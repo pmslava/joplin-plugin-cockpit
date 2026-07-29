@@ -26,7 +26,7 @@ const EXTRACT_DIR = path.join(CACHE_DIR, 'squashfs-root');
 const JOPLIN_BINARY = path.join(EXTRACT_DIR, 'joplin');
 const PLUGIN_DIST = path.join(REPO_ROOT, 'dist');
 
-export const PLUGIN_ID = 'com.github.TheScriptingGuy.joplin-plugin-agenda';
+export const PLUGIN_ID = 'com.github.thescriptingguy.joplin-plugin-agenda';
 
 export interface JoplinInstance {
   browser: Browser;

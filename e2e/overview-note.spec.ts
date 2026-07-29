@@ -53,10 +53,12 @@ test.describe('Overview note', () => {
       .poll(() => noteViewerText(win), { timeout: PANEL_REFRESH_TIMEOUT })
       .toContain(todoTitle);
 
-    // The generated note is headed with the profile name and groups to-dos the same way the panel does.
+    // The generated note is headed with the profile name and groups to-dos the same way the panel
+    // does. Which group the to-do lands in depends on the time of day the suite runs: an alarm a few
+    // hours out is either later today or early tomorrow.
     const text = await noteViewerText(win);
     expect(text).toContain('Overview profile');
-    expect(text).toContain('Today');
+    expect(text).toMatch(/\b(Today|Tomorrow)\b/);
   });
 
   test('a new to-do reaches the overview note as well', async () => {

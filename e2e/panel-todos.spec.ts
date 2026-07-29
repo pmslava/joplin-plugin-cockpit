@@ -54,7 +54,11 @@ test.describe('Panel to-do list', () => {
 
   test('to-dos are grouped by when they are due, in chronological order', async () => {
     const headings = await panelHeadings(joplin.win);
-    expect(headings).toEqual(['Overdue', 'Today']);
+    // A to-do due yesterday is always overdue, but one due a couple of hours from now is either
+    // later today or early tomorrow, depending on the time of day the suite runs.
+    expect(headings).toHaveLength(2);
+    expect(headings[0]).toBe('Overdue');
+    expect(['Today', 'Tomorrow']).toContain(headings[1]);
 
     const titles = await panelTodoTitles(joplin.win);
     expect(titles.findIndex((t) => t.includes(overdueTitle))).toBeLessThan(

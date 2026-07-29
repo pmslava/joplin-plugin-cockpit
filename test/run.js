@@ -208,7 +208,7 @@ async function main() {
     // profiles of an existing install are in a sibling directory rather than in our own.
     const pluginDataRoot = path.join(tmp, 'plugin-data')
     const oldPluginDataDir = path.join(pluginDataRoot, 'com.gitlab.BeatLink.joplin-plugin-agenda')
-    const newPluginDataDir = path.join(pluginDataRoot, 'com.github.TheScriptingGuy.joplin-plugin-agenda')
+    const newPluginDataDir = path.join(pluginDataRoot, 'com.github.thescriptingguy.joplin-plugin-agenda')
     await fs.ensureDir(oldPluginDataDir)
     await fs.ensureDir(newPluginDataDir)
     await fs.copy(legacyPath, path.join(oldPluginDataDir, 'profiles.sqlite3'))
