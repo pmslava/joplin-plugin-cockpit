@@ -118,7 +118,11 @@ Joplin's plugin API is not identical on every platform, so a few things differ o
   Override the Joplin version under test with `JOPLIN_E2E_VERSION`. Both suites also run in CI, see
   `.github/workflows/tests.yml`.
 * Update the plugin framework with `npm run update`
-* Publish using `npm publish`
+* Publishing is done by `.github/workflows/publish.yml`, which runs when a GitHub Release is published (or on demand).
+  It takes the version from the release tag, writes it into both `package.json` and `src/manifest.json`, builds, and
+  publishes to npm. Authentication is npm trusted publishing over OIDC, so there is no npm token to keep in the
+  repository; the package's trusted publisher must name this repository and `publish.yml` once, on npmjs.com.
+  The Joplin plugin repository then picks the release up from npm via the `joplin-plugin` keyword.
 
 ### Notes for contributors
 * Webview scripts are named `*Webview.js` on purpose. Webpack is configured to resolve `.js` before `.ts`, so a script named

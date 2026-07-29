@@ -1,6 +1,14 @@
 {
   "name": "joplin-plugin-agenda",
   "version": "4.0.0",
+  "description": "An agenda/calendar/schedule panel for Joplin that shows all uncompleted to-dos with a due date, on desktop and mobile.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TheScriptingGuy/Joplin-Agenda-Plugin"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dist": "webpack --env joplin-plugin-config=buildMain && webpack --env joplin-plugin-config=buildExtraScripts && webpack --env joplin-plugin-config=createArchive",
     "test": "npm run dist && node test/run.js",
@@ -12,7 +20,14 @@
   },
   "license": "MIT",
   "keywords": [
-    "joplin-plugin"
+    "joplin-plugin",
+    "joplin",
+    "agenda",
+    "calendar",
+    "schedule",
+    "todo",
+    "upcoming",
+    "date"
   ],
   "devDependencies": {
     "@joplin/lib": "~2.9",
