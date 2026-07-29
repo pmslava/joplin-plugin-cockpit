@@ -141,6 +141,40 @@ async function main() {
         assert.ok(desktop.notePuts[0].body.includes('Buy milk](:/'))
     })
 
+    // ------------------------------------ commands that are only reachable from native menus
+    // These cannot be driven by the Playwright e2e suite, because on desktop they live in the
+    // Tools > Agenda menu and the command palette, both of which are native Electron menus.
+    await test('toggleShowProfileControls hides and shows the profile buttons', async () => {
+        const command = desktop.commands.find(c => c.name === 'toggleShowProfileControls')
+        assert.ok(command, 'command was not registered')
+
+        await command.execute()
+        assert.ok(
+            desktop.panelHtml['panel-panel'].includes('id="profileButtonsSection" style="display: none;"'),
+            'profile buttons should be hidden'
+        )
+
+        await command.execute()
+        assert.ok(
+            desktop.panelHtml['panel-panel'].includes('id="profileButtonsSection" style="display: flex;"'),
+            'profile buttons should be shown again'
+        )
+    })
+
+    await test('the styler command stores custom css and the panel applies it', async () => {
+        const command = desktop.commands.find(c => c.name === 'showStylerDialog')
+        assert.ok(command, 'command was not registered')
+
+        desktop.dialogResult = { id: 'ok', formData: { customCSSForm: { customCss: 'h1 { color: red; }' } } }
+        await command.execute()
+        assert.strictEqual(desktop.settings.customCss, 'h1 { color: red; }')
+        assert.ok(
+            desktop.panelHtml['panel-panel'].includes('<style>h1 { color: red; }</style>'),
+            'custom css was not applied to the panel'
+        )
+        desktop.dialogResult = null
+    })
+
     // ------------------------------------------------------- idempotent refresh
     await test('desktop: refreshing again rewrites neither the note nor the panel', async () => {
         const putsBefore = desktop.notePuts.length

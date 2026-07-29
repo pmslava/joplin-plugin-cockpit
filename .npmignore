@@ -5,5 +5,8 @@
 /src
 /dist
 /test
+/e2e
+/scripts
+playwright.config.ts
 tsconfig.json
 webpack.config.js

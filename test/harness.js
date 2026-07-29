@@ -23,6 +23,8 @@ function makeJoplin(options) {
         onStart: null,
         panelMessageHandler: null,
         setHtmlCalls: 0,
+        // Set to a DialogResult to make the next dialogs.open() return it instead of a cancel.
+        dialogResult: null,
     }
 
     const notes = options.notes || {}
@@ -71,7 +73,7 @@ function makeJoplin(options) {
                 addScript: async () => {},
                 setHtml: async () => {},
                 setButtons: async () => {},
-                open: async () => ({ id: 'cancel' }),
+                open: async () => state.dialogResult || { id: 'cancel' },
                 showMessageBox: async (message) => { state.messageBoxes.push(message); return 0 },
             },
             toolbarButtons: {

@@ -6,7 +6,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { openTodo, toggleTodoCompletion } from "../../core/joplin";
-import { refreshInterfaces } from "../../core/timer";
+import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getAllProfiles, getProfile } from "../../core/database";
 import { openDeleteDialog, openEditor } from "../editor/editor";
 import { escapeHtml, getFormatter } from "../../core/formats";
@@ -38,6 +38,8 @@ async function eventHandler(message){
     } else if (message[0] == 'todoChecked'){
         await toggleTodoCompletion(message[1])
         await refreshInterfaces()
+        // The completed to-do only disappears from the list once the search index has caught up.
+        scheduleRefresh()
     } else if (message[0] == 'profilesDropdownChanged'){
         await setCurrentProfileID(message[1])
         await refreshInterfaces()

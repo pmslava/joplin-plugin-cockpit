@@ -14,8 +14,13 @@ import { updateFrequencySettingKey } from "./settings";
 /** Variable Initialization ************************************************************************************************************************/
 const defaultUpdateFrequency = 60
 const refreshDebounceMs = 1000
+// Joplin keeps the search index up to date on a timer of its own, so a to-do that was just created
+// or edited is not returned by a search that runs immediately after the change, and how long it
+// takes varies. A handful of follow up refreshes covers that without having to poll all the time.
+const followUpDelaysMs = [5000, 15000, 30000]
 var timer = null
 var debounceTimer = null
+var followUpTimers = []
 var refreshing = false
 var refreshQueued = false
 
@@ -43,12 +48,14 @@ export async function refreshInterfaces(){
 }
 
 /** scheduleRefresh **********************************************************************************************************************************
- * Requests a refresh a moment from now. Several requests arriving in quick succession, as happens while a note is being edited, result in a single   *
- * refresh.                                                                                                                                          *
+ * Requests a refresh a moment from now, plus a few more spread over the following half minute to cover the delay before the change reaches the      *
+ * search index. Several requests arriving in quick succession, as happens while a note is being edited, result in a single set of refreshes.        *
  ***************************************************************************************************************************************************/
 export function scheduleRefresh(){
     clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => { void refreshInterfaces() }, refreshDebounceMs)
+    for (var followUpTimer of followUpTimers) clearTimeout(followUpTimer)
+    followUpTimers = followUpDelaysMs.map(delay => setTimeout(() => { void refreshInterfaces() }, delay))
 }
 
 /** setupTimer ***************************************************************************************************************************************

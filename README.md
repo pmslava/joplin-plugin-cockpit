@@ -105,8 +105,18 @@ Joplin's plugin API is not identical on every platform, so a few things differ o
 * Modify code in `/src`
 * Update Metadata in `/src/manifest.json` and `/package.json`
 * Build plugin with `npm run dist`
-* Run the checks with `npm test`. These build the plugin and run it against a stubbed plugin API for both desktop and
-  mobile, which is a lot faster than installing the plugin on a phone for every change.
+* Run the fast checks with `npm test`. These build the plugin and run it against a stubbed plugin API for both desktop
+  and mobile, which is a lot faster than installing the plugin on a phone for every change.
+* Run the real-app tests with `npm run test:e2e`. These download the Joplin desktop AppImage, launch it with this plugin
+  loaded as a development plugin, and drive the genuine GUI with Playwright. They need `xvfb` and Chromium's system
+  libraries:
+  ```
+  sudo npx playwright install-deps chromium
+  sudo apt-get install -y xvfb
+  npm run test:e2e
+  ```
+  Override the Joplin version under test with `JOPLIN_E2E_VERSION`. Both suites also run in CI, see
+  `.github/workflows/tests.yml`.
 * Update the plugin framework with `npm run update`
 * Publish using `npm publish`
 
@@ -118,3 +128,8 @@ Joplin's plugin API is not identical on every platform, so a few things differ o
   depends on it optional.
 * To test on mobile without a phone, install the built `publish/*.jpl` into the [web build](https://app.joplincloud.com/)
   of the mobile app under Configuration -> Plugins -> Advanced -> Install from file.
+* Two things in the desktop app are out of reach of the e2e tests, because they are native Electron windows rather than
+  part of the renderer: the Tools -> Agenda menu (and the command palette) and the confirmation shown when deleting a
+  profile. The commands behind them are covered by `npm test` instead.
+* Joplin brings its search index up to date on a timer of its own, so a to-do that was just created does not appear in a
+  search straight away. Anything in the tests that waits for the panel to reflect a change needs a generous timeout.
