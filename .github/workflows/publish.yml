@@ -14,8 +14,12 @@ name: Publish to npm
 #   Environment: (leave empty, this workflow does not use one)
 #
 # Notes:
-#  - NODE_AUTH_TOKEN is deliberately not set. If it is present npm falls back to the legacy token
-#    path and the OIDC exchange never happens.
+#  - setup-node is deliberately used WITHOUT `registry-url`. Given that input it always writes
+#    `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into .npmrc and exports a placeholder
+#    token, and npm then treats authentication as already configured and never starts the OIDC
+#    exchange (actions/setup-node#1551). Without it there is no .npmrc, and npm publishes to the
+#    default registry, which is registry.npmjs.org anyway.
+#  - NODE_AUTH_TOKEN is deliberately not set, for the same reason.
 #  - Provenance attestations are generated automatically when publishing this way, so `--provenance`
 #    is not passed.
 #  - Trusted publishing only works on GitHub hosted runners.
@@ -39,14 +43,14 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          # Points npm at the public registry. No auth token is wired up: see the note above.
-          registry-url: 'https://registry.npmjs.org'
 
       # Trusted publishing needs npm 11.5.1 or later, which is newer than the npm bundled with Node.
+      # The 11.x line is pinned on purpose: npm 12 requires Node 22 or later and installing it here
+      # fails with EBADENGINE.
       - name: Use an npm that supports trusted publishing
         run: |
-          npm install -g npm@latest
-          npm --version
+          npm install -g 'npm@^11.5.1'
+          echo "node $(node --version), npm $(npm --version)"
 
       # Resolve the version to publish: on a Release, take it from the tag (e.g. v1.2.0 -> 1.2.0);
       # otherwise (manual workflow_dispatch) use the existing package.json version. The resolved
@@ -67,8 +71,10 @@ jobs:
           VERSION="$VERSION" node -e "const fs=require('fs');const p='src/manifest.json';const m=JSON.parse(fs.readFileSync(p,'utf8'));m.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(m,null,'\t')+'\n');console.log('manifest.json version ->',m.version)"
           echo "PUBLISH_VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      # --ignore-scripts skips the "prepare" lifecycle hook (which runs dist) since we run it explicitly below.
-      - run: npm ci --ignore-scripts
+      # Install scripts are left enabled on purpose. sqlite3 fetches its native binding in one, and
+      # the harness suite below uses sqlite3 to build the legacy database that the profile import is
+      # tested against; with --ignore-scripts it fails with "Could not locate the bindings file".
+      - run: npm ci
 
       # Gate the publish on the harness suite. The real-app e2e suite is not run here: it downloads
       # the Joplin desktop build and takes minutes. It runs on every push and pull request instead,
@@ -98,5 +104,14 @@ jobs:
       # --ignore-scripts avoids rebuilding via the "prepare" hook since we just built above.
       - name: Publish to npm
         run: |
+          # Fail with something readable rather than an authentication error further down.
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No OIDC token endpoint available. The job needs 'permissions: id-token: write'."
+            exit 1
+          fi
+          if npm config get //registry.npmjs.org/:_authToken 2>/dev/null | grep -qv '^undefined$'; then
+            echo "::warning::An auth token is configured. npm may use it instead of trusted publishing."
+          fi
+          echo "Registry: $(npm config get registry)"
           echo "Publishing $(node -p "require('./package.json').name")@$PUBLISH_VERSION via OIDC"
           npm publish --ignore-scripts
