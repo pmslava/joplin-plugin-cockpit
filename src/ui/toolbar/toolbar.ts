@@ -5,11 +5,15 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { ToolbarButtonLocation } from "api/types";
+import { isMobile } from "../../core/platform";
 
 /** setupToolbar ************************************************************************************************************************************
- * Registers a toolbar button to toggle the panel visibility between shown and hidden                                                               *
+ * Registers a toolbar button to toggle the panel visibility between shown and hidden.                                                              *
+ * The note toolbar is a desktop only location, and a button placed there does nothing on mobile. Mobile does not need one either, as the app has    *
+ * its own toolbar button that opens every plugin panel.                                                                                            *
  ***************************************************************************************************************************************************/
 export async function setupToolbar() {
+    if (await isMobile()) return
     await joplin.views.toolbarButtons.create(
         'togglePanelVisibilityButton',
         'togglePanelVisibility',

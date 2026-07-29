@@ -1,42 +1,59 @@
 /** README ******************************************************************************************************************************************
- * The styler dialog allows the user to add custom css to change the appearance of the panel                                                        *
+ * The styler dialog allows the user to add custom css to change the appearance of the panel. The CSS is stored in a plugin setting: earlier         *
+ * versions kept it in a custom.css file in the plugin directory, which is not writable on mobile.                                                  *
  ***************************************************************************************************************************************************/
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { refreshPanelData } from "../panel/panel";
-const fs = joplin.require('fs-extra');
+import { escapeHtml } from "../../core/formats";
+import { getCustomCss, setCustomCss } from "../../core/settings";
+import { requireNodeModule } from "../../core/platform";
+import { stylerTemplate } from "./stylerTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
 var dialog = null;
-var baseHtml = ""
-var cssFilePath = ""
 
 /** setupStyler *************************************************************************************************************************************
  * Initializes the panel styler dialog                                                                                                              *
  ***************************************************************************************************************************************************/
 export async function setupStyler(){
-    var HTMLFilePath = (await joplin.plugins.installationDir()) + "/ui/styler/styler.html"
-    baseHtml = await fs.readFile(HTMLFilePath, 'utf8');
     dialog = await joplin.views.dialogs.create('styler');
-    cssFilePath = (await joplin.plugins.installationDir()) + '/custom.css'
-    if (!await fs.exists(cssFilePath)){
-        await fs.writeFile(cssFilePath, "")
-    }
+    await joplin.views.dialogs.addScript(dialog, '/ui/styler/styler.css')
+    await importLegacyCssFile()
 }
 
 /** openStyler **************************************************************************************************************************************
  * Opens the panel styler dialog where custom css for the panel can be added.                                                                       *
  ***************************************************************************************************************************************************/
 export async function openStyler(){
-    var cssData = await fs.readFile(cssFilePath, 'utf8');
-    var formattedHtml = baseHtml.replace("<<CSS_DATA>>", cssData)
+    var cssData = escapeHtml(await getCustomCss())
+    var formattedHtml = stylerTemplate.replace("<<CSS_DATA>>", () => cssData)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);
     var formResult = await joplin.views.dialogs.open(dialog)
     if (formResult.id == 'ok') {
-        console.log(formResult)
-        cssData = formResult.formData['customCSSForm']['customCss']
-        await fs.writeFile(cssFilePath, cssData)
+        await setCustomCss(formResult.formData['customCSSForm']['customCss'])
         await refreshPanelData()
+    }
+}
+
+/** importLegacyCssFile *****************************************************************************************************************************
+ * Copies the custom CSS of Agenda 3.6 and later out of the custom.css file and into settings. The file lives in the plugin installation directory,  *
+ * which Joplin recreates when the plugin is updated, so this is a best effort import that only runs on desktop.                                     *
+ ***************************************************************************************************************************************************/
+async function importLegacyCssFile(){
+    if (await getCustomCss()) return
+    var fs = requireNodeModule("fs-extra", "readFile")
+    if (!fs) return
+    try {
+        var cssFilePath = (await joplin.plugins.installationDir()) + '/custom.css'
+        if (!await fs.pathExists(cssFilePath)) return
+        var cssData = await fs.readFile(cssFilePath, 'utf8')
+        if (cssData && cssData.trim()){
+            await setCustomCss(cssData)
+            console.info(`Agenda: imported the custom panel CSS from ${cssFilePath}`)
+        }
+    } catch (error) {
+        console.warn("Agenda: could not import the custom panel CSS", error)
     }
 }

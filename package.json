@@ -1,31 +1,51 @@
 {
-  "name": "joplin-plugin-agenda",
-  "version": "3.7.2",
+  "name": "joplin-plugin-agenda2",
+  "version": "4.0.0",
+  "description": "An agenda/calendar/schedule panel for Joplin that shows all uncompleted to-dos with a due date, on desktop and mobile.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TheScriptingGuy/Joplin-Agenda-Plugin"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "dist": "webpack --env joplin-plugin-config=buildMain && webpack --env joplin-plugin-config=buildExtraScripts && webpack --env joplin-plugin-config=createArchive",
+    "test": "npm run dist && node test/run.js",
+    "setup:e2e": "bash scripts/setup-e2e.sh",
+    "test:e2e": "npm run dist && npm run setup:e2e && xvfb-run -a --server-args=\"-screen 0 1920x1080x24\" playwright test",
     "prepare": "npm run dist",
     "update": "npm install -g generator-joplin && yo joplin --node-package-manager npm --update --force",
     "updateVersion": "webpack --env joplin-plugin-config=updateVersion"
   },
   "license": "MIT",
   "keywords": [
-    "joplin-plugin"
+    "joplin-plugin",
+    "joplin",
+    "agenda",
+    "calendar",
+    "schedule",
+    "todo",
+    "upcoming",
+    "date"
   ],
   "devDependencies": {
+    "@joplin/lib": "~2.9",
+    "@playwright/test": "^1.62.0",
     "@types/node": "^18.7.13",
     "chalk": "^4.1.0",
     "copy-webpack-plugin": "^11.0.0",
     "fs-extra": "^10.1.0",
     "glob": "^8.0.3",
     "on-build-webpack": "^0.1.0",
+    "playwright": "^1.62.0",
     "raw-loader": "^4.0.2",
     "tar": "^6.1.11",
     "ts-loader": "^9.3.1",
     "typescript": "^4.8.2",
     "webpack": "^5.74.0",
     "webpack-cli": "^4.10.0",
-    "yargs": "^16.2.0",
-    "@joplin/lib": "~2.9"
+    "yargs": "^16.2.0"
   },
   "dependencies": {
     "browserify": "^17.0.0",

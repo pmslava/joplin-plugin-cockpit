@@ -1,0 +1,102 @@
+name: Publish to npm
+
+# Publishes the plugin package to npm. Runs when a GitHub Release is published, or manually.
+#
+# Authentication uses npm trusted publishing (OIDC): there is no NPM_TOKEN secret. Instead, npm is
+# told to trust this repository and this workflow file, and the job exchanges a short lived GitHub
+# OIDC token for publish rights. Before the first run, configure the trusted publisher once at
+# npmjs.com -> the package -> Settings -> Trusted publisher, with:
+#
+#   Provider:  GitHub Actions
+#   Owner:     TheScriptingGuy
+#   Repository: Joplin-Agenda-Plugin
+#   Workflow:  publish.yml
+#   Environment: (leave empty, this workflow does not use one)
+#
+# Notes:
+#  - NODE_AUTH_TOKEN is deliberately not set. If it is present npm falls back to the legacy token
+#    path and the OIDC exchange never happens.
+#  - Provenance attestations are generated automatically when publishing this way, so `--provenance`
+#    is not passed.
+#  - Trusted publishing only works on GitHub hosted runners.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Build & publish to npm
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Lets the job mint the OIDC token that npm exchanges for publish rights.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          # Points npm at the public registry. No auth token is wired up: see the note above.
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm 11.5.1 or later, which is newer than the npm bundled with Node.
+      - name: Use an npm that supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # Resolve the version to publish: on a Release, take it from the tag (e.g. v1.2.0 -> 1.2.0);
+      # otherwise (manual workflow_dispatch) use the existing package.json version. The resolved
+      # version is written into BOTH package.json (the npm package version) and src/manifest.json
+      # (the version baked into the built .jpl plugin), keeping them in sync.
+      - name: Resolve package & manifest version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            echo "Using release tag version: $VERSION (from $GITHUB_REF_NAME)"
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+            echo "No release tag (event=${{ github.event_name }}); using package.json version: $VERSION"
+          fi
+          # package.json (--no-git-tag-version: edit only, no commit/tag; --allow-same-version: no-op-safe).
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          # src/manifest.json (preserves the tab indentation the file uses).
+          VERSION="$VERSION" node -e "const fs=require('fs');const p='src/manifest.json';const m=JSON.parse(fs.readFileSync(p,'utf8'));m.version=process.env.VERSION;fs.writeFileSync(p,JSON.stringify(m,null,'\t')+'\n');console.log('manifest.json version ->',m.version)"
+          echo "PUBLISH_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # --ignore-scripts skips the "prepare" lifecycle hook (which runs dist) since we run it explicitly below.
+      - run: npm ci --ignore-scripts
+
+      # Gate the publish on the harness suite. The real-app e2e suite is not run here: it downloads
+      # the Joplin desktop build and takes minutes. It runs on every push and pull request instead,
+      # see tests.yml.
+      - run: npm test
+
+      # Build the publishable artifact (webpack -> ./publish, the only dir in package.json "files").
+      - run: npm run dist
+
+      # The Joplin plugin repository picks packages up from npm by the "joplin-plugin" keyword and
+      # installs the .jpl found in the published tarball, so fail loudly rather than publish a
+      # package that would be silently useless.
+      - name: Check the package contains the built plugin
+        run: |
+          PLUGIN_ID="$(node -p "require('./src/manifest.json').id")"
+          for FILE in "publish/$PLUGIN_ID.jpl" "publish/$PLUGIN_ID.json"; do
+            if [ ! -s "$FILE" ]; then
+              echo "::error::Expected $FILE to exist and be non-empty after npm run dist"
+              exit 1
+            fi
+          done
+          echo "Packing $(node -p "require('./package.json').name")@$PUBLISH_VERSION:"
+          npm pack --dry-run --ignore-scripts
+
+      # No NODE_AUTH_TOKEN, no --provenance: both are handled by trusted publishing.
+      # publishConfig.access is already "public" in package.json.
+      # --ignore-scripts avoids rebuilding via the "prepare" hook since we just built above.
+      - name: Publish to npm
+        run: |
+          echo "Publishing $(node -p "require('./package.json').name")@$PUBLISH_VERSION via OIDC"
+          npm publish --ignore-scripts

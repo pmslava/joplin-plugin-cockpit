@@ -1,0 +1,21 @@
+* {
+    box-sizing: border-box;
+}
+
+#joplin-plugin-content {
+    min-width: min(400px, 100%);
+    max-width: 100%;
+}
+
+fieldset {
+    margin: 5px 0;
+    max-width: 100%;
+}
+
+textarea {
+    width: 100%;
+    max-width: 100%;
+    min-height: 12em;
+    font-family: monospace;
+    resize: vertical;
+}

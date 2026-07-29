@@ -71,10 +71,10 @@ abstract class BaseFormat {
     private getHeadingString(headingString){
         if (headingString){
             if (this.outputFormat == "markdown"){
-                return `## ${headingString}\n`    
+                return `## ${headingString}\n`
             } else if (this.outputFormat == "html") {
-                return `<h2>${headingString}</h2>`; 
-            }    
+                return `<h2>${escapeHtml(headingString)}</h2>`;
+            }
         } else {
             return ""
         }
@@ -89,13 +89,13 @@ abstract class BaseFormat {
             var checkedString = todo.todo_completed ? "x" : " "
             return `- [${checkedString}] [${todoString}](:/${todo.id})\n`    
         } else if (this.outputFormat == "html") {
-            var checkedString = todo.todo_completed ? "checked" : "" 
+            var checkedString = todo.todo_completed ? "checked" : ""
             return `
-                <p>
-                    <input type="checkbox" onchange="onTodoChecked('${todo.id}')" ${checkedString}>
-                    <a onclick="onTodoClicked('${todo.id}')" style="cursor: pointer;">${todoString}</a>
-                </p>
-            `            
+                <div class="todo">
+                    <input type="checkbox" class="todo-checkbox" onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                    <a class="todo-title" onclick="onTodoClicked('${todo.id}')">${escapeHtml(todoString)}</a>
+                </div>
+            `
         }
     }
     
@@ -330,4 +330,31 @@ export var formats = {
     'basic': BasicFormat,
     'interval': IntervalFormat,
     'date': DateFormat,
+}
+
+/** defaultFormatName *******************************************************************************************************************************
+ * The format used when a profile asks for a format that does not exist                                                                             *
+ ***************************************************************************************************************************************************/
+const defaultFormatName = 'interval'
+
+/** getFormatter ************************************************************************************************************************************
+ * Returns the formatter for the given profile and output format. Profiles are stored as free form JSON, so an unknown format name falls back to the *
+ * default rather than crashing the refresh.                                                                                                        *
+ ***************************************************************************************************************************************************/
+export function getFormatter(profile, outputFormat){
+    var format = formats[profile.displayFormat] || formats[defaultFormatName]
+    return new format(profile, outputFormat)
+}
+
+/** escapeHtml **************************************************************************************************************************************
+ * Escapes the characters that would otherwise be interpreted as markup, so that to-do titles and profile names containing characters such as & or < *
+ * are displayed as written                                                                                                                         *
+ ***************************************************************************************************************************************************/
+export function escapeHtml(value){
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;")
 }

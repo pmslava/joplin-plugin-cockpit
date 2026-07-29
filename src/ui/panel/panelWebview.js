@@ -47,3 +47,17 @@ async function onProfilesDropdownChanged(profileID){
  async function onUpdateInterfacesClicked(){
     await webviewApi.postMessage(['updateInterfacesClicked']);
 }
+
+/** onToggleProfileControlsClicked ******************************************************************************************************************
+ * Shows or hides the profile create, edit and delete buttons. This is only shown on mobile, where there is no Tools menu to run the command from    *
+ ***************************************************************************************************************************************************/
+async function onToggleProfileControlsClicked(){
+    await webviewApi.postMessage(['toggleProfileControlsClicked']);
+}
+
+/** onStylerClicked *********************************************************************************************************************************
+ * Opens the panel styler dialog. This is only shown on mobile, where there is no Tools menu to run the command from                                *
+ ***************************************************************************************************************************************************/
+async function onStylerClicked(){
+    await webviewApi.postMessage(['stylerClicked']);
+}
