@@ -203,6 +203,31 @@ async function main() {
         assert.strictEqual(Number(restarted.settings.currentProfileID), 2)
     })
 
+    // ------------------------- legacy database left by the previously published plugin id
+    // Joplin gives every plugin id its own data directory, so after the plugin id changed the
+    // profiles of an existing install are in a sibling directory rather than in our own.
+    const pluginDataRoot = path.join(tmp, 'plugin-data')
+    const oldPluginDataDir = path.join(pluginDataRoot, 'com.gitlab.BeatLink.joplin-plugin-agenda')
+    const newPluginDataDir = path.join(pluginDataRoot, 'com.github.TheScriptingGuy.joplin-plugin-agenda')
+    await fs.ensureDir(oldPluginDataDir)
+    await fs.ensureDir(newPluginDataDir)
+    await fs.copy(legacyPath, path.join(oldPluginDataDir, 'profiles.sqlite3'))
+
+    const renamed = await run({
+        dataDir: newPluginDataDir,
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos,
+    })
+    await test('renamed plugin: profiles are imported from the previous plugin id data directory', () => {
+        const stored = JSON.parse(renamed.settings.profileData)
+        assert.deepStrictEqual(stored.profiles.map(p => p.name).sort(), ['Home', 'Work'])
+    })
+    await test('renamed plugin: the previous plugin data directory is left untouched', async () => {
+        assert.ok(await fs.pathExists(path.join(oldPluginDataDir, 'profiles.sqlite3')))
+    })
+
     // ---------------------------------------------- corrupt / failed migration
     const brokenDir = path.join(tmp, 'broken-data')
     await fs.ensureDir(brokenDir)

@@ -11,7 +11,10 @@ import { requireNodeModule } from "./platform";
 
 /** Variable Setup *********************************************************************************************************************************/
 export const profileDataSettingKey = "profileData"
-const legacyDatabaseFileName = "/profiles.sqlite3"
+const legacyDatabaseFileName = "profiles.sqlite3"
+// Agenda up to 3.x was published under this plugin id. Joplin gives every plugin id its own data
+// directory, so an install of that version left its database in a directory of its own.
+const legacyPluginID = "com.gitlab.BeatLink.joplin-plugin-agenda"
 var profileStore = null
 var migrationWarning = null
 
@@ -193,8 +196,8 @@ async function importLegacyDatabase(){
     var fs = requireNodeModule("fs-extra", "pathExists")
     if (!sqlite3 || !fs) return { profileStore: null, warning: null }
 
-    var databasePath = (await joplin.plugins.dataDir()) + legacyDatabaseFileName
-    if (!await fs.pathExists(databasePath)) return { profileStore: null, warning: null }
+    var databasePath = await findLegacyDatabase(fs)
+    if (!databasePath) return { profileStore: null, warning: null }
 
     try {
         var rows = await readLegacyProfiles(sqlite3, databasePath)
@@ -207,6 +210,25 @@ async function importLegacyDatabase(){
             warning: `Agenda could not read your existing profiles from ${databasePath} (${error.message}). A new default profile has been created. The old database has not been modified.`,
         }
     }
+}
+
+/** findLegacyDatabase ******************************************************************************************************************************
+ * Returns the path of the sqlite3 database left behind by an earlier version of Agenda, or null when there is none. Both this plugin's own data     *
+ * directory and the one belonging to the plugin id Agenda used to be published under are looked in, so that the profiles of an existing install are *
+ * still picked up.                                                                                                                                 *
+ ***************************************************************************************************************************************************/
+async function findLegacyDatabase(fs){
+    var dataDir = await joplin.plugins.dataDir()
+    var separator = dataDir.indexOf("\\") >= 0 ? "\\" : "/"
+    var candidates = [dataDir + separator + legacyDatabaseFileName]
+    var parentDir = dataDir.slice(0, dataDir.lastIndexOf(separator))
+    if (parentDir && !dataDir.endsWith(separator + legacyPluginID)){
+        candidates.push([parentDir, legacyPluginID, legacyDatabaseFileName].join(separator))
+    }
+    for (var candidate of candidates){
+        if (await fs.pathExists(candidate)) return candidate
+    }
+    return null
 }
 
 /** readLegacyProfiles ******************************************************************************************************************************

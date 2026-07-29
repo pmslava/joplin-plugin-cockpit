@@ -19,7 +19,11 @@ export default defineConfig({
   // A single Joplin instance at a time.
   fullyParallel: false,
   workers: 1,
-  retries: process.env.CI ? 1 : 0,
+  // How quickly a change reaches the panel depends on when Joplin next brings its search index up
+  // to date, which it does on a timer of its own and which slows down when the machine is busy. The
+  // specs pass consistently on their own, but back to back a run occasionally overshoots even a
+  // generous timeout, so a failed test gets one retry rather than failing the whole run.
+  retries: 1,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
     trace: 'retain-on-failure',

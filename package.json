@@ -1,5 +1,5 @@
 {
-  "name": "joplin-plugin-agenda",
+  "name": "joplin-plugin-agenda-v2",
   "version": "4.0.0",
   "description": "An agenda/calendar/schedule panel for Joplin that shows all uncompleted to-dos with a due date, on desktop and mobile.",
   "repository": {

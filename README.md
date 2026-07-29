@@ -14,12 +14,16 @@ An agenda/calendar/schedule panel plugin for joplin that shows all uncompleted t
 ## Installation
 
 ### Desktop
-Agenda is already in the Joplin plugin repository so it can be installed from the plugins page inside Joplin settings.
+Install it from the plugins page inside Joplin settings.
 1. Open Joplin
 2. Go to Tools -> Options in the menu bar
 3. Go to Plugins
 4. Search for "Agenda"
 5. Click Install
+
+This is a fork of [BeatLink's Agenda plugin](https://gitlab.com/beatlink-code/joplin-plugin-agenda) and is published
+separately, so it installs alongside the original rather than replacing it. Profiles from an existing Agenda 3.x install
+are imported the first time it runs.
 
 ### Mobile
 Agenda runs on the Joplin mobile app from version 3.3 onwards.
@@ -136,4 +140,5 @@ Joplin's plugin API is not identical on every platform, so a few things differ o
   part of the renderer: the Tools -> Agenda menu (and the command palette) and the confirmation shown when deleting a
   profile. The commands behind them are covered by `npm test` instead.
 * Joplin brings its search index up to date on a timer of its own, so a to-do that was just created does not appear in a
-  search straight away. Anything in the tests that waits for the panel to reflect a change needs a generous timeout.
+  search straight away. Anything in the tests that waits for the panel to reflect a change needs a generous timeout, and
+  the suite is configured to retry a failed test once because that timing gets worse when the machine is busy.
