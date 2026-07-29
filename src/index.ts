@@ -2,14 +2,14 @@
  *  Agenda is a schedule/calendar panel for joplin that can show all to-dos in a chronological order.                                               *
  *  Via various built in formats and user creatable profiles, the to-do list presentation can be filtered and customized.                           *
  *  In addition to the panel, Agenda is capable of presenting the to-do list using individual notes.                                                *
- *  This alllows the to-do list to be accessed even without the agenda panel being available, such as on mobile                                     *
+ *  This allows the to-do list to be accessed even in apps that cannot show the panel                                                               *
  ***************************************************************************************************************************************************/
 
 /** Imports *****************************************************************************************************************************************/
 import joplin from 'api'
 import { setupCommands } from './core/commands'
-import { refreshInterfaces, setupTimer } from './core/timer'
-import { setupDatabase } from './core/database'
+import { refreshInterfaces, setupTimer, setupWorkspaceEvents } from './core/timer'
+import { reportDatabaseProblems, setupDatabase } from './core/database'
 import { setupSettings } from './core/settings'
 import { setupPanel } from './ui/panel/panel'
 import { setupMenu } from './ui/menu/menu'
@@ -23,11 +23,11 @@ import { setupStyler } from './ui/styler/styler'
 joplin.plugins.register({ onStart: setupPlugin })
 
 /** setupPlugin *************************************************************************************************************************************
- * Runs all functions to initialize the plugin                                                                                                      *
+ * Runs all functions to initialize the plugin. The settings are registered first, as the profiles are stored in one of them.                       *
  ****************************************************************************************************************************************************/
  export async function setupPlugin(){
-    await setupDatabase()
     await setupSettings()
+    await setupDatabase()
     await setupCommands()
     await setupToolbar()
     await setupMenu()
@@ -35,5 +35,7 @@ joplin.plugins.register({ onStart: setupPlugin })
     await setupPanel()
     await setupEditor()
     await setupTimer()
+    await setupWorkspaceEvents()
     await refreshInterfaces()
+    await reportDatabaseProblems()
 }

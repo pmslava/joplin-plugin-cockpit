@@ -1,13 +1,26 @@
+* {
+    box-sizing: border-box;
+}
+
+/* A minimum width keeps the dialog usable on desktop, while the maximum stops it overflowing a narrow phone screen */
 #joplin-plugin-content {
-    min-width: 300px;
+    min-width: min(300px, 100%);
+    max-width: 100%;
 }
 
 fieldset {
     margin: 5px 0;
+    max-width: 100%;
 }
 
-select, input[type="text"], label, table {
+select, input[type="text"], input[type="number"], label, table {
+    max-width: 100%;
     min-width: -webkit-fill-available;
+}
+
+textarea {
+    width: 100%;
+    max-width: 100%;
 }
 
 td {

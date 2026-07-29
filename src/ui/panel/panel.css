@@ -1,8 +1,12 @@
+* {
+    box-sizing: border-box;
+}
+
 body {
     padding: 1em;
-    overflow: scroll;
-    height: 100vh;
+    overflow-y: auto;
     font-size: medium;
+    -webkit-text-size-adjust: 100%;
 }
 
 .heading {
@@ -10,6 +14,14 @@ body {
     flex-direction: row;
     justify-content: space-between;
     align-items: center;
+    gap: 0.5em;
+}
+
+.heading-buttons {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    flex-shrink: 0;
 }
 
 #profileControls {
@@ -17,22 +29,53 @@ body {
     flex-direction: row;
     align-items: center;
     justify-content: space-between;
+    gap: 0.5em;
     margin: 20px 0 10px;
 }
 
 select {
     flex-grow: 1;
+    flex-shrink: 1;
+    min-width: 0;
     font-size: medium;
+    padding: 4px;
 }
 
 #profileButtonsSection {
     display: flex;
     flex-direction: row;
-    align-items: stretch;
-    justify-content: space-around;
-    width: 80px;
-    margin: 0 5px;
-    font-size: small;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+/* Icon buttons are transparent so that they follow the colours of whichever Joplin theme is active */
+.icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 34px;
+    min-height: 34px;
+    max-height: none;
+    width: auto;
+    padding: 6px;
+    margin: 0;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.8;
+}
+
+.icon-button:hover {
+    background-color: rgba(127, 127, 127, 0.18);
+    opacity: 1;
+}
+
+.icon-button .icon {
+    width: 1.1em;
+    height: 1.1em;
+    display: block;
 }
 
 h1 {
@@ -47,16 +90,31 @@ h2 {
     margin-bottom: 0.5em;
 }
 
-p {
-    padding: 0.5em;
-    margin: 0em;
+.todo {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0.5em;
+    padding: 0.4em 0.2em;
+}
+
+.todo-checkbox {
+    width: 18px;
+    height: 18px;
+    margin: 0.15em 0 0 0;
+    flex-shrink: 0;
+}
+
+.todo-title {
+    flex-grow: 1;
+    cursor: pointer;
+    overflow-wrap: anywhere;
 }
 
 a {
-    color: inherit; 
+    color: inherit;
     text-decoration: none;
-} 
-
+}
 
 button {
     margin: 0.5em 0;

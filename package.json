@@ -1,8 +1,9 @@
 {
   "name": "joplin-plugin-agenda",
-  "version": "3.7.2",
+  "version": "4.0.0",
   "scripts": {
     "dist": "webpack --env joplin-plugin-config=buildMain && webpack --env joplin-plugin-config=buildExtraScripts && webpack --env joplin-plugin-config=createArchive",
+    "test": "npm run dist && node test/run.js",
     "prepare": "npm run dist",
     "update": "npm install -g generator-joplin && yo joplin --node-package-manager npm --update --force",
     "updateVersion": "webpack --env joplin-plugin-config=updateVersion"

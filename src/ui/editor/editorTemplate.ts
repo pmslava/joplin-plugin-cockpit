@@ -1,0 +1,102 @@
+/** README ******************************************************************************************************************************************
+ * The markup of the profile editor dialog. It is kept in a TypeScript file rather than an HTML file because reading the plugin directory needs      *
+ * fs-extra, which is only available on desktop.                                                                                                    *
+ ***************************************************************************************************************************************************/
+
+export var editorTemplate = `
+    <fieldset>
+        <legend>Name</legend>
+        <input type="text" id="nameInput" name="name" value="New Profile">
+    </fieldset>
+    <fieldset>
+        <legend>Sort Order</legend>
+        <input type="number" id="sortOrderInput" name="sortOrder" value="0">
+    </fieldset>
+    <fieldset>
+        <legend>Search Criteria</legend>
+        <input type="text" id="searchCriteriaInput" name="searchCriteria">
+    </fieldset>
+    <fieldset>
+        <legend>Overview Note ID</legend>
+        <input type="text" id="noteIDInput" name="noteID">
+    </fieldset>
+    <fieldset>
+        <legend>Show Completed</legend>
+        <section>
+            <input type="checkbox" id="showCompletedCheckbox" name="showCompleted">
+            <label for="showCompletedCheckbox">Show completed todos</label>
+        </section>
+    </fieldset>
+    <fieldset>
+        <legend>Show No Due Dates</legend>
+        <section>
+            <input type="checkbox" id="showNoDueCheckbox" name="showNoDue">
+            <label for="showNoDueCheckbox">Show todos with no due date</label>
+        </section>
+    </fieldset>
+    <fieldset>
+        <legend>Move No Due Dates To End</legend>
+        <section>
+            <input type="checkbox" id="noDueDatesAtEndCheckbox" name="noDueDatesAtEnd">
+            <label for="noDueDatesAtEndCheckbox">Sort todos with no due dates to the end of list</label>
+        </section>
+    </fieldset>
+    <fieldset>
+        <legend>Display Format</legend>
+        <select id="displayFormatSelect" name="displayFormat">
+            <option value="basic">Basic</option>
+            <option value="interval">Interval</option>
+            <option value="date">Date</option>
+        </select>
+    </fieldset>
+    <fieldset>
+        <legend>Date Format</legend>
+        <table>
+            <tr>
+                <td>Year</td>
+                <td>Month</td>
+                <td>Day</td>
+            </tr>
+            <tr>
+                <td>
+                    <select id="yearFormatSelect" name="yearFormat">
+                        <option value="numeric">2022</option>
+                        <option value="2-digit">22</option>
+                    </select>
+                </td>
+                <td>
+                    <select id="monthFormatSelect" name="monthFormat">
+                        <option value="long">January</option>
+                        <option value="short">Jan</option>
+                        <option value="narrow">J</option>
+                        <option value="2-digit">01</option>
+                    </select>
+                </td>
+                <td>
+                    <select id="dayFormatSelect" name="dayFormat">
+                        <option value="numeric">9</option>
+                        <option value="2-digit">09</option>
+                    </select>
+                </td>
+            </tr>
+        </table>
+    </fieldset>
+    <fieldset>
+        <legend>Weekday Format</legend>
+        <select id="weekdayFormatSelect" name="weekdayFormat">
+            <option value="long">Monday</option>
+            <option value="short">Mon</option>
+            <option value="narrow">M</option>
+        </select>
+    </fieldset>
+    <fieldset>
+        <legend>Time Format</legend>
+        <section>
+            <input type="checkbox" id="timeIs12HourCheckbox" name="timeIs12Hour">
+            <label for="timeIs12HourCheckbox">Use AM/PM Format</label>
+        </section>
+    </fieldset>
+    <form name="profileDataForm">
+        <input type="hidden" id="profileDataInput" name="profileData" value="<<PROFILE_DATA>>">
+    </form>
+`
