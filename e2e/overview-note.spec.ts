@@ -6,6 +6,7 @@ import {
   createTodo,
   editCurrentProfile,
   noteViewerText,
+  refreshPanel,
   selectNote,
   setAlarm,
   waitForPanelTodo,
@@ -67,8 +68,16 @@ test.describe('Overview note', () => {
     await setAlarm(win, new Date(Date.now() + 5 * 3600 * 1000));
 
     await selectNote(win, overviewNoteTitle);
+    // Nudged with the panel's own refresh button between polls. Waiting for the fallback timer
+    // instead makes this the most load-sensitive test in the suite: on a busy machine Joplin's
+    // search index lags far enough that a to-do can take longer than the timeout to become
+    // searchable. The automatic refresh is covered by the panel specs; what matters here is that
+    // Agenda writes the new to-do into the note at all.
     await expect
-      .poll(() => noteViewerText(win), { timeout: PANEL_REFRESH_TIMEOUT })
+      .poll(async () => {
+        await refreshPanel(win);
+        return noteViewerText(win);
+      }, { timeout: PANEL_REFRESH_TIMEOUT })
       .toContain('Second overview task');
   });
 
@@ -81,9 +90,9 @@ test.describe('Overview note', () => {
     await waitForPanelTodo(win, 'Ignored task');
 
     await selectNote(win, overviewNoteTitle);
-    // Wait out both the follow up refreshes and a fallback interval, so that a profile still
-    // pointing at the note would certainly have rewritten it by now.
-    await win.waitForTimeout(70_000);
+    // Force several refreshes rather than waiting out a fallback interval: a profile still pointing
+    // at the note would rewrite it on any one of them, so this is both stricter and much quicker.
+    for (let attempt = 0; attempt < 3; attempt++) await refreshPanel(win);
     expect(await noteViewerText(win)).not.toContain('Ignored task');
   });
 });
