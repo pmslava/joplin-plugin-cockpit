@@ -11,7 +11,12 @@ name: Publish to npm
 #   Owner:     TheScriptingGuy
 #   Repository: Joplin-Agenda-Plugin
 #   Workflow:  publish.yml
-#   Environment: (leave empty, this workflow does not use one)
+#   Environment: npm
+#
+# The environment name has to match on both sides. GitHub only puts an `environment` claim into the
+# OIDC token when the job declares `environment:`, so if npm expects one and the job does not declare
+# it, the token does not match the trusted publisher, npm falls back to token authentication and the
+# publish fails with ENEEDAUTH.
 #
 # Notes:
 #  - setup-node is deliberately used WITHOUT `registry-url`. Given that input it always writes
@@ -32,6 +37,8 @@ jobs:
   publish:
     name: Build & publish to npm
     runs-on: ubuntu-24.04
+    # Must match the environment configured on the npm trusted publisher.
+    environment: npm
     permissions:
       contents: read
       # Lets the job mint the OIDC token that npm exchanges for publish rights.
