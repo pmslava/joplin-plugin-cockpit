@@ -109,6 +109,49 @@ jobs:
       # No NODE_AUTH_TOKEN, no --provenance: both are handled by trusted publishing.
       # publishConfig.access is already "public" in package.json.
       # --ignore-scripts avoids rebuilding via the "prepare" hook since we just built above.
+      # npm decides whether it may publish by exchanging a GitHub OIDC token for a registry token,
+      # and it matches the claims below against the trusted publisher configured on npmjs.com. Every
+      # step of that exchange is logged by npm at verbose level or lower, so when it fails the only
+      # visible symptom is ENEEDAUTH. Printing the claims makes a mismatch obvious: each one has to
+      # equal what the trusted publisher says. The token itself is never printed.
+      - name: Show the OIDC claims npm will present
+        run: |
+          node -e "
+          (async () => {
+            const url = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+            url.searchParams.set('audience', 'npm:registry.npmjs.org');
+            const response = await fetch(url, { headers: {
+              Authorization: 'Bearer ' + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+              Accept: 'application/json',
+            } });
+            const body = await response.json();
+            if (!body.value) {
+              console.log('No id_token returned, status ' + response.status);
+              return;
+            }
+            const payload = JSON.parse(Buffer.from(body.value.split('.')[1], 'base64').toString('utf8'));
+            for (const claim of ['sub', 'aud', 'repository', 'repository_owner', 'workflow_ref', 'job_workflow_ref', 'environment', 'ref', 'repository_visibility']) {
+              console.log(claim.padEnd(24) + (payload[claim] === undefined ? '(absent)' : payload[claim]));
+            }
+
+            // Run the same exchange npm runs, purely to read the registry's reason out loud. npm
+            // does this internally and discards the message unless it is logging at verbose level.
+            const name = require('./package.json').name;
+            const exchange = 'https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/' + encodeURIComponent(name);
+            const result = await fetch(exchange, {
+              method: 'POST',
+              headers: { Authorization: 'Bearer ' + body.value, 'Content-Type': 'application/json' },
+            });
+            const raw = await result.text();
+            let message = raw.slice(0, 300);
+            try { message = JSON.parse(raw).message ?? message; } catch {}
+            console.log('');
+            console.log('token exchange for ' + name + ': HTTP ' + result.status);
+            // On success the body carries a registry token, so only the status is reported.
+            console.log('registry says:  ' + (result.ok ? '(exchange succeeded)' : message));
+          })()
+          "
+
       - name: Publish to npm
         run: |
           # Fail with something readable rather than an authentication error further down.
@@ -121,4 +164,7 @@ jobs:
           fi
           echo "Registry: $(npm config get registry)"
           echo "Publishing $(node -p "require('./package.json').name")@$PUBLISH_VERSION via OIDC"
-          npm publish --ignore-scripts
+          # --loglevel=verbose is what makes npm report why the OIDC exchange failed. Without it a
+          # rejected exchange is silent and surfaces only as ENEEDAUTH. npm logs the registry's
+          # rejection message but never the tokens themselves.
+          npm publish --ignore-scripts --loglevel=verbose
