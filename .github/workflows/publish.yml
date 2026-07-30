@@ -130,9 +130,25 @@ jobs:
               return;
             }
             const payload = JSON.parse(Buffer.from(body.value.split('.')[1], 'base64').toString('utf8'));
-            for (const claim of ['repository', 'repository_owner', 'workflow_ref', 'job_workflow_ref', 'environment', 'ref', 'repository_visibility']) {
+            for (const claim of ['sub', 'aud', 'repository', 'repository_owner', 'workflow_ref', 'job_workflow_ref', 'environment', 'ref', 'repository_visibility']) {
               console.log(claim.padEnd(24) + (payload[claim] === undefined ? '(absent)' : payload[claim]));
             }
+
+            // Run the same exchange npm runs, purely to read the registry's reason out loud. npm
+            // does this internally and discards the message unless it is logging at verbose level.
+            const name = require('./package.json').name;
+            const exchange = 'https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/' + encodeURIComponent(name);
+            const result = await fetch(exchange, {
+              method: 'POST',
+              headers: { Authorization: 'Bearer ' + body.value, 'Content-Type': 'application/json' },
+            });
+            const raw = await result.text();
+            let message = raw.slice(0, 300);
+            try { message = JSON.parse(raw).message ?? message; } catch {}
+            console.log('');
+            console.log('token exchange for ' + name + ': HTTP ' + result.status);
+            // On success the body carries a registry token, so only the status is reported.
+            console.log('registry says:  ' + (result.ok ? '(exchange succeeded)' : message));
           })()
           "
 
