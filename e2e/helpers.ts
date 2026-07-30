@@ -218,7 +218,7 @@ export interface ProfileFields {
   name?: string;
   searchCriteria?: string;
   noteID?: string;
-  displayFormat?: 'basic' | 'interval' | 'date';
+  displayFormat?: 'basic' | 'interval' | 'date' | 'month' | 'week';
   showCompleted?: boolean;
   showNoDue?: boolean;
   noDueDatesAtEnd?: boolean;
@@ -321,6 +321,59 @@ export async function selectProfile(win: Page, name: string): Promise<void> {
 export async function profileControlsVisible(win: Page): Promise<boolean> {
   const frame = await agendaPanel(win);
   return frame.locator('#profileButtonsSection').isVisible();
+}
+
+/** ----------------------------------------------------------------------------------------------
+ * Calendar views
+ * ------------------------------------------------------------------------------------------- */
+
+/** The month or week currently shown above the calendar. */
+export async function calendarTitle(win: Page): Promise<string> {
+  const frame = await agendaPanel(win);
+  return frame.locator('.calendar-title').innerText();
+}
+
+/** Step the calendar back or forward by one month or week. */
+export async function calendarNavigate(win: Page, direction: 'Previous' | 'Next'): Promise<void> {
+  const frame = await agendaPanel(win);
+  await frame.locator(`.calendar-nav button[title="${direction}"]`).click();
+  await win.waitForTimeout(SETTLE);
+}
+
+/** Return the calendar to the current month or week. */
+export async function calendarToday(win: Page): Promise<void> {
+  const frame = await agendaPanel(win);
+  await frame.locator('.calendar-title').click();
+  await win.waitForTimeout(SETTLE);
+}
+
+/** The weekday column headings of the month grid, in display order. */
+export async function calendarWeekdayHeadings(win: Page): Promise<string[]> {
+  const frame = await agendaPanel(win);
+  return frame.locator('.calendar-grid thead th').allInnerTexts();
+}
+
+/** Click the day cell showing the given day number, within the anchored month. */
+export async function selectCalendarDay(win: Page, dayNumber: number): Promise<void> {
+  const frame = await agendaPanel(win);
+  await frame
+    .locator('.calendar-day:not(.-outside) .calendar-day-button')
+    .filter({ has: frame.locator(`.calendar-day-number:text-is("${dayNumber}")`) })
+    .first()
+    .click();
+  await win.waitForTimeout(SETTLE);
+}
+
+/** The to-do titles listed under the month grid for the selected day. */
+export async function selectedDayTodos(win: Page): Promise<string[]> {
+  const frame = await agendaPanel(win);
+  return frame.locator('.calendar-selected .todo-title').allInnerTexts();
+}
+
+/** The day headings of the week planner, in display order. */
+export async function weekPlannerDays(win: Page): Promise<string[]> {
+  const frame = await agendaPanel(win);
+  return frame.locator('.week-day h2').allInnerTexts();
 }
 
 /** ----------------------------------------------------------------------------------------------

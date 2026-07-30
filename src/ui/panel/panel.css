@@ -140,3 +140,173 @@ table {
     border: 1px solid rgba(50,55,63,0.3);
     width: 100%;
 }
+
+/* ----------------------------------------------------------------------------------------------
+ * Calendar views
+ *
+ * Colours come from the Joplin theme variables that are injected into plugin webviews, so the
+ * calendar follows whichever theme is active instead of hard coding light or dark.
+ * ------------------------------------------------------------------------------------------- */
+
+.calendar-nav {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5em;
+    margin: 0.75em 0 0.5em;
+}
+
+.calendar-title {
+    flex-grow: 1;
+    min-width: 0;
+    height: auto;
+    min-height: 34px;
+    max-height: none;
+    margin: 0;
+    padding: 4px 8px;
+    border: none;
+    background: none;
+    color: inherit;
+    font-size: medium;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.calendar-title:hover {
+    background-color: rgba(127, 127, 127, 0.18);
+}
+
+.calendar-grid {
+    width: 100%;
+    border: none;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.calendar-grid th {
+    padding: 4px 0;
+    font-size: small;
+    font-weight: 600;
+    opacity: 0.7;
+    text-align: center;
+}
+
+.calendar-day {
+    padding: 1px;
+    text-align: center;
+    vertical-align: top;
+}
+
+/* A real button so the grid is reachable by keyboard and large enough to tap */
+.calendar-day-button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 2px;
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 44px;
+    max-height: none;
+    margin: 0;
+    padding: 4px 0;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: none;
+    color: inherit;
+    font-size: small;
+    cursor: pointer;
+}
+
+.calendar-day-button:hover {
+    background-color: rgba(127, 127, 127, 0.15);
+}
+
+.calendar-day.-outside .calendar-day-button {
+    opacity: 0.35;
+}
+
+.calendar-day.-today .calendar-day-button {
+    border-color: var(--joplin-url-color, #2D6BDC);
+    font-weight: 700;
+}
+
+.calendar-day.-selected .calendar-day-button {
+    background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.3));
+}
+
+.calendar-dots {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 2px;
+    min-height: 8px;
+}
+
+.calendar-dot {
+    display: block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: var(--joplin-url-color, #2D6BDC);
+}
+
+.calendar-dot.-overdue {
+    background-color: var(--joplin-color-error, #ff5555);
+}
+
+.calendar-dot.-due {
+    background-color: var(--joplin-color-warn, #d9a300);
+}
+
+.calendar-dot.-done {
+    background-color: var(--joplin-color-faded, rgba(127, 127, 127, 0.6));
+}
+
+.calendar-more {
+    font-size: x-small;
+    opacity: 0.7;
+}
+
+.calendar-selected h2,
+.calendar-undated h2 {
+    font-size: medium;
+}
+
+.calendar-empty {
+    margin: 0.25em 0;
+    padding: 0.25em 0.2em;
+    opacity: 0.6;
+    font-size: small;
+}
+
+/* The planner becomes a multi column board when the panel is wide enough, with no media queries */
+.week-planner {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 0.5em;
+    margin-top: 0.5em;
+}
+
+.week-day {
+    padding: 0.4em 0.5em;
+    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.3));
+    border-radius: 4px;
+    min-width: 0;
+}
+
+.week-day.-today {
+    border-color: var(--joplin-url-color, #2D6BDC);
+}
+
+.week-day h2 {
+    margin: 0 0 0.25em;
+    font-size: small;
+    font-weight: 700;
+    opacity: 0.85;
+}

@@ -71,14 +71,34 @@ you need. For example, you may have one profile for your work to-dos and another
 * The show to-dos without due dates, if checked, will show to-dos, even if they have no due date/alarms set. 
 
 #### Display Format
-* The display format allows you to select how the to-dos are displayed in the list. There are currently two options:
+* The display format allows you to select how the to-dos are displayed:
+    * Basic - A flat list, with no grouping.
     * Interval - This will group to-dos according to the following categories:
         - Overdue
         - Today
+        - Tomorrow
         - This Week
         - This Month
         - This Year
     * Date - This will group to-dos by the date they are due.
+    * Month Calendar - A grid of whole weeks. Each day carries a dot per to-do due on it, coloured red when something is
+      overdue, amber when it is still due and muted once everything on that day is done. A day with more to-dos than the
+      dot limit is summarised as "+N". Select a day to list its to-dos underneath, and select it again to hide them.
+    * Week Planner - The seven days of a week, each listing its to-dos so you can read and tick them off in place. On a
+      wide panel the days lay themselves out in columns.
+* The two calendars can be moved backwards and forwards with the arrows, and clicking the month or week title returns
+  you to today. Where you have navigated to is not saved: the calendar starts at today again when Joplin restarts.
+* To-dos with no due date cannot be placed on a calendar. If the profile shows them, they are listed under the grid
+  rather than being dropped.
+* Overview notes are unaffected by the calendar formats. A profile set to a calendar still writes the date grouped list
+  to its note, which stays readable and clickable where a grid would not.
+
+#### Week Starts On
+* Sets whether weeks begin on Monday or Sunday. This affects both calendars and the "This Week" group of the interval
+  format.
+
+#### Dots Per Day
+* How many dots a day in the month calendar shows before the rest are summarised as "+N".
 
 #### Date and Weekday Formats
 * The date and weekday format dropdowns allow you to set how dates are shown in the panel and notes
@@ -131,6 +151,11 @@ Joplin's plugin API is not identical on every platform, so a few things differ o
 ### Notes for contributors
 * Webview scripts are named `*Webview.js` on purpose. Webpack is configured to resolve `.js` before `.ts`, so a script named
   `panel.js` next to `panel.ts` is silently bundled in place of the plugin module and the plugin fails to start.
+* The panel's markup is regenerated in full on every refresh, so nothing stateful can live in the webview. The calendar
+  views keep which month or week is on screen in `panel.ts` and reach it through messages, the same way the profile
+  dropdown does.
+* A display format returns markdown from `getTodos()` and, optionally, different markup from `renderHtml()`. The
+  calendar formats override only the latter, which is why they still write a sensible overview note.
 * Node modules such as `fs-extra` and `sqlite3` are only available through `joplin.require` on desktop. Use
   `requireNodeModule` from `src/core/platform.ts`, which returns null when the module is unusable, and keep anything that
   depends on it optional.

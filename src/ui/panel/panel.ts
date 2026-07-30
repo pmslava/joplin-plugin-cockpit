@@ -9,7 +9,8 @@ import { openTodo, toggleTodoCompletion } from "../../core/joplin";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getAllProfiles, getProfile } from "../../core/database";
 import { openDeleteDialog, openEditor } from "../editor/editor";
-import { escapeHtml, getFormatter } from "../../core/formats";
+import { escapeHtml, getFormatter, isCalendarFormat, stepCalendarAnchor } from "../../core/formats";
+import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, setCurrentProfileID } from "../../core/settings";
 import { isMobile } from "../../core/platform";
 import { panelTemplate } from "./panelTemplate";
@@ -18,6 +19,18 @@ import { iconButton } from "../icons";
 /** Variable Declaration ***************************************************************************************************************************/
 var panel = null;
 var lastRenderedHtml = null;
+
+/** calendarViewState *******************************************************************************************************************************
+ * Which month or week the calendar views are showing, and which day is selected. This is where the user has navigated to rather than a setting, so   *
+ * it is kept in memory and starts again at today whenever the plugin restarts or the profile changes.                                               *
+ * It has to live here rather than in the webview because the panel markup is regenerated from scratch on every refresh.                             *
+ ***************************************************************************************************************************************************/
+var calendarViewState = { anchor: toISODate(new Date()), selectedDate: null }
+
+/** resetCalendarViewState **************************************************************************************************************************/
+function resetCalendarViewState(){
+    calendarViewState = { anchor: toISODate(new Date()), selectedDate: null }
+}
 
 /** setupPanel **************************************************************************************************************************************
  * Creates the panel in joplin and connects the event handler.                                                                                      *
@@ -42,7 +55,20 @@ async function eventHandler(message){
         scheduleRefresh()
     } else if (message[0] == 'profilesDropdownChanged'){
         await setCurrentProfileID(message[1])
+        // Another profile may show a different calendar, so start it at today rather than wherever the previous one was scrolled to.
+        resetCalendarViewState()
         await refreshInterfaces()
+    } else if (message[0] == 'calendarNavigate'){
+        var profile = await getProfile(await getCurrentProfileID())
+        calendarViewState.anchor = stepCalendarAnchor(profile, calendarViewState.anchor, Number(message[1]))
+        await refreshPanelData()
+    } else if (message[0] == 'calendarToday'){
+        resetCalendarViewState()
+        await refreshPanelData()
+    } else if (message[0] == 'calendarDaySelected'){
+        // Selecting the day that is already selected closes the list again.
+        calendarViewState.selectedDate = calendarViewState.selectedDate === message[1] ? null : message[1]
+        await refreshPanelData()
     } else if (message[0] == 'createProfileClicked'){
         await openEditor()
         await refreshInterfaces()
@@ -92,7 +118,7 @@ export async function togglePanelVisibility() {
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile) return
-    var todosHtml = await getFormatter(profile, 'html').getTodos()
+    var todosHtml = await getFormatter(profile, 'html', calendarViewState).renderHtml()
     var headingButtonsHtml = await getHeadingButtonsHTML()
     var profileControlsHtml = await getProfileControlsHTML(profileID)
     var customCss = sanitizeCss(await getCustomCss())

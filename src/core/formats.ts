@@ -6,6 +6,26 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { getTodos } from "./joplin";
+import { escapeHtml } from "./html";
+import {
+    CalendarViewState,
+    addDays,
+    addMonths,
+    buildMonthGrid,
+    buildWeek,
+    dayState,
+    endOfWeek,
+    fromISODate,
+    groupTodosByDate,
+    renderNavigation,
+    renderUndated,
+    startOfDay,
+    startOfWeek,
+    toISODate,
+    weekdayLabels,
+} from "./calendar";
+
+export { escapeHtml } from "./html";
 
 /** BaseFormat **************************************************************************************************************************************
  * This is the abstract class that all other formats must inherit from.                                                                             *
@@ -15,10 +35,16 @@ abstract class BaseFormat {
     /** constructor *********************************************************************************************************************************
      * This constructor takes and stores the profile that contains customizations as well as the output format, whether it be "html" or "markdown"  *
      ***********************************************************************************************************************************************/
-    constructor(profile, outputFormat) {
+    constructor(profile, outputFormat, viewState?) {
         this.profile = profile
         this.outputFormat = outputFormat
+        this.viewState = viewState
     }
+
+    /** viewState ***********************************************************************************************************************************
+     * Which part of the calendar is on screen. Only the calendar formats use it, and only when rendering HTML.                                     *
+     ***********************************************************************************************************************************************/
+    protected viewState: CalendarViewState = null
 
     /** profile *************************************************************************************************************************************
      * This stores the current profile data used to customize the formatting of the todos                                                           *
@@ -46,7 +72,7 @@ abstract class BaseFormat {
      ***********************************************************************************************************************************************/
     public async getTodos(){
         var todoString = ""
-        var todoList = await getTodos(this.profile.showCompleted, this.profile.showNoDue, this.profile.searchCriteria)
+        var todoList = await this.fetchTodos()
         var todoMap = this.groupBy(todoList)
         if (this.profile.noDueDatesAtEnd){
             var noDueDates = todoMap.get("No Due Date")
@@ -64,7 +90,42 @@ abstract class BaseFormat {
         }
         return todoString
     }
-    
+
+    /** renderHtml **********************************************************************************************************************************
+     * Returns the markup shown in the panel. By default this is the same grouped list that is written to the overview notes; the calendar formats   *
+     * override it to draw a grid instead, while still inheriting the list for the notes.                                                            *
+     ***********************************************************************************************************************************************/
+    public async renderHtml(): Promise<string>{
+        return await this.getTodos()
+    }
+
+    /** fetchTodos **********************************************************************************************************************************
+     * The to-dos matching this profile, unformatted. Provided so that a format can lay them out itself instead of as a list.                        *
+     ***********************************************************************************************************************************************/
+    protected async fetchTodos(){
+        return await getTodos(this.profile.showCompleted, this.profile.showNoDue, this.profile.searchCriteria)
+    }
+
+    /** renderTodoRow *******************************************************************************************************************************
+     * A single to-do as it appears in the panel: a checkbox that completes it and a link that opens it                                              *
+     ***********************************************************************************************************************************************/
+    protected renderTodoRow(todo, label){
+        var checkedString = todo.todo_completed ? "checked" : ""
+        return `
+                <div class="todo">
+                    <input type="checkbox" class="todo-checkbox" onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                    <a class="todo-title" onclick="onTodoClicked('${todo.id}')">${escapeHtml(label)}</a>
+                </div>
+            `
+    }
+
+    /** getWeekStartsOn *****************************************************************************************************************************
+     * The first day of the week for this profile, 0 for Sunday and 1 for Monday                                                                     *
+     ***********************************************************************************************************************************************/
+    protected getWeekStartsOn(){
+        return Number(this.profile.weekStartsOn) === 0 ? 0 : 1
+    }
+
     /** getHeadingString ****************************************************************************************************************************
      * This returns the given heading string with the proper output format(i.e html or markdown)                                                    *
      ***********************************************************************************************************************************************/
@@ -89,13 +150,7 @@ abstract class BaseFormat {
             var checkedString = todo.todo_completed ? "x" : " "
             return `- [${checkedString}] [${todoString}](:/${todo.id})\n`    
         } else if (this.outputFormat == "html") {
-            var checkedString = todo.todo_completed ? "checked" : ""
-            return `
-                <div class="todo">
-                    <input type="checkbox" class="todo-checkbox" onchange="onTodoChecked('${todo.id}')" ${checkedString}>
-                    <a class="todo-title" onclick="onTodoClicked('${todo.id}')">${escapeHtml(todoString)}</a>
-                </div>
-            `
+            return this.renderTodoRow(todo, todoString)
         }
     }
     
@@ -201,13 +256,12 @@ abstract class BaseFormat {
     }
 
     /** getEndOfThisWeek ********************************************************************************************************************************
-     * Gets the date representing the end of the current week. Provided as convenience for use in custom formats                                        *                            *
+     * Gets the date representing the end of the current week, according to the profile's first day of the week.                                        *
+     * The previous implementation subtracted the weekday number directly, which on a Sunday returned the Sunday a week later and so let the "This Week" *
+     * group run seven days too long.                                                                                                                   *
      ***************************************************************************************************************************************************/
     protected getEndOfThisWeek(){
-        var endOfWeek = new Date()
-        endOfWeek.setDate(endOfWeek.getDate() - (endOfWeek.getDay() - 1) + 6);
-        endOfWeek.setHours(23,59,59,999); 
-        return endOfWeek;    
+        return endOfWeek(new Date(), this.getWeekStartsOn())
     }
 
     /** getEndOfThisMonth *******************************************************************************************************************************
@@ -323,6 +377,137 @@ class IntervalFormat extends BaseFormat {
     }
 }
 
+/** MonthFormat *************************************************************************************************************************************
+ * Shows a month at a glance: a grid of days, each marked with a dot per to-do due on it. Selecting a day lists its to-dos underneath.               *
+ * In a note it falls back to the date grouped list it inherits, which stays readable and clickable where a grid would not.                          *
+ ***************************************************************************************************************************************************/
+class MonthFormat extends DateFormat {
+
+    public async renderHtml(){
+        var todoList = await this.fetchTodos()
+        var grouped = groupTodosByDate(todoList)
+        var weekStartsOn = this.getWeekStartsOn()
+        var anchor = fromISODate(this.viewState ? this.viewState.anchor : toISODate(new Date()))
+        var today = new Date()
+        var todayKey = toISODate(today)
+        var selectedKey = this.viewState ? this.viewState.selectedDate : null
+
+        // The grid gets abbreviated headings whatever the profile says, because seven columns of
+        // "Wednesday" do not fit a narrow panel or a phone. A profile asking for single letters is
+        // honoured, since that is narrower still.
+        var headingFormat = this.profile.weekdayFormat === "narrow" ? "narrow" : "short"
+        var headerCells = weekdayLabels(weekStartsOn, headingFormat).map(label => {
+            return `<th scope="col">${escapeHtml(label)}</th>`
+        }).join("")
+
+        var days = buildMonthGrid(anchor, weekStartsOn)
+        var rows = ""
+        for (var index = 0; index < days.length; index += 7){
+            rows += `<tr>${days.slice(index, index + 7).map(day => this.renderDayCell(day, grouped.byDate, anchor, todayKey, selectedKey, today)).join("")}</tr>`
+        }
+
+        var title = anchor.toLocaleDateString(undefined, { month: "long", year: "numeric" })
+        return `
+            ${renderNavigation(title)}
+            <table class="calendar-grid">
+                <thead><tr>${headerCells}</tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+            ${this.renderSelectedDay(grouped.byDate, selectedKey)}
+            ${renderUndated(grouped.undated, (todo, label) => this.renderTodoRow(todo, label))}
+        `
+    }
+
+    /** renderDayCell *******************************************************************************************************************************
+     * One day of the grid: its number, and a dot for each to-do due on it. The dots are capped so that a busy day cannot push the grid out of shape. *
+     ***********************************************************************************************************************************************/
+    private renderDayCell(day, byDate, anchor, todayKey, selectedKey, now){
+        var key = toISODate(day)
+        var todos = byDate.get(key) || []
+        var classes = ["calendar-day", `-${dayState(todos, now)}`]
+        if (day.getMonth() !== anchor.getMonth()) classes.push("-outside")
+        if (key === todayKey) classes.push("-today")
+        if (key === selectedKey) classes.push("-selected")
+
+        var maxDots = Number(this.profile.maxDotsPerDay)
+        if (!Number.isFinite(maxDots) || maxDots < 1) maxDots = 4
+        var dots = todos.slice(0, maxDots).map(todo => {
+            var state = todo.todo_completed ? "done" : (todo.todo_due < now.getTime() ? "overdue" : "due")
+            return `<span class="calendar-dot -${state}"></span>`
+        }).join("")
+        var overflow = todos.length > maxDots ? `<span class="calendar-more">+${todos.length - maxDots}</span>` : ""
+
+        var outstanding = todos.filter(todo => !todo.todo_completed).length
+        var label = `${day.toLocaleDateString(undefined, { day: "numeric", month: "long" })}, ${todos.length} to-do${todos.length === 1 ? "" : "s"}, ${outstanding} outstanding`
+
+        return `
+            <td class="${classes.join(" ")}">
+                <button type="button" class="calendar-day-button" aria-label="${escapeHtml(label)}" onclick="onCalendarDaySelected('${key}')">
+                    <span class="calendar-day-number">${day.getDate()}</span>
+                    <span class="calendar-dots">${dots}${overflow}</span>
+                </button>
+            </td>
+        `
+    }
+
+    /** renderSelectedDay ***************************************************************************************************************************
+     * The to-dos of the day the user picked, listed under the grid                                                                                  *
+     ***********************************************************************************************************************************************/
+    private renderSelectedDay(byDate, selectedKey){
+        if (!selectedKey) return ""
+        var day = fromISODate(selectedKey)
+        var todos = byDate.get(selectedKey) || []
+        var rows = todos.length
+            ? todos.map(todo => this.renderTodoRow(todo, `${this.getTimeString(todo.todo_due)} - ${todo.title}`)).join("")
+            : `<p class="calendar-empty">Nothing due</p>`
+        return `
+            <section class="calendar-selected">
+                <h2>${escapeHtml(this.getFullDateString(day))}</h2>
+                ${rows}
+            </section>
+        `
+    }
+}
+
+/** WeekFormat **************************************************************************************************************************************
+ * A week planner: one section per day, each listing that day's to-dos so they can be read and ticked off in place.                                  *
+ ***************************************************************************************************************************************************/
+class WeekFormat extends DateFormat {
+
+    public async renderHtml(){
+        var todoList = await this.fetchTodos()
+        var grouped = groupTodosByDate(todoList)
+        var weekStartsOn = this.getWeekStartsOn()
+        var anchor = fromISODate(this.viewState ? this.viewState.anchor : toISODate(new Date()))
+        var todayKey = toISODate(new Date())
+
+        var days = buildWeek(anchor, weekStartsOn)
+        var sections = days.map(day => {
+            var key = toISODate(day)
+            var todos = grouped.byDate.get(key) || []
+            var rows = todos.length
+                ? todos.map(todo => this.renderTodoRow(todo, `${this.getTimeString(todo.todo_due)} - ${todo.title}`)).join("")
+                : `<p class="calendar-empty">Nothing due</p>`
+            var heading = day.toLocaleDateString(undefined, { weekday: this.profile.weekdayFormat || "long", day: "numeric", month: "short" })
+            return `
+                <section class="week-day${key === todayKey ? " -today" : ""}">
+                    <h2>${escapeHtml(heading)}</h2>
+                    ${rows}
+                </section>
+            `
+        }).join("")
+
+        var first = days[0]
+        var last = days[days.length - 1]
+        var title = `${this.getDateString(first)} - ${this.getDateString(last)}`
+        return `
+            ${renderNavigation(title)}
+            <section class="week-planner">${sections}</section>
+            ${renderUndated(grouped.undated, (todo, label) => this.renderTodoRow(todo, label))}
+        `
+    }
+}
+
 /** formats *****************************************************************************************************************************************
  * This convenience dict stores all formats using their names as keys                                                                               *
  ***************************************************************************************************************************************************/
@@ -330,6 +515,34 @@ export var formats = {
     'basic': BasicFormat,
     'interval': IntervalFormat,
     'date': DateFormat,
+    'month': MonthFormat,
+    'week': WeekFormat,
+}
+
+/** calendarFormats *********************************************************************************************************************************
+ * The formats that show a calendar, and so need to be told which month or week is on screen and can be navigated                                    *
+ ***************************************************************************************************************************************************/
+export var calendarFormats = {
+    'month': 'month',
+    'week': 'week',
+}
+
+/** isCalendarFormat ********************************************************************************************************************************
+ * Whether the given profile is showing one of the calendar views                                                                                   *
+ ***************************************************************************************************************************************************/
+export function isCalendarFormat(profile){
+    return !!calendarFormats[profile ? profile.displayFormat : null]
+}
+
+/** stepCalendarAnchor ******************************************************************************************************************************
+ * Moves the anchor by whole months or whole weeks, depending on which calendar the profile is showing                                               *
+ ***************************************************************************************************************************************************/
+export function stepCalendarAnchor(profile, anchorISO, delta){
+    var anchor = fromISODate(anchorISO)
+    if (profile && profile.displayFormat === 'week'){
+        return toISODate(addDays(anchor, 7 * delta))
+    }
+    return toISODate(addMonths(anchor, delta))
 }
 
 /** defaultFormatName *******************************************************************************************************************************
@@ -341,20 +554,8 @@ const defaultFormatName = 'interval'
  * Returns the formatter for the given profile and output format. Profiles are stored as free form JSON, so an unknown format name falls back to the *
  * default rather than crashing the refresh.                                                                                                        *
  ***************************************************************************************************************************************************/
-export function getFormatter(profile, outputFormat){
+export function getFormatter(profile, outputFormat, viewState?){
     var format = formats[profile.displayFormat] || formats[defaultFormatName]
-    return new format(profile, outputFormat)
+    return new format(profile, outputFormat, viewState)
 }
 
-/** escapeHtml **************************************************************************************************************************************
- * Escapes the characters that would otherwise be interpreted as markup, so that to-do titles and profile names containing characters such as & or < *
- * are displayed as written                                                                                                                         *
- ***************************************************************************************************************************************************/
-export function escapeHtml(value){
-    return String(value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;")
-}
