@@ -12,6 +12,10 @@ import { defineConfig } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e',
+  // showcase.spec.ts only captures screenshots of the calendar views, it asserts nothing, and it
+  // adds a couple of minutes to a run. Excluded from the default suite; run it deliberately with
+  // `npx playwright test e2e/showcase.spec.ts --ignore-snapshots` when the layout needs a look.
+  testIgnore: '**/showcase.spec.ts',
   // Launching Joplin + waiting for the plugin to register can take a while on a cold profile, and
   // some tests wait out more than one of Agenda's fallback refresh intervals.
   timeout: 240_000,
