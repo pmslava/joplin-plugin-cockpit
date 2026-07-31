@@ -1,3 +1,11 @@
+# 4.1.0
+- Add two calendar display formats. **Month Calendar** shows a grid of whole weeks with a dot per to-do on each day, coloured by whether it is overdue, due or done, and lists a day's to-dos underneath when you select it. **Week Planner** shows the seven days of a week, each listing its to-dos so they can be read and ticked off in place. Both can be navigated backwards and forwards, and the title returns you to today
+- Add a per profile "Week Starts On" option, used by the calendars and by the "This Week" group
+- Fix the "This Week" group running seven days too long on Sundays: the previous week boundary subtracted the weekday number directly, which on a Sunday returned the Sunday a week later
+- Add a per profile "Dots Per Day" option that caps how many dots a day shows before it is summarised as "+N"
+- To-dos with no due date cannot be placed on a calendar, so a profile showing them lists them under the grid instead of dropping them
+- Overview notes are unchanged by the calendar formats: they still receive the date grouped list, which stays readable and clickable in a note
+
 # 4.0.0
 - Publish under a new identity, so that this fork does not collide with the original plugin: the npm package is now `joplin-plugin-agenda2` and the plugin id is now `com.github.thescriptingguy.joplin-plugin-agenda`. Because Joplin gives every plugin id its own data directory, the profile import also looks in the data directory of the previous plugin id, so the profiles of an existing Agenda 3.x install are still picked up
 - Add support for the Joplin mobile app. The panel appears as a tab in the plugin panel dialog, which is opened with the plugin button in the note screen toolbar

@@ -14,6 +14,8 @@ let weekdayFormatSelect = document.getElementById("weekdayFormatSelect")
 let timeIs12HourCheckbox = document.getElementById("timeIs12HourCheckbox")
 let profileDataInput = document.getElementById("profileDataInput")
 let noDueDatesAtEndCheckbox = document.getElementById("noDueDatesAtEndCheckbox")
+let weekStartsOnSelect = document.getElementById("weekStartsOnSelect")
+let maxDotsPerDayInput = document.getElementById("maxDotsPerDayInput")
 
 // Connect Event Handlers
 nameInput.addEventListener("change", saveProfileData)
@@ -29,6 +31,8 @@ dayFormatSelect.addEventListener("change", saveProfileData)
 weekdayFormatSelect.addEventListener("change", saveProfileData)
 timeIs12HourCheckbox.addEventListener("change", saveProfileData)
 noDueDatesAtEndCheckbox.addEventListener("change", saveProfileData)
+weekStartsOnSelect.addEventListener("change", saveProfileData)
+maxDotsPerDayInput.addEventListener("change", saveProfileData)
 
 // Load Profile Data
 function loadProfileData() {
@@ -46,7 +50,9 @@ function loadProfileData() {
         dayFormatSelect.value = profileObject["dayFormat"]
         weekdayFormatSelect.value = profileObject["weekdayFormat"]
         timeIs12HourCheckbox.checked = profileObject["timeIs12Hour"]
-        noDueDatesAtEndCheckbox.checked = profileObject["noDueDatesAtEnd"]    
+        noDueDatesAtEndCheckbox.checked = profileObject["noDueDatesAtEnd"]
+        weekStartsOnSelect.value = String(profileObject["weekStartsOn"])
+        maxDotsPerDayInput.value = profileObject["maxDotsPerDay"]
     }
 }
 
@@ -65,7 +71,9 @@ function saveProfileData(){
         "dayFormat": dayFormatSelect.value,
         "weekdayFormat": weekdayFormatSelect.value,
         "timeIs12Hour": timeIs12HourCheckbox.checked,
-        "noDueDatesAtEnd": noDueDatesAtEndCheckbox.checked
+        "noDueDatesAtEnd": noDueDatesAtEndCheckbox.checked,
+        "weekStartsOn": weekStartsOnSelect.value,
+        "maxDotsPerDay": maxDotsPerDayInput.value
     }
     profileDataInput.value = btoa(encodeURI(JSON.stringify(profileObject)))
 }

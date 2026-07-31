@@ -61,3 +61,24 @@ async function onToggleProfileControlsClicked(){
 async function onStylerClicked(){
     await webviewApi.postMessage(['stylerClicked']);
 }
+
+/** onCalendarNavigate ******************************************************************************************************************************
+ * Moves the calendar a month or a week backwards or forwards. The plugin holds the position, because the panel markup is replaced on every refresh  *
+ ***************************************************************************************************************************************************/
+async function onCalendarNavigate(delta){
+    await webviewApi.postMessage(['calendarNavigate', delta]);
+}
+
+/** onCalendarToday *********************************************************************************************************************************
+ * Returns the calendar to the current month or week                                                                                                *
+ ***************************************************************************************************************************************************/
+async function onCalendarToday(){
+    await webviewApi.postMessage(['calendarToday']);
+}
+
+/** onCalendarDaySelected ***************************************************************************************************************************
+ * Lists the to-dos of the given day under the month grid, or hides them again when that day is already selected                                     *
+ ***************************************************************************************************************************************************/
+async function onCalendarDaySelected(isoDate){
+    await webviewApi.postMessage(['calendarDaySelected', isoDate]);
+}

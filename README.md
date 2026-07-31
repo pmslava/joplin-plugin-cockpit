@@ -1,14 +1,18 @@
 # Agenda
 
-An agenda/calendar/schedule panel plugin for joplin that shows all uncompleted to-dos with a due date
+An agenda/calendar/schedule panel plugin for Joplin that shows your to-dos by when they are due, on desktop and mobile.
+
+Each profile picks how its to-dos are presented, so the same panel can be a grouped list, a month calendar or a week
+planner.
 
 ## Screenshots
 
-### Main Interface
-![Screenshot1](docs/Screenshot1.png)
+| Interval list | Month calendar | Week planner |
+| --- | --- | --- |
+| ![The panel showing to-dos grouped under Overdue, Today, This Week and This Year](docs/panel-interval.png) | ![The panel showing a month grid with a dot on each day that has a to-do](docs/panel-month-calendar.png) | ![The panel showing seven day sections, each listing its to-dos](docs/panel-week-planner.png) |
 
-### The Agenda Panel
-![Screenshot2](docs/Screenshot2.png)
+The screenshots are captured from a real Joplin by `e2e/showcase.spec.ts`; see [Development](#development) to regenerate
+them.
 
 
 ## Installation
@@ -71,14 +75,34 @@ you need. For example, you may have one profile for your work to-dos and another
 * The show to-dos without due dates, if checked, will show to-dos, even if they have no due date/alarms set. 
 
 #### Display Format
-* The display format allows you to select how the to-dos are displayed in the list. There are currently two options:
+* The display format allows you to select how the to-dos are displayed:
+    * Basic - A flat list, with no grouping.
     * Interval - This will group to-dos according to the following categories:
         - Overdue
         - Today
+        - Tomorrow
         - This Week
         - This Month
         - This Year
     * Date - This will group to-dos by the date they are due.
+    * Month Calendar - A grid of whole weeks. Each day carries a dot per to-do due on it, coloured red when something is
+      overdue, amber when it is still due and muted once everything on that day is done. A day with more to-dos than the
+      dot limit is summarised as "+N". Select a day to list its to-dos underneath, and select it again to hide them.
+    * Week Planner - The seven days of a week, each listing its to-dos so you can read and tick them off in place. On a
+      wide panel the days lay themselves out in columns.
+* The two calendars can be moved backwards and forwards with the arrows, and clicking the month or week title returns
+  you to today. Where you have navigated to is not saved: the calendar starts at today again when Joplin restarts.
+* To-dos with no due date cannot be placed on a calendar. If the profile shows them, they are listed under the grid
+  rather than being dropped.
+* Overview notes are unaffected by the calendar formats. A profile set to a calendar still writes the date grouped list
+  to its note, which stays readable and clickable where a grid would not.
+
+#### Week Starts On
+* Sets whether weeks begin on Monday or Sunday. This affects both calendars and the "This Week" group of the interval
+  format.
+
+#### Dots Per Day
+* How many dots a day in the month calendar shows before the rest are summarised as "+N".
 
 #### Date and Weekday Formats
 * The date and weekday format dropdowns allow you to set how dates are shown in the panel and notes
@@ -121,6 +145,9 @@ Joplin's plugin API is not identical on every platform, so a few things differ o
   ```
   Override the Joplin version under test with `JOPLIN_E2E_VERSION`. Both suites also run in CI, see
   `.github/workflows/tests.yml`.
+* Regenerate the README screenshots with `SHOWCASE=1 npx playwright test e2e/showcase.spec.ts`, then copy
+  `test-results/showcase-*.png` over the matching files in `docs/`. That spec fills a month with to-dos and captures the
+  panel in each format; it is skipped unless `SHOWCASE` is set, so it costs nothing in a normal run.
 * Update the plugin framework with `npm run update`
 * Publishing is done by `.github/workflows/publish.yml`, which runs when a GitHub Release is published (or on demand).
   It takes the version from the release tag, writes it into both `package.json` and `src/manifest.json`, builds, and
@@ -131,6 +158,11 @@ Joplin's plugin API is not identical on every platform, so a few things differ o
 ### Notes for contributors
 * Webview scripts are named `*Webview.js` on purpose. Webpack is configured to resolve `.js` before `.ts`, so a script named
   `panel.js` next to `panel.ts` is silently bundled in place of the plugin module and the plugin fails to start.
+* The panel's markup is regenerated in full on every refresh, so nothing stateful can live in the webview. The calendar
+  views keep which month or week is on screen in `panel.ts` and reach it through messages, the same way the profile
+  dropdown does.
+* A display format returns markdown from `getTodos()` and, optionally, different markup from `renderHtml()`. The
+  calendar formats override only the latter, which is why they still write a sensible overview note.
 * Node modules such as `fs-extra` and `sqlite3` are only available through `joplin.require` on desktop. Use
   `requireNodeModule` from `src/core/platform.ts`, which returns null when the module is unusable, and keep anything that
   depends on it optional.

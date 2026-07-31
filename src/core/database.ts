@@ -35,6 +35,9 @@ const profileDefaults = {
     timeIs12Hour: true,
     sortOrder: 0,
     noDueDatesAtEnd: false,
+    // 0 for Sunday, 1 for Monday. Used by the calendar views and by the "This Week" group.
+    weekStartsOn: 1,
+    maxDotsPerDay: 4,
 }
 
 /** createProfile ***********************************************************************************************************************************

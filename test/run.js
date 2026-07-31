@@ -228,6 +228,201 @@ async function main() {
         assert.ok(await fs.pathExists(path.join(oldPluginDataDir, 'profiles.sqlite3')))
     })
 
+    // -------------------------------------------------------------- calendar views
+    // The anchor is plugin state driven by a message, so these navigate to a fixed month and assert
+    // on structure. Nothing here depends on the date the suite happens to run.
+    const calendarDue = (day, hour) => new Date(2026, 4, day, hour, 0, 0).getTime() // May 2026
+    const calendarTodos = [
+        { id: 'd'.repeat(32), title: 'Early May', todo_completed: 0, todo_due: calendarDue(4, 9) },
+        { id: 'e'.repeat(32), title: 'Same day one', todo_completed: 0, todo_due: calendarDue(12, 9) },
+        { id: 'f'.repeat(32), title: 'Same day two', todo_completed: 0, todo_due: calendarDue(12, 14) },
+        { id: '0'.repeat(32), title: 'Same day three', todo_completed: 1, todo_due: calendarDue(12, 16) },
+        // Alone on its day and completed, so that day must render a single muted dot.
+        { id: '2'.repeat(32), title: 'Finished', todo_completed: 1, todo_due: calendarDue(20, 9) },
+        { id: '1'.repeat(32), title: 'Unscheduled', todo_completed: 0, todo_due: 0 },
+    ]
+    const monthProfile = {
+        nextID: 2,
+        profiles: [{
+            id: 1, name: 'Calendar', searchCriteria: '', noteID: '', showCompleted: true, showNoDue: true,
+            displayFormat: 'month', yearFormat: 'numeric', monthFormat: 'long', dayFormat: 'numeric',
+            weekdayFormat: 'short', timeIs12Hour: true, sortOrder: 0, noDueDatesAtEnd: false,
+            weekStartsOn: 1, maxDotsPerDay: 2,
+        }],
+    }
+
+    const calendar = await run({
+        dataDir: path.join(tmp, 'calendar-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: calendarTodos,
+        initialSettings: { profileData: JSON.stringify(monthProfile), currentProfileID: 1 },
+    })
+
+    // Navigate to a known month regardless of when the suite runs: step back to May 2026 from today.
+    const monthsFromNow = (new Date().getFullYear() - 2026) * 12 + (new Date().getMonth() - 4)
+    for (let step = 0; step < Math.abs(monthsFromNow); step++) {
+        await calendar.panelMessageHandler(['calendarNavigate', monthsFromNow > 0 ? -1 : 1])
+    }
+
+    await test('month view: renders a grid of whole weeks starting on Monday', () => {
+        const html = calendar.panelHtml['panel-panel']
+        assert.ok(html.includes('class="calendar-grid"'), 'no calendar grid rendered')
+        // The grid covers whole weeks around the month rather than a fixed six rows. May 2026 runs
+        // Friday the 1st to Sunday the 31st, so a Monday-start grid is Mon 27 Apr to Sun 31 May.
+        assert.strictEqual((html.match(/calendar-day-button/g) || []).length, 35)
+        assert.strictEqual((html.match(/<tr>/g) || []).length, 6) // 1 header row + 5 week rows
+        assert.ok(html.includes('>27<') && html.includes('>31<'), 'grid should span the surrounding weeks')
+        const headerRow = html.slice(html.indexOf('<thead>'), html.indexOf('</thead>'))
+        assert.ok(headerRow.indexOf('Mon') < headerRow.indexOf('Sun'), 'week should start on Monday')
+    })
+
+    await test('month view: a Sunday-start profile shifts the columns', async () => {
+        const sunday = await run({
+            dataDir: path.join(tmp, 'sunday-month-data'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos: calendarTodos,
+            initialSettings: {
+                profileData: JSON.stringify({
+                    nextID: 2,
+                    profiles: [{ ...monthProfile.profiles[0], weekStartsOn: 0 }],
+                }),
+                currentProfileID: 1,
+            },
+        })
+        const header = sunday.panelHtml['panel-panel']
+        const headerRow = header.slice(header.indexOf('<thead>'), header.indexOf('</thead>'))
+        assert.ok(headerRow.indexOf('Sun') < headerRow.indexOf('Mon'), 'week should start on Sunday')
+    })
+
+    await test('month view: shows the navigated month, not today', () => {
+        assert.ok(calendar.panelHtml['panel-panel'].includes('May 2026'), 'expected the May 2026 title')
+    })
+
+    await test('month view: dots are capped and the overflow is counted', () => {
+        const html = calendar.panelHtml['panel-panel']
+        // The 12th has three to-dos and the profile caps dots at two. The class is matched with its
+        // trailing space so that the wrapping "calendar-dots" element is not counted as a dot.
+        const cell = html.slice(html.indexOf('2026-05-12'), html.indexOf('2026-05-13'))
+        assert.strictEqual((cell.match(/class="calendar-dot /g) || []).length, 2, 'dots were not capped')
+        assert.ok(cell.includes('+1'), 'missing overflow indicator')
+    })
+
+    await test('month view: dot colour reflects outstanding versus completed', () => {
+        const html = calendar.panelHtml['panel-panel']
+        // May 2026 is in the past relative to any later run date, so its outstanding to-dos are overdue.
+        assert.ok(html.includes('calendar-dot -overdue'), 'outstanding to-do should render an overdue dot')
+        const finishedCell = html.slice(html.indexOf('2026-05-20'), html.indexOf('2026-05-21'))
+        assert.ok(finishedCell.includes('calendar-dot -done'), 'completed to-do should render a muted dot')
+        assert.ok(html.includes('calendar-day -done'), 'a day whose to-dos are all done should be muted')
+    })
+
+    await test('month view: day cells carry an accessible label', () => {
+        assert.ok(/aria-label="[^"]*to-dos?, \d+ outstanding"/.test(calendar.panelHtml['panel-panel']))
+    })
+
+    await test('month view: to-dos without a due date get their own section', () => {
+        const html = calendar.panelHtml['panel-panel']
+        assert.ok(html.includes('calendar-undated'), 'missing the undated section')
+        assert.ok(html.includes('Unscheduled'), 'undated to-do was dropped')
+    })
+
+    await test('month view: selecting a day lists its to-dos, selecting again hides them', async () => {
+        await calendar.panelMessageHandler(['calendarDaySelected', '2026-05-12'])
+        let html = calendar.panelHtml['panel-panel']
+        assert.ok(html.includes('calendar-selected'), 'no selected day section')
+        assert.ok(html.includes('Same day one') && html.includes('Same day two'))
+
+        await calendar.panelMessageHandler(['calendarDaySelected', '2026-05-12'])
+        html = calendar.panelHtml['panel-panel']
+        assert.ok(!html.includes('calendar-selected'), 'selecting twice should close the day')
+    })
+
+    await test('month view: the overview note still gets a readable list, not a grid', async () => {
+        const withNote = await run({
+            dataDir: path.join(tmp, 'calendar-note-data'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos: calendarTodos,
+            initialSettings: {
+                profileData: JSON.stringify({
+                    nextID: 2,
+                    profiles: [{ ...monthProfile.profiles[0], noteID: 'calendarnote' }],
+                }),
+                currentProfileID: 1,
+            },
+            notes: { calendarnote: { id: 'calendarnote', title: 'Overview', body: 'stale' } },
+        })
+        assert.strictEqual(withNote.notePuts.length, 1)
+        const body = withNote.notePuts[0].body
+        assert.ok(!body.includes('calendar-grid'), 'the note should not contain grid markup')
+        assert.ok(body.includes('- [ ] ['), 'the note should contain a markdown to-do list')
+    })
+
+    await test('week view: renders seven day sections and navigates by weeks', async () => {
+        const weekProfile = {
+            nextID: 2,
+            profiles: [{ ...monthProfile.profiles[0], displayFormat: 'week' }],
+        }
+        const week = await run({
+            dataDir: path.join(tmp, 'week-data'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos: calendarTodos,
+            initialSettings: { profileData: JSON.stringify(weekProfile), currentProfileID: 1 },
+        })
+        const before = week.panelHtml['panel-panel']
+        assert.strictEqual((before.match(/class="week-day/g) || []).length, 7)
+        assert.ok(before.includes('week-planner'))
+
+        await week.panelMessageHandler(['calendarNavigate', -1])
+        assert.notStrictEqual(week.panelHtml['panel-panel'], before, 'navigating a week changed nothing')
+
+        await week.panelMessageHandler(['calendarToday'])
+        assert.strictEqual(week.panelHtml['panel-panel'], before, 'today should return to the starting week')
+    })
+
+    await test('week view: to-dos are tickable in place', async () => {
+        const weekProfile = {
+            nextID: 2,
+            profiles: [{ ...monthProfile.profiles[0], displayFormat: 'week', weekStartsOn: 0 }],
+        }
+        const week = await run({
+            dataDir: path.join(tmp, 'week-sunday-data'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos: calendarTodos,
+            initialSettings: { profileData: JSON.stringify(weekProfile), currentProfileID: 1 },
+        })
+        const html = week.panelHtml['panel-panel']
+        assert.ok(html.includes('onTodoChecked('), 'week planner rows should be tickable')
+        assert.ok(html.includes('onTodoClicked('), 'week planner rows should be openable')
+    })
+
+    await test('an unknown display format still falls back to the interval list', async () => {
+        const oddProfile = {
+            nextID: 2,
+            profiles: [{ ...monthProfile.profiles[0], displayFormat: 'quarterly' }],
+        }
+        const odd = await run({
+            dataDir: path.join(tmp, 'odd-format-data'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos: calendarTodos,
+            initialSettings: { profileData: JSON.stringify(oddProfile), currentProfileID: 1 },
+        })
+        const html = odd.panelHtml['panel-panel']
+        assert.ok(!html.includes('calendar-grid'), 'unknown format should not render a calendar')
+        assert.ok(html.includes('<h2>'), 'expected a grouped list')
+    })
+
     // ---------------------------------------------- corrupt / failed migration
     const brokenDir = path.join(tmp, 'broken-data')
     await fs.ensureDir(brokenDir)

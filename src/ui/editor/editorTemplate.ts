@@ -47,7 +47,20 @@ export var editorTemplate = `
             <option value="basic">Basic</option>
             <option value="interval">Interval</option>
             <option value="date">Date</option>
+            <option value="month">Month Calendar</option>
+            <option value="week">Week Planner</option>
         </select>
+    </fieldset>
+    <fieldset>
+        <legend>Week Starts On</legend>
+        <select id="weekStartsOnSelect" name="weekStartsOn">
+            <option value="1">Monday</option>
+            <option value="0">Sunday</option>
+        </select>
+    </fieldset>
+    <fieldset>
+        <legend>Dots Per Day</legend>
+        <input type="number" id="maxDotsPerDayInput" name="maxDotsPerDay" min="1" max="10" value="4">
     </fieldset>
     <fieldset>
         <legend>Date Format</legend>
