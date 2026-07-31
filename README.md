@@ -1,14 +1,18 @@
 # Agenda
 
-An agenda/calendar/schedule panel plugin for joplin that shows all uncompleted to-dos with a due date
+An agenda/calendar/schedule panel plugin for Joplin that shows your to-dos by when they are due, on desktop and mobile.
+
+Each profile picks how its to-dos are presented, so the same panel can be a grouped list, a month calendar or a week
+planner.
 
 ## Screenshots
 
-### Main Interface
-![Screenshot1](docs/Screenshot1.png)
+| Interval list | Month calendar | Week planner |
+| --- | --- | --- |
+| ![The panel showing to-dos grouped under Overdue, Today, This Week and This Year](docs/panel-interval.png) | ![The panel showing a month grid with a dot on each day that has a to-do](docs/panel-month-calendar.png) | ![The panel showing seven day sections, each listing its to-dos](docs/panel-week-planner.png) |
 
-### The Agenda Panel
-![Screenshot2](docs/Screenshot2.png)
+The screenshots are captured from a real Joplin by `e2e/showcase.spec.ts`; see [Development](#development) to regenerate
+them.
 
 
 ## Installation
@@ -141,6 +145,9 @@ Joplin's plugin API is not identical on every platform, so a few things differ o
   ```
   Override the Joplin version under test with `JOPLIN_E2E_VERSION`. Both suites also run in CI, see
   `.github/workflows/tests.yml`.
+* Regenerate the README screenshots with `SHOWCASE=1 npx playwright test e2e/showcase.spec.ts`, then copy
+  `test-results/showcase-*.png` over the matching files in `docs/`. That spec fills a month with to-dos and captures the
+  panel in each format; it is skipped unless `SHOWCASE` is set, so it costs nothing in a normal run.
 * Update the plugin framework with `npm run update`
 * Publishing is done by `.github/workflows/publish.yml`, which runs when a GitHub Release is published (or on demand).
   It takes the version from the release tag, writes it into both `package.json` and `src/manifest.json`, builds, and

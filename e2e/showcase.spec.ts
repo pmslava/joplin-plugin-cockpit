@@ -13,10 +13,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 /**
- * Not an assertion suite: this populates a realistic month and captures the two calendar views so
- * the layout can be looked at. Run with `npx playwright test e2e/showcase.spec.ts`.
+ * Not an assertion suite: this populates a realistic month and captures the panel views so the
+ * layout can be looked at, and so the README screenshots can be regenerated.
+ *
+ * It asserts nothing and takes a couple of minutes, so it is skipped unless asked for:
+ *
+ *     SHOWCASE=1 npx playwright test e2e/showcase.spec.ts
  */
 test.describe('Calendar showcase', () => {
+  test.skip(!process.env.SHOWCASE, 'Set SHOWCASE=1 to capture the panel screenshots');
+
   let joplin: JoplinInstance;
 
   test.beforeAll(async () => {
@@ -63,6 +69,10 @@ test.describe('Calendar showcase', () => {
     await win.waitForTimeout(1500);
 
     for (let attempt = 0; attempt < 4; attempt++) await refreshPanel(win);
+
+    await editCurrentProfile(win, { displayFormat: 'interval' });
+    for (let attempt = 0; attempt < 2; attempt++) await refreshPanel(win);
+    await win.locator(PANEL_IFRAME).screenshot({ path: path.join(outDir, 'showcase-list.png') });
 
     await editCurrentProfile(win, { displayFormat: 'month' });
     for (let attempt = 0; attempt < 3; attempt++) await refreshPanel(win);
