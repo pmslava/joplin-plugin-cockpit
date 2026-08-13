@@ -22,27 +22,21 @@ var pickedNoteID = null
  ***************************************************************************************************************************************************/
 var savedTodosScrollTop = 0
 
-document.addEventListener('scroll', event => {
-    var target = event.target
-    if (target && target.classList && target.classList.contains('todos')){
-        savedTodosScrollTop = target.scrollTop
-    }
-}, true)
+// The live .todos scroll container, tracked by node identity: the host replaces it with a brand new
+// node on every re-render (setHtml sets innerHTML on the persistent #joplin-plugin-content wrapper),
+// so a changed reference is exactly the signal that a real re-render happened. restoringScroll marks
+// our own programmatic restore so its scroll event is not saved back as a user scroll.
+var currentTodosEl = null
+var restoringScroll = false
 
-function refreshBroughtNewTodos(mutations){
-    for (var mutation of mutations){
-        for (var node of mutation.addedNodes){
-            if (node.nodeType !== 1) continue
-            if (node.classList && node.classList.contains('todos')) return true
-            if (node.querySelector && node.querySelector('.todos')) return true
-        }
-    }
-    return false
-}
-
-function restoreTodosScroll(){
-    var todos = document.querySelector('.todos')
-    if (todos) todos.scrollTop = Math.min(savedTodosScrollTop, todos.scrollHeight)
+function restoreTodosScroll(el){
+    restoringScroll = true
+    requestAnimationFrame(() => {
+        // After layout the flex column has its final height, so scrollHeight/clientHeight are real;
+        // clamp to the maximum legal scrollTop (scrollHeight - clientHeight) rather than scrollHeight.
+        el.scrollTop = Math.min(savedTodosScrollTop, el.scrollHeight - el.clientHeight)
+        requestAnimationFrame(() => { restoringScroll = false })
+    })
 }
 
 function allTodoRows(){
@@ -58,21 +52,40 @@ function paintTodoSelection(){
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    new MutationObserver((mutations) => {
-        if (mutations.some(mutation => mutation.addedNodes.length)) paintTodoSelection()
-        // Only restore when the refresh actually rebuilt the list, not for unrelated body mutations
-        // such as the injected #noteContextMenu, which would otherwise yank the scroll while a menu
-        // or tooltip is open.
-        if (refreshBroughtNewTodos(mutations)){
-            restoreTodosScroll()
-            // The suggestion menu was in the replaced markup; drop its now-stale state (closing on a
-            // re-render is fine - only the typed text must survive, which restoreSearchDraft handles)
-            searchSuggestion = null
-            restoreSearchDraft()
-        }
-    }).observe(document.body, { childList: true, subtree: true })
-})
+/** reconcile ***************************************************************************************************************************************
+ * Runs once at startup and on every DOM mutation. When a fresh .todos node has replaced the previous one (identity change == a real re-render),    *
+ * it re-attaches the per-element scroll saver, restores the scroll position, repaints the selection and puts an in-progress search draft back. A    *
+ * mutation that does not swap .todos (an injected context menu, the suggestion list, a tooltip) leaves the scroll and everything else untouched.    *
+ ***************************************************************************************************************************************************/
+function reconcile(){
+    var el = document.querySelector('.todos')
+    if (el && el !== currentTodosEl){
+        currentTodosEl = el
+        // Save on genuine user scroll only; ignore the programmatic restore below (and any scroll-to-0
+        // fired as the old node is detached), which restoringScroll guards.
+        el.addEventListener('scroll', () => { if (!restoringScroll) savedTodosScrollTop = el.scrollTop })
+        restoreTodosScroll(el)
+        paintTodoSelection()
+        // The suggestion menu was in the replaced markup; drop its now-stale state (closing on a
+        // re-render is fine - only the typed text must survive, which restoreSearchDraft handles).
+        searchSuggestion = null
+        restoreSearchDraft()
+    }
+}
+
+// Joplin injects plugin webview scripts after DOMContentLoaded has already fired, so gating the
+// observer on that event left it never registered and every restore above was dead code. Wire it up
+// at top-level instead, with a fallback for the reverse ordering just in case.
+function startPanelObserver(){
+    reconcile()
+    new MutationObserver(reconcile).observe(document.body, { childList: true, subtree: true })
+}
+
+if (document.body){
+    startPanelObserver()
+} else {
+    document.addEventListener('DOMContentLoaded', startPanelObserver)
+}
 
 /** onTodoRowMouseDown ******************************************************************************************************************************
  * Selection happens on press, like in a list: a plain press selects the row (replacing the selection), Ctrl+press toggles it, Shift+press selects   *
