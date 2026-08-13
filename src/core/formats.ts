@@ -162,7 +162,7 @@ abstract class BaseFormat {
         var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
         var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
         return `
-                <div class="todo" data-todo-id="${todo.id}" draggable="true"
+                <div class="todo${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}" draggable="true"
                     onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
                     onclick="onTodoRowClicked(event, '${todo.id}')"
                     ondblclick="onRowDoubleClicked(event, '${todo.id}')"

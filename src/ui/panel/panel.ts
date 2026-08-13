@@ -14,6 +14,7 @@ import { openDeleteDialog, openEditor } from "../editor/editor";
 import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID } from "../../core/settings";
+import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
 import { panelTemplate } from "./panelTemplate";
 import { iconButton, icons } from "../icons";
@@ -228,8 +229,13 @@ export async function togglePanelVisibility() {
         todosHtml = profile.notesPosition === "before" ? notesHtml + todosHtml : todosHtml + notesHtml
     }
     var controlsHtml = await getControlsHTML(profileID)
+    // The theme block is rebuilt on every render (never memoised) so that a theme-setting change
+    // alters the markup and gets past the equality guard below. It sits before the custom CSS, which
+    // is injected last and still overrides it.
+    var themeCss = await buildThemeCss()
     var customCss = sanitizeCss(await getCustomCss())
     var htmlString = panelTemplate
+        .replace("<<THEME_CSS>>", () => themeCss)
         .replace("<<CUSTOM_CSS>>", () => customCss)
         .replace("<<CONTROLS>>", () => controlsHtml)
         .replace("<<TODOS>>", () => todosHtml)

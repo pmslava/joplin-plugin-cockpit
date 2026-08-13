@@ -8,12 +8,36 @@
 import joplin from "api"
 import { SettingItemType } from "api/types"
 import { getAllProfiles, getProfile, profileDataSettingKey } from "./database"
-import { setupTimer } from "./timer"
+import { refreshInterfaces, setupTimer } from "./timer"
 
 /** Variable Setup *********************************************************************************************************************************/
 export const customCssSettingKey = "customCss"
 export const updateFrequencySettingKey = "updateFrequency"
 export const dayStartTimeSettingKey = "dayStartTime"
+
+/** Theme settings keys. The themes feature (src/core/theme.ts) reads these to build the panel's --cockpit-* override block. */
+export const themeModeSettingKey = "themeMode"
+export const completedTodoStyleSettingKey = "completedTodoStyle"
+export const customFontSizeSettingKey = "customFontSize"
+export const customTextColorSettingKey = "customTextColor"
+export const customPanelBackgroundSettingKey = "customPanelBackground"
+export const customContentBackgroundSettingKey = "customContentBackground"
+export const customCheckboxColorSettingKey = "customCheckboxColor"
+export const customProgressColorSettingKey = "customProgressColor"
+export const customDividerColorSettingKey = "customDividerColor"
+
+/** The theme settings that, when changed, need the panel re-rendered. */
+const themeSettingKeys = [
+	themeModeSettingKey,
+	completedTodoStyleSettingKey,
+	customFontSizeSettingKey,
+	customTextColorSettingKey,
+	customPanelBackgroundSettingKey,
+	customContentBackgroundSettingKey,
+	customCheckboxColorSettingKey,
+	customProgressColorSettingKey,
+	customDividerColorSettingKey,
+]
 
 /** setupSettings ***********************************************************************************************************************************
  * Sets up the settings used by the plugin. This must run before the profile database is loaded, as the profiles are stored in a setting.			*
@@ -83,10 +107,106 @@ export async function setupSettings(){
 			public: true,
 			section: 'section',
 		},
+		[themeModeSettingKey]: {
+			label: "Cockpit panel theme",
+			description: "How the Cockpit panel is coloured. Applies to the Cockpit panel only, not the rest of Joplin.",
+			value: "matchJoplin",
+			type: SettingItemType.String,
+			isEnum: true,
+			options: {
+				matchJoplin: "Match Joplin theme",
+				light: "Preset — Light",
+				dark: "Preset — Dark",
+				solarizedLight: "Preset — Solarized Light",
+				solarizedDark: "Preset — Solarized Dark",
+				nord: "Preset — Nord",
+				aritimDark: "Preset — Aritim Dark",
+				oledDark: "Preset — OLED Dark",
+				custom: "Custom",
+			},
+			public: true,
+			section: 'section',
+		},
+		[completedTodoStyleSettingKey]: {
+			label: "Completed to-dos",
+			description: "How a completed to-do's title looks in the Cockpit panel. Applies in every theme mode.",
+			value: "asNow",
+			type: SettingItemType.String,
+			isEnum: true,
+			options: {
+				asNow: "As now",
+				grayed: "Grayed out",
+				strikethrough: "Strikethrough",
+			},
+			public: true,
+			section: 'section',
+		},
+		[customFontSizeSettingKey]: {
+			label: "Panel font size (px, 0 = match Joplin)",
+			description: "The Cockpit panel's base font size in pixels. 0 follows the Joplin font size. Applies in every theme mode.",
+			value: 0,
+			type: SettingItemType.Int,
+			minimum: 0,
+			maximum: 32,
+			step: 1,
+			public: true,
+			section: 'section',
+		},
+		[customTextColorSettingKey]: {
+			label: "Custom: text colour",
+			description: "Any CSS colour (e.g. #1D2024, rgb(29,32,36)). Leave empty to follow the Joplin theme. Used only when the theme is Custom.",
+			value: "",
+			type: SettingItemType.String,
+			public: true,
+			section: 'section',
+		},
+		[customPanelBackgroundSettingKey]: {
+			label: "Custom: panel background",
+			description: "Any CSS colour (e.g. #1D2024, rgb(29,32,36)). Leave empty to follow the Joplin theme. Used only when the theme is Custom.",
+			value: "",
+			type: SettingItemType.String,
+			public: true,
+			section: 'section',
+		},
+		[customContentBackgroundSettingKey]: {
+			label: "Custom: menu/popup background",
+			description: "Background of dropdowns, the context menu and option lists. Any CSS colour. Leave empty to follow the Joplin theme. Used only when the theme is Custom.",
+			value: "",
+			type: SettingItemType.String,
+			public: true,
+			section: 'section',
+		},
+		[customCheckboxColorSettingKey]: {
+			label: "Custom: to-do checkbox colour",
+			description: "The colour of a ticked to-do's disc and tick. Any CSS colour. Leave empty to follow the Joplin theme. Used only when the theme is Custom.",
+			value: "",
+			type: SettingItemType.String,
+			public: true,
+			section: 'section',
+		},
+		[customProgressColorSettingKey]: {
+			label: "Custom: progress-ring fill colour",
+			description: "The colour of the checkbox-progress ring around an item. Any CSS colour. Leave empty to follow the Joplin theme. Used only when the theme is Custom.",
+			value: "",
+			type: SettingItemType.String,
+			public: true,
+			section: 'section',
+		},
+		[customDividerColorSettingKey]: {
+			label: "Custom: divider/border colour",
+			description: "Any CSS colour (e.g. #1D2024, rgb(29,32,36)). Leave empty to follow the Joplin theme. Used only when the theme is Custom.",
+			value: "",
+			type: SettingItemType.String,
+			public: true,
+			section: 'section',
+		},
 	})
 	await joplin.settings.onChange(async (event) => {
-		if (event && event.keys && !event.keys.includes(updateFrequencySettingKey)) return
-		await setupTimer()
+		var keys = event && event.keys ? event.keys : []
+		if (keys.includes(updateFrequencySettingKey)) await setupTimer()
+		// A theme setting change needs the panel redrawn. buildThemeCss is rebuilt inside
+		// refreshPanelData, so the new colours reach the markup and get past its equality guard.
+		if (keys.some(key => themeSettingKeys.includes(key))) await refreshInterfaces()
 	})
 }
 

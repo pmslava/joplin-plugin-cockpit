@@ -1,8 +1,44 @@
 /* ----------------------------------------------------------------------------------------------
- * Every colour, font and size below comes from the --joplin-* CSS variables that Joplin injects
- * into plugin webviews, so the panel always matches the active theme and the font size of the
- * rest of the app. Hard coded values only appear as fallbacks.
+ * Every colour, font and size below comes from the --cockpit-* CSS variables defined in the base
+ * :root block that follows. By default each --cockpit-* variable simply aliases the matching
+ * --joplin-* variable that Joplin injects into plugin webviews, so out of the box the panel matches
+ * the active theme and the app's font size exactly. The themes feature (src/core/theme.ts) then
+ * emits a second :root block that overrides individual --cockpit-* variables for the chosen preset
+ * or custom colours; the user's custom CSS is injected last and still wins over both. Hard coded
+ * values only appear as fallbacks. Only font-size keeps a direct --joplin- reference, as its
+ * "match Joplin" default is a calc the theme overrides wholesale.
  * ------------------------------------------------------------------------------------------- */
+
+/* Base theme: --cockpit-* variables default to the live Joplin theme, so "Match Joplin" needs no
+ * generated CSS at all. The colour-correct green is exposed as two independent variables - the
+ * checked disc/tick and the progress-ring filler - so a custom theme can set them apart. The two
+ * completed-to-do variables drive how a finished to-do's title looks and are overridden by the
+ * completed-to-do setting. */
+:root {
+    --cockpit-color: var(--joplin-color);
+    --cockpit-color-faded: var(--joplin-color-faded);
+    --cockpit-color-warn: var(--joplin-color-warn);
+    --cockpit-color-error: var(--joplin-color-error);
+    --cockpit-divider-color: var(--joplin-divider-color);
+    --cockpit-url-color: var(--joplin-url-color);
+    --cockpit-selected-color: var(--joplin-selected-color);
+    --cockpit-selected-color2: var(--joplin-selected-color2);
+    --cockpit-destructive-color: var(--joplin-destructive-color);
+    --cockpit-focus-outline-color: var(--joplin-focus-outline-color);
+    --cockpit-background-color: var(--joplin-background-color);
+    --cockpit-background-color2: var(--joplin-background-color2);
+    --cockpit-background-color3: var(--joplin-background-color3);
+    --cockpit-background-color4: var(--joplin-background-color4);
+    --cockpit-background-color-hover3: var(--joplin-background-color-hover3);
+    --cockpit-background-color-hover-dim3: var(--joplin-background-color-hover-dim3);
+    --cockpit-scrollbar-thumb-color: var(--joplin-scrollbar-thumb-color);
+    --cockpit-scrollbar-thumb-color-hover: var(--joplin-scrollbar-thumb-color-hover);
+    --cockpit-checkbox-color: var(--joplin-color-correct);
+    --cockpit-progress-color: var(--joplin-color-correct);
+    --cockpit-font-family: var(--joplin-font-family, sans-serif);
+    --cockpit-completed-decoration: none;
+    --cockpit-completed-opacity: 1;
+}
 
 * {
     box-sizing: border-box;
@@ -16,10 +52,10 @@ body {
      * notebook names next to them. The em-based sizes below scale from this. The outer
      * --cockpit-font-size lets the themes feature override the size; the calc is the default. */
     font-size: var(--cockpit-font-size, calc(var(--joplin-font-size, 12px) * 1.0833));
-    font-family: var(--joplin-font-family, sans-serif);
+    font-family: var(--cockpit-font-family, sans-serif);
     /* The sidebar colour rather than the note editor's, so the panel reads as part of the app
      * chrome and stands apart from the note content */
-    background-color: var(--joplin-background-color2, inherit);
+    background-color: var(--cockpit-background-color2, inherit);
 }
 
 /* Joplin's webview skeleton sets "overflow: hidden" on the html element and wraps this markup in
@@ -50,11 +86,11 @@ body {
 
 .todos::-webkit-scrollbar-thumb {
     border-radius: 4px;
-    background: var(--joplin-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
+    background: var(--cockpit-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
 }
 
 .todos::-webkit-scrollbar-thumb:hover {
-    background: var(--joplin-scrollbar-thumb-color-hover, rgba(127, 127, 127, 0.6));
+    background: var(--cockpit-scrollbar-thumb-color-hover, rgba(127, 127, 127, 0.6));
 }
 
 /* Icon buttons are transparent so that they follow the colours of whichever Joplin theme is active */
@@ -77,7 +113,7 @@ body {
 }
 
 .icon-button:hover {
-    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
     opacity: 1;
 }
 
@@ -113,8 +149,8 @@ body {
     font-family: inherit;
     font-size: inherit;
     color: inherit;
-    background-color: var(--joplin-background-color3, rgba(127, 127, 127, 0.12));
-    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    background-color: var(--cockpit-background-color3, rgba(127, 127, 127, 0.12));
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 3px;
     cursor: pointer;
 }
@@ -126,7 +162,7 @@ body {
 }
 
 .create-button:hover {
-    border-color: var(--joplin-url-color, #2D6BDC);
+    border-color: var(--cockpit-url-color, #2D6BDC);
 }
 
 /* Dropdowns, styled like Joplin's own search field ---------------------------------------------*/
@@ -139,22 +175,22 @@ select {
     padding: 2px 6px;
     font-family: inherit;
     font-size: inherit;
-    color: var(--joplin-color, inherit);
-    background-color: var(--joplin-background-color4, transparent);
-    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    color: var(--cockpit-color, inherit);
+    background-color: var(--cockpit-background-color4, transparent);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 3px;
     outline: none;
 }
 
 select:focus {
-    border-color: var(--joplin-focus-outline-color, var(--joplin-url-color, #2D6BDC));
+    border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
 }
 
 /* Explicit option colours, so the dropdown list never mixes the theme's light text with the
  * platform's white popup background */
 option {
-    background-color: var(--joplin-background-color, #ffffff);
-    color: var(--joplin-color, #000000);
+    background-color: var(--cockpit-background-color, #ffffff);
+    color: var(--cockpit-color, #000000);
 }
 
 #profileControls,
@@ -193,15 +229,15 @@ option {
     padding: 2px 6px;
     font-family: inherit;
     font-size: inherit;
-    color: var(--joplin-color, inherit);
-    background-color: var(--joplin-background-color4, transparent);
-    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    color: var(--cockpit-color, inherit);
+    background-color: var(--cockpit-background-color4, transparent);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 3px;
     cursor: pointer;
 }
 
 .dropdown-toggle:focus {
-    border-color: var(--joplin-focus-outline-color, var(--joplin-url-color, #2D6BDC));
+    border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
 }
 
 .dropdown-toggle-label {
@@ -227,7 +263,7 @@ option {
 
 .dropdown.-compact .dropdown-toggle:hover {
     opacity: 1;
-    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
 }
 
 .dropdown.-compact .dropdown-toggle .icon {
@@ -260,8 +296,8 @@ option {
     max-height: 320px;
     overflow-y: auto;
     padding: 4px;
-    background-color: var(--joplin-background-color, #1D2024);
-    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    background-color: var(--cockpit-background-color, #1D2024);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 6px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
@@ -274,7 +310,7 @@ option {
 .dropdown-menu::-webkit-scrollbar-track { background: transparent; }
 .dropdown-menu::-webkit-scrollbar-thumb {
     border-radius: 3px;
-    background: var(--joplin-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
+    background: var(--cockpit-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
 }
 
 .dropdown-item {
@@ -289,11 +325,11 @@ option {
 }
 
 .dropdown-item:hover {
-    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
 }
 
 .dropdown-item.-current {
-    background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.3));
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
 }
 
 .dropdown-label {
@@ -333,7 +369,7 @@ option {
 
 .dropdown-separator {
     margin: 4px 0;
-    border-top: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    border-top: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
 }
 
 #searchRow {
@@ -359,19 +395,19 @@ option {
     padding: 2px 6px;
     font-family: inherit;
     font-size: inherit;
-    color: var(--joplin-color, inherit);
-    background-color: var(--joplin-background-color4, transparent);
-    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    color: var(--cockpit-color, inherit);
+    background-color: var(--cockpit-background-color4, transparent);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 3px;
     outline: none;
 }
 
 #searchFilter:focus {
-    border-color: var(--joplin-focus-outline-color, var(--joplin-url-color, #2D6BDC));
+    border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
 }
 
 #searchFilter::placeholder {
-    color: var(--joplin-color-faded, #999999);
+    color: var(--cockpit-color-faded, #999999);
     opacity: 0.8;
 }
 
@@ -386,13 +422,13 @@ h2 {
     z-index: 2;
     margin: 0 0 3px;
     padding: 12px 0 3px;
-    background-color: var(--joplin-background-color2, inherit);
-    border-bottom: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    background-color: var(--cockpit-background-color2, inherit);
+    border-bottom: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     font-size: 0.92em;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--joplin-color-faded, #999999);
+    color: var(--cockpit-color-faded, #999999);
 }
 
 .todos > h2:first-child {
@@ -414,11 +450,11 @@ h2 {
 }
 
 .todo:hover {
-    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.12));
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.12));
 }
 
 .todo.-selected {
-    background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.3));
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
 }
 
 .todo.-dragging {
@@ -427,7 +463,7 @@ h2 {
 
 /* Group headings, calendar days and week columns light up while to-dos are dragged over them */
 .-drop-over {
-    background-color: var(--joplin-selected-color2, rgba(45, 107, 220, 0.35)) !important;
+    background-color: var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35)) !important;
     border-radius: 4px;
 }
 
@@ -449,8 +485,8 @@ h2 {
     flex-shrink: 0;
     border-radius: 50%;
     background: conic-gradient(
-        var(--joplin-color-correct, #72b972) calc(var(--percent, 0) * 1%),
-        var(--joplin-divider-color, rgba(127, 127, 127, 0.45)) 0
+        var(--cockpit-progress-color, #72b972) calc(var(--percent, 0) * 1%),
+        var(--cockpit-divider-color, rgba(127, 127, 127, 0.45)) 0
     );
     cursor: pointer;
 }
@@ -461,7 +497,7 @@ h2 {
     position: absolute;
     inset: 3px;
     border-radius: 50%;
-    background: var(--joplin-background-color2, #181A1D);
+    background: var(--cockpit-background-color2, #181A1D);
 }
 
 /* The small to-do disc; the tick is an SVG painted into it, so it is always centered and crisp */
@@ -471,15 +507,15 @@ h2 {
     z-index: 1;
     inset: 4px;
     border-radius: 50%;
-    background-color: var(--joplin-divider-color, rgba(127, 127, 127, 0.5));
+    background-color: var(--cockpit-divider-color, rgba(127, 127, 127, 0.5));
 }
 
 .todo-checkbox:hover::before {
-    background-color: var(--joplin-color-faded, #999999);
+    background-color: var(--cockpit-color-faded, #999999);
 }
 
 .todo-checkbox:checked::before {
-    background-color: var(--joplin-color-correct, #72b972);
+    background-color: var(--cockpit-checkbox-color, #72b972);
     background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M4 8.4l3 3L12.2 5.2" fill="none" stroke="%23ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>');
     background-position: center;
     background-repeat: no-repeat;
@@ -511,7 +547,14 @@ h2 {
 /* Each of the three zones of a row (circle, title, notebook label) reacts on its own to hovering,
  * hinting that they do different things - on left click and on right click */
 .todo-title:hover {
-    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+}
+
+/* A completed to-do's title. By default it reads exactly like an open one; the completed-to-do
+ * setting drives these two variables to grey it out or strike it through instead. */
+.todo.-completed .todo-title {
+    text-decoration: var(--cockpit-completed-decoration, none);
+    opacity: var(--cockpit-completed-opacity, 1);
 }
 
 /* The notebook the to-do lives in, as a small pill at the end of the row. The full notebook path
@@ -526,14 +569,14 @@ h2 {
     padding: 0 7px;
     border-radius: 9px;
     font-size: 0.85em;
-    color: var(--joplin-color-faded, #999999);
-    background-color: var(--joplin-background-color3, rgba(127, 127, 127, 0.15));
+    color: var(--cockpit-color-faded, #999999);
+    background-color: var(--cockpit-background-color3, rgba(127, 127, 127, 0.15));
     cursor: pointer;
 }
 
 .todo-notebook:hover {
-    color: var(--joplin-color, inherit);
-    background-color: var(--joplin-background-color-hover3, rgba(127, 127, 127, 0.35));
+    color: var(--cockpit-color, inherit);
+    background-color: var(--cockpit-background-color-hover3, rgba(127, 127, 127, 0.35));
 }
 
 /* The progress circle of a regular note: the same ring as a to-do's, but with no completion state
@@ -547,8 +590,8 @@ h2 {
     flex-shrink: 0;
     border-radius: 50%;
     background: conic-gradient(
-        var(--joplin-color-correct, #72b972) calc(var(--percent, 0) * 1%),
-        var(--joplin-divider-color, rgba(127, 127, 127, 0.45)) 0
+        var(--cockpit-progress-color, #72b972) calc(var(--percent, 0) * 1%),
+        var(--cockpit-divider-color, rgba(127, 127, 127, 0.45)) 0
     );
 }
 
@@ -557,7 +600,7 @@ h2 {
     position: absolute;
     inset: 3px;
     border-radius: 50%;
-    background: var(--joplin-background-color2, #181A1D);
+    background: var(--cockpit-background-color2, #181A1D);
 }
 
 /* The context menu of a to-do or note row */
@@ -568,8 +611,8 @@ h2 {
     flex-direction: column;
     min-width: 220px;
     padding: 4px;
-    background-color: var(--joplin-background-color, #1D2024);
-    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    background-color: var(--cockpit-background-color, #1D2024);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 6px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
@@ -590,11 +633,11 @@ h2 {
 }
 
 .context-menu-item:hover {
-    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
 }
 
 .context-menu-item.-danger {
-    color: var(--joplin-destructive-color, #F07777);
+    color: var(--cockpit-destructive-color, #F07777);
 }
 
 a {
@@ -608,10 +651,10 @@ button {
     min-height: 26px;
     width: auto;
     padding: 0 12px;
-    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 3px;
-    background-color: var(--joplin-background-color3, transparent);
-    color: var(--joplin-color, inherit);
+    background-color: var(--cockpit-background-color3, transparent);
+    color: var(--cockpit-color, inherit);
     font-family: inherit;
     font-size: inherit;
     cursor: pointer;
@@ -655,7 +698,7 @@ table {
 }
 
 .calendar-title:hover {
-    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
 }
 
 .calendar-grid {
@@ -702,7 +745,7 @@ table {
 }
 
 .calendar-day-button:hover {
-    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.15));
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.15));
 }
 
 .calendar-day.-outside .calendar-day-button {
@@ -710,12 +753,12 @@ table {
 }
 
 .calendar-day.-today .calendar-day-button {
-    border-color: var(--joplin-url-color, #2D6BDC);
+    border-color: var(--cockpit-url-color, #2D6BDC);
     font-weight: 700;
 }
 
 .calendar-day.-selected .calendar-day-button {
-    background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.3));
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
 }
 
 .calendar-dots {
@@ -733,19 +776,19 @@ table {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background-color: var(--joplin-url-color, #2D6BDC);
+    background-color: var(--cockpit-url-color, #2D6BDC);
 }
 
 .calendar-dot.-overdue {
-    background-color: var(--joplin-color-error, #ff5555);
+    background-color: var(--cockpit-color-error, #ff5555);
 }
 
 .calendar-dot.-due {
-    background-color: var(--joplin-color-warn, #d9a300);
+    background-color: var(--cockpit-color-warn, #d9a300);
 }
 
 .calendar-dot.-done {
-    background-color: var(--joplin-color-faded, rgba(127, 127, 127, 0.6));
+    background-color: var(--cockpit-color-faded, rgba(127, 127, 127, 0.6));
 }
 
 .calendar-more {
@@ -770,13 +813,13 @@ table {
 
 .week-day {
     padding: 0.4em 0.5em;
-    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.3));
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.3));
     border-radius: 4px;
     min-width: 0;
 }
 
 .week-day.-today {
-    border-color: var(--joplin-url-color, #2D6BDC);
+    border-color: var(--cockpit-url-color, #2D6BDC);
 }
 
 .week-day h2 {

@@ -4,7 +4,7 @@
  ***************************************************************************************************************************************************/
 
 export var panelTemplate = `
-    <style><<CUSTOM_CSS>></style>
+    <style><<THEME_CSS>><<CUSTOM_CSS>></style>
     <<CONTROLS>>
     <section class="todos"><<TODOS>></section>
 `
