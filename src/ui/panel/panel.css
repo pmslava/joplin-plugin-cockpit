@@ -11,6 +11,10 @@
 body {
     -webkit-text-size-adjust: 100%;
     line-height: 1.5;
+    /* Match Joplin's own panels (the notebook sidebar): without this the webview inherits the
+     * browser default rather than the theme font. The em-based sizes below scale from it. */
+    font-size: var(--joplin-font-size, 14px);
+    font-family: var(--joplin-font-family, sans-serif);
     /* The sidebar colour rather than the note editor's, so the panel reads as part of the app
      * chrome and stands apart from the note content */
     background-color: var(--joplin-background-color2, inherit);
