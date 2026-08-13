@@ -475,6 +475,15 @@ h2 {
     flex-grow: 1;
     cursor: pointer;
     overflow-wrap: anywhere;
+    padding: 0 3px;
+    margin: 0 -3px;
+    border-radius: 3px;
+}
+
+/* Each of the three zones of a row (circle, title, notebook label) reacts on its own to hovering,
+ * hinting that they do different things - on left click and on right click */
+.todo-title:hover {
+    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
 }
 
 /* The notebook the to-do lives in, as a small pill at the end of the row. The full notebook path
@@ -491,6 +500,14 @@ h2 {
     font-size: 0.85em;
     color: var(--joplin-color-faded, #999999);
     background-color: var(--joplin-background-color3, rgba(127, 127, 127, 0.15));
+    /* Right clicking the label opens "Move to notebook"; the cursor hints at a menu rather than
+     * at dragging */
+    cursor: context-menu;
+}
+
+.todo-notebook:hover {
+    color: var(--joplin-color, inherit);
+    background-color: var(--joplin-background-color-hover3, rgba(127, 127, 127, 0.35));
 }
 
 /* The progress circle of a regular note: the same ring as a to-do's, but with no completion state
