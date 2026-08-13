@@ -12,6 +12,8 @@ async function onTodoClicked(todoID){
  ***************************************************************************************************************************************************/
 var selectedTodoIDs = new Set()
 var lastClickedTodoID = null
+// A picked regular note is only highlighted; it takes no part in drag or set-alarm operations
+var pickedNoteID = null
 
 function allTodoRows(){
     return Array.from(document.querySelectorAll('.todo[data-todo-id]'))
@@ -21,6 +23,9 @@ function paintTodoSelection(){
     for (var row of allTodoRows()){
         row.classList.toggle('-selected', selectedTodoIDs.has(row.dataset.todoId))
     }
+    for (var noteRow of document.querySelectorAll('.todo[data-note-id]')){
+        noteRow.classList.toggle('-selected', noteRow.dataset.noteId === pickedNoteID)
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -29,12 +34,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }).observe(document.body, { childList: true, subtree: true })
 })
 
-function onTodoRowClicked(event, todoID){
+/** onTodoRowMouseDown ******************************************************************************************************************************
+ * Selection happens on press, like in a list: a plain press selects the row (replacing the selection), Ctrl+press toggles it, Shift+press selects   *
+ * the range from the last plainly- or Ctrl-pressed row (the anchor). The anchor stays put, so a further Shift+press resizes the range rather than   *
+ * chaining from its end. Opening happens separately, on click.                                                                                     *
+ ***************************************************************************************************************************************************/
+function onTodoRowMouseDown(event, todoID){
+    if (event.button !== 0) return
     if (event.target.classList.contains('todo-checkbox')) return
+    pickedNoteID = null
     if (event.shiftKey){
-        // The range runs from the last plainly- or Ctrl-clicked row (the anchor) to this one, and
-        // replaces the selection, as in a file manager. The anchor itself stays where it is, so a
-        // further Shift+click resizes the range rather than chaining from its end.
         var ids = allTodoRows().map(row => row.dataset.todoId)
         var anchor = lastClickedTodoID !== null && ids.indexOf(lastClickedTodoID) >= 0 ? lastClickedTodoID : todoID
         var from = ids.indexOf(anchor)
@@ -43,18 +52,22 @@ function onTodoRowClicked(event, todoID){
         for (var index = Math.min(from, to); index <= Math.max(from, to); index++){
             selectedTodoIDs.add(ids[index])
         }
-        paintTodoSelection()
     } else if (event.ctrlKey || event.metaKey){
         selectedTodoIDs.has(todoID) ? selectedTodoIDs.delete(todoID) : selectedTodoIDs.add(todoID)
         lastClickedTodoID = todoID
-        paintTodoSelection()
-    } else if (event.target.classList.contains('todo-title')){
-        lastClickedTodoID = todoID
-        void onTodoClicked(todoID)
     } else {
         selectedTodoIDs.clear()
+        selectedTodoIDs.add(todoID)
         lastClickedTodoID = todoID
-        paintTodoSelection()
+    }
+    paintTodoSelection()
+}
+
+function onTodoRowClicked(event, todoID){
+    if (event.ctrlKey || event.metaKey || event.shiftKey) return
+    if (event.target.classList.contains('todo-checkbox')) return
+    if (event.target.classList.contains('todo-title')){
+        void onTodoClicked(todoID)
     }
 }
 
@@ -83,6 +96,13 @@ function onTodoContextMenu(event, todoID){
  * Regular notes have no checkbox or due date: a click on the title opens them, and the right click zones are the notebook label ("Move to           *
  * notebook") and everything else (context menu).                                                                                                   *
  ***************************************************************************************************************************************************/
+function onNoteRowMouseDown(event, noteID){
+    if (event.button !== 0) return
+    selectedTodoIDs.clear()
+    pickedNoteID = noteID
+    paintTodoSelection()
+}
+
 function onNoteRowClicked(event, noteID){
     if (event.target.classList.contains('todo-title')){
         void onTodoClicked(noteID)

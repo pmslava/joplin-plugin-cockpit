@@ -163,6 +163,7 @@ abstract class BaseFormat {
         var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
         return `
                 <div class="todo" data-todo-id="${todo.id}" draggable="true"
+                    onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
                     onclick="onTodoRowClicked(event, '${todo.id}')"
                     oncontextmenu="onTodoContextMenu(event, '${todo.id}')"
                     ondragstart="onTodoDragStart(event, '${todo.id}')"
@@ -659,6 +660,7 @@ export async function renderNotesSection(profile, viewState){
             : ""
         return `
             <div class="todo -note" data-note-id="${note.id}"
+                onmousedown="onNoteRowMouseDown(event, '${note.id}')"
                 onclick="onNoteRowClicked(event, '${note.id}')"
                 oncontextmenu="onNoteContextMenu(event, '${note.id}')">
                 <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
