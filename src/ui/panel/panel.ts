@@ -8,6 +8,7 @@ import joplin from "api";
 import { getNotebookMap, invalidateNotebookMap, openTodo, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
 import { openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
+import { getSyncStatus } from "../../core/syncStatus";
 import { getAllProfiles, getProfile } from "../../core/database";
 import { openDeleteDialog, openEditor } from "../editor/editor";
 import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, stepCalendarAnchor } from "../../core/formats";
@@ -175,8 +176,11 @@ async function eventHandler(message){
         applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
         lastRenderedHtml = null
         await refreshInterfaces()
-    } else if (message[0] == 'updateInterfacesClicked'){
-        await refreshInterfaces()
+    } else if (message[0] == 'synchronizeClicked'){
+        // Joplin's synchronize command is a toggle: it starts a sync, or cancels the one in
+        // progress. It resolves as soon as the sync is scheduled, so completion is tracked through
+        // the onSyncStart / onSyncComplete events rather than by awaiting this.
+        await joplin.commands.execute('synchronize')
     } else if (message[0] == 'toggleProfileControlsClicked'){
         await toggleShowProfileControls()
     } else if (message[0] == 'stylerClicked'){
@@ -231,8 +235,26 @@ export async function togglePanelVisibility() {
     await joplin.views.panels.setHtml(panel, htmlString);
 }
 
+/** syncButtonTooltip *******************************************************************************************************************************
+ * The tooltip for the Synchronize button. While a sync runs it says so and hints that clicking cancels (Joplin's command is a toggle); otherwise it  *
+ * shows when the last sync finished, how long it took, and whether it had errors, as far as those are known.                                         *
+ ***************************************************************************************************************************************************/
+function syncButtonTooltip(sync){
+    if (sync.syncing) return "Syncing… (click to cancel)"
+    var text = "Synchronize"
+    if (sync.lastCompletedAt){
+        var time = new Date(sync.lastCompletedAt)
+        var hh = String(time.getHours()).padStart(2, "0")
+        var mm = String(time.getMinutes()).padStart(2, "0")
+        text += ` — Last sync: ${hh}:${mm}`
+        if (sync.lastDurationMs != null) text += ` (${Math.round(sync.lastDurationMs / 1000)}s)`
+        if (sync.lastWithErrors) text += " — with errors"
+    }
+    return text
+}
+
 /** getControlsHTML *********************************************************************************************************************************
- * The three control rows at the top of the panel: the profile picker with the create buttons, the notebook filter with the sort and refresh         *
+ * The three control rows at the top of the panel: the profile picker with the create buttons, the notebook filter with the sort and synchronize      *
  * buttons, and the search field. Profile management lives inside the profile dropdown as its last entries.                                          *
  ***************************************************************************************************************************************************/
 async function getControlsHTML(currentProfileID){
@@ -241,6 +263,8 @@ async function getControlsHTML(currentProfileID){
     // is TTL-cached, so this is cheap.
     var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
     var mobileButtons = (await isMobile()) ? iconButton("brush", "Set Panel CSS", "onStylerClicked()") : ""
+    var sync = getSyncStatus()
+    var syncButton = iconButton("refresh", syncButtonTooltip(sync), "onSynchronizeClicked()", sync.syncing ? "-syncing" : "")
     return `
         <section id="profileControls">
             ${getProfileDropdownHTML(await getAllProfiles(), currentProfileID)}
@@ -252,7 +276,7 @@ async function getControlsHTML(currentProfileID){
             ${getSortDropdownHTML()}
             ${iconButton(sortDirection === "desc" ? "arrowDown" : "arrowUp", `Sort direction: ${sortDirection === "desc" ? "descending" : "ascending"}`, "onSortDirectionClicked()")}
             ${mobileButtons}
-            ${iconButton("refresh", "Update Panel and Notes", "onUpdateInterfacesClicked()")}
+            ${syncButton}
         </section>
         <section id="searchRow">
             <input id="searchFilter" type="search" placeholder="Search... any:1 tag:a tag:b = a OR b"

@@ -85,6 +85,16 @@ body {
     display: block;
 }
 
+/* The Synchronize button spins its icon while a sync is running */
+@keyframes rotate {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.icon-button.-syncing .icon {
+    animation: rotate 1s linear infinite;
+}
+
 /* The create buttons: labelled, and visually heavier than the plain icon buttons */
 .create-button {
     display: inline-flex;

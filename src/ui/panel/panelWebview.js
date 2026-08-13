@@ -368,11 +368,12 @@ async function onSearchFilterChanged(searchString){
 }
 
 
-/** onUpdateInterfacesClicked **************************************************************************************************************************
- * When the user requests an interface update, this function sends a message to the main plugin              *
+/** onSynchronizeClicked ****************************************************************************************************************************
+ * Starts a synchronisation (or cancels the one in progress - Joplin's command is a toggle). The button's spinning state and tooltip are driven by     *
+ * the plugin, which re-renders the panel on the sync start and complete events.                                                                      *
  ***************************************************************************************************************************************************/
- async function onUpdateInterfacesClicked(){
-    await webviewApi.postMessage(['updateInterfacesClicked']);
+ async function onSynchronizeClicked(){
+    await webviewApi.postMessage(['synchronizeClicked']);
 }
 
 /** onToggleProfileControlsClicked ******************************************************************************************************************

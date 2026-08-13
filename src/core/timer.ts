@@ -10,6 +10,7 @@ import joplin from "api";
 import { refreshPanelData } from "../ui/panel/panel";
 import { getOverviewNoteIDs, refreshNoteData } from "./markdown";
 import { updateFrequencySettingKey } from "./settings";
+import { markSyncComplete, markSyncStart } from "./syncStatus";
 
 /** Variable Initialization ************************************************************************************************************************/
 const defaultUpdateFrequency = 60
@@ -78,7 +79,20 @@ export async function setupWorkspaceEvents(){
         if (event && (await getOverviewNoteIDs()).includes(event.id)) return
         scheduleRefresh()
     })
-    await registerEvent("onSyncComplete", () => scheduleRefresh())
+    // onSyncStart carries no payload (its withErrors is only known at the end), so the button state
+    // is measured here: a start sets "syncing", and the panel is re-rendered at once so the
+    // Synchronize button starts spinning without waiting for a data refresh.
+    await registerEvent("onSyncStart", () => {
+        markSyncStart()
+        void refreshPanelData()
+    })
+    await registerEvent("onSyncComplete", (event) => {
+        markSyncComplete(event && event.withErrors)
+        // Re-render at once so the button stops spinning immediately, then schedule the data
+        // refreshes that let the search index catch up with whatever the sync pulled in.
+        void refreshPanelData()
+        scheduleRefresh()
+    })
     await registerEvent("onNoteAlarmTrigger", () => scheduleRefresh())
 }
 
