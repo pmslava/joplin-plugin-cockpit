@@ -38,11 +38,34 @@ import joplin from 'api';
 /** searchTitleSuggestions **************************************************************************************************************************
  * Returns up to ten distinct note titles for the search field's title: autocomplete. Joplin's search wildcard is suffix only and quoting a phrase   *
  * with a trailing * is unreliable, so the query matches the LAST typed word with a suffix wildcard (title:word*) and the results are then filtered   *
- * case-insensitively against the whole typed partial. An empty partial has nothing to match on and returns no suggestions.                          *
+ * case-insensitively against the whole typed partial. An empty partial (the bare "title:" state) has nothing to match on, so it returns the ten most  *
+ * recently updated notes/to-dos instead, mirroring how tag:/notebook: list their whole set immediately after the colon.                             *
  ***************************************************************************************************************************************************/
 export async function searchTitleSuggestions(partial){
     var typed = String(partial || "").trim()
-    if (!typed) return []
+    if (!typed) {
+        // Bare "title:" with nothing typed yet: offer the most recently updated notes/to-dos so the
+        // list appears immediately after the colon, the same way tag:/notebook: do. A single ['notes']
+        // fetch ordered by updated_time covers both regular notes and to-dos.
+        var recent = await joplin.data.get(['notes'], {
+            fields: ['id', 'title'],
+            order_by: 'updated_time',
+            order_dir: 'DESC',
+            limit: 10,
+        })
+        var recentTitles = []
+        var recentSeen = new Set()
+        for (var r of (recent.items || [])) {
+            var recentTitle = String(r.title || "").trim()
+            if (!recentTitle) continue                  // skip untitled notes (empty-title to-dos exist and would render as blank rows)
+            var recentKey = recentTitle.toLowerCase()
+            if (recentSeen.has(recentKey)) continue
+            recentSeen.add(recentKey)
+            recentTitles.push(recentTitle)
+            if (recentTitles.length >= 10) break
+        }
+        return recentTitles
+    }
     var words = typed.split(/\s+/)
     var lastWord = words[words.length - 1]
     // Escape the wildcard characters Joplin's search treats specially so a stray * or " in the typed

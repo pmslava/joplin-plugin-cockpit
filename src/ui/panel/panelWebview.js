@@ -452,8 +452,8 @@ function onSearchInput(input){
  * title: partial with the field focused, so a stale or superseded response never overwrites what the user is now typing.                             *
  ***************************************************************************************************************************************************/
 function requestTitleSuggestions(input, token){
-    // An empty title: token has nothing to search on yet
-    if (!token.partial){ hideSearchSuggestions(); return }
+    // An empty title: token (the bare "title:" state) still round-trips: the plugin answers it with
+    // the most recently updated notes/to-dos, so the list appears right after the colon like tag:/notebook:.
     if (titleSuggestTimer) clearTimeout(titleSuggestTimer)
     var seq = ++titleSuggestSeq
     var partial = token.partial
