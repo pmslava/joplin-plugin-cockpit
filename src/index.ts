@@ -1,7 +1,7 @@
 /** README ******************************************************************************************************************************************
- *  Agenda is a schedule/calendar panel for joplin that can show all to-dos in a chronological order.                                               *
+ *  Cockpit is a schedule/calendar panel for joplin that can show all to-dos in a chronological order.                                               *
  *  Via various built in formats and user creatable profiles, the to-do list presentation can be filtered and customized.                           *
- *  In addition to the panel, Agenda is capable of presenting the to-do list using individual notes.                                                *
+ *  In addition to the panel, Cockpit is capable of presenting the to-do list using individual notes.                                                *
  *  This allows the to-do list to be accessed even in apps that cannot show the panel                                                               *
  ***************************************************************************************************************************************************/
 
@@ -12,6 +12,7 @@ import { refreshInterfaces, setupTimer, setupWorkspaceEvents } from './core/time
 import { reportDatabaseProblems, setupDatabase } from './core/database'
 import { setupSettings } from './core/settings'
 import { setupPanel } from './ui/panel/panel'
+import { setupAlarmDialog } from './ui/alarm/alarm'
 import { setupMenu } from './ui/menu/menu'
 import { setupEditor } from './ui/editor/editor'
 import { setupToolbar } from './ui/toolbar/toolbar'
@@ -32,6 +33,7 @@ joplin.plugins.register({ onStart: setupPlugin })
     await setupToolbar()
     await setupMenu()
     await setupStyler()
+    await setupAlarmDialog()
     await setupPanel()
     await setupEditor()
     await setupTimer()

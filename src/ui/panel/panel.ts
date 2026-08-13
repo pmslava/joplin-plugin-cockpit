@@ -5,16 +5,17 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { openTodo, toggleTodoCompletion } from "../../core/joplin";
+import { getNotebookMap, openTodo, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
+import { openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getAllProfiles, getProfile } from "../../core/database";
 import { openDeleteDialog, openEditor } from "../editor/editor";
-import { escapeHtml, getFormatter, isCalendarFormat, stepCalendarAnchor } from "../../core/formats";
+import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
-import { getCurrentProfileID, getCustomCss, setCurrentProfileID } from "../../core/settings";
+import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID } from "../../core/settings";
 import { isMobile } from "../../core/platform";
 import { panelTemplate } from "./panelTemplate";
-import { iconButton } from "../icons";
+import { iconButton, icons } from "../icons";
 
 /** Variable Declaration ***************************************************************************************************************************/
 var panel = null;
@@ -32,6 +33,30 @@ function resetCalendarViewState(){
     calendarViewState = { anchor: toISODate(new Date()), selectedDate: null }
 }
 
+/** notebookFilter **********************************************************************************************************************************
+ * The notebook the panel is filtered to, as a notebook ID, or an empty string for all notebooks. Like the calendar view state this is where the      *
+ * user has navigated to rather than a setting, so it lives in memory and starts again at "all notebooks" when the plugin restarts or the profile     *
+ * changes.                                                                                                                                          *
+ ***************************************************************************************************************************************************/
+var notebookFilter = ""
+
+/** searchFilter ************************************************************************************************************************************
+ * A search string appended to the profile's search criteria, supporting the full Joplin search syntax (tag:, notebook:, plain words). Empty for no  *
+ * extra filtering. Held in memory for the same reason as the notebook filter.                                                                       *
+ ***************************************************************************************************************************************************/
+var searchFilter = ""
+
+/** Sort state **************************************************************************************************************************************
+ * How items sharing a due time (and the notes group) are ordered. Kept in settings so it survives restarts, mirrored here for rendering.            *
+ ***************************************************************************************************************************************************/
+var sortField = "title"
+var sortDirection = "asc"
+const sortFieldCycle = ["title", "updated", "created"]
+const sortFieldLabels = { title: "Title", updated: "Updated", created: "Created" }
+
+/** notebookPickerDialog ****************************************************************************************************************************/
+var notebookPickerDialog = null
+
 /** setupPanel **************************************************************************************************************************************
  * Creates the panel in joplin and connects the event handler.                                                                                      *
  ***************************************************************************************************************************************************/
@@ -40,6 +65,20 @@ export async function setupPanel(){
     await joplin.views.panels.addScript(panel, '/ui/panel/panelWebview.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panel.css')
     await joplin.views.panels.onMessage(panel, eventHandler)
+    notebookPickerDialog = await joplin.views.dialogs.create('notebookPicker')
+    applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+}
+
+/** applyProfileHeaderState *************************************************************************************************************************
+ * Applies a profile's stored header state - notebook filter, search text and sorting - so that switching profiles switches the whole view. Header    *
+ * controls used afterwards override it for the session without being written back to the profile.                                                   *
+ ***************************************************************************************************************************************************/
+function applyProfileHeaderState(profile){
+    if (!profile) return
+    notebookFilter = String(profile.notebook || "")
+    searchFilter = String(profile.panelSearch || "")
+    sortField = sortFieldCycle.includes(profile.sortField) ? profile.sortField : "title"
+    sortDirection = profile.sortDirection === "desc" ? "desc" : "asc"
 }
 
 /** eventHandler ************************************************************************************************************************************
@@ -48,16 +87,62 @@ export async function setupPanel(){
 async function eventHandler(message){
     if (message[0] == 'todoClicked'){
         await openTodo(message[1])
+    } else if (message[0] == 'newNoteClicked' || message[0] == 'newTodoClicked'){
+        await createItem(message[0] == 'newTodoClicked')
+    } else if (message[0] == 'sortFieldSelected'){
+        if (sortFieldCycle.includes(String(message[1]))) sortField = String(message[1])
+        await refreshPanelData()
+    } else if (message[0] == 'sortDirectionClicked'){
+        sortDirection = sortDirection === "asc" ? "desc" : "asc"
+        await refreshPanelData()
+    } else if (message[0] == 'renameNotebookClicked'){
+        await runNotebookAction('rename', String(message[1] || ""))
+    } else if (message[0] == 'moveNotebookClicked'){
+        await runNotebookAction('move', String(message[1] || ""))
+    } else if (message[0] == 'deleteNotebookClicked'){
+        await runNotebookAction('delete', String(message[1] || ""))
+    } else if (message[0] == 'createNotebookClicked'){
+        await runAppCommand('newFolder')
+        lastRenderedHtml = null
+        await refreshInterfaces()
+        scheduleRefresh()
+    } else if (message[0] == 'moveToNotebookClicked'){
+        await runAppCommand('moveToFolder', Array.isArray(message[1]) ? message[1] : [message[1]])
+        await refreshInterfaces()
+        scheduleRefresh()
+    } else if (message[0] == 'noteMenuAction'){
+        await runNoteMenuAction(String(message[1] || ""), String(message[2] || ""))
     } else if (message[0] == 'todoChecked'){
         await toggleTodoCompletion(message[1])
         await refreshInterfaces()
         // The completed to-do only disappears from the list once the search index has caught up.
         scheduleRefresh()
     } else if (message[0] == 'profilesDropdownChanged'){
+        // The last entries of the dropdown are actions rather than profiles
         await setCurrentProfileID(message[1])
         // Another profile may show a different calendar, so start it at today rather than wherever the previous one was scrolled to.
         resetCalendarViewState()
+        // The profile carries its own header state: notebook filter, search and sorting.
+        applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
         await refreshInterfaces()
+    } else if (message[0] == 'notebookFilterChanged'){
+        notebookFilter = String(message[1] || "")
+        await refreshPanelData()
+    } else if (message[0] == 'searchFilterChanged'){
+        searchFilter = String(message[1] || "").trim()
+        await refreshPanelData()
+    } else if (message[0] == 'setAlarmClicked'){
+        var alarmTodoIDs = Array.isArray(message[1]) ? message[1] : []
+        if (alarmTodoIDs.length) await openAlarmDialog(alarmTodoIDs)
+    } else if (message[0] == 'todosDropped'){
+        var todoIDs = Array.isArray(message[1]) ? message[1] : []
+        var dropTarget = String(message[2] || "")
+        if (todoIDs.length && dropTarget){
+            await setTodoDueDates(todoIDs, dropTarget === "clear" ? null : dropTarget, await getDayStartTime())
+            await refreshInterfaces()
+            // The moved to-dos only settle into their new groups once the search index has caught up.
+            scheduleRefresh()
+        }
     } else if (message[0] == 'calendarNavigate'){
         var profile = await getProfile(await getCurrentProfileID())
         calendarViewState.anchor = stepCalendarAnchor(profile, calendarViewState.anchor, Number(message[1]))
@@ -71,14 +156,21 @@ async function eventHandler(message){
         await refreshPanelData()
     } else if (message[0] == 'createProfileClicked'){
         await openEditor()
+        lastRenderedHtml = null
         await refreshInterfaces()
     } else if (message[0] == 'editProfileClicked'){
-        var id = await getCurrentProfileID()
+        var id = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
         await openEditor(id)
+        // Editing the current profile may change its header state, so re-apply it
+        if (id == await getCurrentProfileID()) applyProfileHeaderState(await getProfile(id))
+        lastRenderedHtml = null
         await refreshInterfaces()
     } else if (message[0] == 'deleteProfileClicked'){
-        var id = await getCurrentProfileID()
-        await openDeleteDialog(id)
+        var deleteID = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
+        await openDeleteDialog(deleteID)
+        // The deleted profile may have been the current one, in which case another becomes current
+        applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+        lastRenderedHtml = null
         await refreshInterfaces()
     } else if (message[0] == 'updateInterfacesClicked'){
         await refreshInterfaces()
@@ -118,56 +210,274 @@ export async function togglePanelVisibility() {
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile) return
-    var todosHtml = await getFormatter(profile, 'html', calendarViewState).renderHtml()
-    var headingButtonsHtml = await getHeadingButtonsHTML()
-    var profileControlsHtml = await getProfileControlsHTML(profileID)
+    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection } }
+    var formatter = getFormatter(profile, 'html', panelViewState)
+    var todosHtml = await formatter.renderHtml()
+    if (profile.showNotes){
+        var notesHtml = await renderNotesSection(profile, panelViewState)
+        todosHtml = profile.notesPosition === "before" ? notesHtml + todosHtml : todosHtml + notesHtml
+    }
+    var controlsHtml = await getControlsHTML(profileID, formatter.availableNotebooks)
     var customCss = sanitizeCss(await getCustomCss())
     var htmlString = panelTemplate
         .replace("<<CUSTOM_CSS>>", () => customCss)
-        .replace("<<HEADING_BUTTONS>>", () => headingButtonsHtml)
-        .replace("<<PROFILE_CONTROLS>>", () => profileControlsHtml)
+        .replace("<<CONTROLS>>", () => controlsHtml)
         .replace("<<TODOS>>", () => todosHtml)
     if (htmlString === lastRenderedHtml) return
     lastRenderedHtml = htmlString
     await joplin.views.panels.setHtml(panel, htmlString);
 }
 
-/** getHeadingButtonsHTML ***************************************************************************************************************************
- * Returns the buttons shown in the panel heading. On mobile these also cover the two commands that live in the Tools menu on desktop, as mobile     *
- * has no menu for plugins to add items to.                                                                                                         *
+/** getControlsHTML *********************************************************************************************************************************
+ * The three control rows at the top of the panel: the profile picker with the create buttons, the notebook filter with the sort and refresh         *
+ * buttons, and the search field. Profile management lives inside the profile dropdown as its last entries.                                          *
  ***************************************************************************************************************************************************/
-async function getHeadingButtonsHTML(){
-    var buttonsHtml = ""
-    if (await isMobile()){
-        buttonsHtml += iconButton("sliders", "Toggle Profile Edit Mode", "onToggleProfileControlsClicked()")
-        buttonsHtml += iconButton("brush", "Set Panel CSS", "onStylerClicked()")
+async function getControlsHTML(currentProfileID, availableNotebooks){
+    var notebooks = (availableNotebooks || []).slice()
+    if (notebookFilter && !notebooks.some(notebook => notebook.id === notebookFilter)){
+        notebooks.push({ id: notebookFilter, path: "(no matching to-dos)" })
     }
-    buttonsHtml += iconButton("refresh", "Update Panel and Notes", "onUpdateInterfacesClicked()")
-    return buttonsHtml
-}
-
-/** getProfileControlsHTML **************************************************************************************************************************
- * Returns a string representing the HTML containing the profile dropdown and the create, edit and delete buttons                                   *
- ***************************************************************************************************************************************************/
-async function getProfileControlsHTML(currentProfileID){
-    var profileListString = ""
-    for (var profile of await getAllProfiles()){
-        var selected = currentProfileID && currentProfileID == profile.id ? "selected" : ""
-        profileListString += `<option value="${profile.id}" ${selected}>${escapeHtml(profile.name)}</option>`
-    }
-    var showProfileControls = await joplin.settings.value("showProfileControls")
+    var mobileButtons = (await isMobile()) ? iconButton("brush", "Set Panel CSS", "onStylerClicked()") : ""
     return `
         <section id="profileControls">
-            <select id="profileDropdown" onchange="onProfilesDropdownChanged(this.value)">
-                ${profileListString}
-            </select>
-            <section id="profileButtonsSection" style="display: ${showProfileControls == true ? "flex" : "none"};">
-                ${iconButton("plus", "Create New Profile", "onCreateProfileClicked()")}
-                ${iconButton("edit", "Edit Profile", "onEditProfileClicked()")}
-                ${iconButton("trash", "Delete Profile", "onDeleteProfileClicked()")}
-            </section>
+            ${getProfileDropdownHTML(await getAllProfiles(), currentProfileID)}
+            <button type="button" class="create-button" title="New note" onclick="onNewNoteClicked()">${icons["notePlus"]}<span>New note</span></button>
+            <button type="button" class="create-button" title="New to-do" onclick="onNewTodoClicked()">${icons["todoPlus"]}<span>New to-do</span></button>
+        </section>
+        <section id="filterRow">
+            ${getNotebookDropdownHTML(notebooks)}
+            ${getSortDropdownHTML()}
+            ${iconButton(sortDirection === "desc" ? "arrowDown" : "arrowUp", `Sort direction: ${sortDirection === "desc" ? "descending" : "ascending"}`, "onSortDirectionClicked()")}
+            ${mobileButtons}
+            ${iconButton("refresh", "Update Panel and Notes", "onUpdateInterfacesClicked()")}
+        </section>
+        <section id="searchRow">
+            <input id="searchFilter" type="search" placeholder="Search... any:1 tag:a tag:b = a OR b"
+                title="Joplin search syntax, applied with Enter. AND by default; start with any:1 to match ANY term (OR). Also tag:, notebook:, -tag:, plain words."
+                value="${escapeHtml(searchFilter)}"
+                onchange="onSearchFilterChanged(this.value)" onsearch="onSearchFilterChanged(this.value)">
         </section>
     `
+}
+
+/** getProfileDropdownHTML **************************************************************************************************************************
+ * The profile picker, drawn by the panel rather than as a native select so that every row can carry its own always visible edit and delete buttons  *
+ * - which also work by tap on mobile, where there is no hover.                                                                                      *
+ ***************************************************************************************************************************************************/
+function getProfileDropdownHTML(profiles, currentProfileID){
+    var currentName = "Profiles"
+    var itemsHtml = ""
+    for (var profile of profiles){
+        var isCurrent = currentProfileID && currentProfileID == profile.id
+        if (isCurrent) currentName = profile.name
+        itemsHtml += `
+            <div class="dropdown-item${isCurrent ? " -current" : ""}" onclick="onDropdownItemClicked(event, 'profilesDropdownChanged', '${profile.id}')">
+                <span class="dropdown-label">${escapeHtml(profile.name)}</span>
+                <button type="button" class="row-action" title="Edit profile" onclick="onDropdownActionClicked(event, 'editProfileClicked', '${profile.id}')">${icons["edit"]}</button>
+                <button type="button" class="row-action" title="Delete profile" onclick="onDropdownActionClicked(event, 'deleteProfileClicked', '${profile.id}')">${icons["trash"]}</button>
+            </div>
+        `
+    }
+    itemsHtml += `
+        <div class="dropdown-separator"></div>
+        <div class="dropdown-item" onclick="onDropdownItemClicked(event, 'createProfileClicked', null)">
+            <span class="dropdown-label">+ New profile...</span>
+        </div>
+    `
+    return dropdownHTML("profileMenu", currentName, itemsHtml)
+}
+
+/** getNotebookDropdownHTML *************************************************************************************************************************
+ * The notebook filter, with rename, move and delete buttons on every notebook row                                                                  *
+ ***************************************************************************************************************************************************/
+function getNotebookDropdownHTML(notebooks){
+    var currentLabel = "All notebooks"
+    var itemsHtml = `
+        <div class="dropdown-item${notebookFilter ? "" : " -current"}" onclick="onDropdownItemClicked(event, 'notebookFilterChanged', '')">
+            <span class="dropdown-label">All notebooks</span>
+        </div>
+    `
+    for (var notebook of notebooks){
+        var isCurrent = notebook.id === notebookFilter
+        if (isCurrent) currentLabel = notebook.path
+        itemsHtml += `
+            <div class="dropdown-item${isCurrent ? " -current" : ""}" onclick="onDropdownItemClicked(event, 'notebookFilterChanged', '${escapeHtml(notebook.id)}')">
+                <span class="dropdown-label">${escapeHtml(notebook.path)}</span>
+                <button type="button" class="row-action" title="Rename notebook" onclick="onDropdownActionClicked(event, 'renameNotebookClicked', '${escapeHtml(notebook.id)}')">${icons["edit"]}</button>
+                <button type="button" class="row-action" title="Move notebook" onclick="onDropdownActionClicked(event, 'moveNotebookClicked', '${escapeHtml(notebook.id)}')">${icons["chevronRight"]}</button>
+                <button type="button" class="row-action" title="Delete notebook" onclick="onDropdownActionClicked(event, 'deleteNotebookClicked', '${escapeHtml(notebook.id)}')">${icons["trash"]}</button>
+            </div>
+        `
+    }
+    itemsHtml += `
+        <div class="dropdown-separator"></div>
+        <div class="dropdown-item" onclick="onDropdownItemClicked(event, 'createNotebookClicked', null)">
+            <span class="dropdown-label">+ New notebook...</span>
+        </div>
+    `
+    return dropdownHTML("notebookMenu", currentLabel, itemsHtml)
+}
+
+/** getSortDropdownHTML *****************************************************************************************************************************
+ * The sorting picker: its face shows the current sort field, and pressing it lists the choices with the current one highlighted                     *
+ ***************************************************************************************************************************************************/
+function getSortDropdownHTML(){
+    var itemsHtml = ""
+    for (var field of sortFieldCycle){
+        itemsHtml += `
+            <div class="dropdown-item${field === sortField ? " -current" : ""}" onclick="onDropdownItemClicked(event, 'sortFieldSelected', '${field}')">
+                <span class="dropdown-label">${sortFieldLabels[field]}</span>
+            </div>
+        `
+    }
+    return `
+        <div class="dropdown -compact">
+            <button type="button" class="dropdown-toggle" title="How items sharing a due time are sorted" onclick="onDropdownToggle(event, 'sortMenu')">
+                ${icons["sort"]}<span class="dropdown-toggle-label">${sortFieldLabels[sortField] || "Title"}</span>
+            </button>
+            <div class="dropdown-menu" id="sortMenu" hidden>${itemsHtml}</div>
+        </div>
+    `
+}
+
+/** dropdownHTML ************************************************************************************************************************************/
+function dropdownHTML(menuID, toggleLabel, itemsHtml){
+    return `
+        <div class="dropdown">
+            <button type="button" class="dropdown-toggle" onclick="onDropdownToggle(event, '${menuID}')">
+                <span class="dropdown-toggle-label">${escapeHtml(toggleLabel)}</span>
+                <span class="dropdown-caret">&#9662;</span>
+            </button>
+            <div class="dropdown-menu" id="${menuID}" hidden>${itemsHtml}</div>
+        </div>
+    `
+}
+
+/** createItem **************************************************************************************************************************************
+ * Creates a note or a to-do and opens it. It goes into the notebook the panel is filtered to; with "All notebooks" selected, a dialog asks where.   *
+ ***************************************************************************************************************************************************/
+async function createItem(isTodo){
+    var folderID = notebookFilter || await pickNotebook(isTodo ? "Create to-do in notebook" : "Create note in notebook")
+    if (!folderID) return
+    var newItem = await joplin.data.post(['notes'], null, { parent_id: folderID, is_todo: isTodo ? 1 : 0, title: "" })
+    await openTodo(newItem.id)
+    scheduleRefresh()
+}
+
+/** runNotebookAction *******************************************************************************************************************************
+ * Applies an action from the notebook dropdown's last entries. Apart from creating a notebook, the actions work on the notebook the panel is        *
+ * currently filtered to.                                                                                                                           *
+ ***************************************************************************************************************************************************/
+async function runNotebookAction(action, folderID){
+    if (!folderID) return
+    // A cancelled dialog leaves the markup unchanged, so force a redraw
+    lastRenderedHtml = null
+    if (action == 'rename'){
+        await runAppCommand('renameFolder', folderID)
+    } else if (action == 'move'){
+        var target = await pickNotebook("Move notebook under...", true)
+        if (target !== null){
+            try {
+                await joplin.data.put(['folders', folderID], null, { parent_id: target })
+            } catch (error) {
+                await joplin.views.dialogs.showMessageBox(`Cockpit: the notebook could not be moved (${error.message}).`)
+            }
+        }
+    } else if (action == 'delete'){
+        var folder = (await getNotebookMap()).get(folderID)
+        var answer = await joplin.views.dialogs.showMessageBox(`Move the notebook "${folder ? folder.path : folderID}" and its notes to the trash?`)
+        if (answer === 0){
+            await joplin.data.delete(['folders', folderID])
+            if (notebookFilter === folderID) notebookFilter = ""
+        }
+    }
+    await refreshInterfaces()
+    scheduleRefresh()
+}
+
+/** pickNotebook ************************************************************************************************************************************
+ * Asks the user to choose a notebook and returns its ID, or null when cancelled. With includeRoot, "(top level)" is offered and returned as an      *
+ * empty string.                                                                                                                                    *
+ ***************************************************************************************************************************************************/
+async function pickNotebook(promptTitle, includeRoot = false){
+    var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
+    var options = notebooks.map(notebook => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.path)}</option>`).join("")
+    if (includeRoot) options = `<option value="__root">(top level)</option>` + options
+    await joplin.views.dialogs.setHtml(notebookPickerDialog, `
+        <style>
+            #joplin-plugin-content { width: 300px; }
+        </style>
+        <style>
+            /* Explicit option colours, because the dropdown list otherwise mixes the theme's light
+             * text with the platform's white popup background and becomes unreadable */
+            option {
+                background-color: var(--joplin-background-color, #ffffff);
+                color: var(--joplin-color, #000000);
+            }
+        </style>
+        <form name="picker" style="display: flex; flex-direction: column; gap: 10px; padding: 14px;">
+            <strong>${escapeHtml(promptTitle)}</strong>
+            <select name="folderId" style="padding: 4px 6px; font-family: inherit; font-size: inherit; color: inherit; background: inherit; border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;">
+                ${options}
+            </select>
+        </form>
+    `)
+    var result = await joplin.views.dialogs.open(notebookPickerDialog)
+    if (!result || result.id !== 'ok' || !result.formData || !result.formData.picker) return null
+    var picked = result.formData.picker.folderId
+    if (picked === "__root") return ""
+    return picked || null
+}
+
+/** runAppCommand ***********************************************************************************************************************************
+ * Runs one of Joplin's own commands, telling the user when the current platform does not have it (several desktop commands do not exist on mobile)  *
+ ***************************************************************************************************************************************************/
+async function runAppCommand(commandName, args?){
+    try {
+        await (args === undefined ? joplin.commands.execute(commandName) : joplin.commands.execute(commandName, args))
+    } catch (error) {
+        console.warn(`Cockpit: the command ${commandName} could not be run`, error)
+        await joplin.views.dialogs.showMessageBox(`Cockpit: "${commandName}" is not available here.`)
+    }
+}
+
+/** runNoteMenuAction *******************************************************************************************************************************
+ * Applies an action from the panel's context menu to the given note. Actions with no matching command on all platforms are done through the data    *
+ * API instead.                                                                                                                                     *
+ ***************************************************************************************************************************************************/
+async function runNoteMenuAction(action, noteID){
+    if (!action || !noteID) return
+    if (action == 'open'){
+        await openTodo(noteID)
+        return
+    } else if (action == 'toggleType'){
+        var note = await joplin.data.get(['notes', noteID], { fields: ['is_todo'] })
+        await joplin.data.put(['notes', noteID], null, { is_todo: note.is_todo ? 0 : 1 })
+    } else if (action == 'tags'){
+        await runAppCommand('setTags', [noteID])
+    } else if (action == 'moveToFolder'){
+        await runAppCommand('moveToFolder', [noteID])
+    } else if (action == 'duplicate'){
+        await runAppCommand('duplicateNote', [noteID])
+    } else if (action == 'copyMarkdownLink'){
+        var linkNote = await joplin.data.get(['notes', noteID], { fields: ['title'] })
+        await (joplin as any).clipboard.writeText(`[${linkNote.title}](:/${noteID})`)
+        return
+    } else if (action == 'copyNoteID'){
+        await (joplin as any).clipboard.writeText(noteID)
+        return
+    } else if (action == 'delete'){
+        try {
+            await joplin.commands.execute('deleteNote', [noteID])
+        } catch (error) {
+            // The command is desktop only; the data API delete moves the note to the trash
+            await joplin.data.delete(['notes', noteID])
+        }
+    } else {
+        return
+    }
+    await refreshInterfaces()
+    scheduleRefresh()
 }
 
 /** sanitizeCss *************************************************************************************************************************************

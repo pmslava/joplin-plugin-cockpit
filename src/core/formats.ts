@@ -5,8 +5,8 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getTodos } from "./joplin";
-import { escapeHtml } from "./html";
+import { getTodos, getNotes, getNotebookMap, notebookWithDescendants } from "./joplin";
+import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
     CalendarViewState,
     addDays,
@@ -56,6 +56,12 @@ abstract class BaseFormat {
      ***********************************************************************************************************************************************/
     private outputFormat = null
 
+    /** availableNotebooks **************************************************************************************************************************
+     * The notebooks the fetched to-dos live in, before the notebook filter is applied, sorted by path. Filled in by fetchTodos so that the panel     *
+     * can offer them as filter choices.                                                                                                            *
+     ***********************************************************************************************************************************************/
+    public availableNotebooks = []
+
     /** getFormattedHeadingString *******************************************************************************************************************
      * This method should return the heading string that the given todo would fall under. All formats must implement this method.                   *
      ***********************************************************************************************************************************************/
@@ -83,9 +89,9 @@ abstract class BaseFormat {
         }
         for (var headingGroup of todoMap){
             var heading = headingGroup[0]
-            todoString += this.getHeadingString(heading)
+            todoString += this.getHeadingString(heading, this.getHeadingDropTarget(heading, headingGroup[1]), headingGroup[1].map(todo => todo.id))
             for (var todo of headingGroup[1]){
-                todoString += this.getTodoString(todo, heading) 
+                todoString += this.getTodoString(todo, heading)
             }
         }
         return todoString
@@ -100,10 +106,45 @@ abstract class BaseFormat {
     }
 
     /** fetchTodos **********************************************************************************************************************************
-     * The to-dos matching this profile, unformatted. Provided so that a format can lay them out itself instead of as a list.                        *
+     * The to-dos matching this profile, unformatted, each labelled with the notebook it lives in. Provided so that a format can lay them out       *
+     * itself instead of as a list. When the view state carries a notebook filter, only the to-dos of that notebook are returned, while              *
+     * availableNotebooks still lists every notebook the unfiltered to-dos live in.                                                                  *
      ***********************************************************************************************************************************************/
     protected async fetchTodos(){
-        return await getTodos(this.profile.showCompleted, this.profile.showNoDue, this.profile.searchCriteria)
+        var searchFilter = this.viewState ? (this.viewState as any).searchFilter : null
+        var searchCriteria = searchFilter ? `${this.profile.searchCriteria} ${searchFilter}` : this.profile.searchCriteria
+        var showAnyCompleted = this.profile.showCompletedPast || this.profile.showCompletedToday || this.profile.showCompletedFuture || this.profile.showCompletedNoDue
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria)
+        if (showAnyCompleted){
+            todos = todos.filter(todo => {
+                if (!todo.todo_completed) return true
+                var bucket = this.getCompletedBucket(todo)
+                if (bucket == "nodue") return this.profile.showCompletedNoDue
+                if (bucket == "past") return this.profile.showCompletedPast
+                if (bucket == "today") return this.profile.showCompletedToday
+                return this.profile.showCompletedFuture
+            })
+        }
+        var notebooks = await getNotebookMap()
+        var present = new Map()
+        for (var todo of todos){
+            var notebook = notebooks.get(todo.parent_id)
+            todo.notebookTitle = notebook ? notebook.title : ""
+            todo.notebookPath = notebook ? notebook.path : ""
+            if (notebook) present.set(notebook.id, notebook)
+        }
+        this.availableNotebooks = [...present.values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
+        var notebookFilter = this.viewState ? (this.viewState as any).notebookFilter : null
+        if (notebookFilter){
+            var allowedNotebooks = notebookWithDescendants(notebooks, notebookFilter)
+            todos = todos.filter(todo => allowedNotebooks.has(todo.parent_id))
+        }
+        var sort = this.viewState ? (this.viewState as any).sort : null
+        if (sort){
+            var compare = itemComparator(sort)
+            todos.sort((first, second) => (first.todo_due - second.todo_due) || compare(first, second))
+        }
+        return todos
     }
 
     /** renderTodoRow *******************************************************************************************************************************
@@ -111,12 +152,46 @@ abstract class BaseFormat {
      ***********************************************************************************************************************************************/
     protected renderTodoRow(todo, label){
         var checkedString = todo.todo_completed ? "checked" : ""
+        var notebookString = todo.notebookTitle
+            ? `<span class="todo-notebook" title="${escapeHtml(todo.notebookPath)}">${escapeHtml(todo.notebookTitle)}</span>`
+            : ""
+        // The ring around the checkbox shows how many of the checkboxes inside the note are ticked.
+        // It is display only: filling it does not complete the to-do, and completing the to-do does
+        // not fill it.
+        var total = Number(todo.checkboxTotal) || 0
+        var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
+        var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
         return `
-                <div class="todo">
-                    <input type="checkbox" class="todo-checkbox" onchange="onTodoChecked('${todo.id}')" ${checkedString}>
-                    <a class="todo-title" onclick="onTodoClicked('${todo.id}')">${escapeHtml(label)}</a>
+                <div class="todo" data-todo-id="${todo.id}" draggable="true"
+                    onclick="onTodoRowClicked(event, '${todo.id}')"
+                    oncontextmenu="onTodoContextMenu(event, '${todo.id}')"
+                    ondragstart="onTodoDragStart(event, '${todo.id}')"
+                    ondragend="onTodoDragEnd(event)">
+                    <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"
+                        onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                    <a class="todo-title">${escapeHtml(label)}</a>
+                    ${notebookString}
                 </div>
             `
+    }
+
+    /** getHeadingDropTarget ************************************************************************************************************************
+     * What dropping a to-do onto the given heading should do: a YYYY-MM-DD date the to-do becomes due on, "clear" to remove its due date, or null    *
+     * when the heading is not a meaningful drop target. Formats whose headings map to dates override this.                                          *
+     ***********************************************************************************************************************************************/
+    protected getHeadingDropTarget(heading, todos){
+        return null
+    }
+
+    /** getCompletedBucket **************************************************************************************************************************
+     * Whether a completed to-do belongs to the past, to today or to the future, judged by its due date. One without a due date is its own bucket,    *
+     * with its own switch in the profile.                                                                                                           *
+     ***********************************************************************************************************************************************/
+    private getCompletedBucket(todo){
+        if (!todo.todo_due || todo.todo_due <= 0) return "nodue"
+        if (todo.todo_due < this.getStartOfToday().getTime()) return "past"
+        if (todo.todo_due <= this.getEndOfToday().getTime()) return "today"
+        return "future"
     }
 
     /** getWeekStartsOn *****************************************************************************************************************************
@@ -129,12 +204,12 @@ abstract class BaseFormat {
     /** getHeadingString ****************************************************************************************************************************
      * This returns the given heading string with the proper output format(i.e html or markdown)                                                    *
      ***********************************************************************************************************************************************/
-    private getHeadingString(headingString){
+    private getHeadingString(headingString, dropTarget?, todoIDs?){
         if (headingString){
             if (this.outputFormat == "markdown"){
                 return `## ${headingString}\n`
             } else if (this.outputFormat == "html") {
-                return `<h2>${escapeHtml(headingString)}</h2>`;
+                return `<h2${dropTargetAttributes(dropTarget)}${headingContextAttributes(todoIDs)}>${escapeHtml(headingString)}</h2>`;
             }
         } else {
             return ""
@@ -326,6 +401,16 @@ class DateFormat extends BaseFormat {
         var dueTime = todo.todo_due != 0 ? `${this.getTimeString(todo.todo_due)} - ` : ""
         return `${dueTime}${todo.title}`
     }
+
+    /** getHeadingDropTarget ************************************************************************************************************************
+     * Every heading of this format is a single day, so dropping onto it makes the to-do due that day. The date is read from the group's first to-do  *
+     * rather than re-parsed from the heading text.                                                                                                  *
+     ***********************************************************************************************************************************************/
+    protected getHeadingDropTarget(heading, todos){
+        if (heading == "No Due Date") return "clear"
+        var first = todos && todos.length ? todos[0] : null
+        return first && first.todo_due ? toISODate(new Date(first.todo_due)) : null
+    }
 }
 
 /** IntervalFormat **********************************************************************************************************************************
@@ -374,6 +459,20 @@ class IntervalFormat extends BaseFormat {
             dueDate = `${this.getFullDateString(todo.todo_due)} - `
         }
         return `${dueDate}${todo.title}`
+    }
+
+    /** getHeadingDropTarget ************************************************************************************************************************
+     * A to-do dropped onto an interval becomes due on that interval's last day - "due by the end of this week/month/year" - except for Today and     *
+     * Tomorrow, which are days already. Overdue and Future have no meaningful date, so they accept no drops.                                        *
+     ***********************************************************************************************************************************************/
+    protected getHeadingDropTarget(heading, todos){
+        if (heading == "No Due Date") return "clear"
+        if (heading == "Today") return toISODate(new Date())
+        if (heading == "Tomorrow") return toISODate(this.getStartOfTomorrow())
+        if (heading == "This Week") return toISODate(this.getEndOfThisWeek())
+        if (heading == "This Month") return toISODate(this.getEndOfThisMonth())
+        if (heading == "This Year") return toISODate(this.getEndOfThisYear())
+        return null
     }
 }
 
@@ -441,7 +540,7 @@ class MonthFormat extends DateFormat {
         var label = `${day.toLocaleDateString(undefined, { day: "numeric", month: "long" })}, ${todos.length} to-do${todos.length === 1 ? "" : "s"}, ${outstanding} outstanding`
 
         return `
-            <td class="${classes.join(" ")}">
+            <td class="${classes.join(" ")}"${dropTargetAttributes(key)}>
                 <button type="button" class="calendar-day-button" aria-label="${escapeHtml(label)}" onclick="onCalendarDaySelected('${key}')">
                     <span class="calendar-day-number">${day.getDate()}</span>
                     <span class="calendar-dots">${dots}${overflow}</span>
@@ -462,7 +561,7 @@ class MonthFormat extends DateFormat {
             : `<p class="calendar-empty">Nothing due</p>`
         return `
             <section class="calendar-selected">
-                <h2>${escapeHtml(this.getFullDateString(day))}</h2>
+                <h2${headingContextAttributes(todos.map(todo => todo.id))}>${escapeHtml(this.getFullDateString(day))}</h2>
                 ${rows}
             </section>
         `
@@ -490,8 +589,8 @@ class WeekFormat extends DateFormat {
                 : `<p class="calendar-empty">Nothing due</p>`
             var heading = day.toLocaleDateString(undefined, { weekday: this.profile.weekdayFormat || "long", day: "numeric", month: "short" })
             return `
-                <section class="week-day${key === todayKey ? " -today" : ""}">
-                    <h2>${escapeHtml(heading)}</h2>
+                <section class="week-day${key === todayKey ? " -today" : ""}"${dropTargetAttributes(key)}>
+                    <h2${headingContextAttributes(todos.map(todo => todo.id))}>${escapeHtml(heading)}</h2>
                     ${rows}
                 </section>
             `
@@ -506,6 +605,74 @@ class WeekFormat extends DateFormat {
             ${renderUndated(grouped.undated, (todo, label) => this.renderTodoRow(todo, label))}
         `
     }
+}
+
+/** itemComparator **********************************************************************************************************************************
+ * The comparator behind the panel's sort button. It orders items sharing a due time - and the notes group - by title, updated time or created time, *
+ * ascending or descending.                                                                                                                         *
+ ***************************************************************************************************************************************************/
+export function itemComparator(sort){
+    var field = sort && sort.field ? sort.field : "title"
+    var directionFactor = sort && sort.direction === "desc" ? -1 : 1
+    return (first, second) => {
+        var result = 0
+        if (field === "updated"){
+            result = (Number(first.user_updated_time) || 0) - (Number(second.user_updated_time) || 0)
+        } else if (field === "created"){
+            result = (Number(first.user_created_time) || 0) - (Number(second.user_created_time) || 0)
+        } else {
+            result = String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" })
+        }
+        return result * directionFactor
+    }
+}
+
+/** renderNotesSection ******************************************************************************************************************************
+ * The regular notes matching the profile, as their own group in the panel. Notes have no due date or completion, so the circle only shows the       *
+ * checkbox progress of the note and cannot be ticked.                                                                                              *
+ ***************************************************************************************************************************************************/
+export async function renderNotesSection(profile, viewState){
+    var searchFilter = viewState ? viewState.searchFilter : null
+    var searchCriteria = searchFilter ? `${profile.searchCriteria} ${searchFilter}` : profile.searchCriteria
+    var notes = await getNotes(searchCriteria)
+    var notebooks = await getNotebookMap()
+    for (var note of notes){
+        var notebook = notebooks.get(note.parent_id)
+        note.notebookTitle = notebook ? notebook.title : ""
+        note.notebookPath = notebook ? notebook.path : ""
+    }
+    var notebookFilter = viewState ? viewState.notebookFilter : null
+    if (notebookFilter){
+        var allowedNotebooks = notebookWithDescendants(notebooks, notebookFilter)
+        notes = notes.filter(note => allowedNotebooks.has(note.parent_id))
+    }
+    if (viewState && viewState.sort){
+        notes.sort(itemComparator(viewState.sort))
+    }
+    if (!notes.length) return ""
+    var rows = notes.map(note => {
+        var total = Number(note.checkboxTotal) || 0
+        var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
+        var progressTitle = total ? `${note.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
+        var notebookString = note.notebookTitle
+            ? `<span class="todo-notebook" title="${escapeHtml(note.notebookPath)}">${escapeHtml(note.notebookTitle)}</span>`
+            : ""
+        return `
+            <div class="todo -note" data-note-id="${note.id}"
+                onclick="onNoteRowClicked(event, '${note.id}')"
+                oncontextmenu="onNoteContextMenu(event, '${note.id}')">
+                <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
+                <a class="todo-title">${escapeHtml(note.title)}</a>
+                ${notebookString}
+            </div>
+        `
+    }).join("")
+    return `
+        <section class="notes-section">
+            <h2>Notes</h2>
+            ${rows}
+        </section>
+    `
 }
 
 /** formats *****************************************************************************************************************************************

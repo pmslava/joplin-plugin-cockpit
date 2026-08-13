@@ -22,11 +22,16 @@ export var icons = {
     brush: svgIcon("M12 3a9 9 0 0 0 0 18c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1a1.5 1.5 0 0 1 1.11-2.5H16a5 5 0 0 0 5-5c0-4.42-4.03-8-9-8zM6.5 12a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3 4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"),
     chevronLeft: svgIcon("M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"),
     chevronRight: svgIcon("M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"),
+    notePlus: svgIcon("M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm2 14h-3v3h-2v-3H8v-2h3v-3h2v3h3v2zm-3-7V3.5L18.5 9H13z"),
+    sort: svgIcon("M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z"),
+    arrowUp: svgIcon("M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"),
+    arrowDown: svgIcon("M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"),
+    todoPlus: svgIcon("M22 5.18 10.59 16.6l-4.24-4.24 1.41-1.41 2.83 2.83L20.59 3.76 22 5.18zm-2.21 5.04c.13.57.21 1.17.21 1.78 0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8c1.58 0 3.04.46 4.28 1.25l1.44-1.44A9.9 9.9 0 0 0 12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10c0-1.19-.22-2.33-.6-3.39l-1.61 1.61zM19 15h-2v2h-2v2h2v2h2v-2h2v-2h-2v-2z"),
 }
 
 /** iconButton **************************************************************************************************************************************
  * Returns the markup for a clickable icon. A real button element is used so that the control is reachable by keyboard and large enough to tap.      *
  ***************************************************************************************************************************************************/
-export function iconButton(iconName, title, onClick){
-    return `<button type="button" class="icon-button" title="${title}" aria-label="${title}" onclick="${onClick}">${icons[iconName]}</button>`
+export function iconButton(iconName, title, onClick, extraClass = ""){
+    return `<button type="button" class="icon-button${extraClass ? ` ${extraClass}` : ""}" title="${title}" aria-label="${title}" onclick="${onClick}">${icons[iconName]}</button>`
 }

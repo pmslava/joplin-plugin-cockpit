@@ -15,7 +15,7 @@ import { isMobile } from "../../core/platform"
     if (await isMobile()) return
     await joplin.views.menus.create(
         'agendaMenu',
-        "Agenda",
+        "Cockpit",
         [
             {commandName: 'togglePanelVisibility'},
             {commandName: 'toggleShowProfileControls'},

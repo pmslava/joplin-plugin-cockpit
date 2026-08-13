@@ -1,6 +1,6 @@
 /** README ******************************************************************************************************************************************
  * This file contains all functions related to settings configuration and management.																*
- * Settings are also where Agenda keeps the data that used to live on disk: the profile list and the custom panel CSS. The plugin API for settings	*
+ * Settings are also where Cockpit keeps the data that used to live on disk: the profile list and the custom panel CSS. The plugin API for settings	*
  * works the same on desktop and mobile, whereas the file system is desktop only.																	*
  ***************************************************************************************************************************************************/
 
@@ -13,6 +13,7 @@ import { setupTimer } from "./timer"
 /** Variable Setup *********************************************************************************************************************************/
 export const customCssSettingKey = "customCss"
 export const updateFrequencySettingKey = "updateFrequency"
+export const dayStartTimeSettingKey = "dayStartTime"
 
 /** setupSettings ***********************************************************************************************************************************
  * Sets up the settings used by the plugin. This must run before the profile database is loaded, as the profiles are stored in a setting.			*
@@ -20,28 +21,28 @@ export const updateFrequencySettingKey = "updateFrequency"
 export async function setupSettings(){
 	await joplin.settings.registerSection(
 		"section", {
-			label: "Agenda",
+			label: "Cockpit",
 			iconName: 'fas fa-calendar',
-			description: "Settings for the Agenda Plugin",
+			description: "Settings for the Cockpit Plugin",
 			name: "agenda"
 		})
 	await joplin.settings.registerSettings({
 		"currentProfileID": {
-			label: "The ID of the current profile used by Agenda",
+			label: "The ID of the current profile used by Cockpit",
 			value: null,
 			type: SettingItemType.Int,
 			public: false,
 			section: 'section',
 		},
 		[profileDataSettingKey]: {
-			label: "The Agenda profiles, stored as JSON",
+			label: "The Cockpit profiles, stored as JSON",
 			value: "",
 			type: SettingItemType.String,
 			public: false,
 			section: 'section',
 		},
 		[customCssSettingKey]: {
-			label: "Custom CSS applied to the Agenda panel",
+			label: "Custom CSS applied to the Cockpit panel",
 			value: "",
 			type: SettingItemType.String,
 			public: false,
@@ -58,6 +59,27 @@ export async function setupSettings(){
 			label: "How many seconds should agenda wait before updating the panel and notes",
 			value: 60,
 			type: SettingItemType.Int,
+			public: true,
+			section: 'section',
+		},
+		"panelSortField": {
+			label: "How the panel breaks ties between items sharing a due time: title, updated or created",
+			value: "title",
+			type: SettingItemType.String,
+			public: false,
+			section: 'section',
+		},
+		"panelSortDirection": {
+			label: "The direction of the panel's tie-break sorting: asc or desc",
+			value: "asc",
+			type: SettingItemType.String,
+			public: false,
+			section: 'section',
+		},
+		[dayStartTimeSettingKey]: {
+			label: "Day start time (HH:MM). A to-do dragged onto a day without a time of its own becomes due at this time",
+			value: "09:00",
+			type: SettingItemType.String,
 			public: true,
 			section: 'section',
 		},
@@ -87,6 +109,16 @@ export async function getCurrentProfileID(){
 		await setCurrentProfileID(currentProfileID)
 	}
 	return currentProfileID
+}
+
+/** getDayStartTime *********************************************************************************************************************************
+ * The configured start of the day as { hours, minutes }, falling back to 09:00 when the setting cannot be parsed									*
+ ***************************************************************************************************************************************************/
+export async function getDayStartTime(){
+	var value = await joplin.settings.value(dayStartTimeSettingKey)
+	var match = /^(\d{1,2}):(\d{2})$/.exec(String(value || "").trim())
+	if (!match) return { hours: 9, minutes: 0 }
+	return { hours: Math.min(23, Number(match[1])), minutes: Math.min(59, Number(match[2])) }
 }
 
 /** getCustomCss ************************************************************************************************************************************

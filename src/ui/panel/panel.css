@@ -1,51 +1,51 @@
+/* ----------------------------------------------------------------------------------------------
+ * Every colour, font and size below comes from the --joplin-* CSS variables that Joplin injects
+ * into plugin webviews, so the panel always matches the active theme and the font size of the
+ * rest of the app. Hard coded values only appear as fallbacks.
+ * ------------------------------------------------------------------------------------------- */
+
 * {
     box-sizing: border-box;
 }
 
 body {
-    padding: 1em;
-    overflow-y: auto;
-    font-size: medium;
     -webkit-text-size-adjust: 100%;
+    line-height: 1.5;
 }
 
-.heading {
-    display: flex;
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.5em;
+/* Joplin's webview skeleton sets "overflow: hidden" on the html element and wraps this markup in
+ * the #joplin-plugin-content flex column. That column is made exactly one viewport tall here, so
+ * the to-do list scrolls inside it while the heading and the dropdowns stay put. */
+#joplin-plugin-content {
+    height: 100vh;
+    padding: 12px 12px 0;
+    overflow: hidden;
 }
 
-.heading-buttons {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    flex-shrink: 0;
+.todos {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    margin: 0 -6px;
+    padding: 0 6px 12px;
 }
 
-#profileControls {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5em;
-    margin: 20px 0 10px;
+/* A thin scrollbar in the theme's scrollbar colour, like the note list's */
+.todos::-webkit-scrollbar {
+    width: 7px;
 }
 
-select {
-    flex-grow: 1;
-    flex-shrink: 1;
-    min-width: 0;
-    font-size: medium;
-    padding: 4px;
+.todos::-webkit-scrollbar-track {
+    background: transparent;
 }
 
-#profileButtonsSection {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    flex-shrink: 0;
+.todos::-webkit-scrollbar-thumb {
+    border-radius: 4px;
+    background: var(--joplin-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
+}
+
+.todos::-webkit-scrollbar-thumb:hover {
+    background: var(--joplin-scrollbar-thumb-color-hover, rgba(127, 127, 127, 0.6));
 }
 
 /* Icon buttons are transparent so that they follow the colours of whichever Joplin theme is active */
@@ -53,22 +53,22 @@ select {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 34px;
-    min-height: 34px;
+    min-width: 26px;
+    min-height: 26px;
     max-height: none;
     width: auto;
-    padding: 6px;
+    padding: 4px;
     margin: 0;
     border: none;
     border-radius: 4px;
     background: none;
     color: inherit;
     cursor: pointer;
-    opacity: 0.8;
+    opacity: 0.7;
 }
 
 .icon-button:hover {
-    background-color: rgba(127, 127, 127, 0.18);
+    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
     opacity: 1;
 }
 
@@ -78,31 +78,397 @@ select {
     display: block;
 }
 
-h1 {
-    margin: 0;
-    padding: 0;
-    font-size: x-large;
+/* The create buttons: labelled, and visually heavier than the plain icon buttons */
+.create-button {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    flex: 0 1 auto;
+    height: 26px;
+    min-height: 26px;
+    padding: 0 9px;
+    white-space: nowrap;
+    overflow: hidden;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    background-color: var(--joplin-background-color3, rgba(127, 127, 127, 0.12));
+    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 3px;
+    cursor: pointer;
 }
 
-h2 {
-    font-size: large;
-    margin-top: 1em;
-    margin-bottom: 0.5em;
+.create-button .icon {
+    width: 1.15em;
+    height: 1.15em;
+    flex-shrink: 0;
 }
+
+.create-button:hover {
+    border-color: var(--joplin-url-color, #2D6BDC);
+}
+
+/* Dropdowns, styled like Joplin's own search field ---------------------------------------------*/
+
+select {
+    flex-grow: 1;
+    flex-shrink: 1;
+    min-width: 0;
+    height: 26px;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--joplin-color, inherit);
+    background-color: var(--joplin-background-color4, transparent);
+    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 3px;
+    outline: none;
+}
+
+select:focus {
+    border-color: var(--joplin-focus-outline-color, var(--joplin-url-color, #2D6BDC));
+}
+
+/* Explicit option colours, so the dropdown list never mixes the theme's light text with the
+ * platform's white popup background */
+option {
+    background-color: var(--joplin-background-color, #ffffff);
+    color: var(--joplin-color, #000000);
+}
+
+#profileControls,
+#filterRow {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    margin: 0 0 6px;
+}
+
+/* Custom dropdowns: a native select cannot carry buttons on its rows, so the pickers are drawn by
+ * the panel. Every row's action buttons are always visible - hover only emphasises them - so they
+ * work the same by tap on mobile. */
+.dropdown {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* The profile picker yields to the labelled create buttons beside it */
+#profileControls .dropdown {
+    flex: 1 1 60px;
+    min-width: 60px;
+}
+
+.dropdown-toggle {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    width: 100%;
+    height: 26px;
+    min-height: 26px;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--joplin-color, inherit);
+    background-color: var(--joplin-background-color4, transparent);
+    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.dropdown-toggle:focus {
+    border-color: var(--joplin-focus-outline-color, var(--joplin-url-color, #2D6BDC));
+}
+
+.dropdown-toggle-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The compact variant, used by the sort picker: a small labelled button whose menu opens
+ * right-aligned so it stays inside the panel */
+.dropdown.-compact {
+    flex: 0 0 auto;
+}
+
+.dropdown.-compact .dropdown-toggle {
+    gap: 4px;
+    width: auto;
+    padding: 2px 7px;
+    background: none;
+    border-color: transparent;
+    opacity: 0.85;
+}
+
+.dropdown.-compact .dropdown-toggle:hover {
+    opacity: 1;
+    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+}
+
+.dropdown.-compact .dropdown-toggle .icon {
+    width: 1.1em;
+    height: 1.1em;
+    flex-shrink: 0;
+}
+
+.dropdown.-compact .dropdown-menu {
+    left: auto;
+    right: 0;
+    min-width: 130px;
+}
+
+.dropdown-caret {
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
+.dropdown-menu {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    min-width: 100%;
+    width: max-content;
+    max-width: 320px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 4px;
+    background-color: var(--joplin-background-color, #1D2024);
+    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.dropdown-menu[hidden] {
+    display: none;
+}
+
+.dropdown-menu::-webkit-scrollbar { width: 6px; }
+.dropdown-menu::-webkit-scrollbar-track { background: transparent; }
+.dropdown-menu::-webkit-scrollbar-thumb {
+    border-radius: 3px;
+    background: var(--joplin-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
+}
+
+.dropdown-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.dropdown-item:hover {
+    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+}
+
+.dropdown-item.-current {
+    background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.3));
+}
+
+.dropdown-label {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* The per-row action buttons: always visible so that they can be tapped on mobile */
+.row-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    min-height: 22px;
+    padding: 2px;
+    border: none;
+    border-radius: 3px;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.65;
+}
+
+.row-action:hover {
+    opacity: 1;
+    background-color: rgba(127, 127, 127, 0.25);
+}
+
+.row-action .icon {
+    width: 0.95em;
+    height: 0.95em;
+    display: block;
+}
+
+.dropdown-separator {
+    margin: 4px 0;
+    border-top: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+}
+
+#searchRow {
+    display: flex;
+    flex-direction: row;
+    margin: 0 0 10px;
+}
+
+/* The search field, styled like the dropdowns and Joplin's own search box */
+#searchFilter {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 26px;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--joplin-color, inherit);
+    background-color: var(--joplin-background-color4, transparent);
+    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 3px;
+    outline: none;
+}
+
+#searchFilter:focus {
+    border-color: var(--joplin-focus-outline-color, var(--joplin-url-color, #2D6BDC));
+}
+
+#searchFilter::placeholder {
+    color: var(--joplin-color-faded, #999999);
+    opacity: 0.8;
+}
+
+/* Group headings ------------------------------------------------------------------------------*/
+
+/* Sticky, so that while a long group scrolls by you can still see which one you are in. The gap
+ * above the heading is padding rather than margin, so that rows scrolling underneath stay hidden
+ * behind its opaque background. */
+h2 {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    margin: 0 0 3px;
+    padding: 12px 0 3px;
+    background-color: var(--joplin-background-color, inherit);
+    border-bottom: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    font-size: 0.92em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--joplin-color-faded, #999999);
+}
+
+.todos > h2:first-child {
+    padding-top: 2px;
+}
+
+/* To-do rows ----------------------------------------------------------------------------------*/
 
 .todo {
     display: flex;
     flex-direction: row;
     align-items: flex-start;
-    gap: 0.5em;
-    padding: 0.4em 0.2em;
+    gap: 7px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    /* Rows are dragged and shift-clicked, where accidental text selection would get in the way */
+    user-select: none;
+    cursor: grab;
 }
 
+.todo:hover {
+    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.12));
+}
+
+.todo.-selected {
+    background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.3));
+}
+
+.todo.-dragging {
+    opacity: 0.45;
+}
+
+/* Group headings, calendar days and week columns light up while to-dos are dragged over them */
+.-drop-over {
+    background-color: var(--joplin-selected-color2, rgba(45, 107, 220, 0.35)) !important;
+    border-radius: 4px;
+}
+
+/* The item glyph is read in two layers, so the kinds can be told apart at a glance:
+ *  - small filled disc              = a to-do (the disc is its tick target)
+ *  - disc inside a thin ring        = a to-do with checkboxes inside; the ring is their progress
+ *  - thin ring alone, hollow centre = a note with checkboxes inside
+ *  - nothing                        = a plain note
+ * Ticking fills the disc green; the ring's fill is independent of the tick. */
 .todo-checkbox {
+    -webkit-appearance: none;
+    appearance: none;
+    position: relative;
+    /* Contains the disc's z-index, so it cannot paint over the sticky group headings */
+    z-index: 0;
     width: 18px;
     height: 18px;
-    margin: 0.15em 0 0 0;
+    margin: 0;
     flex-shrink: 0;
+    border-radius: 50%;
+    background: conic-gradient(
+        var(--joplin-color-correct, #72b972) calc(var(--percent, 0) * 1%),
+        var(--joplin-divider-color, rgba(127, 127, 127, 0.45)) 0
+    );
+    cursor: pointer;
+}
+
+/* Hollows the ring */
+.todo-checkbox::after {
+    content: "";
+    position: absolute;
+    inset: 3px;
+    border-radius: 50%;
+    background: var(--joplin-background-color, #1D2024);
+}
+
+/* The small to-do disc; the tick is an SVG painted into it, so it is always centered and crisp */
+.todo-checkbox::before {
+    content: "";
+    position: absolute;
+    z-index: 1;
+    inset: 4px;
+    border-radius: 50%;
+    background-color: var(--joplin-divider-color, rgba(127, 127, 127, 0.5));
+}
+
+.todo-checkbox:hover::before {
+    background-color: var(--joplin-color-faded, #999999);
+}
+
+.todo-checkbox:checked::before {
+    background-color: var(--joplin-color-correct, #72b972);
+    background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M4 8.4l3 3L12.2 5.2" fill="none" stroke="%23ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 90% 90%;
+}
+
+/* A to-do with no checkboxes inside: just the small disc, no ring */
+.todo-checkbox.-plain,
+.todo-checkbox.-plain::after {
+    background: none;
+}
+
+/* A note with no checkboxes inside shows no circle at all; the invisible spacer keeps the titles
+ * of the notes group aligned */
+.note-progress.-empty,
+.note-progress.-empty::after {
+    background: none;
 }
 
 .todo-title {
@@ -111,41 +477,112 @@ h2 {
     overflow-wrap: anywhere;
 }
 
+/* The notebook the to-do lives in, as a small pill at the end of the row. The full notebook path
+ * is in the tooltip. */
+.todo-notebook {
+    flex-shrink: 0;
+    max-width: 38%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 1px;
+    padding: 0 7px;
+    border-radius: 9px;
+    font-size: 0.85em;
+    color: var(--joplin-color-faded, #999999);
+    background-color: var(--joplin-background-color3, rgba(127, 127, 127, 0.15));
+}
+
+/* The progress circle of a regular note: the same ring as a to-do's, but with no completion state
+ * to toggle */
+.note-progress {
+    position: relative;
+    z-index: 0;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background: conic-gradient(
+        var(--joplin-color-correct, #72b972) calc(var(--percent, 0) * 1%),
+        var(--joplin-divider-color, rgba(127, 127, 127, 0.45)) 0
+    );
+}
+
+.note-progress::after {
+    content: "";
+    position: absolute;
+    inset: 3px;
+    border-radius: 50%;
+    background: var(--joplin-background-color, #1D2024);
+}
+
+/* The context menu of a to-do or note row */
+#noteContextMenu {
+    position: fixed;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    min-width: 220px;
+    padding: 4px;
+    background-color: var(--joplin-background-color, #1D2024);
+    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.context-menu-item {
+    height: auto;
+    min-height: 0;
+    padding: 6px 10px;
+    text-align: left;
+    justify-content: flex-start;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.context-menu-item:hover {
+    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+}
+
+.context-menu-item.-danger {
+    color: var(--joplin-destructive-color, #F07777);
+}
+
 a {
     color: inherit;
     text-decoration: none;
 }
 
+/* Generic buttons (profile editor dialog, etc.) follow the theme instead of being hard coded white */
 button {
-    margin: 0.5em 0;
-    height: 32px;
-    min-height: 32px;
-    max-height: 32px;
+    height: 26px;
+    min-height: 26px;
     width: auto;
-    min-width: 100px;
-    box-sizing: border-box;
+    padding: 0 12px;
+    border: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 3px;
-    border-style: solid;
-    border-width: 1px;
-    padding: 0 14px;
+    background-color: var(--joplin-background-color3, transparent);
+    color: var(--joplin-color, inherit);
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
     justify-content: center;
-    opacity: 1;
     user-select: none;
-    border: 1px solid rgba(50,55,63,0.3);
-    background-color: #ffffff;
-    color: #2D6BDC;
 }
 
 table {
-    border: 1px solid rgba(50,55,63,0.3);
     width: 100%;
+    border-collapse: collapse;
 }
 
 /* ----------------------------------------------------------------------------------------------
  * Calendar views
- *
- * Colours come from the Joplin theme variables that are injected into plugin webviews, so the
- * calendar follows whichever theme is active instead of hard coding light or dark.
  * ------------------------------------------------------------------------------------------- */
 
 .calendar-nav {
@@ -154,28 +591,28 @@ table {
     align-items: center;
     justify-content: space-between;
     gap: 0.5em;
-    margin: 0.75em 0 0.5em;
+    margin: 0.5em 0;
 }
 
 .calendar-title {
     flex-grow: 1;
     min-width: 0;
     height: auto;
-    min-height: 34px;
+    min-height: 26px;
     max-height: none;
     margin: 0;
-    padding: 4px 8px;
+    padding: 2px 8px;
     border: none;
     background: none;
     color: inherit;
-    font-size: medium;
+    font-size: inherit;
     font-weight: 600;
     cursor: pointer;
     border-radius: 4px;
 }
 
 .calendar-title:hover {
-    background-color: rgba(127, 127, 127, 0.18);
+    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
 }
 
 .calendar-grid {
@@ -187,7 +624,7 @@ table {
 
 .calendar-grid th {
     padding: 4px 0;
-    font-size: small;
+    font-size: 0.85em;
     font-weight: 600;
     opacity: 0.7;
     text-align: center;
@@ -209,7 +646,7 @@ table {
     width: 100%;
     min-width: 0;
     height: auto;
-    min-height: 44px;
+    min-height: 40px;
     max-height: none;
     margin: 0;
     padding: 4px 0;
@@ -217,12 +654,12 @@ table {
     border-radius: 4px;
     background: none;
     color: inherit;
-    font-size: small;
+    font-size: 0.9em;
     cursor: pointer;
 }
 
 .calendar-day-button:hover {
-    background-color: rgba(127, 127, 127, 0.15);
+    background-color: var(--joplin-background-color-hover-dim3, rgba(127, 127, 127, 0.15));
 }
 
 .calendar-day.-outside .calendar-day-button {
@@ -269,20 +706,15 @@ table {
 }
 
 .calendar-more {
-    font-size: x-small;
+    font-size: 0.8em;
     opacity: 0.7;
-}
-
-.calendar-selected h2,
-.calendar-undated h2 {
-    font-size: medium;
 }
 
 .calendar-empty {
     margin: 0.25em 0;
     padding: 0.25em 0.2em;
     opacity: 0.6;
-    font-size: small;
+    font-size: 0.9em;
 }
 
 /* The planner becomes a multi column board when the panel is wide enough, with no media queries */
@@ -305,8 +737,9 @@ table {
 }
 
 .week-day h2 {
+    position: static;
     margin: 0 0 0.25em;
-    font-size: small;
-    font-weight: 700;
-    opacity: 0.85;
+    padding: 0;
+    border-bottom: none;
+    background: none;
 }

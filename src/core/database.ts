@@ -1,6 +1,6 @@
 /** README ******************************************************************************************************************************************
  * This file contains all functions involved in managing the agenda profile database.                                                               *
- * Profiles are stored as a JSON document in a private plugin setting. Earlier versions of Agenda used an sqlite3 database in the plugin data        *
+ * Profiles are stored as a JSON document in a private plugin setting. Earlier versions of Cockpit used an sqlite3 database in the plugin data        *
  * directory, but neither sqlite3 nor the file system is available to plugins on mobile, so that database is imported into the setting the first     *
  * time this version runs and is then left untouched.                                                                                               *
  ***************************************************************************************************************************************************/
@@ -12,7 +12,7 @@ import { requireNodeModule } from "./platform";
 /** Variable Setup *********************************************************************************************************************************/
 export const profileDataSettingKey = "profileData"
 const legacyDatabaseFileName = "profiles.sqlite3"
-// Agenda up to 3.x was published under this plugin id. Joplin gives every plugin id its own data
+// Cockpit up to 3.x was published under this plugin id. Joplin gives every plugin id its own data
 // directory, so an install of that version left its database in a directory of its own.
 const legacyPluginID = "com.gitlab.BeatLink.joplin-plugin-agenda"
 var profileStore = null
@@ -25,8 +25,24 @@ const profileDefaults = {
     name: "New Profile",
     searchCriteria: "",
     noteID: "",
+    // showCompleted is the pre-4.3 all-or-nothing switch. It is kept so that stored profiles can be
+    // migrated to the three period switches below, which say whether completed to-dos are shown
+    // depending on whether they belong to the past, to today or to the future.
     showCompleted: false,
+    showCompletedPast: false,
+    showCompletedToday: false,
+    showCompletedFuture: false,
+    showCompletedNoDue: false,
     showNoDue: false,
+    // Regular notes can be listed alongside the to-dos, in their own group before or after them
+    showNotes: false,
+    notesPosition: "after",
+    // The panel's header state this profile starts with, making a profile a complete view preset:
+    // the notebook filter (a folder ID, empty for all), the search field, and the tie-break sorting
+    notebook: "",
+    panelSearch: "",
+    sortField: "title",
+    sortDirection: "asc",
     displayFormat: "interval",
     yearFormat: "numeric",
     monthFormat: "long",
@@ -123,7 +139,7 @@ export async function reportDatabaseProblems(){
     try {
         await joplin.views.dialogs.showMessageBox(warning)
     } catch (error) {
-        console.error("Agenda:", warning, error)
+        console.error("Cockpit:", warning, error)
     }
 }
 
@@ -136,7 +152,7 @@ async function loadProfileStore(){
     try {
         return normalizeProfileStore(JSON.parse(storedData))
     } catch (error) {
-        console.error("Agenda: the stored profile data could not be read", error)
+        console.error("Cockpit: the stored profile data could not be read", error)
         return null
     }
 }
@@ -187,12 +203,20 @@ function normalizeProfile(sourceProfile, id){
             profile[key] = String(value)
         }
     }
+    // A profile stored before the period switches existed gets them from its old all-or-nothing
+    // "show completed" value, so its behaviour does not change on upgrade
+    if (source["showCompletedPast"] === undefined && source["showCompletedToday"] === undefined && source["showCompletedFuture"] === undefined){
+        profile["showCompletedPast"] = profile["showCompleted"]
+        profile["showCompletedToday"] = profile["showCompleted"]
+        profile["showCompletedFuture"] = profile["showCompleted"]
+        profile["showCompletedNoDue"] = profile["showCompleted"]
+    }
     return profile
 }
 
 /** importLegacyDatabase ****************************************************************************************************************************
- * Imports the profiles from the sqlite3 database used by Agenda 3.x. This can only work on desktop, where sqlite3 and fs-extra are available. The   *
- * database file itself is left in place so that downgrading to an older version of Agenda still works.                                              *
+ * Imports the profiles from the sqlite3 database used by Cockpit 3.x. This can only work on desktop, where sqlite3 and fs-extra are available. The   *
+ * database file itself is left in place so that downgrading to an older version of Cockpit still works.                                              *
  ***************************************************************************************************************************************************/
 async function importLegacyDatabase(){
     var sqlite3 = requireNodeModule("sqlite3", "Database")
@@ -204,20 +228,20 @@ async function importLegacyDatabase(){
 
     try {
         var rows = await readLegacyProfiles(sqlite3, databasePath)
-        console.info(`Agenda: imported ${rows.length} profile(s) from ${databasePath}`)
+        console.info(`Cockpit: imported ${rows.length} profile(s) from ${databasePath}`)
         return { profileStore: normalizeProfileStore({ nextID: 1, profiles: rows }), warning: null }
     } catch (error) {
-        console.error("Agenda: could not import the profile database", error)
+        console.error("Cockpit: could not import the profile database", error)
         return {
             profileStore: null,
-            warning: `Agenda could not read your existing profiles from ${databasePath} (${error.message}). A new default profile has been created. The old database has not been modified.`,
+            warning: `Cockpit could not read your existing profiles from ${databasePath} (${error.message}). A new default profile has been created. The old database has not been modified.`,
         }
     }
 }
 
 /** findLegacyDatabase ******************************************************************************************************************************
- * Returns the path of the sqlite3 database left behind by an earlier version of Agenda, or null when there is none. Both this plugin's own data     *
- * directory and the one belonging to the plugin id Agenda used to be published under are looked in, so that the profiles of an existing install are *
+ * Returns the path of the sqlite3 database left behind by an earlier version of Cockpit, or null when there is none. Both this plugin's own data     *
+ * directory and the one belonging to the plugin id Cockpit used to be published under are looked in, so that the profiles of an existing install are *
  * still picked up.                                                                                                                                 *
  ***************************************************************************************************************************************************/
 async function findLegacyDatabase(fs){
@@ -249,7 +273,7 @@ async function readLegacyProfiles(sqlite3, databasePath): Promise<any[]>{
         try {
             database.close()
         } catch (error) {
-            console.warn("Agenda: could not close the legacy profile database", error)
+            console.warn("Cockpit: could not close the legacy profile database", error)
         }
     }
 }

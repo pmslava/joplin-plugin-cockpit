@@ -41,7 +41,7 @@ export async function refreshInterfaces(){
             await refreshNoteData()
         } while (refreshQueued)
     } catch (error) {
-        console.error("Agenda: could not refresh the to-do list", error)
+        console.error("Cockpit: could not refresh the to-do list", error)
     } finally {
         refreshing = false
     }
@@ -74,7 +74,7 @@ export async function setupTimer(){
  ***************************************************************************************************************************************************/
 export async function setupWorkspaceEvents(){
     await registerEvent("onNoteChange", async (event) => {
-        // Agenda writes the overview notes itself, so refreshing on those changes would loop.
+        // Cockpit writes the overview notes itself, so refreshing on those changes would loop.
         if (event && (await getOverviewNoteIDs()).includes(event.id)) return
         scheduleRefresh()
     })
@@ -89,6 +89,6 @@ async function registerEvent(eventName, handler){
     try {
         await joplin.workspace[eventName](handler)
     } catch (error) {
-        console.warn(`Agenda: could not subscribe to ${eventName}`, error)
+        console.warn(`Cockpit: could not subscribe to ${eventName}`, error)
     }
 }

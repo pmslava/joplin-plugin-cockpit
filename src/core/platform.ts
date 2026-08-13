@@ -39,7 +39,7 @@ async function detectPlatform(){
             return versionInfo.platform
         }
     } catch (error) {
-        console.warn("Agenda: could not read the app version info", error)
+        console.warn("Cockpit: could not read the app version info", error)
     }
     return requireNodeModule("fs-extra", "readFile") ? "desktop" : "mobile"
 }

@@ -6,7 +6,7 @@
  ***************************************************************************************************************************************************/
 
 /** Imports ****************************************************************************************************************************************/
-import { escapeHtml } from "./html";
+import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import { iconButton } from "../ui/icons";
 
 /** CalendarViewState *******************************************************************************************************************************
@@ -166,7 +166,7 @@ export function renderUndated(undatedTodos, renderTodoRow): string {
     var rows = undatedTodos.map(todo => renderTodoRow(todo, todo.title)).join("")
     return `
         <section class="calendar-undated">
-            <h2>No Due Date</h2>
+            <h2${dropTargetAttributes("clear")}${headingContextAttributes(undatedTodos.map(todo => todo.id))}>No Due Date</h2>
             ${rows}
         </section>
     `

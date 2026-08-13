@@ -31,7 +31,7 @@ export async function refreshNoteData(){
 }
 
 /** getOverviewNoteIDs ******************************************************************************************************************************
- * Returns the IDs of every note Agenda writes its to-do lists to. Changes to those notes are caused by Agenda itself, so they must not trigger      *
+ * Returns the IDs of every note Cockpit writes its to-do lists to. Changes to those notes are caused by Cockpit itself, so they must not trigger      *
  * another refresh.                                                                                                                                 *
  ***************************************************************************************************************************************************/
 export async function getOverviewNoteIDs(){

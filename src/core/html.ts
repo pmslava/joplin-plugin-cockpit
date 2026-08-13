@@ -15,3 +15,21 @@ export function escapeHtml(value){
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;")
 }
+
+/** dropTargetAttributes ****************************************************************************************************************************
+ * The attributes that make an element accept dropped to-dos. The target is either a YYYY-MM-DD date the dropped to-dos become due on, or "clear"    *
+ * to remove their due dates. Returns an empty string for no target, so it can be interpolated unconditionally.                                     *
+ ***************************************************************************************************************************************************/
+export function dropTargetAttributes(target){
+    if (!target) return ""
+    return ` data-drop="${escapeHtml(target)}" ondragover="onDropTargetOver(event)" ondragleave="onDropTargetLeave(event)" ondrop="onTodoDropped(event)"`
+}
+
+/** headingContextAttributes ************************************************************************************************************************
+ * The attributes that make a group heading open the set alarm dialog for every to-do in its group on right click. Returns an empty string when the  *
+ * group is empty, so it can be interpolated unconditionally.                                                                                       *
+ ***************************************************************************************************************************************************/
+export function headingContextAttributes(todoIDs){
+    if (!todoIDs || !todoIDs.length) return ""
+    return ` data-todo-ids="${escapeHtml(todoIDs.join(","))}" oncontextmenu="onHeadingContextMenu(event)"`
+}

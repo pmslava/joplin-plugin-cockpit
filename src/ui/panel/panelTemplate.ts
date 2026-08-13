@@ -5,10 +5,6 @@
 
 export var panelTemplate = `
     <style><<CUSTOM_CSS>></style>
-    <section class="heading">
-        <h1>Agenda</h1>
-        <section class="heading-buttons"><<HEADING_BUTTONS>></section>
-    </section>
-    <<PROFILE_CONTROLS>>
+    <<CONTROLS>>
     <section class="todos"><<TODOS>></section>
 `

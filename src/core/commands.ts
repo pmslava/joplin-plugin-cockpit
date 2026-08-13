@@ -13,7 +13,7 @@ import { togglePanelVisibility, toggleShowProfileControls } from "../ui/panel/pa
 export async function setupCommands(){
     await joplin.commands.register({
         name: 'togglePanelVisibility',
-        label: 'Toggle Agenda Panel',
+        label: 'Toggle Cockpit Panel',
         iconName: 'fas fa-calendar',
         execute: togglePanelVisibility
     })

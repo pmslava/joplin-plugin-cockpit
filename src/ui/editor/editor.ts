@@ -5,6 +5,8 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { createProfile, deleteProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
+import { getNotebookMap } from "../../core/joplin";
+import { escapeHtml } from "../../core/html";
 import { editorTemplate } from "./editorTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -28,6 +30,9 @@ export async function setupEditor(){
 export async function openEditor(profileID?){
     var profileData = profileID == null ? null : btoa(encodeURI(JSON.stringify(await getProfile(profileID))))
     var formattedHtml = profileData == null ? editorTemplate : editorTemplate.replace("<<PROFILE_DATA>>", () => profileData)
+    var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
+    var notebookOptions = `<option value="">All notebooks</option>` + notebooks.map(notebook => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.path)}</option>`).join("")
+    formattedHtml = formattedHtml.replace("<<NOTEBOOK_OPTIONS>>", () => notebookOptions)
     var dialogButtons = profileID == null ? createButtons : editButtons
     await joplin.views.dialogs.setButtons(dialog, dialogButtons)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);

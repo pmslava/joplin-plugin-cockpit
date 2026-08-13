@@ -38,7 +38,7 @@ export async function openStyler(){
 }
 
 /** importLegacyCssFile *****************************************************************************************************************************
- * Copies the custom CSS of Agenda 3.6 and later out of the custom.css file and into settings. The file lives in the plugin installation directory,  *
+ * Copies the custom CSS of Cockpit 3.6 and later out of the custom.css file and into settings. The file lives in the plugin installation directory,  *
  * which Joplin recreates when the plugin is updated, so this is a best effort import that only runs on desktop.                                     *
  ***************************************************************************************************************************************************/
 async function importLegacyCssFile(){
@@ -51,9 +51,9 @@ async function importLegacyCssFile(){
         var cssData = await fs.readFile(cssFilePath, 'utf8')
         if (cssData && cssData.trim()){
             await setCustomCss(cssData)
-            console.info(`Agenda: imported the custom panel CSS from ${cssFilePath}`)
+            console.info(`Cockpit: imported the custom panel CSS from ${cssFilePath}`)
         }
     } catch (error) {
-        console.warn("Agenda: could not import the custom panel CSS", error)
+        console.warn("Cockpit: could not import the custom panel CSS", error)
     }
 }

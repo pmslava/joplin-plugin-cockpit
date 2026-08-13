@@ -1,24 +1,28 @@
 {
 	"manifest_version": 1,
-	"id": "com.github.thescriptingguy.joplin-plugin-agenda",
+	"id": "io.github.pmslava.cockpit",
 	"app_min_version": "2.9",
 	"app_min_version_mobile": "3.3",
 	"platforms": [
 		"desktop",
 		"mobile"
 	],
-	"version": "4.1.0",
-	"name": "Agenda",
-	"description": "An agenda/calendar/schedule panel for joplin that shows all uncompleted to-dos with a due date.",
-	"author": "BeatLink",
-	"homepage_url": "https://discourse.joplinapp.org/t/agenda/21158",
-	"repository_url": "https://github.com/TheScriptingGuy/Joplin-Agenda-Plugin",
+	"version": "1.0.0",
+	"name": "Cockpit",
+	"description": "A tasks-and-notes command center panel: due dates with drag and drop and a calendar picker, checkbox progress rings, notebook and search filters, view profiles, and notebook management - on desktop and mobile.",
+	"author": "pmslava",
+	"homepage_url": "https://github.com/pmslava/joplin-plugin-cockpit",
+	"repository_url": "https://github.com/pmslava/joplin-plugin-cockpit",
 	"keywords": [
 		"joplin",
-		"schedule",
-		"calendar",
+		"todo",
+		"task",
 		"agenda",
-		"upcoming",
-		"date"
+		"calendar",
+		"planner",
+		"panel",
+		"notes",
+		"due",
+		"schedule"
 	]
 }
