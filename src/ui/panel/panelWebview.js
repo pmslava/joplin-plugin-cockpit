@@ -273,23 +273,6 @@ async function onTodoChecked(todoID){
     await webviewApi.postMessage(['todoChecked', todoID]);
 }
 
-/** onProfilesDropdownChanged ************************************************************************************************************************
- * When the profiles dropdown is changed, this function sends a message to the main plugin to load the new profile                                   *
- ***************************************************************************************************************************************************/ 
-async function onProfilesDropdownChanged(profileID){
-    savedTodosScrollTop = 0
-    await webviewApi.postMessage(['profilesDropdownChanged', profileID]);
-}
-
-/** onNotebookFilterChanged **************************************************************************************************************************
- * When the notebook filter dropdown is changed, this function sends a message to the main plugin containing the notebook id, or an empty string     *
- * for all notebooks                                                                                                                                 *
- ***************************************************************************************************************************************************/
-async function onNotebookFilterChanged(notebookID){
-    savedTodosScrollTop = 0
-    await webviewApi.postMessage(['notebookFilterChanged', notebookID]);
-}
-
 /** onSortFieldClicked / onSortDirectionClicked ******************************************************************************************************/
 async function onSortFieldClicked(){
     await webviewApi.postMessage(['sortFieldClicked']);
@@ -307,6 +290,10 @@ function closeAllDropdowns(){
     for (var menu of document.querySelectorAll('.dropdown-menu')){
         menu.setAttribute('hidden', '')
     }
+    // The search suggestion list carries the .dropdown-menu class too, so the loop above just hid it.
+    // Drop its logical state as well, or it would stay "open" while invisible and a following Enter or
+    // arrow key would act on the hidden menu instead of committing the search.
+    hideSearchSuggestions()
 }
 
 function onDropdownToggle(event, menuID){
@@ -320,6 +307,9 @@ function onDropdownToggle(event, menuID){
 }
 
 function onDropdownItemClicked(event, messageName, value){
+    // A deliberate profile or notebook-filter change starts the list at the top, like the other view
+    // changes; the scroll position is otherwise restored across the re-render.
+    if (messageName === 'profilesDropdownChanged' || messageName === 'notebookFilterChanged') savedTodosScrollTop = 0
     closeAllDropdowns()
     void webviewApi.postMessage(value === null ? [messageName] : [messageName, value]);
 }
@@ -391,10 +381,21 @@ function readSearchData(){
  ***************************************************************************************************************************************************/
 function tokenAtCaret(value, caret){
     var before = value.slice(0, caret)
+    var after = value.slice(caret)
     var quoted = /(^|\s)(tag|notebook):"([^"]*)$/.exec(before)
-    if (quoted) return { kind: quoted[2], partial: quoted[3], hasQuote: true, start: quoted.index + quoted[1].length, end: caret }
+    if (quoted){
+        // Consume the rest of the quoted value after the caret, up to and including its closing quote,
+        // so selecting a suggestion with the caret mid-token replaces the whole token rather than
+        // orphaning its tail.
+        var quotedTail = /^[^"]*"?/.exec(after)
+        return { kind: quoted[2], partial: quoted[3], hasQuote: true, start: quoted.index + quoted[1].length, end: caret + (quotedTail ? quotedTail[0].length : 0) }
+    }
     var bare = /(^|\s)(tag|notebook):(\S*)$/.exec(before)
-    if (bare) return { kind: bare[2], partial: bare[3], hasQuote: false, start: bare.index + bare[1].length, end: caret }
+    if (bare){
+        // Likewise consume the rest of the unquoted token after the caret (up to the next whitespace).
+        var bareTail = /^\S*/.exec(after)
+        return { kind: bare[2], partial: bare[3], hasQuote: false, start: bare.index + bare[1].length, end: caret + (bareTail ? bareTail[0].length : 0) }
+    }
     return null
 }
 
@@ -515,15 +516,22 @@ function onSearchFocus(){
     searchFocused = true
 }
 
-function onSearchBlur(){
+function onSearchBlur(event){
+    // A refresh removes the focused field mid-typing. Some Chromium builds fire blur on that removal
+    // and some do not; either way this is not a genuine blur and the draft must survive so
+    // restoreSearchDraft can put it back. The removed field is already disconnected from the document
+    // when its removal-blur fires, so ignore a blur whose target is no longer connected.
+    if (event && event.target && event.target.isConnected === false) return
     searchFocused = false
-    // A genuine blur (removing the field on a refresh does not fire blur) ends the suggestion list
+    // The user left the field without committing, so the uncommitted draft is abandoned. Drop it, or a
+    // later focus + refresh would resurrect this stale text over the freshly rendered field.
+    searchDraft = null
     hideSearchSuggestions()
 }
 
 /** restoreSearchDraft *****************************************************************************************************************************
- * After a refresh replaced the panel while the user was typing an uncommitted search, this puts the draft text, caret and focus back. Removing the   *
- * old field does not fire blur, so searchFocused still reflects that the user was in the field.                                                     *
+ * After a refresh replaced the panel while the user was typing an uncommitted search, this puts the draft text, caret and focus back. onSearchBlur   *
+ * ignores the blur fired when the focused field is removed, so searchFocused still reflects that the user was in the field.                          *
  ***************************************************************************************************************************************************/
 function restoreSearchDraft(){
     if (!searchDraft || !searchFocused) return

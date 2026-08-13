@@ -292,7 +292,7 @@ async function getControlsHTML(currentProfileID){
                 title="Joplin search syntax, applied with Enter. AND by default; start with any:1 to match ANY term (OR). Also tag:, notebook:, title:, -tag:, plain words."
                 value="${escapeHtml(searchFilter)}"
                 oninput="onSearchInput(this)" onkeydown="onSearchKeyDown(event)"
-                onfocus="onSearchFocus()" onblur="onSearchBlur()"
+                onfocus="onSearchFocus()" onblur="onSearchBlur(event)"
                 onchange="onSearchFilterChanged(this.value)" onsearch="onSearchFilterChanged(this.value)">
             <script id="cockpitSearchData" type="application/json">${searchData}</script>
         </section>
