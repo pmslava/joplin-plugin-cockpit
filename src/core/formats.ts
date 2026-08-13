@@ -56,11 +56,6 @@ abstract class BaseFormat {
      ***********************************************************************************************************************************************/
     private outputFormat = null
 
-    /** availableNotebooks **************************************************************************************************************************
-     * The notebooks the fetched to-dos live in, before the notebook filter is applied, sorted by path. Filled in by fetchTodos so that the panel     *
-     * can offer them as filter choices.                                                                                                            *
-     ***********************************************************************************************************************************************/
-    public availableNotebooks = []
 
     /** getFormattedHeadingString *******************************************************************************************************************
      * This method should return the heading string that the given todo would fall under. All formats must implement this method.                   *
@@ -107,8 +102,8 @@ abstract class BaseFormat {
 
     /** fetchTodos **********************************************************************************************************************************
      * The to-dos matching this profile, unformatted, each labelled with the notebook it lives in. Provided so that a format can lay them out       *
-     * itself instead of as a list. When the view state carries a notebook filter, only the to-dos of that notebook are returned, while              *
-     * availableNotebooks still lists every notebook the unfiltered to-dos live in.                                                                  *
+     * itself instead of as a list. When the view state carries a notebook filter, the query is narrowed to that notebook (and its sub-notebooks)   *
+     * server side, then filtered precisely below.                                                                                                  *
      ***********************************************************************************************************************************************/
     protected async fetchTodos(){
         var notebooks = await getNotebookMap()
@@ -135,14 +130,11 @@ abstract class BaseFormat {
                 return this.profile.showCompletedFuture
             })
         }
-        var present = new Map()
         for (var todo of todos){
             var notebook = notebooks.get(todo.parent_id)
             todo.notebookTitle = notebook ? notebook.title : ""
             todo.notebookPath = notebook ? notebook.path : ""
-            if (notebook) present.set(notebook.id, notebook)
         }
-        this.availableNotebooks = [...present.values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
         if (notebookFilter){
             var allowedNotebooks = notebookWithDescendants(notebooks, notebookFilter)
             todos = todos.filter(todo => allowedNotebooks.has(todo.parent_id))

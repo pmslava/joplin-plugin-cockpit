@@ -220,7 +220,7 @@ export async function togglePanelVisibility() {
         var notesHtml = await renderNotesSection(profile, panelViewState)
         todosHtml = profile.notesPosition === "before" ? notesHtml + todosHtml : todosHtml + notesHtml
     }
-    var controlsHtml = await getControlsHTML(profileID, formatter.availableNotebooks)
+    var controlsHtml = await getControlsHTML(profileID)
     var customCss = sanitizeCss(await getCustomCss())
     var htmlString = panelTemplate
         .replace("<<CUSTOM_CSS>>", () => customCss)
@@ -235,11 +235,11 @@ export async function togglePanelVisibility() {
  * The three control rows at the top of the panel: the profile picker with the create buttons, the notebook filter with the sort and refresh         *
  * buttons, and the search field. Profile management lives inside the profile dropdown as its last entries.                                          *
  ***************************************************************************************************************************************************/
-async function getControlsHTML(currentProfileID, availableNotebooks){
-    var notebooks = (availableNotebooks || []).slice()
-    if (notebookFilter && !notebooks.some(notebook => notebook.id === notebookFilter)){
-        notebooks.push({ id: notebookFilter, path: "(no matching to-dos)" })
-    }
+async function getControlsHTML(currentProfileID){
+    // The notebook filter offers every notebook, not only the ones the current to-dos live in, so a
+    // notebook can be picked even when the active profile's filter hides its to-dos. getNotebookMap
+    // is TTL-cached, so this is cheap.
+    var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
     var mobileButtons = (await isMobile()) ? iconButton("brush", "Set Panel CSS", "onStylerClicked()") : ""
     return `
         <section id="profileControls">
