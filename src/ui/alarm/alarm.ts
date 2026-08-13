@@ -10,6 +10,7 @@ import { setTodoDueTimestamps } from "../../core/joplin";
 import { getDayStartTime } from "../../core/settings";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { openPluginDialog } from "../../core/dialog";
+import { isMobile } from "../../core/platform";
 
 /** Variable Declaration ***************************************************************************************************************************/
 var alarmDialog = null;
@@ -265,7 +266,15 @@ export async function openAlarmDialog(todoIDs){
     `)
 
     var result = await openPluginDialog(alarmDialog)
-    if (!result || result.id === 'cancel') return
+    if (!result || result.id === 'cancel'){
+        // Nothing changed, but on mobile the dialog guard in refreshPanelData drops every refresh that
+        // came due while this dialog was open (e.g. a scheduleRefresh follow-up from a to-do just
+        // checked, or the periodic day-boundary tick). Cancelling clears the guard but arms no new
+        // refresh, so the panel could stay stale until the next tick. Repaint once here to pick up
+        // whatever was skipped. Desktop never skips refreshes, so it keeps its no-op cancel untouched.
+        if (await isMobile()) await refreshInterfaces()
+        return
+    }
 
     var timestamp = 0
     if (result.id === 'ok'){

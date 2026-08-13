@@ -226,9 +226,10 @@ export async function togglePanelVisibility() {
     // Dialog guard (mobile only): while a Cockpit dialog is open, a panel refresh calls setHtml, which
     // re-asserts the panel viewer's native React Native Modal on top of the dialog's Modal - the "the
     // dialog popped up behind the panel" bug. Skipping the refresh keeps the dialog on top. The guard
-    // clears in openPluginDialog's finally once the dialog is dismissed, and every dialog site refreshes
-    // afterwards, so nothing is lost. Gated to mobile: desktop has no such Modal stacking limitation, so
-    // its refresh timing stays byte-for-byte unchanged.
+    // clears in openPluginDialog's finally once the dialog is dismissed, and every dialog site issues a
+    // refresh afterwards on mobile (including the alarm and styler cancel paths, which refresh only on
+    // mobile precisely so a skipped refresh is not lost), so nothing is left stale. Gated to mobile:
+    // desktop has no such Modal stacking limitation, so its refresh timing stays byte-for-byte unchanged.
     if (mobile && isDialogOpen()) return
     // Building the markup runs the full search / notes / body query cycle, so it is skipped while the
     // panel is hidden (a closed desktop panel, or a plugin dialog the user has not opened on mobile),

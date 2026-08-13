@@ -8,7 +8,7 @@ import joplin from "api";
 import { refreshPanelData } from "../panel/panel";
 import { escapeHtml } from "../../core/formats";
 import { getCustomCss, setCustomCss } from "../../core/settings";
-import { requireNodeModule } from "../../core/platform";
+import { requireNodeModule, isMobile } from "../../core/platform";
 import { openPluginDialog } from "../../core/dialog";
 import { stylerTemplate } from "./stylerTemplate";
 
@@ -34,6 +34,11 @@ export async function openStyler(){
     var formResult = await openPluginDialog(dialog)
     if (formResult.id == 'ok') {
         await setCustomCss(formResult.formData['customCSSForm']['customCss'])
+        await refreshPanelData()
+    } else if (await isMobile()) {
+        // On mobile the dialog guard in refreshPanelData drops every refresh that came due while this
+        // dialog was open. Cancelling (or dismissing) arms no new refresh, so repaint once to pick up
+        // whatever was skipped. Desktop never skips refreshes, so its no-op cancel stays untouched.
         await refreshPanelData()
     }
 }
