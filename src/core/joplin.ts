@@ -212,6 +212,14 @@ export async function getNotebookMap(){
 var tagsCache = { stamp: 0, list: null }
 const tagsTTL = 20000
 
+/** invalidateTagsCache *****************************************************************************************************************************
+ * Drops the cached tag list. Called after the panel itself creates a tag (the mobile setTags fallback) so the new tag shows in the search field's    *
+ * tag: autocomplete immediately rather than when the cache expires.                                                                                 *
+ ***************************************************************************************************************************************************/
+export function invalidateTagsCache(){
+    tagsCache = { stamp: 0, list: null }
+}
+
 export async function getAllTags(){
     if (tagsCache.list && Date.now() - tagsCache.stamp < tagsTTL) return tagsCache.list
     var tags = []

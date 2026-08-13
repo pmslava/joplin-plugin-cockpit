@@ -1,125 +1,207 @@
 # Cockpit — Mobile Readiness Runbook
 
-Maintainer notes for running Cockpit on Joplin mobile (Android/iOS). Cockpit already did a
-real mobile pass in v4.0.0 (platform detection, `isMobile` toolbar/menu guards, inline SVG icons,
-settings-based storage, mobile-only styler/profile buttons). This document covers the remaining
-seams, what this batch changed, the work still queued for the mobile phase, and the device-test
-checklist for the first Pixel sideload session.
+Maintainer notes for running Cockpit on Joplin mobile (Android/iOS). Cockpit did a first mobile
+pass in v4.0.0 (platform detection, `isMobile` toolbar/menu guards, inline SVG icons, settings-based
+storage, mobile-only styler/profile buttons). A second, larger mobile phase then landed across three
+commits (dialog stacking guard, touch-interaction layer, command fallbacks + responsive alarm
+dialog). This document records what is implemented, what is still queued, and — most importantly —
+the **step-by-step checklist Slava follows on the Pixel for the first sideload session**.
+
+Every mobile behaviour is gated on the platform flag (`isMobile()` / `requireNodeModule`, from
+`src/core/platform.ts`) or on the `.cockpit-mobile` body/wrapper class, so **desktop behaviour is
+unchanged**. When something below says "mobile only", that guard is why.
 
 ## Current status
 
-- **Manifest** (`manifest.json`): `platforms: ["desktop","mobile"]`, `app_min_version_mobile: "3.3"`,
-  `app_min_version: "2.9"`. 3.3 is a safe floor (Android plugin support stabilised ~3.1–3.2).
-- **App commands** all funnel through `runAppCommand()` (`src/ui/panel/panel.ts:484`), which
-  try/catches and shows `"…is not available here"`, so an absent desktop-only command degrades to a
-  message box rather than crashing. `deleteNote` additionally falls back to `joplin.data.delete`
-  (trash) at `src/ui/panel/panel.ts:519`.
-- **Build**: webpack `target:'node'` with node builtins set `false` (`webpack.config.js`); node
-  modules (sqlite3, fs-extra) are pulled only via `joplin.require` behind `requireNodeModule` guards
-  (`src/core/platform.ts`, `src/core/database.ts`, `src/core/styler.ts`), never hard-bundled, so the
-  mobile bundle carries no node-builtin requires. Webview scripts (`panelWebview.js`) are copied
-  verbatim. No polyfill work needed. `.jpl` sideloading on mobile is supported (Settings > Plugins >
-  install from file).
-- **Already responsive**: week-planner grid `auto-fit minmax(160px)` (`panel.css`), calendar-grid
-  `table-layout:fixed`, day headers auto-abbreviate on narrow widths (`src/core/formats.ts`).
+- **Manifest** (`src/manifest.json`): `platforms: ["desktop","mobile"]`,
+  `app_min_version_mobile: "3.3"`, `app_min_version: "2.9"`. 3.3 is a safe floor: the
+  `#joplin-plugin-content` styling hook Cockpit's CSS relies on arrived in Android v3.1.6, and
+  panels + dialog webviews + `versionInfo().platform` + guarded commands are all present by 3.3.
+  One known caveat lives past this floor: Android **v3.4.6** (2025-09-01) fixes "plugin panel buttons
+  are off-screen on recent versions of Android", which can make the alarm dialog's OK / Clear /
+  Cancel buttons unreachable on 3.3–3.4.5 on newer Android. Kept at "3.3" for reach; revisit only if
+  the Pixel reproduces the off-screen-buttons bug (checklist step 8).
+- **Build / sideload**: webpack `target:'node'` with node builtins set `false`
+  (`webpack.config.js`); node modules (sqlite3, fs-extra) are pulled only via `joplin.require` behind
+  `requireNodeModule` guards, never hard-bundled, so the mobile bundle carries no node-builtin
+  requires. Webview scripts (`panelWebview.js`) are copied verbatim. The **same platform-agnostic
+  `.jpl`** (`publish/io.github.pmslava.cockpit.jpl`) serves both platforms; it self-detects at
+  runtime. `.jpl` sideloading on mobile is supported (Settings → Plugins → install from file). No
+  polyfill work is needed.
 - **Perf already guarded**: `refreshPanelData` bails when markup is byte-identical
-  (`lastRenderedHtml`, `src/ui/panel/panel.ts`); checkbox body fetches capped 300/refresh in chunks of
-  20, cached by `user_updated_time` (`src/core/joplin.ts`); notebook map + tags TTL-cached 20s.
+  (`lastRenderedHtml`); checkbox body fetches capped 300/refresh in chunks of 20, cached by
+  `user_updated_time` (`src/core/joplin.ts`); notebook map + tag list TTL-cached 20s.
 
-## What this batch changed
+## Implemented in the mobile phase
 
-All five are engine changes safe without a device; each also helps desktop or is pure robustness.
+Three commits, all mobile-gated, each verified to leave the desktop paths byte-for-byte unchanged.
 
-1. **Clipboard guarded** — `src/ui/panel/panel.ts`. `copyMarkdownLink` / `copyNoteID` now route
-   through a new `copyToClipboard()` helper (`src/ui/panel/panel.ts:514`) that existence-checks
-   `(joplin as any).clipboard.writeText`, try/catches, and falls back to the same message-box pattern
-   `runAppCommand` uses. These were the only note-menu actions that could throw an **unhandled
-   rejection** on a platform where the Electron-backed clipboard is unimplemented.
-2. **`synchronize` defensively wrapped** — `src/ui/panel/panel.ts:187`. The one direct
-   `joplin.commands.execute('synchronize')` now goes through `runAppCommand('synchronize')`. Toggle
-   semantics and fire-and-forget nature preserved (completion still tracked via `onSyncStart` /
-   `onSyncComplete` in `src/core/timer.ts`).
-3. **Control rows wrap** — `src/ui/panel/panel.css:197`. Added `flex-wrap: wrap` to `#profileControls`
-   and `#filterRow`, and changed `.create-button` from `flex: 0 1 auto` to `flex: 0 0 auto`
-   (`panel.css:143`) so the labelled "New note" / "New to-do" buttons wrap instead of crushing the
-   profile picker on a narrow phone (also helps a narrow desktop panel).
-4. **Alarm dialog tolerates narrow screens** — `src/ui/alarm/alarm.ts:27`. `#joplin-plugin-content`
-   width `424px` → `min(424px, 100vw - 16px)`; `#alarmForm` `width: 400px` → `width: 100%;
-   max-width: 400px`. Still hands Joplin a concrete measured width (the `min()` keeps desktop at 424px,
-   respecting the documented 200px feedback-loop caveat at `alarm.ts:22-25`) but stops 424px
-   overflowing a ~360–412px phone. **Verify desktop rendering** — the sizing hack is delicate; the
-   `min()` form is specifically chosen to preserve the desktop measurement.
-5. **Skip panel build while hidden** — `src/ui/panel/panel.ts:237`. `refreshPanelData` early-returns
-   when `await joplin.views.panels.visible(panel) === false`, wrapped in try/catch defaulting to
-   visible so any API oddity keeps current behaviour. This saves the full search / notes / body query
-   cycle on every 60s timer tick + 5/15/30s follow-ups (`src/core/timer.ts:21,69`) while the panel is
-   hidden — benefits desktop too. `refreshNoteData` is unaffected (it runs separately in
-   `refreshInterfaces`, `src/core/timer.ts:42`). **Interaction**: `togglePanelVisibility`
-   (`src/ui/panel/panel.ts:201`) now forces `refreshPanelData()` when showing the panel, so it renders
-   fresh on show rather than displaying stale/empty markup. The `lastRenderedHtml` equality guard still
-   holds the last rendered markup across the hidden period, so the re-render is correct.
+### 1. Dialog stacking guard — dialogs stay in front of the panel
 
-## LATER — mobile-phase work items
+On mobile Joplin renders the panel viewer and every custom dialog as separate React Native `<Modal>`
+windows and cannot reliably z-order two that are visible at once; the always-mounted panel viewer is
+declared last, so a dialog opening in the same commit as a panel re-render (or a mid-dialog refresh
+re-asserting the viewer) can land **behind** the panel. A plugin cannot set the native z-order from
+inside its webview, so the fix is pure timing (`src/core/dialog.ts`):
 
-Actual mobile work, most needing a device. One-line plan each.
+- `openPluginDialog()` holds a shared `dialogOpenCount` guard and, on mobile, yields one tick before
+  `dialogs.open()` so the dialog's Modal commits in its own React Native commit and attaches last (on
+  top). Wired at all four dialog sites (alarm, editor, styler, notebook picker) — and now the tag
+  picker (commit 3).
+- `refreshPanelData` early-returns while a dialog is open (`isDialogOpen()`, mobile only), so a timer
+  tick's `setHtml` cannot re-assert the viewer Modal over an open dialog. The guard clears in
+  `openPluginDialog`'s `finally` after the dialog is dismissed, and every dialog site refreshes
+  afterwards, so nothing is lost.
 
-1. **Touch context menu** — add a long-press adapter (pointerdown + timer, or touchstart) that calls
-   the existing `onTodoContextMenu` / `onNoteContextMenu` / `onHeadingContextMenu`
-   (`src/ui/panel/panelWebview.js:118,161,217`) with the same target-zone dispatch; the whole note menu
-   (open/tags/move/duplicate/copy-link/copy-id/delete), set-alarm on the circle, and move-to-notebook
-   ride on `contextmenu`, which touch webviews do not reliably fire. Biggest mobile gap.
-2. **Touch drag-to-reschedule** — replace/supplement HTML5 DnD (`formats.ts` `draggable`,
-   `panelWebview.js:231-267`) with Pointer Events (pointerdown/move/up + long-press to arm), reusing
-   the existing `['todosDropped', ids, target]` message and `data-drop` targets; or, simpler first cut,
-   add a "move to date" entry to the touch context menu that opens the alarm/date picker.
-3. **Mobile-friendly sync status** — surface what the sync button `title` carries (last-sync
-   time/duration/errors, `src/ui/panel/panel.ts:268`) as visible inline text or a tap-to-show line,
-   since hover tooltips are unreachable on touch.
-4. **Responsive alarm dialog** — rework `src/ui/alarm/alarm.ts` so calendar + time columns stack/reflow
-   under a narrow width (media query or flex-wrap on `#alarmBody`), verified against Joplin's mobile
-   dialog measurement so it neither collapses to 200px nor clips; confirm the ISO text inputs behave
-   with the mobile keyboard.
-5. **Mobile-native fallbacks for degrading commands** — where `moveToFolder` / `setTags` /
-   `duplicateNote` turn out absent on mobile (see unknowns 2), implement via `joplin.data` (a notebook
-   picker like `pickNotebook` for move; a tag dialog; a note copy for duplicate) instead of the
-   "not available here" message box.
-6. **Verify 100vh sizing** — `panel.css:27` (`#joplin-plugin-content height:100vh; overflow:hidden`).
-   Inside the mobile plugin-dialog iframe, 100vh may not equal the visible dialog height; switch to
-   `100dvh` or a flex-fill layout if the list clips or leaves dead space.
-7. **Autocomplete on touch** — confirm the mousedown-before-blur suggestion pick
-   (`panelWebview.js:448`) works in the Android webview; if it double-fires or blur commits first,
-   switch to pointerdown/touchstart with `preventDefault`.
-8. **Tap-target sizing pass** — audit the 22px row-action buttons (`panel.css:309`) and 18px checkbox
-   circle (`panel.css:438`) against the ~44px touch-target guideline; bump on mobile via an
-   `isMobile`-gated class.
+### 2. Touch-interaction layer + tap targets + viewport (`panelWebview.js`, `panel.css`)
 
-## UNKNOWNS — first Pixel sideload test checklist
+All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click, dblclick,
+`contextmenu` and HTML5 drag are untouched.
 
-Things only a real Pixel + Joplin mobile can answer. Work through these in the first device session.
+- **Long-press context menus**: a Pointer Events adapter (500 ms; cancelled by >10 px move, pointer
+  up/cancel, or a list scroll) synthesises the three desktop context-menu handlers (to-do row, note
+  row, group heading). The trailing synthetic click is swallowed so tap-to-open does not also fire.
+- **Reschedule on touch**: a mobile-only "Move to date…" to-do menu entry (and a checkbox long-press)
+  posts the existing `setAlarmClicked`, i.e. opens the alarm dialog as the date picker.
+- **Sync status without hover**: long-pressing the sync button shows its tooltip
+  (last-sync time / duration / errors) as a transient bottom toast.
+- **Tap targets**: ~40 px hit areas via `::after` overlays and stacked-row `min-height`, with the
+  18 px checkbox ring and row layout preserved visually.
+- **Autocomplete on touch**: the search-suggestion pick commits on `pointerdown` (not `mousedown`) on
+  mobile, keeping the field focused and the soft keyboard up.
+- **Viewport**: `#joplin-plugin-content` keeps `height: 100vh` as the base, with a mobile-gated
+  `@supports (height: 100dvh)` override to `100dvh` on `.cockpit-mobile`. Inside the plugin-dialog
+  iframe `dvh == vh`, so this is a harmless, future-proof line; the real fill guarantee is the flex
+  column (`.todos { flex:1 1 auto; min-height:0; overflow-y:auto }`).
 
-1. **Clipboard** — is `joplin.clipboard` implemented on the mobile runtime at all? Test copy-link /
-   copy-id from the note menu: do they copy, or hit the new "clipboard is not available here" message?
-   (Bundled type is Electron-backed, `api/JoplinClipboard.d.ts:2`.)
-2. **App commands** — which of `moveToFolder`, `setTags`, `duplicateNote`, `newFolder`, `renameFolder`
-   actually exist as executable commands on mobile? Each that is absent falls back to the message box;
-   this decides how many context-menu/notebook actions need native `joplin.data` fallbacks (LATER 5).
-3. **contextmenu** — does `contextmenu` ever fire from a long-press in the Android plugin webview, or is
-   it fully dead? Decides urgency of the long-press adapter (LATER 1).
-4. **100vh** — does `100vh` (`panel.css:27`) map to the visible plugin-dialog height, or does mobile
-   viewport/notch/dialog chrome make the list clip or leave a gap? (LATER 6.)
-5. **Dialog widths** — measure the actual rendered width of the plugin panel dialog and of custom
-   dialogs on a Pixel. Validates the alarm-dialog width fix (batch item 4) and whether
-   `notebookPicker`'s 300px (`src/ui/panel/panel.ts`) fits.
-6. **panels.visible() on mobile** — does `joplin.views.panels.visible()` return meaningful state for the
-   mobile tabbed-dialog panel (open vs closed)? The batch item 5 visibility-skip depends on it. If it
-   returns false when the tab is merely inactive, panel content may be up to 60s stale when the tab is
-   opened (the try/catch defaults to visible, so an *error* is safe; a *wrong-but-valid* value is the
-   risk). If stale, add a refresh trigger on the mobile show path.
-7. **Touch mouse synthesis** — do touch taps reliably synthesize the `mousedown` that row selection
-   (`panelWebview.js:82`) and autocomplete (`panelWebview.js:448`) rely on, with correct ordering
-   relative to input blur? (LATER 7.)
-8. **Cold-start cost** — real cost on weaker hardware of the 300-body checkbox fetch cap
-   (`src/core/joplin.ts`) + 5/15/30s follow-up refreshes over a large vault; decides whether to lower
-   the cap / trim follow-ups on mobile.
-9. **app_min_version_mobile** — is `"3.3"` actually the lowest version that runs this plugin (panels +
-   `versionInfo.platform` + guarded commands all present), or should it be raised?
+### 3. Command fallbacks + responsive alarm dialog (this commit)
+
+- **Data-API command fallbacks** (`src/ui/panel/panel.ts`). `moveToFolder`, `setTags` and
+  `duplicateNote` are registered only on desktop; on mobile they throw. A new
+  `tryAppCommandWithFallback(commandName, args, fallback)` runs the native command first (desktop:
+  succeeds → native dialog preserved exactly) and, **only on mobile**, runs a `joplin.data` fallback
+  when it throws. If a command is later added to mobile, the native one is used automatically.
+  - `moveToFolder` → `moveNotesFallback`: the existing `pickNotebook` dialog (notebooks only, no
+    root) + a `parent_id` PUT per note. Wired for both the note context menu and the notebook-row
+    "move to notebook" action.
+  - `duplicateNote` → `duplicateNoteFallback`: GET the note's copyable fields → POST a fresh copy in
+    the same notebook (title not renamed, `todo_completed` reset to 0, id/timestamps left for Joplin;
+    `:/resource` links resolve to the same shared resources, matching desktop).
+  - `setTags` → `setTagsFallback`: a new comma-separated tag-input dialog (`tagPicker`) prefilled with
+    the note's current tags; on OK the desired titles are diffed against the current ones — missing
+    tags attached (reusing an existing tag id or creating one), removed tags detached. Titles are
+    lowercased to match Joplin's storage; a freshly created tag invalidates the tag cache.
+- **Responsive alarm dialog** (`src/ui/alarm/alarm.ts`). All narrow-screen rules live inside the
+  existing `@media (max-width: 440px)` block, so the desktop measurement stays an unconditional 424 px
+  side-by-side layout (the documented dialog-sizing feedback loop is untouched). Under 440 px the
+  wrapper goes fluid (`calc(100vw - 16px)`), `#alarmBody` stacks to a column (calendar on top, time
+  columns below), and the hour/minute columns share the width at a compact 132 px height so stacking
+  does not make a very tall dialog. The date/time fields stay **text** inputs (a numeric keyboard
+  cannot type the `-`/`:` separators) and are hardened with
+  `inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"` so
+  mobile autocorrect/autocaps cannot mangle the ISO strings; primary input remains the tap pickers.
+
+## Remaining / optional mobile work
+
+- **Full touch drag-to-reschedule** — the "Move to date…" menu entry (above) already covers
+  rescheduling on touch. A richer drag (Pointer Events long-press + move onto a `data-drop` target,
+  reusing the existing `['todosDropped', ids, target]` message) is a nice-to-have, not a blocker.
+- **Tag autocomplete in the mobile tag picker** — the `setTags` fallback is a plain comma input;
+  autocomplete against `getAllTags()` could be added later if the plain input proves fiddly.
+- **`app_min_version_mobile` bump** — only if checklist step 8 reproduces the pre-3.4.6 off-screen
+  dialog-buttons bug.
+
+## FIRST-SIDELOAD TEST CHECKLIST (Pixel)
+
+Work through these in order in the first device session. Each step says what to do and what
+success vs failure looks like. The build to install is
+`publish/io.github.pmslava.cockpit.jpl` (produced by `npm run dist`).
+
+1. **Install the `.jpl` from file.** Copy `io.github.pmslava.cockpit.jpl` to the Pixel (USB, Drive,
+   or email-to-self). In Joplin: **Settings → Plugins → the three-dot / gear menu → Install from
+   file**, pick the `.jpl`, then **restart Joplin** if prompted.
+   - Success: Cockpit appears in the plugin list as enabled, no load error.
+   - Failure: an install/parse error, or the plugin is greyed out → check `app_min_version_mobile`
+     against the device's Joplin version (step 8); capture the error text.
+
+2. **Open the panel.** On the note screen tap Joplin's **toolbar plugin-panel button**. Cockpit is a
+   tab inside Joplin's shared plugin-panel dialog (if it is the only plugin panel, there is a single
+   button; with others, tabs).
+   - Success: the panel opens showing the profile row, notebook/sort/search row, and the to-do list;
+     it **fills the dialog height** with no large dead gap and no clipped/cut-off bottom.
+   - Failure (viewport): the list is cut off, or there is a big empty band below it → the `100dvh`
+     path needs the percentage-height fallback in `panel.css` (see the VIEWPORT note); record roughly
+     how much is clipped/empty.
+
+3. **Tap-to-open and tap targets.** Tap a to-do title, then tap the checkbox ring, then the small
+   row-action / dropdown buttons.
+   - Success: tapping a title opens the note; the checkbox toggles; the small buttons are easy to hit
+     first-try (≈40 px targets).
+   - Failure: taps miss or need multiple tries, or tapping the ring opens the note instead of toggling
+     → note which control and how far off.
+
+4. **Long-press context menu.** Long-press (~0.5 s) a to-do row, a plain-note row, and a group
+   heading in turn.
+   - Success: the context menu appears for each; a short scroll or a quick tap does **not** trigger
+     it; dismissing works.
+   - Failure: no menu ever appears (long-press dead), or a normal tap/scroll fires it by accident, or
+     the menu opens then immediately closes → note which target and which misbehaviour.
+
+5. **Command fallbacks — the core of this commit.** From a to-do's long-press menu, try each:
+   - **Move to folder / Move to notebook**: pick a target notebook in the picker, confirm.
+     - Success: the note moves; the list updates within a second or two.
+     - Failure: a "…is not available here" message box (fallback did not run), the picker shows behind
+       the panel, or the note does not move → record which.
+   - **Duplicate**: run it, then check the target notebook.
+     - Success: an exact copy appears (same title, same body); a duplicated to-do is **open**, not
+       completed.
+     - Failure: "not available here", no copy, or the copy is marked done.
+   - **Tags**: the tag picker opens prefilled with the note's current tags; edit the comma-separated
+     list (add one, remove one, add a brand-new tag name), confirm.
+     - Success: added tags attach, removed tags detach, a new tag name is created and attached; the
+       new tag then appears in the search field's `tag:` autocomplete.
+     - Failure: "not available here", tags not applied, or a duplicate tag created for an existing
+       name (case mismatch).
+   - **Copy Markdown link / Copy note ID**: run each, paste into the note body.
+     - Success: the link / id pastes.
+     - Failure: the "clipboard is not available here" message → clipboard is unimplemented on this
+       runtime (expected-possible; not a regression).
+
+6. **Set-alarm / responsive alarm dialog.** Long-press a to-do's checkbox ring (or use "Move to
+   date…"). The alarm dialog opens.
+   - Success: on the narrow screen the **calendar sits on top and the hour/minute columns below it**
+     (stacked, not crushed side-by-side); tapping a calendar day fills the date field, tapping
+     hour/minute fills the time; the quick buttons (Today / Tomorrow / +1 week / +month) work;
+     **OK / Clear alarm / Cancel are all visible and tappable**; OK sets the due date/time.
+   - Failure: the calendar is squeezed to a sliver next to the time columns (stacking media query not
+     applied), the dialog opens behind the panel, or the bottom buttons are off-screen (→ step 8).
+
+7. **Typing in the alarm date/time fields.** Tap into the `YYYY-MM-DD` and `HH:MM` fields and type.
+   - Success: a normal text keyboard appears; typed `-` and `:` separators work; no autocorrect/
+     autocaps mangling; a valid value is accepted, an invalid one shows the "must be YYYY-MM-DD …"
+     message.
+   - Failure: a digits-only keyboard with no `-`/`:` (should not happen — fields are `inputmode=text`),
+     or autocorrect rewrites the string.
+
+8. **Dialog buttons on-screen (Android version check).** During steps 5–6, confirm every dialog's
+   footer buttons are reachable.
+   - Success: OK / Cancel (and Clear alarm) are on-screen and tappable.
+   - Failure: footer buttons are cut off the bottom → this is the pre-3.4.6 Android bug; note the
+     device's Joplin version and consider bumping `app_min_version_mobile` to "3.4".
+
+9. **Dialog-behind-panel race (regression watch).** Repeat opening a dialog (alarm, tag picker,
+   notebook picker) several times, sometimes right as the list would refresh.
+   - Success: the dialog always appears **in front** of the panel.
+   - Failure: it occasionally opens behind the panel → the timing guard is not fully holding on this
+     device; capture how often and from which trigger.
+
+10. **Autocomplete + soft keyboard.** In the search field type `tag:` or `title:` and tap a
+    suggestion.
+    - Success: the suggestion commits into the field, the field stays focused, the keyboard stays up.
+    - Failure: the tap dismisses the keyboard without committing, or double-commits.
+
+11. **Cold-start feel over a real vault.** Note time-to-first-render and scrolling smoothness on the
+    first open over the full vault.
+    - Success: the panel paints quickly; checkbox rings fill in over the next refresh or two.
+    - Failure: a long stall or janky scroll on first open → candidate for the mobile perf trims
+      (lower the body-fetch cap / trim follow-up refreshes); record rough timings.

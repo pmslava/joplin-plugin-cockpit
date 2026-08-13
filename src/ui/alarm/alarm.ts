@@ -28,11 +28,33 @@ const dialogCss = `
         width: 424px;
     }
     /* On a narrow (mobile) screen the fixed width would overflow, so the wrapper is allowed to shrink
-     * there. Kept behind a media query so the desktop measurement stays an unconditional 424px and
-     * never depends on the pre-sized 100vw, which the note above documents starts at a small minimum. */
+     * there, and the calendar / time columns stack instead of sitting side by side (which crushes the
+     * 7-column calendar below ~340px inner). Everything narrow lives inside this one media query so the
+     * desktop measurement stays an unconditional 424px, an unconditional side-by-side layout, and never
+     * depends on the pre-sized 100vw, which the note above documents starts at a small minimum. The
+     * breakpoint matches the width switch above (440px), so there is exactly one narrow/wide transition
+     * and side-by-side is only ever rendered at >=440px, where it comfortably fits. */
     @media (max-width: 440px) {
         #joplin-plugin-content {
             width: calc(100vw - 16px);
+        }
+        /* Use the full narrow width rather than capping at 400px */
+        #alarmForm {
+            max-width: none;
+        }
+        /* Calendar on top, the hour/minute columns below it */
+        #alarmBody {
+            flex-direction: column;
+        }
+        #alarmTimePanel {
+            justify-content: center;
+        }
+        .alarm-time-col {
+            /* Compact (~4-5 rows) so a stacked column under the 245px-min calendar does not make a very
+             * tall dialog; the hour & minute lists share the full width instead of 46px each. */
+            height: 132px;
+            flex: 1 1 0;
+            max-width: 120px;
         }
     }
     #alarmForm {
@@ -221,8 +243,10 @@ export async function openAlarmDialog(todoIDs){
         <form name="alarm" id="alarmForm">
             <strong>Set alarm for ${count}</strong>
             <div id="alarmFields">
-                <input name="date" id="alarmDate" placeholder="YYYY-MM-DD" value="${initialDate}" oninput="onAlarmDateEdited()">
-                <input name="time" id="alarmTime" placeholder="HH:MM" value="${initialTime}" oninput="onAlarmTimeEdited()">
+                <input name="date" id="alarmDate" placeholder="YYYY-MM-DD" value="${initialDate}" oninput="onAlarmDateEdited()"
+                    inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+                <input name="time" id="alarmTime" placeholder="HH:MM" value="${initialTime}" oninput="onAlarmTimeEdited()"
+                    inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
             </div>
             <div id="alarmBody">
                 <div id="alarmCalendar"></div>

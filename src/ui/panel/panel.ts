@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getAllTags, getNotebookMap, invalidateNotebookMap, openTodo, searchTitleSuggestions, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
+import { getAllTags, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, openTodo, searchTitleSuggestions, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
 import { openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
@@ -60,6 +60,12 @@ const sortFieldLabels = { title: "Title", updated: "Updated", created: "Created"
 /** notebookPickerDialog ****************************************************************************************************************************/
 var notebookPickerDialog = null
 
+/** tagPickerDialog *********************************************************************************************************************************
+ * The dialog behind the mobile setTags fallback: a single comma-separated tag input. Only ever opened on mobile (where the native setTags command   *
+ * is absent), but created unconditionally at startup so the handle exists if the fallback path runs.                                                *
+ ***************************************************************************************************************************************************/
+var tagPickerDialog = null
+
 /** setupPanel **************************************************************************************************************************************
  * Creates the panel in joplin and connects the event handler.                                                                                      *
  ***************************************************************************************************************************************************/
@@ -69,6 +75,7 @@ export async function setupPanel(){
     await joplin.views.panels.addScript(panel, '/ui/panel/panel.css')
     await joplin.views.panels.onMessage(panel, eventHandler)
     notebookPickerDialog = await joplin.views.dialogs.create('notebookPicker')
+    tagPickerDialog = await joplin.views.dialogs.create('tagPicker')
     applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
 }
 
@@ -113,7 +120,10 @@ async function eventHandler(message){
         await refreshInterfaces()
         scheduleRefresh()
     } else if (message[0] == 'moveToNotebookClicked'){
-        await runAppCommand('moveToFolder', Array.isArray(message[1]) ? message[1] : [message[1]])
+        var moveIDs = Array.isArray(message[1]) ? message[1] : [message[1]]
+        // Desktop runs the native moveToFolder command; mobile (where it is absent) falls back to the
+        // notebook picker + a parent_id PUT per note.
+        await tryAppCommandWithFallback('moveToFolder', moveIDs, () => moveNotesFallback(moveIDs))
         await refreshInterfaces()
         scheduleRefresh()
     } else if (message[0] == 'noteMenuAction'){
@@ -520,6 +530,108 @@ async function runAppCommand(commandName, args?){
     }
 }
 
+/** tryAppCommandWithFallback ***********************************************************************************************************************
+ * Like runAppCommand, but with a mobile-only data-API fallback. moveToFolder / setTags / duplicateNote are registered only on desktop, so on mobile *
+ * they throw and hit the "not available here" message box. This runs the native command first: on desktop it exists and succeeds, so the native      *
+ * dialog (tag autocomplete, move, duplicate) is preserved exactly. On mobile it throws, and the fallback runs the equivalent through joplin.data.     *
+ * If a command is ever added to mobile, the try simply succeeds and the native one is used automatically. Without a fallback (or on desktop) the      *
+ * behaviour is identical to runAppCommand.                                                                                                           *
+ ***************************************************************************************************************************************************/
+async function tryAppCommandWithFallback(commandName, args, fallback){
+    try {
+        await (args === undefined ? joplin.commands.execute(commandName) : joplin.commands.execute(commandName, args))
+    } catch (error) {
+        if ((await isMobile()) && fallback){
+            await fallback()
+        } else {
+            console.warn(`Cockpit: the command ${commandName} could not be run`, error)
+            await joplin.views.dialogs.showMessageBox(`Cockpit: "${commandName}" is not available here.`)
+        }
+    }
+}
+
+/** moveNotesFallback *******************************************************************************************************************************
+ * The mobile fallback for moveToFolder: pick a target notebook and PUT parent_id on each note. No includeRoot - a note must live in a notebook, so   *
+ * only notebooks are offered. Uses the same pickNotebook dialog and the same parent_id PUT shape as setTodoDueDates.                                 *
+ ***************************************************************************************************************************************************/
+async function moveNotesFallback(noteIDs){
+    var target = await pickNotebook("Move to notebook")
+    if (target === null) return                              // cancelled
+    for (var id of noteIDs) await joplin.data.put(['notes', id], null, { parent_id: target })
+}
+
+/** duplicateNoteFallback ***************************************************************************************************************************
+ * The mobile fallback for duplicateNote: GET the note's copyable fields and POST a fresh copy in the same notebook. Matches desktop's behaviour -    *
+ * the title is not renamed, a duplicated task is left open (todo_completed 0), and id / timestamps / order are left for Joplin to assign. The body's  *
+ * :/resourceId links resolve to the same shared resources, so no resource duplication is needed (desktop behaves identically).                       *
+ ***************************************************************************************************************************************************/
+async function duplicateNoteFallback(noteID){
+    var note = await joplin.data.get(['notes', noteID], { fields:
+        ['title', 'body', 'parent_id', 'is_todo', 'todo_due', 'markup_language', 'source_url', 'author', 'latitude', 'longitude', 'altitude'] })
+    await joplin.data.post(['notes'], null, {
+        title: note.title, body: note.body, parent_id: note.parent_id,
+        is_todo: note.is_todo, todo_due: note.todo_due, todo_completed: 0,
+        markup_language: note.markup_language, source_url: note.source_url, author: note.author,
+        latitude: note.latitude, longitude: note.longitude, altitude: note.altitude,
+    })
+}
+
+/** setTagsFallback *********************************************************************************************************************************
+ * The mobile fallback for setTags: a single comma-separated tag input prefilled with the note's current tags. On OK the desired titles are diffed    *
+ * against the current ones - missing tags are attached (reusing an existing tag id, or creating one), and removed tags are detached. Joplin stores    *
+ * tag titles lowercased, so titles are compared case-insensitively.                                                                                  *
+ ***************************************************************************************************************************************************/
+async function setTagsFallback(noteID){
+    var currentTags = await joplin.data.get(['notes', noteID, 'tags'], { fields: ['id', 'title'] })
+    var currentByTitle = new Map()
+    for (var tag of (currentTags.items || [])) currentByTitle.set(String(tag.title || "").toLowerCase(), tag.id)
+    var currentTitles = [...currentByTitle.keys()]
+
+    await joplin.views.dialogs.setHtml(tagPickerDialog, `
+        <style>
+            #joplin-plugin-content { width: 300px; }
+        </style>
+        <form name="tagpicker" style="display: flex; flex-direction: column; gap: 10px; padding: 14px;">
+            <strong>Tags (comma separated)</strong>
+            <input name="tags" value="${escapeHtml(currentTitles.join(", "))}"
+                inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                style="padding: 4px 6px; font-family: inherit; font-size: inherit; color: inherit; background: inherit; border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;">
+        </form>
+    `)
+    var result = await openPluginDialog(tagPickerDialog)
+    if (!result || result.id !== 'ok' || !result.formData || !result.formData.tagpicker) return
+
+    // Parse desired titles: trim, lowercase (Joplin stores lowercase), drop blanks and duplicates.
+    var desired = new Set()
+    for (var raw of String(result.formData.tagpicker.tags || "").split(",")){
+        var title = raw.trim().toLowerCase()
+        if (title) desired.add(title)
+    }
+
+    // Title -> id over every existing tag, so a desired-but-absent tag reuses its id rather than creating a duplicate.
+    var allByTitle = new Map()
+    for (var existing of await getAllTags()) allByTitle.set(String(existing.title || "").toLowerCase(), existing.id)
+
+    var createdAny = false
+    // Attach every desired tag the note does not already carry.
+    for (var wantTitle of desired){
+        if (currentByTitle.has(wantTitle)) continue
+        var tagID = allByTitle.get(wantTitle)
+        if (!tagID){
+            var created = await joplin.data.post(['tags'], null, { title: wantTitle })
+            tagID = created.id
+            createdAny = true
+        }
+        await joplin.data.post(['tags', tagID, 'notes'], null, { id: noteID })
+    }
+    // Detach every current tag the user removed.
+    for (var [haveTitle, haveID] of currentByTitle){
+        if (!desired.has(haveTitle)) await joplin.data.delete(['tags', haveID, 'notes', noteID])
+    }
+    // A freshly created tag should show up in the search field's tag: autocomplete without waiting for the TTL.
+    if (createdAny) invalidateTagsCache()
+}
+
 /** copyToClipboard *********************************************************************************************************************************
  * Writes text to the clipboard. joplin.clipboard is Electron-backed, and whether it is wired on the mobile runtime is unknown, so an absent or       *
  * failing clipboard degrades to the same "not available here" message the app commands use rather than throwing an unhandled rejection.             *
@@ -548,11 +660,13 @@ async function runNoteMenuAction(action, noteID){
         var note = await joplin.data.get(['notes', noteID], { fields: ['is_todo'] })
         await joplin.data.put(['notes', noteID], null, { is_todo: note.is_todo ? 0 : 1 })
     } else if (action == 'tags'){
-        await runAppCommand('setTags', [noteID])
+        // Desktop opens its native tag-autocomplete dialog; mobile (no such command) falls back to a
+        // comma-separated tag input applied through the data API.
+        await tryAppCommandWithFallback('setTags', [noteID], () => setTagsFallback(noteID))
     } else if (action == 'moveToFolder'){
-        await runAppCommand('moveToFolder', [noteID])
+        await tryAppCommandWithFallback('moveToFolder', [noteID], () => moveNotesFallback([noteID]))
     } else if (action == 'duplicate'){
-        await runAppCommand('duplicateNote', [noteID])
+        await tryAppCommandWithFallback('duplicateNote', [noteID], () => duplicateNoteFallback(noteID))
     } else if (action == 'copyMarkdownLink'){
         var linkNote = await joplin.data.get(['notes', noteID], { fields: ['title'] })
         await copyToClipboard(`[${linkNote.title}](:/${noteID})`)
