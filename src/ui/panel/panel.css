@@ -500,6 +500,7 @@ h2 {
     font-size: 0.85em;
     color: var(--joplin-color-faded, #999999);
     background-color: var(--joplin-background-color3, rgba(127, 127, 127, 0.15));
+    cursor: pointer;
 }
 
 .todo-notebook:hover {
