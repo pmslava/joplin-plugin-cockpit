@@ -40,10 +40,12 @@
     --cockpit-completed-opacity: 1;
     /* The diameter of the to-do checkbox / note progress ring. A hard default (not a Joplin alias)
      * because a circle always has a size; the themes feature (buildThemeCss) emits an override from
-     * the setting. 18px restores the original 18px default; the glyph is now centred on the first
-     * line (a ~0.75px correction versus the old top-aligned position), so it is not pixel-identical
-     * to the pre-setting look. The ring thickness and disc inset are FIXED px (not ratios of this),
-     * so a bigger circle reads as a bigger fine ring rather than a bloated one. */
+     * the setting. 18px is pixel-identical to the original 18px look the user liked: the circle is
+     * top-aligned (no downward nudge), so at the default it lands exactly where it always did. A
+     * centring correction applies ONLY when the circle is TALLER than one text line, where no
+     * original look exists (the title drops to meet the bigger circle - see .todo-title). The ring
+     * thickness and disc inset are FIXED px (not ratios of this), so a bigger circle reads as a
+     * bigger fine ring rather than a bloated one. */
     --cockpit-circle-size: 18px;
     /* The height of one line of body text (font-size x line-height 1.5), mirrored from the body rule
      * below so it survives a font-size setting change. The item glyph is centred on the first text
@@ -500,11 +502,18 @@ h2 {
     width: var(--cockpit-circle-size);
     height: var(--cockpit-circle-size);
     margin: 0;
-    /* Centre the circle on the first line of the row. When the circle is smaller than a line it drops
-     * by half the slack; when it is larger the title takes the offset instead (see .todo-title), so
-     * this stays 0 and never pulls the circle up out of the row. Either way the circle's centre lands
-     * on the first line's centre at every circle and font size. */
-    margin-top: max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2));
+    /* Centre the circle on the first line's OPTICAL middle, not the geometric line box. The text run
+     * sits ~0.75px above the line-box centre (ascent-heavy fonts), so the -0.75px optical term below
+     * lands the circle on the text rather than 0.75px under it - which is what an earlier attempt got
+     * wrong by centring on --cockpit-row-line-height (the line box) and drew the "text higher than
+     * the circles" complaint. At the 18px default the drop is max(0, (L-18)/2 - 0.75) = 0 EXACTLY
+     * (L/2 = 9.75, 18/2 = 9, slack 0.75, cancelled), so the circle is top-aligned pixel-for-pixel
+     * with the original the user liked. It only leaves 0 when the circle is smaller than the line's
+     * optical half (e.g. a larger font-size with the default circle); when the circle is TALLER than
+     * a line the title drops instead (see .todo-title) and this clamps back to 0. Being derived from
+     * the same 0.75 term for every row variant, the offset is identical across them, so the circles
+     * line up with each other. */
+    margin-top: max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2 - 0.75px));
     flex-shrink: 0;
     border-radius: 50%;
     background: conic-gradient(
@@ -567,9 +576,12 @@ h2 {
     padding: 0 3px;
     margin: 0 -3px;
     /* The mirror of the circle's margin-top: when the circle is taller than a line, the title drops
-     * by half the slack so the first line's centre meets the circle's centre. Zero when the circle
-     * fits within a line (the circle takes the offset instead). Keeps the -3px horizontal margin. */
-    margin-top: max(0px, calc((var(--cockpit-circle-size) - var(--cockpit-row-line-height)) / 2));
+     * so the first line's OPTICAL centre meets the circle's centre. The +0.75px is the same optical
+     * term as the circle uses (the text run sits ~0.75px above the line box), so a large circle
+     * centres on the text and not 0.75px above it. Zero at the 18px default and whenever the circle
+     * fits within a line's optical half (the circle takes the offset instead), so the default title
+     * is pixel-identical to the original. Keeps the -3px horizontal margin. */
+    margin-top: max(0px, calc((var(--cockpit-circle-size) - var(--cockpit-row-line-height)) / 2 + 0.75px));
     border-radius: 3px;
 }
 
@@ -596,8 +608,8 @@ h2 {
     white-space: nowrap;
     /* Track the title's first line at large circle sizes (circle taller than one text line) while
      * keeping the original 1px nudge at the default, so the pill sits on the title line rather than
-     * floating near the top of the row. Matches .todo-title's first-line offset. */
-    margin-top: calc(1px + max(0px, (var(--cockpit-circle-size) - var(--cockpit-row-line-height)) / 2));
+     * floating near the top of the row. Mirrors .todo-title's first-line optical offset exactly. */
+    margin-top: calc(1px + max(0px, calc((var(--cockpit-circle-size) - var(--cockpit-row-line-height)) / 2 + 0.75px)));
     padding: 0 7px;
     border-radius: 9px;
     font-size: 0.85em;
@@ -619,8 +631,9 @@ h2 {
     width: var(--cockpit-circle-size);
     height: var(--cockpit-circle-size);
     margin: 0;
-    /* Same first-line centring as the to-do checkbox, so note rows and to-do rows line up */
-    margin-top: max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2));
+    /* Same optical first-line centring as the to-do checkbox, so note rows and to-do rows line up
+     * identically (0 at the 18px default: top-aligned, pixel-identical to the original) */
+    margin-top: max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2 - 0.75px));
     flex-shrink: 0;
     border-radius: 50%;
     background: conic-gradient(
