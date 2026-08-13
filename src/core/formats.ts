@@ -111,8 +111,18 @@ abstract class BaseFormat {
      * availableNotebooks still lists every notebook the unfiltered to-dos live in.                                                                  *
      ***********************************************************************************************************************************************/
     protected async fetchTodos(){
+        var notebooks = await getNotebookMap()
         var searchFilter = this.viewState ? (this.viewState as any).searchFilter : null
         var searchCriteria = searchFilter ? `${this.profile.searchCriteria} ${searchFilter}` : this.profile.searchCriteria
+        var notebookFilter = this.viewState ? (this.viewState as any).notebookFilter : null
+        // The notebook filter is also pushed into the query (Joplin's notebook: filter is
+        // recursive), so the server does not return the whole vault only for most of it to be
+        // thrown away below. The precise filtering still happens client side, because notebook
+        // titles are not necessarily unique.
+        var filterNotebook = notebookFilter ? notebooks.get(notebookFilter) : null
+        if (filterNotebook && filterNotebook.title && !filterNotebook.title.includes('"')){
+            searchCriteria = `${searchCriteria} notebook:"${filterNotebook.title}"`
+        }
         var showAnyCompleted = this.profile.showCompletedPast || this.profile.showCompletedToday || this.profile.showCompletedFuture || this.profile.showCompletedNoDue
         var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria)
         if (showAnyCompleted){
@@ -125,7 +135,6 @@ abstract class BaseFormat {
                 return this.profile.showCompletedFuture
             })
         }
-        var notebooks = await getNotebookMap()
         var present = new Map()
         for (var todo of todos){
             var notebook = notebooks.get(todo.parent_id)
@@ -134,7 +143,6 @@ abstract class BaseFormat {
             if (notebook) present.set(notebook.id, notebook)
         }
         this.availableNotebooks = [...present.values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
-        var notebookFilter = this.viewState ? (this.viewState as any).notebookFilter : null
         if (notebookFilter){
             var allowedNotebooks = notebookWithDescendants(notebooks, notebookFilter)
             todos = todos.filter(todo => allowedNotebooks.has(todo.parent_id))
@@ -634,10 +642,15 @@ export function itemComparator(sort){
  * checkbox progress of the note and cannot be ticked.                                                                                              *
  ***************************************************************************************************************************************************/
 export async function renderNotesSection(profile, viewState){
+    var notebooks = await getNotebookMap()
     var searchFilter = viewState ? viewState.searchFilter : null
     var searchCriteria = searchFilter ? `${profile.searchCriteria} ${searchFilter}` : profile.searchCriteria
+    // Same server side notebook narrowing as fetchTodos, so showing notes does not pull the vault
+    var sectionFilterNotebook = viewState && viewState.notebookFilter ? notebooks.get(viewState.notebookFilter) : null
+    if (sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"')){
+        searchCriteria = `${searchCriteria} notebook:"${sectionFilterNotebook.title}"`
+    }
     var notes = await getNotes(searchCriteria)
-    var notebooks = await getNotebookMap()
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
         note.notebookTitle = notebook ? notebook.title : ""

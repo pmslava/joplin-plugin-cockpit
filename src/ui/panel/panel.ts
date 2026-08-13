@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getNotebookMap, openTodo, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
+import { getNotebookMap, invalidateNotebookMap, openTodo, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
 import { openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getAllProfiles, getProfile } from "../../core/database";
@@ -105,6 +105,7 @@ async function eventHandler(message){
         await runNotebookAction('delete', String(message[1] || ""))
     } else if (message[0] == 'createNotebookClicked'){
         await runAppCommand('newFolder')
+        invalidateNotebookMap()
         lastRenderedHtml = null
         await refreshInterfaces()
         scheduleRefresh()
@@ -374,6 +375,7 @@ async function runNotebookAction(action, folderID){
     if (!folderID) return
     // A cancelled dialog leaves the markup unchanged, so force a redraw
     lastRenderedHtml = null
+    invalidateNotebookMap()
     if (action == 'rename'){
         await runAppCommand('renameFolder', folderID)
     } else if (action == 'move'){

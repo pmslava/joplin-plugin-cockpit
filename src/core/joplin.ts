@@ -17,21 +17,14 @@ import joplin from 'api';
     do {
         var response = await joplin.data.get(['search'], {
             query: `type:todo ${completed} ${noDue} ${searchCritera}`,
-            fields: ['id', 'title', 'todo_completed', 'todo_due', 'parent_id', 'body', 'user_updated_time', 'user_created_time'],
+            fields: ['id', 'title', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time'],
             type: 'note',
             order_by: 'todo_due',
             page: pageNum++,
         })
         allTodos = allTodos.concat(response.items)
     } while (response.has_more)
-    // Each to-do's progress is how many of the markdown checkboxes inside its note are ticked.
-    // The bodies are only needed for that count, so they are dropped right away.
-    for (var todo of allTodos){
-        var counts = countCheckboxes(todo.body)
-        todo.checkboxDone = counts.done
-        todo.checkboxTotal = counts.total
-        delete todo.body
-    }
+    await attachCheckboxCounts(allTodos)
     // The search only orders by due date, which leaves to-dos sharing a due date - and the whole
     // "No Due Date" group - in arbitrary order. Ties are broken by title, so that a naming scheme
     // gives a deliberate order. The comparison is case insensitive and number aware ("2" < "10").
@@ -52,19 +45,47 @@ export async function getNotes(searchCriteria){
     do {
         var response = await joplin.data.get(['search'], {
             query: `type:note ${searchCriteria}`,
-            fields: ['id', 'title', 'parent_id', 'body', 'user_updated_time', 'user_created_time'],
+            fields: ['id', 'title', 'parent_id', 'user_updated_time', 'user_created_time'],
             type: 'note',
             page: pageNum++,
         })
         allNotes = allNotes.concat(response.items)
     } while (response.has_more)
-    for (var note of allNotes){
-        var counts = countCheckboxes(note.body)
-        note.checkboxDone = counts.done
-        note.checkboxTotal = counts.total
-        delete note.body
-    }
+    await attachCheckboxCounts(allNotes)
     return allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
+}
+
+/** attachCheckboxCounts ****************************************************************************************************************************
+ * Fills in checkboxDone/checkboxTotal for each item. The counts need the note bodies, which are by far the heaviest thing to transfer, so they are  *
+ * cached per note and a body is only re-fetched when the note's updated time has changed. A refresh therefore usually fetches no bodies at all.     *
+ * On a cold start over a large set, at most maxBodyFetchesPerRefresh bodies are fetched per refresh and the rest fill in on following refreshes,    *
+ * so the panel appears quickly instead of stalling.                                                                                                 *
+ ***************************************************************************************************************************************************/
+var checkboxCounts = new Map()
+const bodyFetchChunk = 20
+const maxBodyFetchesPerRefresh = 300
+
+async function attachCheckboxCounts(items){
+    var stale = items.filter(item => {
+        var cached = checkboxCounts.get(item.id)
+        return !cached || cached.stamp !== item.user_updated_time
+    }).slice(0, maxBodyFetchesPerRefresh)
+    for (var index = 0; index < stale.length; index += bodyFetchChunk){
+        await Promise.all(stale.slice(index, index + bodyFetchChunk).map(async item => {
+            try {
+                var note = await joplin.data.get(['notes', item.id], { fields: ['body'] })
+                var counts = countCheckboxes(note.body)
+                checkboxCounts.set(item.id, { stamp: item.user_updated_time, done: counts.done, total: counts.total })
+            } catch (error) {
+                checkboxCounts.set(item.id, { stamp: item.user_updated_time, done: 0, total: 0 })
+            }
+        }))
+    }
+    for (var item of items){
+        var counts = checkboxCounts.get(item.id)
+        item.checkboxDone = counts ? counts.done : 0
+        item.checkboxTotal = counts ? counts.total : 0
+    }
 }
 
 /** countCheckboxes *********************************************************************************************************************************
@@ -82,7 +103,19 @@ function countCheckboxes(body){
  * Returns a Map of notebook ID to { id, title, path }, where path is the notebook's full "Parent / Child" breadcrumb. Used to show which notebook    *
  * a to-do lives in and to build the notebook filter.                                                                                                *
  ***************************************************************************************************************************************************/
+var notebookMapCache = { stamp: 0, map: null }
+const notebookMapTTL = 20000
+
+/** invalidateNotebookMap ***************************************************************************************************************************
+ * Drops the cached notebook map. Called after the panel itself creates, renames, moves or deletes a notebook, so the change shows immediately       *
+ * rather than when the cache expires.                                                                                                              *
+ ***************************************************************************************************************************************************/
+export function invalidateNotebookMap(){
+    notebookMapCache = { stamp: 0, map: null }
+}
+
 export async function getNotebookMap(){
+    if (notebookMapCache.map && Date.now() - notebookMapCache.stamp < notebookMapTTL) return notebookMapCache.map
     var folders = new Map()
     let pageNum = 1;
     do {
@@ -104,6 +137,7 @@ export async function getNotebookMap(){
         }
         notebooks.set(id, { id: id, title: folder.title, path: titles.join(" / "), parentID: folder.parent_id || "" })
     }
+    notebookMapCache = { stamp: Date.now(), map: notebooks }
     return notebooks
 }
 
