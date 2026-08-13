@@ -5,6 +5,7 @@
 
 export var panelTemplate = `
     <style><<THEME_CSS>><<CUSTOM_CSS>></style>
+    <<ROOT_MARKER>>
     <<CONTROLS>>
     <section class="todos"><<TODOS>></section>
 `

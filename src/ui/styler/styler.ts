@@ -9,6 +9,7 @@ import { refreshPanelData } from "../panel/panel";
 import { escapeHtml } from "../../core/formats";
 import { getCustomCss, setCustomCss } from "../../core/settings";
 import { requireNodeModule } from "../../core/platform";
+import { openPluginDialog } from "../../core/dialog";
 import { stylerTemplate } from "./stylerTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -30,7 +31,7 @@ export async function openStyler(){
     var cssData = escapeHtml(await getCustomCss())
     var formattedHtml = stylerTemplate.replace("<<CSS_DATA>>", () => cssData)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);
-    var formResult = await joplin.views.dialogs.open(dialog)
+    var formResult = await openPluginDialog(dialog)
     if (formResult.id == 'ok') {
         await setCustomCss(formResult.formData['customCSSForm']['customCss'])
         await refreshPanelData()

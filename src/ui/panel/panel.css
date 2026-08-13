@@ -83,6 +83,20 @@ body {
     overflow: hidden;
 }
 
+/* Mobile viewport refinement. On mobile Cockpit runs in an iframe inside Joplin's native plugin-panel
+ * dialog, whose height is set by the native layout, so 100dvh resolves identically to the 100vh above -
+ * this is a harmless, future-proof switch (it would only diverge if Joplin ever promoted the panel to a
+ * top-level document, where dvh correctly tracks the dynamic viewport). It is gated on the cockpit-mobile
+ * class (added by panelWebview.js from the rendered marker) so the desktop rule stays an unconditional
+ * 100vh, and wrapped in @supports so engines without dvh keep it too. No safe-area padding: env(safe-area-
+ * inset-*) is 0 inside the plugin iframe (Joplin's native dialog chrome handles the notch), so adding it
+ * would be a silent no-op that reads as false safety. */
+@supports (height: 100dvh) {
+    #joplin-plugin-content.cockpit-mobile {
+        height: 100dvh;
+    }
+}
+
 .todos {
     flex: 1 1 auto;
     min-height: 0;

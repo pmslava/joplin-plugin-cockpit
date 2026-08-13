@@ -16,6 +16,7 @@ import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
+import { isDialogOpen, openPluginDialog } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
 import { iconButton, icons } from "../icons";
 
@@ -211,6 +212,14 @@ export async function togglePanelVisibility() {
  ***************************************************************************************************************************************************/
  export async function refreshPanelData(){
     if (!panel) return
+    var mobile = await isMobile()
+    // Dialog guard (mobile only): while a Cockpit dialog is open, a panel refresh calls setHtml, which
+    // re-asserts the panel viewer's native React Native Modal on top of the dialog's Modal - the "the
+    // dialog popped up behind the panel" bug. Skipping the refresh keeps the dialog on top. The guard
+    // clears in openPluginDialog's finally once the dialog is dismissed, and every dialog site refreshes
+    // afterwards, so nothing is lost. Gated to mobile: desktop has no such Modal stacking limitation, so
+    // its refresh timing stays byte-for-byte unchanged.
+    if (mobile && isDialogOpen()) return
     // Building the markup runs the full search / notes / body query cycle, so it is skipped while the
     // panel is hidden (a closed desktop panel, or a plugin dialog the user has not opened on mobile),
     // which otherwise happens on every 60s timer tick and its follow-ups for no visible effect. The
@@ -225,7 +234,7 @@ export async function togglePanelVisibility() {
     // the panel current; the skip stays on desktop, where togglePanelVisibility forces a refresh on show.
     var panelVisible = true
     try {
-        panelVisible = (await isMobile()) || await joplin.views.panels.visible(panel)
+        panelVisible = mobile || await joplin.views.panels.visible(panel)
     } catch (error) {
         console.warn("Cockpit: could not read panel visibility; assuming visible", error)
     }
@@ -246,9 +255,15 @@ export async function togglePanelVisibility() {
     // is injected last and still overrides it.
     var themeCss = await buildThemeCss()
     var customCss = sanitizeCss(await getCustomCss())
+    // A hidden marker element carried in the rendered markup on mobile. panelWebview.js reads it on
+    // every re-render and adds the cockpit-mobile class to the persistent #joplin-plugin-content
+    // wrapper, so mobile-only CSS/JS can branch off it. Empty on desktop, so the desktop markup and DOM
+    // are unchanged.
+    var rootMarker = mobile ? '<div id="cockpitPlatform" hidden></div>' : ''
     var htmlString = panelTemplate
         .replace("<<THEME_CSS>>", () => themeCss)
         .replace("<<CUSTOM_CSS>>", () => customCss)
+        .replace("<<ROOT_MARKER>>", () => rootMarker)
         .replace("<<CONTROLS>>", () => controlsHtml)
         .replace("<<TODOS>>", () => todosHtml)
     if (htmlString === lastRenderedHtml) return
@@ -483,7 +498,7 @@ async function pickNotebook(promptTitle, includeRoot = false){
             </select>
         </form>
     `)
-    var result = await joplin.views.dialogs.open(notebookPickerDialog)
+    var result = await openPluginDialog(notebookPickerDialog)
     if (!result || result.id !== 'ok' || !result.formData || !result.formData.picker) return null
     var picked = result.formData.picker.folderId
     if (picked === "__root") return ""

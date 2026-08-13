@@ -11,14 +11,26 @@ import { refreshPanelData } from "../ui/panel/panel";
 import { getOverviewNoteIDs, refreshNoteData } from "./markdown";
 import { updateFrequencySettingKey } from "./settings";
 import { markSyncComplete, markSyncStart } from "./syncStatus";
+import { isMobile } from "./platform";
 
 /** Variable Initialization ************************************************************************************************************************/
 const defaultUpdateFrequency = 60
+// On mobile every periodic refresh is a full search/notes/body cycle across the React Native bridge and,
+// unlike desktop, it is not suppressed while the panel is hidden (panels.visible() is unreliable on
+// mobile, so refreshPanelData deliberately always renders there). The periodic timer only exists to roll
+// to-dos across day boundaries (Today -> Overdue), which tolerates a slower beat - interactive freshness
+// is covered by onNoteChange + scheduleRefresh - so the mobile default is doubled to halve that waste.
+const defaultMobileUpdateFrequency = 120
 const refreshDebounceMs = 1000
 // Joplin keeps the search index up to date on a timer of its own, so a to-do that was just created
 // or edited is not returned by a search that runs immediately after the change, and how long it
 // takes varies. A handful of follow up refreshes covers that without having to poll all the time.
 const followUpDelaysMs = [5000, 15000, 30000]
+// On mobile the search index usually settles within a few seconds and each follow-up is a full bridge
+// round-trip, so the 30s tail is dropped. Chosen once at setup into activeFollowUpDelaysMs below so
+// scheduleRefresh stays synchronous.
+const mobileFollowUpDelaysMs = [5000, 15000]
+var activeFollowUpDelaysMs = followUpDelaysMs
 var timer = null
 var debounceTimer = null
 var followUpTimers = []
@@ -56,7 +68,7 @@ export function scheduleRefresh(){
     clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => { void refreshInterfaces() }, refreshDebounceMs)
     for (var followUpTimer of followUpTimers) clearTimeout(followUpTimer)
-    followUpTimers = followUpDelaysMs.map(delay => setTimeout(() => { void refreshInterfaces() }, delay))
+    followUpTimers = activeFollowUpDelaysMs.map(delay => setTimeout(() => { void refreshInterfaces() }, delay))
 }
 
 /** setupTimer ***************************************************************************************************************************************
@@ -64,8 +76,14 @@ export function scheduleRefresh(){
  ***************************************************************************************************************************************************/
 export async function setupTimer(){
     clearInterval(timer)
+    var mobile = await isMobile()
+    // Resolve the mobile flag once here (isMobile() is cached) so scheduleRefresh can stay synchronous.
+    activeFollowUpDelaysMs = mobile ? mobileFollowUpDelaysMs : followUpDelaysMs
     var updateFrequency = Number(await joplin.settings.value(updateFrequencySettingKey))
     if (!Number.isFinite(updateFrequency) || updateFrequency < 1) updateFrequency = defaultUpdateFrequency
+    // Only when the user has left the interval at its default is it raised on mobile; an explicitly set
+    // value is always honoured. Desktop keeps the 60s default untouched.
+    if (mobile && updateFrequency === defaultUpdateFrequency) updateFrequency = defaultMobileUpdateFrequency
     timer = setInterval(() => { void refreshInterfaces() }, updateFrequency * 1000);
 }
 

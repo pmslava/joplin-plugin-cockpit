@@ -57,10 +57,21 @@ function paintTodoSelection(){
  * it re-attaches the per-element scroll saver, restores the scroll position, repaints the selection and puts an in-progress search draft back. A    *
  * mutation that does not swap .todos (an injected context menu, the suggestion list, a tooltip) leaves the scroll and everything else untouched.    *
  ***************************************************************************************************************************************************/
+// The panel is mobile when the rendered markup carries the #cockpitPlatform marker (emitted by
+// refreshPanelData only on mobile). Mirror that onto the persistent #joplin-plugin-content wrapper as
+// a class, so mobile-only CSS/JS can branch off it. Add-only and gated on the marker's presence, so on
+// desktop (no marker) the wrapper is never touched.
+function applyPlatformClass(){
+    if (!document.getElementById('cockpitPlatform')) return
+    var wrapper = document.getElementById('joplin-plugin-content')
+    if (wrapper) wrapper.classList.add('cockpit-mobile')
+}
+
 function reconcile(){
     var el = document.querySelector('.todos')
     if (el && el !== currentTodosEl){
         currentTodosEl = el
+        applyPlatformClass()
         // Save on genuine user scroll only; ignore the programmatic restore below (and any scroll-to-0
         // fired as the old node is detached), which restoringScroll guards.
         el.addEventListener('scroll', () => { if (!restoringScroll) savedTodosScrollTop = el.scrollTop })

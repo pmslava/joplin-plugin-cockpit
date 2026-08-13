@@ -7,6 +7,7 @@ import joplin from "api";
 import { createProfile, deleteProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getNotebookMap } from "../../core/joplin";
 import { escapeHtml } from "../../core/html";
+import { openPluginDialog } from "../../core/dialog";
 import { editorTemplate } from "./editorTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -36,7 +37,7 @@ export async function openEditor(profileID?){
     var dialogButtons = profileID == null ? createButtons : editButtons
     await joplin.views.dialogs.setButtons(dialog, dialogButtons)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);
-    var formResult = await joplin.views.dialogs.open(dialog)
+    var formResult = await openPluginDialog(dialog)
     if (formResult.id == 'ok') {
         var profile = JSON.parse(decodeURI(atob(formResult.formData["profileDataForm"]["profileData"])))
         if (profileID == null){

@@ -9,6 +9,7 @@ import joplin from "api";
 import { setTodoDueTimestamps } from "../../core/joplin";
 import { getDayStartTime } from "../../core/settings";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
+import { openPluginDialog } from "../../core/dialog";
 
 /** Variable Declaration ***************************************************************************************************************************/
 var alarmDialog = null;
@@ -239,7 +240,7 @@ export async function openAlarmDialog(todoIDs){
         </form>
     `)
 
-    var result = await joplin.views.dialogs.open(alarmDialog)
+    var result = await openPluginDialog(alarmDialog)
     if (!result || result.id === 'cancel') return
 
     var timestamp = 0
