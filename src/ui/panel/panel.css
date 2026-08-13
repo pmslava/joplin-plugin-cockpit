@@ -893,3 +893,82 @@ table {
     border-bottom: none;
     background: none;
 }
+
+/** Touch layer (mobile) ****************************************************************************************************************************
+ * Everything below is gated on the .cockpit-mobile class, which panelWebview.js adds to the
+ * #joplin-plugin-content wrapper and to <body> on mobile only (from the #cockpitPlatform marker). On
+ * desktop the class is never present, so none of these rules ever match and the desktop appearance and
+ * layout are unchanged. The class sits on <body> as well as the wrapper so that the rules below also
+ * reach the context menu and the toast, which are appended to <body> outside the wrapper.
+ ***************************************************************************************************************************************************/
+
+/* Suppress the native text-selection and iOS long-press callout on the pressable zones, so a long
+ * press synthesises the context menu instead of selecting text or raising the system callout. The rows
+ * already carry user-select:none; this adds the callout suppression and covers the group headings. */
+.cockpit-mobile .todo,
+.cockpit-mobile h2[data-todo-ids] {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* Tap-target enlargement. Every rule below grows only the touch/hit area to ~40px; the visible box and
+ * the row layout are unchanged (the checkbox cancels its added padding with an equal negative margin,
+ * and the ::after overlays add no layout). */
+
+/* The checkbox circle: grow the border box to 40px with content-box padding cancelled by an equal
+ * negative margin (so neighbours still see the original margin box), clip the ring to the content box,
+ * and push the two pseudo-elements out by the pad so the disc, hollow and tick render pixel-identical. */
+.cockpit-mobile .todo-checkbox {
+    --tap-pad: max(0px, calc((40px - var(--cockpit-circle-size)) / 2));
+    padding: var(--tap-pad);
+    background-origin: content-box;
+    background-clip: content-box;
+    margin: calc(-1 * var(--tap-pad));
+    /* Fold the existing optical top offset back into the cancelled top margin */
+    margin-top: calc(max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2 - 0.75px)) - var(--tap-pad));
+}
+
+.cockpit-mobile .todo-checkbox::after { inset: calc(var(--tap-pad) + 3px); }
+.cockpit-mobile .todo-checkbox::before { inset: calc(var(--tap-pad) + 4px); }
+
+/* The per-row action buttons (profile / notebook dropdown rows), clustered with 4px gaps: grow
+ * vertically by 18px and 2px into each 4px gap horizontally, so adjacent buttons never collide. */
+.cockpit-mobile .row-action { position: relative; }
+.cockpit-mobile .row-action::after { content: ""; position: absolute; inset: -9px -2px; }
+
+/* Standalone icon buttons (sync, sort direction, mobile styler, calendar nav): 26 + 14 = 40 square. */
+.cockpit-mobile .icon-button { position: relative; }
+.cockpit-mobile .icon-button::after { content: ""; position: absolute; inset: -7px; }
+
+/* Dropdown togglers in the flex filter row: vertical only, so the hit area never overflows the flex
+ * neighbours. */
+.cockpit-mobile .dropdown-toggle { position: relative; }
+.cockpit-mobile .dropdown-toggle::after { content: ""; position: absolute; inset: -7px 0; }
+
+/* The notebook pill (the "Move to notebook" long-press zone): vertical only, kept to the pill width so
+ * it never covers the title. */
+.cockpit-mobile .todo-notebook { position: relative; }
+.cockpit-mobile .todo-notebook::after { content: ""; position: absolute; inset: -9px 0; }
+
+/* Stacked menu rows use min-height rather than ::after overlays (which would collide between rows).
+ * A taller menu row is the standard touch pattern and does not alter the resting panel. */
+.cockpit-mobile .dropdown-item { min-height: 40px; }
+.cockpit-mobile .context-menu-item { display: flex; align-items: center; min-height: 40px; }
+
+.cockpit-mobile .calendar-title { min-height: 40px; }
+
+/* The sync-status toast (mobile long-press on the sync button). It is appended to <body>, so it is not
+ * torn down by the panel's setHtml re-renders, and is fixed to the bottom of the viewport. */
+#cockpitToast {
+    position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 200;
+    padding: 8px 12px; border-radius: 6px;
+    background-color: var(--cockpit-background-color, #1D2024);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    color: var(--cockpit-color, inherit);
+    font-size: 0.9em; text-align: center;
+    opacity: 0; transition: opacity 0.15s ease; pointer-events: none;
+}
+
+#cockpitToast.-show { opacity: 1; }

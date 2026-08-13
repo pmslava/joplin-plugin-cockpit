@@ -57,21 +57,34 @@ function paintTodoSelection(){
  * it re-attaches the per-element scroll saver, restores the scroll position, repaints the selection and puts an in-progress search draft back. A    *
  * mutation that does not swap .todos (an injected context menu, the suggestion list, a tooltip) leaves the scroll and everything else untouched.    *
  ***************************************************************************************************************************************************/
+// True when the panel is running in the Joplin mobile app, read from the #cockpitPlatform marker the
+// plugin emits into the rendered markup on mobile only. It gates every touch-layer behaviour in this
+// file; on desktop the marker is absent so it stays false and all of those behaviours are inert.
+var IS_MOBILE = false
+
 // The panel is mobile when the rendered markup carries the #cockpitPlatform marker (emitted by
-// refreshPanelData only on mobile). Mirror that onto the persistent #joplin-plugin-content wrapper as
-// a class, so mobile-only CSS/JS can branch off it. Add-only and gated on the marker's presence, so on
-// desktop (no marker) the wrapper is never touched.
+// refreshPanelData only on mobile). Mirror that onto a JS global and onto the persistent
+// #joplin-plugin-content wrapper (and <body>) as a class, so mobile-only CSS/JS can branch off it.
+// Add-only and gated on the marker's presence, so on desktop (no marker) IS_MOBILE stays false and no
+// element is ever touched. The class is put on <body> as well as the wrapper because the context menu
+// and the sync-status toast are appended to <body>, which sits OUTSIDE #joplin-plugin-content, so their
+// mobile-gated CSS would not match a class carried only on the wrapper.
 function applyPlatformClass(){
-    if (!document.getElementById('cockpitPlatform')) return
+    IS_MOBILE = !!document.getElementById('cockpitPlatform')
+    if (!IS_MOBILE) return
     var wrapper = document.getElementById('joplin-plugin-content')
     if (wrapper) wrapper.classList.add('cockpit-mobile')
+    document.body.classList.add('cockpit-mobile')
 }
 
 function reconcile(){
+    // Refresh IS_MOBILE and the class on every render (the marker is re-emitted each time); it must run
+    // unconditionally, not only when the .todos node identity changes, so the flag is set before the
+    // first pointer event even on renders that reuse the scroll container.
+    applyPlatformClass()
     var el = document.querySelector('.todos')
     if (el && el !== currentTodosEl){
         currentTodosEl = el
-        applyPlatformClass()
         // Save on genuine user scroll only; ignore the programmatic restore below (and any scroll-to-0
         // fired as the old node is detached), which restoringScroll guards.
         el.addEventListener('scroll', () => { if (!restoringScroll) savedTodosScrollTop = el.scrollTop })
@@ -152,7 +165,7 @@ function onTodoContextMenu(event, todoID){
     } else if (event.target.classList.contains('todo-notebook')){
         void webviewApi.postMessage(['moveToNotebookClicked', [todoID]]);
     } else {
-        showNoteContextMenu(event, todoID)
+        showNoteContextMenu(event, todoID, true)
     }
 }
 
@@ -187,7 +200,7 @@ function onNoteContextMenu(event, noteID){
     if (event.target.classList.contains('todo-notebook')){
         void webviewApi.postMessage(['moveToNotebookClicked', [noteID]]);
     } else {
-        showNoteContextMenu(event, noteID)
+        showNoteContextMenu(event, noteID, false)
     }
 }
 
@@ -205,16 +218,24 @@ var noteMenuItems = [
     { action: 'delete', label: 'Delete note' },
 ]
 
-function showNoteContextMenu(event, noteID){
+function showNoteContextMenu(event, noteID, isTodo){
     hideNoteContextMenu()
+    // On mobile the 18px checkbox circle is a hard touch target, so to-do rows get an explicit
+    // "Move to date…" entry that opens the same set-alarm dialog the circle long-press does. On desktop
+    // (IS_MOBILE false) the list is exactly noteMenuItems and the setDueDate branch below is unreachable,
+    // so the menu and its behaviour are byte-identical to before.
+    var items = (IS_MOBILE && isTodo)
+        ? [{ action: 'setDueDate', label: 'Move to date…' }].concat(noteMenuItems)
+        : noteMenuItems
     var menu = document.createElement('div')
     menu.id = 'noteContextMenu'
-    menu.innerHTML = noteMenuItems.map(item => {
+    menu.innerHTML = items.map(item => {
         return `<button type="button" class="context-menu-item${item.action == 'delete' ? ' -danger' : ''}" data-action="${item.action}">${item.label}</button>`
     }).join('')
     menu.addEventListener('click', clickEvent => {
         var action = clickEvent.target.dataset ? clickEvent.target.dataset.action : null
         hideNoteContextMenu()
+        if (action === 'setDueDate'){ void webviewApi.postMessage(['setAlarmClicked', [noteID]]); return }
         if (action) void webviewApi.postMessage(['noteMenuAction', action, noteID]);
     })
     document.body.appendChild(menu)
@@ -228,6 +249,12 @@ function hideNoteContextMenu(){
 }
 
 document.addEventListener('click', event => {
+    // This capture listener is registered before the long-press adapter's click swallower below, so on
+    // the synthetic click that follows a fired long-press it runs first, while longPress.fired is still
+    // true. Bail out then, or it would close the very menu the long-press just opened. longPress is
+    // hoisted (var) so the reference is safe; on desktop longPress.fired is never true, so this
+    // early-return is never taken and the listener stays byte-identical.
+    if (longPress && longPress.fired) return
     if (!event.target.closest || !event.target.closest('#noteContextMenu')) hideNoteContextMenu()
 }, true)
 document.addEventListener('scroll', hideNoteContextMenu, true)
@@ -246,6 +273,91 @@ function onHeadingContextMenu(event){
     for (var id of ids) selectedTodoIDs.add(id)
     paintTodoSelection()
     void webviewApi.postMessage(['setAlarmClicked', ids]);
+}
+
+/** Long-press adapter (mobile) *********************************************************************************************************************
+ * The mobile webview never fires oncontextmenu, so touch has no way into the context menus that a desktop right click opens. This synthesises them  *
+ * from a Pointer Events long press: a touch that stays put for 500ms on a to-do row, a note row, a group heading or the sync button fires the same   *
+ * handler the desktop right click would, passing a minimal event carrying the press point and pressed element. It is fully gated on IS_MOBILE and    *
+ * on a non-mouse pointer, so on desktop (and for a desktop mouse) it is inert and the existing click / dblclick / contextmenu paths are untouched.   *
+ * A move of more than 10px, a pointer up/cancel, or a scroll of the list aborts the press (a scroll or a drag is not a long press). The click the    *
+ * browser synthesises right after the touch is swallowed, so a fired long press does not also open or toggle the item.                               *
+ ***************************************************************************************************************************************************/
+var longPress = { timer: null, x: 0, y: 0, fired: false, target: null, el: null, kind: null, id: null }
+
+function cancelLongPress(){
+    if (longPress.timer){ clearTimeout(longPress.timer); longPress.timer = null }
+}
+
+// A minimal stand-in for the DOM event the desktop right-click handlers receive: they read target,
+// currentTarget, clientX/clientY, and call preventDefault/stopPropagation, and nothing else.
+function synthEvent(target, x, y, currentTarget){
+    return { target: target, currentTarget: currentTarget || target, clientX: x, clientY: y,
+             preventDefault: function(){}, stopPropagation: function(){} }
+}
+
+function onLongPressFire(){
+    longPress.timer = null
+    longPress.fired = true
+    if (navigator.vibrate){ try { navigator.vibrate(10) } catch (error){} }
+    var ev = synthEvent(longPress.target, longPress.x, longPress.y, longPress.el)
+    if (longPress.kind === 'todo') onTodoContextMenu(ev, longPress.id)
+    else if (longPress.kind === 'note') onNoteContextMenu(ev, longPress.id)
+    else if (longPress.kind === 'heading') onHeadingContextMenu(ev)
+    else if (longPress.kind === 'sync') showToast(longPress.el.title || 'Synchronize')
+}
+
+document.addEventListener('pointerdown', function(event){
+    if (!IS_MOBILE) return
+    if (event.pointerType === 'mouse') return
+    if (!event.target.closest) return
+    var todoRow = event.target.closest('.todo[data-todo-id]')
+    var noteRow = event.target.closest('.todo[data-note-id]')
+    var heading = event.target.closest('h2[data-todo-ids]')
+    var sync    = event.target.closest('.icon-button.-sync')
+    var kind = null, el = null, id = null
+    if (todoRow){ kind = 'todo'; el = todoRow; id = todoRow.dataset.todoId }
+    else if (noteRow){ kind = 'note'; el = noteRow; id = noteRow.dataset.noteId }
+    else if (heading){ kind = 'heading'; el = heading }
+    else if (sync){ kind = 'sync'; el = sync }
+    if (!kind) return
+    longPress.fired = false
+    longPress.x = event.clientX; longPress.y = event.clientY
+    longPress.target = event.target; longPress.el = el; longPress.kind = kind; longPress.id = id
+    longPress.timer = setTimeout(onLongPressFire, 500)
+}, true)
+
+document.addEventListener('pointermove', function(event){
+    if (!longPress.timer) return
+    if (Math.abs(event.clientX - longPress.x) > 10 || Math.abs(event.clientY - longPress.y) > 10) cancelLongPress()
+}, true)
+
+document.addEventListener('pointerup', cancelLongPress, true)
+document.addEventListener('pointercancel', cancelLongPress, true)
+// A scroll of the .todos list is not a long press, so it aborts a pending one (capture, so it catches
+// the scroll of the inner container too).
+document.addEventListener('scroll', cancelLongPress, true)
+// The browser synthesises a click right after a fired long press; swallow it so tap-to-open (or the
+// sync toggle) does not also run. This capture listener is registered after the context-menu dismiss
+// listener above, which is why that one guards on longPress.fired and runs first.
+document.addEventListener('click', function(event){
+    if (longPress.fired){ longPress.fired = false; event.preventDefault(); event.stopPropagation() }
+}, true)
+
+/** showToast (mobile) ******************************************************************************************************************************
+ * A transient bottom toast, used to surface the sync button's status text on a long press (touch has no hover, so the desktop title tooltip is       *
+ * otherwise unreachable). The toast lives on <body>, which persists across the panel's setHtml re-renders, so it is created once and reused.          *
+ ***************************************************************************************************************************************************/
+var toastTimer = null
+
+function showToast(text){
+    var toast = document.getElementById('cockpitToast')
+    if (!toast){ toast = document.createElement('div'); toast.id = 'cockpitToast'; document.body.appendChild(toast) }
+    toast.textContent = text
+    void toast.offsetWidth        // force a reflow so the opacity transition runs again on each show
+    toast.classList.add('-show')
+    if (toastTimer) clearTimeout(toastTimer)
+    toastTimer = setTimeout(function(){ toast.classList.remove('-show') }, 3000)
 }
 
 /** Drag and drop ***********************************************************************************************************************************
@@ -509,8 +621,12 @@ function renderSearchSuggestions(input){
         label.textContent = suggestion.label
         item.appendChild(label)
         // mousedown, not click, so the selection happens before the field's blur can commit or the
-        // menu can be torn down
-        item.addEventListener('mousedown', event => {
+        // menu can be torn down. On mobile the pointer/mouse/blur ordering in the Android webview is
+        // unreliable, so pointerdown is used instead: it fires for touch, is cancelable (so
+        // preventDefault keeps the field focused and the soft keyboard up), and precedes the synthesised
+        // mousedown and any blur, so the pick commits before the menu can be torn down.
+        var pickEvent = IS_MOBILE ? 'pointerdown' : 'mousedown'
+        item.addEventListener(pickEvent, event => {
             event.preventDefault()
             applySearchSuggestion(input, suggestion)
         })

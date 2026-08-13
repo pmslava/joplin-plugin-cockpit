@@ -300,7 +300,10 @@ async function getControlsHTML(currentProfileID){
     var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
     var mobileButtons = (await isMobile()) ? iconButton("brush", "Set Panel CSS", "onStylerClicked()") : ""
     var sync = getSyncStatus()
-    var syncButton = iconButton("refresh", syncButtonTooltip(sync), "onSynchronizeClicked()", sync.syncing ? "-syncing" : "")
+    // The "-sync" class gives the button a stable selector for the mobile long-press adapter (which
+    // shows its status tooltip as a toast, since touch has no hover). It has no CSS of its own, so it is
+    // inert on desktop; "-syncing" still drives the spin animation while a sync runs.
+    var syncButton = iconButton("refresh", syncButtonTooltip(sync), "onSynchronizeClicked()", (sync.syncing ? "-syncing " : "") + "-sync")
     // The tag and notebook names that feed the search field's autocomplete, embedded as a JSON
     // island the webview reads. It is user content, so "</" is neutralised (as <) to keep a
     // name from closing the script element early, and the webview builds the dropdown with
