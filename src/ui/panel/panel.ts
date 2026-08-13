@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getAllTags, getNotebookMap, invalidateNotebookMap, openTodo, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
+import { getAllTags, getNotebookMap, invalidateNotebookMap, openTodo, searchTitleSuggestions, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
 import { openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
@@ -132,6 +132,9 @@ async function eventHandler(message){
     } else if (message[0] == 'notebookFilterChanged'){
         notebookFilter = String(message[1] || "")
         await refreshPanelData()
+    } else if (message[0] == 'searchTitleSuggestions'){
+        // A two-way round-trip: the webview awaits this handler's return value (title: autocomplete).
+        return await searchTitleSuggestions(String(message[1] || ""))
     } else if (message[0] == 'searchFilterChanged'){
         searchFilter = String(message[1] || "").trim()
         await refreshPanelData()

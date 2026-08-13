@@ -35,6 +35,41 @@ import joplin from 'api';
     return allTodos
 }
 
+/** searchTitleSuggestions **************************************************************************************************************************
+ * Returns up to ten distinct note titles for the search field's title: autocomplete. Joplin's search wildcard is suffix only and quoting a phrase   *
+ * with a trailing * is unreliable, so the query matches the LAST typed word with a suffix wildcard (title:word*) and the results are then filtered   *
+ * case-insensitively against the whole typed partial. An empty partial has nothing to match on and returns no suggestions.                          *
+ ***************************************************************************************************************************************************/
+export async function searchTitleSuggestions(partial){
+    var typed = String(partial || "").trim()
+    if (!typed) return []
+    var words = typed.split(/\s+/)
+    var lastWord = words[words.length - 1]
+    // Escape the wildcard characters Joplin's search treats specially so a stray * or " in the typed
+    // text cannot break the query; the field-scoped title: filter matches the last word as a prefix.
+    var safeLastWord = lastWord.replace(/["*]/g, "")
+    if (!safeLastWord) return []
+    var response = await joplin.data.get(['search'], {
+        query: `type:note title:${safeLastWord}*`,
+        fields: ['title'],
+        type: 'note',
+        limit: 10,
+    })
+    var needle = typed.toLowerCase()
+    var seen = new Set()
+    var titles = []
+    for (var item of (response.items || [])){
+        var title = String(item.title || "")
+        if (title.toLowerCase().indexOf(needle) < 0) continue
+        var key = title.toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        titles.push(title)
+        if (titles.length >= 10) break
+    }
+    return titles
+}
+
 /** getNotes ****************************************************************************************************************************************
  * Returns the regular (non to-do) notes matching the given search criteria, sorted by title, each with its checkbox counts. Used when a profile     *
  * shows notes alongside the to-dos.                                                                                                                *

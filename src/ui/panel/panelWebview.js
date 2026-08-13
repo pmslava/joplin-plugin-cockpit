@@ -389,13 +389,13 @@ function readSearchData(){
 }
 
 /** tokenAtCaret ************************************************************************************************************************************
- * The tag: / notebook: filter being typed immediately before the caret, or null. A quoted value may contain spaces; an unquoted one may not, so the  *
- * quoted form is tried first.                                                                                                                       *
+ * The tag: / notebook: / title: filter being typed immediately before the caret, or null. A quoted value may contain spaces; an unquoted one may     *
+ * not, so the quoted form is tried first.                                                                                                            *
  ***************************************************************************************************************************************************/
 function tokenAtCaret(value, caret){
     var before = value.slice(0, caret)
     var after = value.slice(caret)
-    var quoted = /(^|\s)(tag|notebook):"([^"]*)$/.exec(before)
+    var quoted = /(^|\s)(tag|notebook|title):"([^"]*)$/.exec(before)
     if (quoted){
         // Consume the rest of the quoted value after the caret, up to and including its closing quote,
         // so selecting a suggestion with the caret mid-token replaces the whole token rather than
@@ -403,7 +403,7 @@ function tokenAtCaret(value, caret){
         var quotedTail = /^[^"]*"?/.exec(after)
         return { kind: quoted[2], partial: quoted[3], hasQuote: true, start: quoted.index + quoted[1].length, end: caret + (quotedTail ? quotedTail[0].length : 0) }
     }
-    var bare = /(^|\s)(tag|notebook):(\S*)$/.exec(before)
+    var bare = /(^|\s)(tag|notebook|title):(\S*)$/.exec(before)
     if (bare){
         // Likewise consume the rest of the unquoted token after the caret (up to the next whitespace).
         var bareTail = /^\S*/.exec(after)
@@ -426,14 +426,52 @@ function suggestionsFor(token, data){
         .map(notebook => ({ insert: String(notebook.title), label: String(notebook.path) }))
 }
 
+// The title: autocomplete cannot use the embedded tag/notebook data - titles are too many to ship on
+// every render - so it round-trips to the plugin. Each keystroke is debounced, and a sequence counter
+// makes sure only the newest request's response is rendered (async replies can arrive out of order).
+var titleSuggestSeq = 0
+var titleSuggestTimer = null
+
 function onSearchInput(input){
     updateSearchDraft(input)
     var token = tokenAtCaret(input.value, input.selectionStart)
     if (!token){ hideSearchSuggestions(); return }
+    if (token.kind === 'title'){ requestTitleSuggestions(input, token); return }
     var items = suggestionsFor(token, readSearchData())
     if (!items.length){ hideSearchSuggestions(); return }
     searchSuggestion = { token: token, items: items, activeIndex: 0 }
     renderSearchSuggestions(input)
+}
+
+/** requestTitleSuggestions ************************************************************************************************************************
+ * Debounced round-trip for the title: autocomplete. The webview posts ['searchTitleSuggestions', partial] and awaits the plugin's reply (matching   *
+ * note titles). The reply is discarded unless it is still the newest request (sequence counter) and the token under the caret is still the same      *
+ * title: partial with the field focused, so a stale or superseded response never overwrites what the user is now typing.                             *
+ ***************************************************************************************************************************************************/
+function requestTitleSuggestions(input, token){
+    // An empty title: token has nothing to search on yet
+    if (!token.partial){ hideSearchSuggestions(); return }
+    if (titleSuggestTimer) clearTimeout(titleSuggestTimer)
+    var seq = ++titleSuggestSeq
+    var partial = token.partial
+    titleSuggestTimer = setTimeout(async () => {
+        var titles
+        try {
+            titles = await webviewApi.postMessage(['searchTitleSuggestions', partial])
+        } catch (error) {
+            return
+        }
+        if (seq !== titleSuggestSeq) return
+        if (!searchFocused) return
+        var liveInput = getSearchInput()
+        if (!liveInput) return
+        var current = tokenAtCaret(liveInput.value, liveInput.selectionStart)
+        if (!current || current.kind !== 'title' || current.partial !== partial) return
+        if (!titles || !titles.length){ hideSearchSuggestions(); return }
+        var items = titles.slice(0, 10).map(title => ({ insert: String(title), label: String(title) }))
+        searchSuggestion = { token: current, items: items, activeIndex: 0 }
+        renderSearchSuggestions(liveInput)
+    }, 200)
 }
 
 /** renderSearchSuggestions ************************************************************************************************************************
