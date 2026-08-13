@@ -116,8 +116,8 @@ export async function buildThemeCss(): Promise<string> {
         }
     }
 
-    // The completed-to-do appearance applies in every mode. "As now" leaves the base defaults
-    // (no decoration, full opacity) untouched.
+    // The completed-to-do appearance applies in every mode. The "Normal" option (enum key asNow)
+    // leaves the base defaults (no decoration, full opacity) untouched.
     var completedStyle = String(await joplin.settings.value(completedTodoStyleSettingKey) || "asNow")
     if (completedStyle === "grayed") {
         decls.push("--cockpit-completed-opacity:0.5")

@@ -186,8 +186,6 @@ async function eventHandler(message){
         // the onSyncStart / onSyncComplete events rather than by awaiting this. Routed through
         // runAppCommand so an absent command degrades to a message box like every other app command.
         await runAppCommand('synchronize')
-    } else if (message[0] == 'toggleProfileControlsClicked'){
-        await toggleShowProfileControls()
     } else if (message[0] == 'stylerClicked'){
         // Executed as a command rather than called directly so that the panel does not have to import the styler dialog, which imports the panel.
         await joplin.commands.execute('showStylerDialog')
@@ -205,15 +203,6 @@ export async function togglePanelVisibility() {
     // refreshPanelData skips its work while the panel is hidden, so a refresh is forced here when the
     // panel is being shown, otherwise it would display whatever markup it last held (or nothing).
     if (!visibility) await refreshPanelData();
-}
-
-/** toggleShowProfileControls ***********************************************************************************************************************
- * Toggles between showing and hiding the profile editor buttons (create, edit and delete profile) on the main panel									*
- ***************************************************************************************************************************************************/
- export async function toggleShowProfileControls() {
-	var showProfileControls = await joplin.settings.value("showProfileControls")
-	await joplin.settings.setValue("showProfileControls", !showProfileControls)
-	await refreshPanelData()
 }
 
 /** refreshPanelData ********************************************************************************************************************************

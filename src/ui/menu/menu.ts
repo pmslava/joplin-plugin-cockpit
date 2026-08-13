@@ -18,7 +18,6 @@ import { isMobile } from "../../core/platform"
         "Cockpit",
         [
             {commandName: 'togglePanelVisibility'},
-            {commandName: 'toggleShowProfileControls'},
             {commandName: 'showStylerDialog'},
         ],
         MenuItemLocation.Tools

@@ -5,7 +5,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { openStyler } from "../ui/styler/styler";
-import { togglePanelVisibility, toggleShowProfileControls } from "../ui/panel/panel";
+import { togglePanelVisibility } from "../ui/panel/panel";
 
 /** setupCommands ***********************************************************************************************************************************
  * Sets up the commands used by the plugin                                                                                                          *
@@ -16,11 +16,6 @@ export async function setupCommands(){
         label: 'Toggle Cockpit Panel',
         iconName: 'fas fa-calendar',
         execute: togglePanelVisibility
-    })
-    await joplin.commands.register({
-        name: 'toggleShowProfileControls',
-        label: 'Toggle Profile Edit Mode',
-        execute: toggleShowProfileControls
     })
     await joplin.commands.register({
         name: 'showStylerDialog',

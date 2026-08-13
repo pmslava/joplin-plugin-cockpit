@@ -72,15 +72,9 @@ export async function setupSettings(){
 			public: false,
 			section: 'section',
 		},
-		"showProfileControls": {
-			label: "Show Profile Controls",
-			value: true,
-			type: SettingItemType.Bool,
-			public: true,
-			section: 'section',
-		},
 		[updateFrequencySettingKey]: {
-			label: "How many seconds should agenda wait before updating the panel and notes",
+			label: "Panel refresh interval (seconds)",
+			description: "How long Cockpit waits between refreshing the panel and the overview notes. Lower is more responsive; higher is lighter on the machine.",
 			value: 60,
 			type: SettingItemType.Int,
 			public: true,
@@ -134,7 +128,7 @@ export async function setupSettings(){
 			type: SettingItemType.String,
 			isEnum: true,
 			options: {
-				asNow: "As now",
+				asNow: "Normal",
 				grayed: "Grayed out",
 				strikethrough: "Strikethrough",
 			},
