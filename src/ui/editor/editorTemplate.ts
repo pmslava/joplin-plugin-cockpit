@@ -11,7 +11,7 @@ export var editorTemplate = `
          * zoom the dialog can come out larger than the requested pixels, which would leave dead
          * space beside the content. */
         #joplin-plugin-content {
-            width: 380px;
+            width: 440px;
             height: 540px;
             overflow: hidden;
         }

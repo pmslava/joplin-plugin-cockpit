@@ -1,40 +1,12 @@
+/* Almost everything is styled inline in editorTemplate.ts, so that the rules are guaranteed to be
+ * present when Joplin measures the dialog. Only the universal bits live here. The upstream version
+ * of this file set "min-width: -webkit-fill-available" on labels and inputs, which made the labels
+ * swallow their row and crush the controls - do not reintroduce it. */
+
 * {
     box-sizing: border-box;
 }
 
-/* A minimum width keeps the dialog usable on desktop, while the maximum stops it overflowing a narrow phone screen */
-#joplin-plugin-content {
-    min-width: min(300px, 100%);
-    max-width: 100%;
-}
-
-fieldset {
-    margin: 5px 0;
-    max-width: 100%;
-}
-
-select, input[type="text"], input[type="number"], label, table {
-    max-width: 100%;
-    min-width: -webkit-fill-available;
-}
-
-textarea {
-    width: 100%;
-    max-width: 100%;
-}
-
-td {
-    text-align: center;
-}
-
-section {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    padding: 3px;
-}
-
 input[type="checkbox"] {
-    margin: 0;
-    margin-right: 10px;
+    margin: 0 10px 0 0;
 }

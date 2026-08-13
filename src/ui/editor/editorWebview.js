@@ -123,7 +123,7 @@ saveProfileData()
 function fitEditorDialog() {
     var wrapper = document.getElementById("joplin-plugin-content")
     if (!wrapper) return
-    var targetWidth = 380, targetHeight = 540
+    var targetWidth = 440, targetHeight = 540
     if (window.innerWidth > 0 && Math.abs(window.innerWidth - targetWidth) > 4) {
         wrapper.style.width = `${Math.round(wrapper.offsetWidth * targetWidth / window.innerWidth)}px`
     }
