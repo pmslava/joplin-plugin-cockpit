@@ -40,9 +40,14 @@
     --cockpit-completed-opacity: 1;
     /* The diameter of the to-do checkbox / note progress ring. A hard default (not a Joplin alias)
      * because a circle always has a size; the themes feature (buildThemeCss) emits an override from
-     * the setting. Every dependent dimension below is a calc() ratio of this, tuned so that at 18px
-     * the panel reproduces the pre-setting look exactly. */
-    --cockpit-circle-size: 24px;
+     * the setting. 18px reproduces the original pre-setting look exactly. The ring thickness and disc
+     * inset are FIXED px (not ratios of this), so a bigger circle reads as a bigger fine ring rather
+     * than a bloated one. */
+    --cockpit-circle-size: 18px;
+    /* The height of one line of body text (font-size x line-height 1.5), mirrored from the body rule
+     * below so it survives a font-size setting change. The item glyph is centred on the first text
+     * line of its row against this, independent of the circle size. */
+    --cockpit-row-line-height: calc(var(--cockpit-font-size, calc(var(--joplin-font-size, 12px) * 1.0833)) * 1.5);
 }
 
 * {
@@ -447,12 +452,14 @@ h2 {
     display: flex;
     flex-direction: row;
     align-items: flex-start;
-    /* Gap, padding and min-height scale with the circle (ratios 7/18, 4/18, 6/18 reproduce the old
-     * 7px / 4px 6px at circle-size 18px), so a bigger circle also gets proportionally more breathing
-     * room between rows and can never be clipped or overlapped by the row above. */
-    gap: calc(var(--cockpit-circle-size) * 7 / 18);
-    padding: calc(var(--cockpit-circle-size) * 4 / 18) calc(var(--cockpit-circle-size) * 6 / 18);
-    min-height: var(--cockpit-circle-size);
+    /* Gap and padding are fixed at the original 7px / 4px 6px whatever the circle size, so enlarging
+     * the circle never inflates the horizontal spacing (which read as untidy). Only min-height grows,
+     * just enough that the circle plus its 4px top/bottom padding is never clipped and adjacent rows'
+     * circles keep at least an 8px gap. The circle is centred on the first line by its own margin
+     * (below), so single- and multi-line rows align identically. */
+    gap: 7px;
+    padding: 4px 6px;
+    min-height: calc(var(--cockpit-circle-size) + 8px);
     border-radius: 4px;
     /* Rows are dragged and shift-clicked, where accidental text selection would get in the way */
     user-select: none;
@@ -492,6 +499,11 @@ h2 {
     width: var(--cockpit-circle-size);
     height: var(--cockpit-circle-size);
     margin: 0;
+    /* Centre the circle on the first line of the row. When the circle is smaller than a line it drops
+     * by half the slack; when it is larger the title takes the offset instead (see .todo-title), so
+     * this stays 0 and never pulls the circle up out of the row. Either way the circle's centre lands
+     * on the first line's centre at every circle and font size. */
+    margin-top: max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2));
     flex-shrink: 0;
     border-radius: 50%;
     background: conic-gradient(
@@ -501,21 +513,23 @@ h2 {
     cursor: pointer;
 }
 
-/* Hollows the ring */
+/* Hollows the ring. A fixed 3px inset keeps the ring a constant fine stroke at any circle size, and
+ * being symmetric on all four sides it can never render the hollow off-centre. */
 .todo-checkbox::after {
     content: "";
     position: absolute;
-    inset: calc(var(--cockpit-circle-size) * 3 / 18);
+    inset: 3px;
     border-radius: 50%;
     background: var(--cockpit-background-color2, #181A1D);
 }
 
-/* The small to-do disc; the tick is an SVG painted into it, so it is always centered and crisp */
+/* The small to-do disc; the tick is an SVG painted into it, so it is always centered and crisp. A
+ * fixed 4px inset keeps the disc a constant 1px inside the ring at any size and always symmetric. */
 .todo-checkbox::before {
     content: "";
     position: absolute;
     z-index: 1;
-    inset: calc(var(--cockpit-circle-size) * 4 / 18);
+    inset: 4px;
     border-radius: 50%;
     background-color: var(--cockpit-divider-color, rgba(127, 127, 127, 0.5));
 }
@@ -551,6 +565,10 @@ h2 {
     overflow-wrap: anywhere;
     padding: 0 3px;
     margin: 0 -3px;
+    /* The mirror of the circle's margin-top: when the circle is taller than a line, the title drops
+     * by half the slack so the first line's centre meets the circle's centre. Zero when the circle
+     * fits within a line (the circle takes the offset instead). Keeps the -3px horizontal margin. */
+    margin-top: max(0px, calc((var(--cockpit-circle-size) - var(--cockpit-row-line-height)) / 2));
     border-radius: 3px;
 }
 
@@ -597,6 +615,8 @@ h2 {
     width: var(--cockpit-circle-size);
     height: var(--cockpit-circle-size);
     margin: 0;
+    /* Same first-line centring as the to-do checkbox, so note rows and to-do rows line up */
+    margin-top: max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2));
     flex-shrink: 0;
     border-radius: 50%;
     background: conic-gradient(
@@ -608,7 +628,7 @@ h2 {
 .note-progress::after {
     content: "";
     position: absolute;
-    inset: calc(var(--cockpit-circle-size) * 3 / 18);
+    inset: 3px;
     border-radius: 50%;
     background: var(--cockpit-background-color2, #181A1D);
 }

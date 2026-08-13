@@ -90,9 +90,9 @@ export async function buildThemeCss(): Promise<string> {
     var fontSize = Number(await joplin.settings.value(customFontSizeSettingKey)) || 0
     if (fontSize > 0) decls.push(`--cockpit-font-size:${Math.round(fontSize)}px`)
 
-    // The to-do circle size applies in every mode. Its setting default (24) is always > 0, so this is
-    // always emitted; the base :root --cockpit-circle-size in panel.css is the paint-before-emit
-    // fallback that keeps the calc()-ratio geometry valid.
+    // The to-do circle size applies in every mode. Its setting default (18) is always > 0, so this is
+    // always emitted; the base :root --cockpit-circle-size in panel.css (also 18) is the
+    // paint-before-emit fallback that keeps the glyph geometry valid.
     var circleSize = Number(await joplin.settings.value(customCircleSizeSettingKey)) || 0
     if (circleSize > 0) decls.push(`--cockpit-circle-size:${Math.round(circleSize)}px`)
 

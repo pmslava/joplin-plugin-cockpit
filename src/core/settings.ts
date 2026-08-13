@@ -150,8 +150,8 @@ export async function setupSettings(){
 		},
 		[customCircleSizeSettingKey]: {
 			label: "To-do circle size (px)",
-			description: "The diameter of the round to-do checkbox and the note progress ring in the Cockpit panel. Row spacing scales with it. Applies in every theme mode.",
-			value: 24,
+			description: "The diameter of the round to-do checkbox and the note progress ring in the Cockpit panel. The ring and disc keep a constant fine weight at any size; the circle stays centred on the first line of the row. Applies in every theme mode.",
+			value: 18,
 			type: SettingItemType.Int,
 			minimum: 16,
 			maximum: 36,
