@@ -310,6 +310,14 @@ function onLongPressFire(){
 document.addEventListener('pointerdown', function(event){
     if (!IS_MOBILE) return
     if (event.pointerType === 'mouse') return
+    // Clear a stale fired flag at the very start of every touch pointerdown, before the zone check can
+    // early-return below. If a long press fired but its gesture produced no synthesised click (the finger
+    // dragged off, or a pointercancel arrived after the 500ms timer had already fired - cancelLongPress is
+    // a no-op then), fired would stay true; the next tap on an unrecognised zone (a menu item, dropdown
+    // toggle, search field, calendar day) would hit the `if (!kind) return` and skip a reset there, so the
+    // click swallower below would eat that unrelated tap. Resetting here guarantees one fired flag is only
+    // ever consumed by its own gesture's click.
+    longPress.fired = false
     if (!event.target.closest) return
     var todoRow = event.target.closest('.todo[data-todo-id]')
     var noteRow = event.target.closest('.todo[data-note-id]')
@@ -321,7 +329,6 @@ document.addEventListener('pointerdown', function(event){
     else if (heading){ kind = 'heading'; el = heading }
     else if (sync){ kind = 'sync'; el = sync }
     if (!kind) return
-    longPress.fired = false
     longPress.x = event.clientX; longPress.y = event.clientY
     longPress.target = event.target; longPress.el = el; longPress.kind = kind; longPress.id = id
     longPress.timer = setTimeout(onLongPressFire, 500)
