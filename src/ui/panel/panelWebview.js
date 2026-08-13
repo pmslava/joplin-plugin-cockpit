@@ -15,6 +15,36 @@ var lastClickedTodoID = null
 // A picked regular note is only highlighted; it takes no part in drag or set-alarm operations
 var pickedNoteID = null
 
+/** Scroll preservation *********************************************************************************************************************************
+ * The whole panel document is replaced on every refresh, which discards the .todos scroll container and drops the list back to the top. The scroll    *
+ * position is kept here in module state (which survives setHtml, like the selection above) and painted back on when a fresh .todos node reappears.    *
+ * Deliberate view changes (profile, notebook, search, calendar navigation) zero it first, so those still start at the top.                            *
+ ***************************************************************************************************************************************************/
+var savedTodosScrollTop = 0
+
+document.addEventListener('scroll', event => {
+    var target = event.target
+    if (target && target.classList && target.classList.contains('todos')){
+        savedTodosScrollTop = target.scrollTop
+    }
+}, true)
+
+function refreshBroughtNewTodos(mutations){
+    for (var mutation of mutations){
+        for (var node of mutation.addedNodes){
+            if (node.nodeType !== 1) continue
+            if (node.classList && node.classList.contains('todos')) return true
+            if (node.querySelector && node.querySelector('.todos')) return true
+        }
+    }
+    return false
+}
+
+function restoreTodosScroll(){
+    var todos = document.querySelector('.todos')
+    if (todos) todos.scrollTop = Math.min(savedTodosScrollTop, todos.scrollHeight)
+}
+
 function allTodoRows(){
     return Array.from(document.querySelectorAll('.todo[data-todo-id]'))
 }
@@ -31,6 +61,10 @@ function paintTodoSelection(){
 document.addEventListener('DOMContentLoaded', () => {
     new MutationObserver((mutations) => {
         if (mutations.some(mutation => mutation.addedNodes.length)) paintTodoSelection()
+        // Only restore when the refresh actually rebuilt the list, not for unrelated body mutations
+        // such as the injected #noteContextMenu, which would otherwise yank the scroll while a menu
+        // or tooltip is open.
+        if (refreshBroughtNewTodos(mutations)) restoreTodosScroll()
     }).observe(document.body, { childList: true, subtree: true })
 })
 
@@ -237,6 +271,7 @@ async function onTodoChecked(todoID){
  * When the profiles dropdown is changed, this function sends a message to the main plugin to load the new profile                                   *
  ***************************************************************************************************************************************************/ 
 async function onProfilesDropdownChanged(profileID){
+    savedTodosScrollTop = 0
     await webviewApi.postMessage(['profilesDropdownChanged', profileID]);
 }
 
@@ -245,6 +280,7 @@ async function onProfilesDropdownChanged(profileID){
  * for all notebooks                                                                                                                                 *
  ***************************************************************************************************************************************************/
 async function onNotebookFilterChanged(notebookID){
+    savedTodosScrollTop = 0
     await webviewApi.postMessage(['notebookFilterChanged', notebookID]);
 }
 
@@ -306,6 +342,7 @@ async function onNewTodoClicked(){
  * Joplin search syntax: tag:, notebook:, plain words, and so on.                                                                                    *
  ***************************************************************************************************************************************************/
 async function onSearchFilterChanged(searchString){
+    savedTodosScrollTop = 0
     await webviewApi.postMessage(['searchFilterChanged', searchString]);
 }
 
@@ -356,6 +393,7 @@ async function onStylerClicked(){
  * Moves the calendar a month or a week backwards or forwards. The plugin holds the position, because the panel markup is replaced on every refresh  *
  ***************************************************************************************************************************************************/
 async function onCalendarNavigate(delta){
+    savedTodosScrollTop = 0
     await webviewApi.postMessage(['calendarNavigate', delta]);
 }
 
@@ -363,6 +401,7 @@ async function onCalendarNavigate(delta){
  * Returns the calendar to the current month or week                                                                                                *
  ***************************************************************************************************************************************************/
 async function onCalendarToday(){
+    savedTodosScrollTop = 0
     await webviewApi.postMessage(['calendarToday']);
 }
 
