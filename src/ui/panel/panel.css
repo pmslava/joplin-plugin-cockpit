@@ -41,9 +41,12 @@
     /* The diameter of the to-do checkbox / note progress ring. A hard default (not a Joplin alias)
      * because a circle always has a size; the themes feature (buildThemeCss) emits an override from
      * the setting. 18px is pixel-identical to the original 18px look the user liked: the circle is
-     * top-aligned (no downward nudge), so at the default it lands exactly where it always did. A
-     * centring correction applies ONLY when the circle is TALLER than one text line, where no
-     * original look exists (the title drops to meet the bigger circle - see .todo-title). The ring
+     * top-aligned (no downward nudge), so at the default it lands exactly where it always did. Away
+     * from that crossover a centring correction engages in one of two symmetric branches, and both
+     * are zero at the 18px/default-font default: when the circle is SMALLER than a line (a larger
+     * font-size with the default circle) the circle itself drops to the line's optical middle (see
+     * .todo-checkbox margin-top); when the circle is TALLER than a line the title drops to meet the
+     * bigger circle instead (see .todo-title). Only one branch is ever non-zero at a time. The ring
      * thickness and disc inset are FIXED px (not ratios of this), so a bigger circle reads as a
      * bigger fine ring rather than a bloated one. */
     --cockpit-circle-size: 18px;
