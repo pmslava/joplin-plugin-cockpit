@@ -19,6 +19,7 @@ export const dayStartTimeSettingKey = "dayStartTime"
 export const themeModeSettingKey = "themeMode"
 export const completedTodoStyleSettingKey = "completedTodoStyle"
 export const customFontSizeSettingKey = "customFontSize"
+export const customCircleSizeSettingKey = "customCircleSize"
 export const customTextColorSettingKey = "customTextColor"
 export const customPanelBackgroundSettingKey = "customPanelBackground"
 export const customContentBackgroundSettingKey = "customContentBackground"
@@ -31,6 +32,7 @@ const themeSettingKeys = [
 	themeModeSettingKey,
 	completedTodoStyleSettingKey,
 	customFontSizeSettingKey,
+	customCircleSizeSettingKey,
 	customTextColorSettingKey,
 	customPanelBackgroundSettingKey,
 	customContentBackgroundSettingKey,
@@ -142,6 +144,17 @@ export async function setupSettings(){
 			type: SettingItemType.Int,
 			minimum: 0,
 			maximum: 32,
+			step: 1,
+			public: true,
+			section: 'section',
+		},
+		[customCircleSizeSettingKey]: {
+			label: "To-do circle size (px)",
+			description: "The diameter of the round to-do checkbox and the note progress ring in the Cockpit panel. Row spacing scales with it. Applies in every theme mode.",
+			value: 24,
+			type: SettingItemType.Int,
+			minimum: 16,
+			maximum: 36,
 			step: 1,
 			public: true,
 			section: 'section',

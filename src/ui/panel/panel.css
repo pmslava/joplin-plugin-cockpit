@@ -38,6 +38,11 @@
     --cockpit-font-family: var(--joplin-font-family, sans-serif);
     --cockpit-completed-decoration: none;
     --cockpit-completed-opacity: 1;
+    /* The diameter of the to-do checkbox / note progress ring. A hard default (not a Joplin alias)
+     * because a circle always has a size; the themes feature (buildThemeCss) emits an override from
+     * the setting. Every dependent dimension below is a calc() ratio of this, tuned so that at 18px
+     * the panel reproduces the pre-setting look exactly. */
+    --cockpit-circle-size: 24px;
 }
 
 * {
@@ -442,8 +447,12 @@ h2 {
     display: flex;
     flex-direction: row;
     align-items: flex-start;
-    gap: 7px;
-    padding: 4px 6px;
+    /* Gap, padding and min-height scale with the circle (ratios 7/18, 4/18, 6/18 reproduce the old
+     * 7px / 4px 6px at circle-size 18px), so a bigger circle also gets proportionally more breathing
+     * room between rows and can never be clipped or overlapped by the row above. */
+    gap: calc(var(--cockpit-circle-size) * 7 / 18);
+    padding: calc(var(--cockpit-circle-size) * 4 / 18) calc(var(--cockpit-circle-size) * 6 / 18);
+    min-height: var(--cockpit-circle-size);
     border-radius: 4px;
     /* Rows are dragged and shift-clicked, where accidental text selection would get in the way */
     user-select: none;
@@ -480,8 +489,8 @@ h2 {
     position: relative;
     /* Contains the disc's z-index, so it cannot paint over the sticky group headings */
     z-index: 0;
-    width: 18px;
-    height: 18px;
+    width: var(--cockpit-circle-size);
+    height: var(--cockpit-circle-size);
     margin: 0;
     flex-shrink: 0;
     border-radius: 50%;
@@ -496,7 +505,7 @@ h2 {
 .todo-checkbox::after {
     content: "";
     position: absolute;
-    inset: 3px;
+    inset: calc(var(--cockpit-circle-size) * 3 / 18);
     border-radius: 50%;
     background: var(--cockpit-background-color2, #181A1D);
 }
@@ -506,7 +515,7 @@ h2 {
     content: "";
     position: absolute;
     z-index: 1;
-    inset: 4px;
+    inset: calc(var(--cockpit-circle-size) * 4 / 18);
     border-radius: 50%;
     background-color: var(--cockpit-divider-color, rgba(127, 127, 127, 0.5));
 }
@@ -585,8 +594,8 @@ h2 {
 .note-progress {
     position: relative;
     z-index: 0;
-    width: 18px;
-    height: 18px;
+    width: var(--cockpit-circle-size);
+    height: var(--cockpit-circle-size);
     margin: 0;
     flex-shrink: 0;
     border-radius: 50%;
@@ -599,7 +608,7 @@ h2 {
 .note-progress::after {
     content: "";
     position: absolute;
-    inset: 3px;
+    inset: calc(var(--cockpit-circle-size) * 3 / 18);
     border-radius: 50%;
     background: var(--cockpit-background-color2, #181A1D);
 }
