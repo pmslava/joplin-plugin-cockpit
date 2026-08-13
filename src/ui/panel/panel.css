@@ -40,9 +40,10 @@
     --cockpit-completed-opacity: 1;
     /* The diameter of the to-do checkbox / note progress ring. A hard default (not a Joplin alias)
      * because a circle always has a size; the themes feature (buildThemeCss) emits an override from
-     * the setting. 18px reproduces the original pre-setting look exactly. The ring thickness and disc
-     * inset are FIXED px (not ratios of this), so a bigger circle reads as a bigger fine ring rather
-     * than a bloated one. */
+     * the setting. 18px restores the original 18px default; the glyph is now centred on the first
+     * line (a ~0.75px correction versus the old top-aligned position), so it is not pixel-identical
+     * to the pre-setting look. The ring thickness and disc inset are FIXED px (not ratios of this),
+     * so a bigger circle reads as a bigger fine ring rather than a bloated one. */
     --cockpit-circle-size: 18px;
     /* The height of one line of body text (font-size x line-height 1.5), mirrored from the body rule
      * below so it survives a font-size setting change. The item glyph is centred on the first text
@@ -593,7 +594,10 @@ h2 {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    margin-top: 1px;
+    /* Track the title's first line at large circle sizes (circle taller than one text line) while
+     * keeping the original 1px nudge at the default, so the pill sits on the title line rather than
+     * floating near the top of the row. Matches .todo-title's first-line offset. */
+    margin-top: calc(1px + max(0px, (var(--cockpit-circle-size) - var(--cockpit-row-line-height)) / 2));
     padding: 0 7px;
     border-radius: 9px;
     font-size: 0.85em;
