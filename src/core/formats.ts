@@ -165,6 +165,7 @@ abstract class BaseFormat {
                 <div class="todo" data-todo-id="${todo.id}" draggable="true"
                     onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
                     onclick="onTodoRowClicked(event, '${todo.id}')"
+                    ondblclick="onRowDoubleClicked(event, '${todo.id}')"
                     oncontextmenu="onTodoContextMenu(event, '${todo.id}')"
                     ondragstart="onTodoDragStart(event, '${todo.id}')"
                     ondragend="onTodoDragEnd(event)">
@@ -662,6 +663,7 @@ export async function renderNotesSection(profile, viewState){
             <div class="todo -note" data-note-id="${note.id}"
                 onmousedown="onNoteRowMouseDown(event, '${note.id}')"
                 onclick="onNoteRowClicked(event, '${note.id}')"
+                ondblclick="onRowDoubleClicked(event, '${note.id}')"
                 oncontextmenu="onNoteContextMenu(event, '${note.id}')">
                 <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
                 <a class="todo-title">${escapeHtml(note.title)}</a>

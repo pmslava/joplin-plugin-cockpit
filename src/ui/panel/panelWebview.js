@@ -109,6 +109,15 @@ function onNoteRowClicked(event, noteID){
     }
 }
 
+/** onRowDoubleClicked ******************************************************************************************************************************
+ * Double clicking a title opens the note in its own window, like in Joplin's note list                                                             *
+ ***************************************************************************************************************************************************/
+function onRowDoubleClicked(event, noteID){
+    if (event.target.classList.contains('todo-title')){
+        void webviewApi.postMessage(['openInNewWindow', noteID]);
+    }
+}
+
 function onNoteContextMenu(event, noteID){
     event.preventDefault()
     if (event.target.classList.contains('todo-notebook')){

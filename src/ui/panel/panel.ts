@@ -87,6 +87,8 @@ function applyProfileHeaderState(profile){
 async function eventHandler(message){
     if (message[0] == 'todoClicked'){
         await openTodo(message[1])
+    } else if (message[0] == 'openInNewWindow'){
+        await runAppCommand('openNoteInNewWindow', String(message[1] || ""))
     } else if (message[0] == 'newNoteClicked' || message[0] == 'newTodoClicked'){
         await createItem(message[0] == 'newTodoClicked')
     } else if (message[0] == 'sortFieldSelected'){
