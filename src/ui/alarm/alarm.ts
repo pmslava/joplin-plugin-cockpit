@@ -24,14 +24,15 @@ const dialogCss = `
      * dialog 200px wide and clips everything past it. Setting the wrapper's width directly is the
      * one way to tell Joplin how wide this dialog is. */
     #joplin-plugin-content {
-        width: 424px;
+        width: min(424px, 100vw - 16px);
     }
     #alarmForm {
         display: flex;
         flex-direction: column;
         gap: 10px;
         padding: 6px 4px;
-        width: 400px;
+        width: 100%;
+        max-width: 400px;
         box-sizing: border-box;
         font-size: var(--joplin-font-size, 13px);
     }

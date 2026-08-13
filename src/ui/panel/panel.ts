@@ -183,8 +183,9 @@ async function eventHandler(message){
     } else if (message[0] == 'synchronizeClicked'){
         // Joplin's synchronize command is a toggle: it starts a sync, or cancels the one in
         // progress. It resolves as soon as the sync is scheduled, so completion is tracked through
-        // the onSyncStart / onSyncComplete events rather than by awaiting this.
-        await joplin.commands.execute('synchronize')
+        // the onSyncStart / onSyncComplete events rather than by awaiting this. Routed through
+        // runAppCommand so an absent command degrades to a message box like every other app command.
+        await runAppCommand('synchronize')
     } else if (message[0] == 'toggleProfileControlsClicked'){
         await toggleShowProfileControls()
     } else if (message[0] == 'stylerClicked'){
@@ -201,6 +202,9 @@ export async function togglePanelVisibility() {
     if (await isMobile()) return
     var visibility = await joplin.views.panels.visible(panel);
     await joplin.views.panels.show(panel, !visibility);
+    // refreshPanelData skips its work while the panel is hidden, so a refresh is forced here when the
+    // panel is being shown, otherwise it would display whatever markup it last held (or nothing).
+    if (!visibility) await refreshPanelData();
 }
 
 /** toggleShowProfileControls ***********************************************************************************************************************
@@ -218,6 +222,19 @@ export async function togglePanelVisibility() {
  ***************************************************************************************************************************************************/
  export async function refreshPanelData(){
     if (!panel) return
+    // Building the markup runs the full search / notes / body query cycle, so it is skipped while the
+    // panel is hidden (a closed desktop panel, or a plugin dialog the user has not opened on mobile),
+    // which otherwise happens on every 60s timer tick and its follow-ups for no visible effect. The
+    // equality guard below still holds the last rendered markup, so the panel renders fresh the moment
+    // it is shown again (togglePanelVisibility forces a refresh on show). Any panels.visible() oddity
+    // defaults to "visible" so the current behaviour is preserved.
+    var panelVisible = true
+    try {
+        panelVisible = await joplin.views.panels.visible(panel)
+    } catch (error) {
+        console.warn("Cockpit: could not read panel visibility; assuming visible", error)
+    }
+    if (!panelVisible) return
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile) return
@@ -490,6 +507,21 @@ async function runAppCommand(commandName, args?){
     }
 }
 
+/** copyToClipboard *********************************************************************************************************************************
+ * Writes text to the clipboard. joplin.clipboard is Electron-backed, and whether it is wired on the mobile runtime is unknown, so an absent or       *
+ * failing clipboard degrades to the same "not available here" message the app commands use rather than throwing an unhandled rejection.             *
+ ***************************************************************************************************************************************************/
+async function copyToClipboard(text){
+    try {
+        var clipboard = (joplin as any).clipboard
+        if (!clipboard || typeof clipboard.writeText !== 'function') throw new Error('clipboard unavailable')
+        await clipboard.writeText(text)
+    } catch (error) {
+        console.warn('Cockpit: could not write to the clipboard', error)
+        await joplin.views.dialogs.showMessageBox('Cockpit: the clipboard is not available here.')
+    }
+}
+
 /** runNoteMenuAction *******************************************************************************************************************************
  * Applies an action from the panel's context menu to the given note. Actions with no matching command on all platforms are done through the data    *
  * API instead.                                                                                                                                     *
@@ -510,10 +542,10 @@ async function runNoteMenuAction(action, noteID){
         await runAppCommand('duplicateNote', [noteID])
     } else if (action == 'copyMarkdownLink'){
         var linkNote = await joplin.data.get(['notes', noteID], { fields: ['title'] })
-        await (joplin as any).clipboard.writeText(`[${linkNote.title}](:/${noteID})`)
+        await copyToClipboard(`[${linkNote.title}](:/${noteID})`)
         return
     } else if (action == 'copyNoteID'){
-        await (joplin as any).clipboard.writeText(noteID)
+        await copyToClipboard(noteID)
         return
     } else if (action == 'delete'){
         try {

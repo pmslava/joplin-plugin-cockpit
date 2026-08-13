@@ -140,7 +140,7 @@ body {
     align-items: center;
     justify-content: center;
     gap: 5px;
-    flex: 0 1 auto;
+    flex: 0 0 auto;
     height: 26px;
     min-height: 26px;
     padding: 0 9px;
@@ -197,6 +197,7 @@ option {
 #filterRow {
     display: flex;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
     gap: 4px;
     margin: 0 0 6px;
