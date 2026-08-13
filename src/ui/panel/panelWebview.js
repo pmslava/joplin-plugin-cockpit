@@ -292,6 +292,9 @@ async function onSortFieldClicked(){
 }
 
 async function onSortDirectionClicked(){
+    // Re-sorting reorders the whole list, so the old pixel offset points at arbitrary rows; start at
+    // the top like the other deliberate view changes rather than letting the scroll restore run.
+    savedTodosScrollTop = 0
     await webviewApi.postMessage(['sortDirectionClicked']);
 }
 
@@ -322,7 +325,7 @@ function onDropdownToggle(event, menuID){
 function onDropdownItemClicked(event, messageName, value){
     // A deliberate profile or notebook-filter change starts the list at the top, like the other view
     // changes; the scroll position is otherwise restored across the re-render.
-    if (messageName === 'profilesDropdownChanged' || messageName === 'notebookFilterChanged') savedTodosScrollTop = 0
+    if (messageName === 'profilesDropdownChanged' || messageName === 'notebookFilterChanged' || messageName === 'sortFieldSelected') savedTodosScrollTop = 0
     closeAllDropdowns()
     void webviewApi.postMessage(value === null ? [messageName] : [messageName, value]);
 }
@@ -527,8 +530,12 @@ function hideSearchSuggestions(){
 function applySearchSuggestion(input, suggestion){
     if (!input || !searchSuggestion) return
     var token = searchSuggestion.token
-    var needsQuote = /\s/.test(suggestion.insert)
-    var replacement = token.kind + ':' + (needsQuote ? '"' + suggestion.insert + '"' : suggestion.insert) + ' '
+    // Strip embedded double-quotes before wrapping: a title (or tag/notebook) can itself contain a
+    // quote, and Joplin's phrase syntax has no way to escape one, so a raw quote would break the
+    // committed token. This matches how searchTitleSuggestions already sanitizes the query side.
+    var insert = String(suggestion.insert).replace(/"/g, '')
+    var needsQuote = /\s/.test(insert)
+    var replacement = token.kind + ':' + (needsQuote ? '"' + insert + '"' : insert) + ' '
     var value = input.value
     input.value = value.slice(0, token.start) + replacement + value.slice(token.end)
     var caret = token.start + replacement.length

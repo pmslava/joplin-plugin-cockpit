@@ -50,7 +50,9 @@ export async function searchTitleSuggestions(partial){
     var safeLastWord = lastWord.replace(/["*]/g, "")
     if (!safeLastWord) return []
     var response = await joplin.data.get(['search'], {
-        query: `type:note title:${safeLastWord}*`,
+        // No type: filter, so both regular notes and to-dos are matched - the panel's primary content
+        // is to-dos, which type:note would exclude (type:note and type:todo are mutually exclusive).
+        query: `title:${safeLastWord}*`,
         fields: ['title'],
         type: 'note',
         limit: 10,

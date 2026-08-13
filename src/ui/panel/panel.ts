@@ -228,9 +228,15 @@ export async function togglePanelVisibility() {
     // equality guard below still holds the last rendered markup, so the panel renders fresh the moment
     // it is shown again (togglePanelVisibility forces a refresh on show). Any panels.visible() oddity
     // defaults to "visible" so the current behaviour is preserved.
+    // On mobile the visibility skip is not applied: the panel is a tab in Joplin's plugin-panel
+    // dialog, which the user opens themselves, and togglePanelVisibility (the only forced refresh on
+    // show) early-returns on mobile. If panels.visible() reports the not-yet-opened tab as hidden
+    // (UNKNOWN #6 in docs/MOBILE.md), skipping here would leave the tab empty on first open with
+    // nothing to force a render. Always rendering on mobile restores the pre-batch behaviour that kept
+    // the panel current; the skip stays on desktop, where togglePanelVisibility forces a refresh on show.
     var panelVisible = true
     try {
-        panelVisible = await joplin.views.panels.visible(panel)
+        panelVisible = (await isMobile()) || await joplin.views.panels.visible(panel)
     } catch (error) {
         console.warn("Cockpit: could not read panel visibility; assuming visible", error)
     }

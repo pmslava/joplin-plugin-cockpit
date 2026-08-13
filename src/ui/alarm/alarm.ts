@@ -24,7 +24,15 @@ const dialogCss = `
      * dialog 200px wide and clips everything past it. Setting the wrapper's width directly is the
      * one way to tell Joplin how wide this dialog is. */
     #joplin-plugin-content {
-        width: min(424px, 100vw - 16px);
+        width: 424px;
+    }
+    /* On a narrow (mobile) screen the fixed width would overflow, so the wrapper is allowed to shrink
+     * there. Kept behind a media query so the desktop measurement stays an unconditional 424px and
+     * never depends on the pre-sized 100vw, which the note above documents starts at a small minimum. */
+    @media (max-width: 440px) {
+        #joplin-plugin-content {
+            width: calc(100vw - 16px);
+        }
     }
     #alarmForm {
         display: flex;
