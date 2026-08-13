@@ -48,14 +48,18 @@ export async function searchTitleSuggestions(partial){
         // list appears immediately after the colon, the same way tag:/notebook: do. A single ['notes']
         // fetch ordered by updated_time covers both regular notes and to-dos.
         var recent = await joplin.data.get(['notes'], {
-            fields: ['id', 'title'],
+            fields: ['id', 'title', 'deleted_time'],
             order_by: 'updated_time',
             order_dir: 'DESC',
-            limit: 10,
+            limit: 20,
         })
         var recentTitles = []
         var recentSeen = new Set()
         for (var r of (recent.items || [])) {
+            // The ['notes'] endpoint returns trashed notes too, and trashing bumps updated_time so they
+            // sort to the top. Search (which both the non-empty title: path and the applied query use)
+            // excludes trash, so a trashed suggestion would find nothing when selected. Skip them here.
+            if (r.deleted_time && r.deleted_time > 0) continue
             var recentTitle = String(r.title || "").trim()
             if (!recentTitle) continue                  // skip untitled notes (empty-title to-dos exist and would render as blank rows)
             var recentKey = recentTitle.toLowerCase()
