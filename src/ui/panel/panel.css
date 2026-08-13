@@ -335,9 +335,18 @@ option {
 }
 
 #searchRow {
+    position: relative;
     display: flex;
     flex-direction: row;
     margin: 0 0 10px;
+}
+
+/* The search autocomplete list anchors under the whole row (reusing the dropdown-menu styling) */
+#searchRow .dropdown-menu {
+    left: 0;
+    right: 0;
+    width: auto;
+    max-width: none;
 }
 
 /* The search field, styled like the dropdowns and Joplin's own search box */

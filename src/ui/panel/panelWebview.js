@@ -64,7 +64,13 @@ document.addEventListener('DOMContentLoaded', () => {
         // Only restore when the refresh actually rebuilt the list, not for unrelated body mutations
         // such as the injected #noteContextMenu, which would otherwise yank the scroll while a menu
         // or tooltip is open.
-        if (refreshBroughtNewTodos(mutations)) restoreTodosScroll()
+        if (refreshBroughtNewTodos(mutations)){
+            restoreTodosScroll()
+            // The suggestion menu was in the replaced markup; drop its now-stale state (closing on a
+            // re-render is fine - only the typed text must survive, which restoreSearchDraft handles)
+            searchSuggestion = null
+            restoreSearchDraft()
+        }
     }).observe(document.body, { childList: true, subtree: true })
 })
 
@@ -339,11 +345,194 @@ async function onNewTodoClicked(){
 
 /** onSearchFilterChanged ****************************************************************************************************************************
  * When the search field is committed (Enter, or its clear button), this function sends the search string to the main plugin. It supports the full   *
- * Joplin search syntax: tag:, notebook:, plain words, and so on.                                                                                    *
+ * Joplin search syntax: tag:, notebook:, title:, plain words, and so on.                                                                            *
  ***************************************************************************************************************************************************/
 async function onSearchFilterChanged(searchString){
     savedTodosScrollTop = 0
+    // The search is now committed, so any uncommitted draft and the open suggestion list are done.
+    searchDraft = null
+    hideSearchSuggestions()
     await webviewApi.postMessage(['searchFilterChanged', searchString]);
+}
+
+/** Search autocomplete *********************************************************************************************************************************
+ * A tag: / notebook: autocomplete for the search field. As the user types, the token at the caret is parsed; when it is a tag: or notebook: filter   *
+ * being written, a dropdown of matching names is shown (reusing the dropdown styling). Picking one inserts it into the field - quoted when it        *
+ * contains spaces, notebooks by their title (Joplin's notebook: matches by title, recursively) - without committing the search, which still happens  *
+ * on Enter. Because the whole panel is replaced on every refresh, the uncommitted text, caret and focus are kept here and painted back on.           *
+ ***************************************************************************************************************************************************/
+
+// The uncommitted search text and caret, kept so a refresh mid-typing does not wipe them
+var searchDraft = null
+// Whether the search field currently has focus, so a refresh only steals focus back when the user
+// was actually in the field (a genuine blur commits the search and clears the draft first)
+var searchFocused = false
+// The open suggestion list: the parsed token it is for, its items, and which one is highlighted
+var searchSuggestion = null
+
+function getSearchInput(){
+    return document.getElementById('searchFilter')
+}
+
+function readSearchData(){
+    var node = document.getElementById('cockpitSearchData')
+    if (!node) return { tags: [], notebooks: [] }
+    try {
+        var data = JSON.parse(node.textContent || '{}')
+        return { tags: data.tags || [], notebooks: data.notebooks || [] }
+    } catch (error) {
+        return { tags: [], notebooks: [] }
+    }
+}
+
+/** tokenAtCaret ************************************************************************************************************************************
+ * The tag: / notebook: filter being typed immediately before the caret, or null. A quoted value may contain spaces; an unquoted one may not, so the  *
+ * quoted form is tried first.                                                                                                                       *
+ ***************************************************************************************************************************************************/
+function tokenAtCaret(value, caret){
+    var before = value.slice(0, caret)
+    var quoted = /(^|\s)(tag|notebook):"([^"]*)$/.exec(before)
+    if (quoted) return { kind: quoted[2], partial: quoted[3], hasQuote: true, start: quoted.index + quoted[1].length, end: caret }
+    var bare = /(^|\s)(tag|notebook):(\S*)$/.exec(before)
+    if (bare) return { kind: bare[2], partial: bare[3], hasQuote: false, start: bare.index + bare[1].length, end: caret }
+    return null
+}
+
+function suggestionsFor(token, data){
+    var partial = token.partial.toLowerCase()
+    if (token.kind === 'tag'){
+        return data.tags
+            .filter(title => String(title).toLowerCase().indexOf(partial) >= 0)
+            .slice(0, 8)
+            .map(title => ({ insert: String(title), label: String(title) }))
+    }
+    return data.notebooks
+        .filter(notebook => (String(notebook.path).toLowerCase().indexOf(partial) >= 0) || (String(notebook.title).toLowerCase().indexOf(partial) >= 0))
+        .slice(0, 8)
+        .map(notebook => ({ insert: String(notebook.title), label: String(notebook.path) }))
+}
+
+function onSearchInput(input){
+    updateSearchDraft(input)
+    var token = tokenAtCaret(input.value, input.selectionStart)
+    if (!token){ hideSearchSuggestions(); return }
+    var items = suggestionsFor(token, readSearchData())
+    if (!items.length){ hideSearchSuggestions(); return }
+    searchSuggestion = { token: token, items: items, activeIndex: 0 }
+    renderSearchSuggestions(input)
+}
+
+/** renderSearchSuggestions ************************************************************************************************************************
+ * Draws the suggestion list under the search row. Items are built with textContent, so a tag or notebook name is never interpreted as markup.        *
+ ***************************************************************************************************************************************************/
+function renderSearchSuggestions(input){
+    // Remove any previous menu directly, so searchSuggestion (just set by the caller) is kept
+    var existing = document.getElementById('searchSuggestions')
+    if (existing) existing.remove()
+    if (!searchSuggestion) return
+    var row = document.getElementById('searchRow')
+    if (!row) return
+    var menu = document.createElement('div')
+    menu.className = 'dropdown-menu'
+    menu.id = 'searchSuggestions'
+    searchSuggestion.items.forEach((suggestion, index) => {
+        var item = document.createElement('div')
+        item.className = 'dropdown-item' + (index === searchSuggestion.activeIndex ? ' -current' : '')
+        var label = document.createElement('span')
+        label.className = 'dropdown-label'
+        label.textContent = suggestion.label
+        item.appendChild(label)
+        // mousedown, not click, so the selection happens before the field's blur can commit or the
+        // menu can be torn down
+        item.addEventListener('mousedown', event => {
+            event.preventDefault()
+            applySearchSuggestion(input, suggestion)
+        })
+        menu.appendChild(item)
+    })
+    row.appendChild(menu)
+}
+
+function paintSearchSuggestionActive(){
+    var menu = document.getElementById('searchSuggestions')
+    if (!menu || !searchSuggestion) return
+    var items = menu.querySelectorAll('.dropdown-item')
+    for (var index = 0; index < items.length; index++){
+        items[index].classList.toggle('-current', index === searchSuggestion.activeIndex)
+    }
+}
+
+function hideSearchSuggestions(){
+    var menu = document.getElementById('searchSuggestions')
+    if (menu) menu.remove()
+    searchSuggestion = null
+}
+
+/** applySearchSuggestion **************************************************************************************************************************
+ * Inserts the chosen value in place of the partial token, quoting it when it contains spaces and adding a trailing space, then keeps focus and the   *
+ * caret after the insertion. The search is not committed.                                                                                           *
+ ***************************************************************************************************************************************************/
+function applySearchSuggestion(input, suggestion){
+    if (!input || !searchSuggestion) return
+    var token = searchSuggestion.token
+    var needsQuote = /\s/.test(suggestion.insert)
+    var replacement = token.kind + ':' + (needsQuote ? '"' + suggestion.insert + '"' : suggestion.insert) + ' '
+    var value = input.value
+    input.value = value.slice(0, token.start) + replacement + value.slice(token.end)
+    var caret = token.start + replacement.length
+    input.focus()
+    input.setSelectionRange(caret, caret)
+    updateSearchDraft(input)
+    hideSearchSuggestions()
+}
+
+function onSearchKeyDown(event){
+    if (!searchSuggestion) return
+    if (event.key === 'ArrowDown'){
+        event.preventDefault()
+        searchSuggestion.activeIndex = (searchSuggestion.activeIndex + 1) % searchSuggestion.items.length
+        paintSearchSuggestionActive()
+    } else if (event.key === 'ArrowUp'){
+        event.preventDefault()
+        searchSuggestion.activeIndex = (searchSuggestion.activeIndex - 1 + searchSuggestion.items.length) % searchSuggestion.items.length
+        paintSearchSuggestionActive()
+    } else if (event.key === 'Enter'){
+        // Select the highlighted suggestion rather than committing the search on this press
+        event.preventDefault()
+        applySearchSuggestion(getSearchInput(), searchSuggestion.items[searchSuggestion.activeIndex])
+    } else if (event.key === 'Escape'){
+        event.preventDefault()
+        event.stopPropagation()
+        hideSearchSuggestions()
+    }
+}
+
+function updateSearchDraft(input){
+    searchDraft = { value: input.value, caret: input.selectionStart }
+}
+
+function onSearchFocus(){
+    searchFocused = true
+}
+
+function onSearchBlur(){
+    searchFocused = false
+    // A genuine blur (removing the field on a refresh does not fire blur) ends the suggestion list
+    hideSearchSuggestions()
+}
+
+/** restoreSearchDraft *****************************************************************************************************************************
+ * After a refresh replaced the panel while the user was typing an uncommitted search, this puts the draft text, caret and focus back. Removing the   *
+ * old field does not fire blur, so searchFocused still reflects that the user was in the field.                                                     *
+ ***************************************************************************************************************************************************/
+function restoreSearchDraft(){
+    if (!searchDraft || !searchFocused) return
+    var input = getSearchInput()
+    if (!input) return
+    input.value = searchDraft.value
+    input.focus()
+    var caret = Math.min(searchDraft.caret, input.value.length)
+    input.setSelectionRange(caret, caret)
 }
 
 /** onCreateProfileClicked **************************************************************************************************************************

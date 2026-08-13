@@ -141,6 +141,28 @@ export async function getNotebookMap(){
     return notebooks
 }
 
+/** getAllTags **************************************************************************************************************************************
+ * Returns every tag as { id, title }, for the search field's tag: autocomplete. Paginated and TTL-cached the same way as the notebook map, so the    *
+ * whole list is fetched at most once every few seconds no matter how often the panel re-renders. Joplin stores tag titles lowercased.               *
+ ***************************************************************************************************************************************************/
+var tagsCache = { stamp: 0, list: null }
+const tagsTTL = 20000
+
+export async function getAllTags(){
+    if (tagsCache.list && Date.now() - tagsCache.stamp < tagsTTL) return tagsCache.list
+    var tags = []
+    let pageNum = 1;
+    do {
+        var response = await joplin.data.get(['tags'], {
+            fields: ['id', 'title'],
+            page: pageNum++,
+        })
+        tags = tags.concat(response.items)
+    } while (response.has_more)
+    tagsCache = { stamp: Date.now(), list: tags }
+    return tags
+}
+
 /** notebookWithDescendants *************************************************************************************************************************
  * The IDs of the given notebook and every notebook nested under it, so that filtering to a notebook includes its sub-notebooks                     *
  ***************************************************************************************************************************************************/

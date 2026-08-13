@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getNotebookMap, invalidateNotebookMap, openTodo, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
+import { getAllTags, getNotebookMap, invalidateNotebookMap, openTodo, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
 import { openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
@@ -265,6 +265,15 @@ async function getControlsHTML(currentProfileID){
     var mobileButtons = (await isMobile()) ? iconButton("brush", "Set Panel CSS", "onStylerClicked()") : ""
     var sync = getSyncStatus()
     var syncButton = iconButton("refresh", syncButtonTooltip(sync), "onSynchronizeClicked()", sync.syncing ? "-syncing" : "")
+    // The tag and notebook names that feed the search field's autocomplete, embedded as a JSON
+    // island the webview reads. It is user content, so "</" is neutralised (as <) to keep a
+    // name from closing the script element early, and the webview builds the dropdown with
+    // textContent so nothing here is interpreted as markup.
+    var tags = await getAllTags()
+    var searchData = JSON.stringify({
+        tags: tags.map(tag => tag.title),
+        notebooks: notebooks.map(notebook => ({ title: notebook.title, path: notebook.path })),
+    }).replace(/</g, "\\u003c")
     return `
         <section id="profileControls">
             ${getProfileDropdownHTML(await getAllProfiles(), currentProfileID)}
@@ -279,10 +288,13 @@ async function getControlsHTML(currentProfileID){
             ${syncButton}
         </section>
         <section id="searchRow">
-            <input id="searchFilter" type="search" placeholder="Search... any:1 tag:a tag:b = a OR b"
-                title="Joplin search syntax, applied with Enter. AND by default; start with any:1 to match ANY term (OR). Also tag:, notebook:, -tag:, plain words."
+            <input id="searchFilter" type="search" placeholder="Search... tag: notebook: title: — any:1 = OR"
+                title="Joplin search syntax, applied with Enter. AND by default; start with any:1 to match ANY term (OR). Also tag:, notebook:, title:, -tag:, plain words."
                 value="${escapeHtml(searchFilter)}"
+                oninput="onSearchInput(this)" onkeydown="onSearchKeyDown(event)"
+                onfocus="onSearchFocus()" onblur="onSearchBlur()"
                 onchange="onSearchFilterChanged(this.value)" onsearch="onSearchFilterChanged(this.value)">
+            <script id="cockpitSearchData" type="application/json">${searchData}</script>
         </section>
     `
 }
