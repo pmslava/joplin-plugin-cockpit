@@ -11,6 +11,9 @@
 body {
     -webkit-text-size-adjust: 100%;
     line-height: 1.5;
+    /* The sidebar colour rather than the note editor's, so the panel reads as part of the app
+     * chrome and stands apart from the note content */
+    background-color: var(--joplin-background-color2, inherit);
 }
 
 /* Joplin's webview skeleton sets "overflow: hidden" on the html element and wraps this markup in
@@ -358,7 +361,7 @@ h2 {
     z-index: 2;
     margin: 0 0 3px;
     padding: 12px 0 3px;
-    background-color: var(--joplin-background-color, inherit);
+    background-color: var(--joplin-background-color2, inherit);
     border-bottom: 1px solid var(--joplin-divider-color, rgba(127, 127, 127, 0.4));
     font-size: 0.92em;
     font-weight: 600;
@@ -433,7 +436,7 @@ h2 {
     position: absolute;
     inset: 3px;
     border-radius: 50%;
-    background: var(--joplin-background-color, #1D2024);
+    background: var(--joplin-background-color2, #181A1D);
 }
 
 /* The small to-do disc; the tick is an SVG painted into it, so it is always centered and crisp */
@@ -529,7 +532,7 @@ h2 {
     position: absolute;
     inset: 3px;
     border-radius: 50%;
-    background: var(--joplin-background-color, #1D2024);
+    background: var(--joplin-background-color2, #181A1D);
 }
 
 /* The context menu of a to-do or note row */
