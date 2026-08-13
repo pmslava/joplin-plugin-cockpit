@@ -1,5 +1,5 @@
 /** README ******************************************************************************************************************************************
- * The agenda panel. On desktop it is shown beside the note list; on mobile Joplin shows it as a tab in the plugin panel dialog, which is opened     *
+ * The Cockpit panel. On desktop it is shown beside the note list; on mobile Joplin shows it as a tab in the plugin panel dialog, which is opened    *
  * from the built in toolbar button of the note screen.                                                                                             *
  ***************************************************************************************************************************************************/
 

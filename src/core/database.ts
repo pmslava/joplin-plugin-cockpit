@@ -1,5 +1,5 @@
 /** README ******************************************************************************************************************************************
- * This file contains all functions involved in managing the agenda profile database.                                                               *
+ * This file contains all functions involved in managing the Cockpit profile database.                                                              *
  * Profiles are stored as a JSON document in a private plugin setting. Earlier versions of Cockpit used an sqlite3 database in the plugin data        *
  * directory, but neither sqlite3 nor the file system is available to plugins on mobile, so that database is imported into the setting the first     *
  * time this version runs and is then left untouched.                                                                                               *
