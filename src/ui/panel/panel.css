@@ -921,6 +921,13 @@ table {
  * and push the two pseudo-elements out by the pad so the disc, hollow and tick render pixel-identical. */
 .cockpit-mobile .todo-checkbox {
     --tap-pad: max(0px, calc((40px - var(--cockpit-circle-size)) / 2));
+    /* The panel sets a global `* { box-sizing: border-box }`, under which the padding below would eat
+     * into the fixed 18px width instead of growing the box - the content floors to 0, the conic ring
+     * (clipped to the content box) vanishes and both pseudo-elements collapse, so the whole glyph
+     * disappears and the tap target is only the padding wide. Restoring content-box for this element
+     * makes width the content size, so border box = circle + 2*pad = 40px and the disc/ring/tick render
+     * pixel-identical to desktop. */
+    box-sizing: content-box;
     padding: var(--tap-pad);
     background-origin: content-box;
     background-clip: content-box;
@@ -940,6 +947,13 @@ table {
 /* Standalone icon buttons (sync, sort direction, mobile styler, calendar nav): 26 + 14 = 40 square. */
 .cockpit-mobile .icon-button { position: relative; }
 .cockpit-mobile .icon-button::after { content: ""; position: absolute; inset: -7px; }
+
+/* The filter row packs the sort-direction, styler and sync icon buttons directly against each other
+ * (and against the sort dropdown) with only a 4px gap, so the full -7px overlay above would overlap the
+ * neighbour by ~10px and, painted on top, occlude ~3px of its icon - taps in that band would hit the
+ * wrong button. Constrain the growth to vertical only here, matching the .dropdown-toggle treatment in
+ * the same flex row; the standalone calendar-nav arrows keep the full square overlay above. */
+.cockpit-mobile #filterRow .icon-button::after { inset: -7px 0; }
 
 /* Dropdown togglers in the flex filter row: vertical only, so the hit area never overflows the flex
  * neighbours. */
