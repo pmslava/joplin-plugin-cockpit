@@ -32,7 +32,12 @@ test.describe('Calendar views', () => {
     const { win } = joplin;
     await createNotebook(win, 'Agenda E2E');
     await createTodo(win, todayTitle);
-    await setAlarm(win, new Date(Date.now() + 3 * 3600 * 1000));
+    // Anchor the due date to midday today, not "a few hours from now": run late enough in the day
+    // and now+3h rolls past midnight, landing the to-do on tomorrow, so the "select today" test
+    // below finds nothing on today's cell. Midday keeps it on today whatever time the suite runs.
+    const dueToday = new Date();
+    dueToday.setHours(12, 0, 0, 0);
+    await setAlarm(win, dueToday);
     await waitForPanelTodo(win, todayTitle);
   });
 

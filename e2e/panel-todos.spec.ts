@@ -38,8 +38,15 @@ test.describe('Panel to-do list', () => {
     await createTodo(win, todayTitle);
     await setAlarm(win, new Date(Date.now() + 2 * 3600 * 1000));
 
-    // Left without an alarm on purpose: the default profile must not show it.
+    // Left without an alarm on purpose: the profile is pinned below to hide undated to-dos, so it
+    // must not show it until the "reveal" test turns that on.
     await createTodo(win, noDueTitle);
+
+    // This suite's narrative — undated hidden until revealed, a ticked to-do dropping out until a
+    // show-completed profile brings it back — needs a profile that hides undated and completed
+    // to-dos. Cockpit's shipped default ("All todo and notes") shows both, so pin the starting
+    // state explicitly rather than depending on whatever the shipped defaults happen to be.
+    await editCurrentProfile(win, { showNoDue: false, showCompleted: false });
   });
 
   test.afterAll(async () => {
@@ -53,6 +60,10 @@ test.describe('Panel to-do list', () => {
   });
 
   test('to-dos are grouped by when they are due, in chronological order', async () => {
+    // Read the headings from a settled panel: right after a refresh the panel can paint one group
+    // before the rest arrive, so wait for both dated to-dos to be present first.
+    await waitForPanelTodo(joplin.win, overdueTitle);
+    await waitForPanelTodo(joplin.win, todayTitle);
     const headings = await panelHeadings(joplin.win);
     // A to-do due yesterday is always overdue, but one due a couple of hours from now is either
     // later today or early tomorrow, depending on the time of day the suite runs.
@@ -67,6 +78,9 @@ test.describe('Panel to-do list', () => {
   });
 
   test('the due time is shown alongside the title', async () => {
+    // Wait for the row to be present before reading, so a mid-refresh partial paint can't yield an
+    // undefined title.
+    await waitForPanelTodo(joplin.win, todayTitle);
     const titles = await panelTodoTitles(joplin.win);
     const today = titles.find((t) => t.includes(todayTitle))!;
     // The interval format prefixes to-dos due today with their time, e.g. "6:20 PM - Today task".

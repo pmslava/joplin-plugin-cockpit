@@ -79,18 +79,30 @@ export async function panelIsVisible(win: Page): Promise<boolean> {
   }
 }
 
-/** The to-do titles currently listed in the panel, in display order. */
+/**
+ * The to-do titles currently listed in the panel, in display order.
+ *
+ * Read via textContent, not innerText: innerText is layout-dependent (it returns "" for anything
+ * the panel is painting invisibly and reflects CSS text casing), whereas the tests want the literal
+ * label the panel emitted, e.g. "23:06 - Today task".
+ */
 export async function panelTodoTitles(win: Page): Promise<string[]> {
   const frame = await findPanelFrame(win);
   if (!frame) return [];
-  return frame.locator('.todo-title').allInnerTexts();
+  return (await frame.locator('.todo-title').allTextContents()).map((t) => t.trim());
 }
 
-/** The group headings (Overdue, Today, ...) currently shown in the panel, in display order. */
+/**
+ * The group headings (Overdue, Today, ...) currently shown in the panel, in display order.
+ *
+ * The panel uppercases these headings with `text-transform: uppercase`, which is a display effect
+ * only; innerText would echo it back as "OVERDUE". textContent returns the real heading the panel
+ * rendered ("Overdue", "Today", "No Due Date", ...), which is what the specs assert against.
+ */
 export async function panelHeadings(win: Page): Promise<string[]> {
   const frame = await findPanelFrame(win);
   if (!frame) return [];
-  return frame.locator('.todos h2').allInnerTexts();
+  return (await frame.locator('.todos h2').allTextContents()).map((t) => t.trim());
 }
 
 /** Wait until the panel lists a to-do whose text contains `title`. */
@@ -420,7 +432,9 @@ export async function selectCalendarDay(win: Page, dayNumber: number): Promise<v
 /** The to-do titles listed under the month grid for the selected day. */
 export async function selectedDayTodos(win: Page): Promise<string[]> {
   const frame = await agendaPanel(win);
-  return frame.locator('.calendar-selected .todo-title').allInnerTexts();
+  return (await frame.locator('.calendar-selected .todo-title').allTextContents()).map((t) =>
+    t.trim()
+  );
 }
 
 /** The day headings of the week planner, in display order. */
