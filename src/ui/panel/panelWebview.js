@@ -131,6 +131,10 @@ function reconcile(){
         // re-render is fine - only the typed text must survive, which restoreSearchDraft handles).
         searchSuggestion = null
         restoreSearchDraft()
+        // Overlay reload-survival: when this render carries the overlay descriptor island (the host's
+        // reconstruct render after a mid-overlay reload) and no overlay is open in this webview yet, rebuild
+        // it from the descriptor. Mobile only; the island is never emitted on desktop.
+        if (IS_MOBILE && !overlayOpen) reopenOverlayFromEmbeddedState()
     }
 }
 
@@ -138,11 +142,21 @@ function reconcile(){
 // observer on that event left it never registered and every restore above was dead code. Wire it up
 // at top-level instead, with a fallback for the reverse ordering just in case.
 function startPanelObserver(){
+    // Set IS_MOBILE from the platform marker before anything below reads it (reconcile() sets it too, but
+    // the dialogGuardReset post has to know the platform first).
+    applyPlatformClass()
+    if (IS_MOBILE){
+        // Clear any overlay refresh-guard leaked by a previous webview torn down mid-overlay, and drive the
+        // overlay reload-survival handshake. message[1] tells the host whether THIS freshly loaded document
+        // already carries the overlay descriptor island: when it does, reconcile() below rebuilds the
+        // overlay itself and the host must not force another render; when it does not (a host reload that
+        // re-served the stale pre-overlay snapshot), the host re-renders once with the descriptor embedded.
+        // Posted BEFORE reconcile() so the leaked guard is zeroed first and reconcile's rebuild re-arms it
+        // cleanly afterwards. A no-op on an ordinary fresh load (no descriptor, no leaked guard).
+        var stateText = readEmbeddedOverlayStateText()
+        void webviewApi.postMessage(['dialogGuardReset', !!stateText]);
+    }
     reconcile()
-    // reconcile() has just set IS_MOBILE from the platform marker. Clear any overlay refresh-guard leaked
-    // by a previous webview that was torn down mid-overlay (only meaningful on mobile, where overlays and
-    // the guard exist); a no-op on a normal fresh load.
-    if (IS_MOBILE) void webviewApi.postMessage(['dialogGuardReset']);
     new MutationObserver(reconcile).observe(document.body, { childList: true, subtree: true })
 }
 
@@ -893,6 +907,72 @@ async function onCalendarDaySelected(isoDate){
 // Whether an overlay is currently open, so the guard is posted exactly once per open/close.
 var overlayOpen = false
 
+/** Overlay reload-survival ****************************************************************************************************************************
+ * On mobile the panel WebView can be reloaded by the HOST at any moment (an Android renderer-process kill under sync load remounts it and re-serves    *
+ * the last document Joplin held - the PRE-overlay snapshot, since the refresh guard blocked any newer setHtml while the overlay was up). That wipes an  *
+ * open overlay. To survive it the plugin holds a small, fully-rebuildable descriptor of the open overlay: this webview posts it on open and on          *
+ * (throttled) input changes, and on the next reload the host re-renders once with the descriptor embedded as a JSON island so the fresh webview can     *
+ * reconstruct the overlay. overlayContext carries the static parts; currentOverlayDescriptor() reads the live field values so the posted descriptor     *
+ * always reflects the latest input.                                                                                                                    *
+ ***************************************************************************************************************************************************/
+var overlayContext = null
+var overlayStateTimer = null
+
+function currentOverlayDescriptor(){
+    if (!overlayContext) return null
+    if (overlayContext.kind === 'notebook'){
+        return { kind: 'notebook', purpose: overlayContext.purpose, opts: overlayContext.opts, selection: overlayNotebookSelection }
+    }
+    if (overlayContext.kind === 'tag'){
+        var tagInput = document.querySelector('#cockpitOverlay .cockpit-overlay-input')
+        return { kind: 'tag', noteID: overlayContext.noteID, text: tagInput ? tagInput.value : (overlayContext.text || '') }
+    }
+    if (overlayContext.kind === 'alarm'){
+        var dateEl = document.getElementById('alarmDate')
+        var timeEl = document.getElementById('alarmTime')
+        return { kind: 'alarm', ids: overlayContext.ids, date: dateEl ? dateEl.value : '', time: timeEl ? timeEl.value : '' }
+    }
+    return null
+}
+
+// Post the current descriptor to the host immediately. Used on open and on discrete picks (a notebook row,
+// a calendar day, an hour/minute). A null descriptor (no overlay) is a harmless no-op for the host.
+function pushOverlayState(){
+    void webviewApi.postMessage(['overlayState', currentOverlayDescriptor()])
+}
+
+// Trailing-edge throttle for rapid input (typing a tag, editing the date/time text), mirroring
+// queueScrollPost so a burst of keystrokes posts at most once every 300ms.
+function queueOverlayState(){
+    if (overlayStateTimer) return
+    overlayStateTimer = setTimeout(function(){ overlayStateTimer = null; pushOverlayState() }, 300)
+}
+
+// The raw text of the embedded overlay-state island (empty string when absent/null), read by
+// startPanelObserver to tell the host whether this document can reconstruct the overlay itself.
+function readEmbeddedOverlayStateText(){
+    var node = document.getElementById('cockpitOverlayState')
+    if (!node) return ''
+    var text = String(node.textContent || '').trim()
+    return text && text !== 'null' ? text : ''
+}
+
+// Reconstruct the overlay from the descriptor embedded in the host's reconstruct render (see reconcile).
+function reopenOverlayFromEmbeddedState(){
+    var text = readEmbeddedOverlayStateText()
+    if (!text) return
+    var state = null
+    try { state = JSON.parse(text) } catch (error){ return }
+    reopenOverlayFromState(state)
+}
+
+function reopenOverlayFromState(state){
+    if (!state || overlayOpen) return
+    if (state.kind === 'notebook') openNotebookOverlay(state.purpose, state.opts || {}, state)
+    else if (state.kind === 'tag') openTagOverlay(state.noteID, state)
+    else if (state.kind === 'alarm') openAlarmOverlay(state.ids || [], state)
+}
+
 function readNotebookData(){
     var node = document.getElementById('cockpitSearchData')
     if (!node) return { notebooks: [], notebookFilter: '' }
@@ -917,6 +997,10 @@ function closeOverlay(){
     if (backdrop) backdrop.remove()
     if (overlayOpen){
         overlayOpen = false
+        // Drop the reload-survival context; the host clears its held descriptor on the dialogGuard false
+        // below (no separate overlayState-null message is posted, to avoid a close/refresh ordering race).
+        overlayContext = null
+        if (overlayStateTimer){ clearTimeout(overlayStateTimer); overlayStateTimer = null }
         document.removeEventListener('keydown', overlayKeydown, true)
         void webviewApi.postMessage(['dialogGuard', false]);
     }
@@ -983,7 +1067,7 @@ function buildOverlay(titleText, footerButtons){
  ***************************************************************************************************************************************************/
 var overlayNotebookSelection = null
 
-function openNotebookOverlay(purpose, opts){
+function openNotebookOverlay(purpose, opts, restore){
     opts = opts || {}
     var titles = {
         moveNotes: 'Move to notebook',
@@ -991,7 +1075,9 @@ function openNotebookOverlay(purpose, opts){
         createNote: 'Create note in notebook',
         createTodo: 'Create to-do in notebook',
     }
-    overlayNotebookSelection = null
+    // On a reload-survival reconstruct, start from the previously-picked row.
+    overlayNotebookSelection = (restore && restore.selection != null) ? restore.selection : null
+    overlayContext = { kind: 'notebook', purpose: purpose, opts: opts }
     var body = buildOverlay(titles[purpose] || 'Select notebook', [
         { label: 'Cancel', onClick: function(){ closeOverlay() } },
         { label: 'OK', kind: 'primary', onClick: function(){
@@ -1011,10 +1097,13 @@ function openNotebookOverlay(purpose, opts){
         var row = document.createElement('div')
         row.className = 'cockpit-overlay-item'
         row.textContent = label
+        // Re-mark the restored selection so a reconstructed overlay shows what was picked before the reload.
+        if (overlayNotebookSelection !== null && id === overlayNotebookSelection) row.classList.add('-selected')
         row.addEventListener('click', function(){
             overlayNotebookSelection = id
             for (var other of rows) other.classList.remove('-selected')
             row.classList.add('-selected')
+            pushOverlayState()
         })
         rows.push(row)
         list.appendChild(row)
@@ -1024,13 +1113,15 @@ function openNotebookOverlay(purpose, opts){
         makeRow(String(notebook.id), String(notebook.path))
     }
     body.appendChild(list)
+    pushOverlayState()
 }
 
 /** openTagOverlay **********************************************************************************************************************************
  * The in-panel tag picker: a single comma-separated input prefilled with the note's current tags, fetched with the getNoteTags round-trip (the host   *
  * knows the tags, the webview does not). On OK it posts tagsPicked with the desired titles; the host keeps the diff/attach/detach logic.              *
  ***************************************************************************************************************************************************/
-function openTagOverlay(noteID){
+function openTagOverlay(noteID, restore){
+    overlayContext = { kind: 'tag', noteID: noteID, text: (restore && restore.text) || '' }
     var input = document.createElement('input')
     input.className = 'cockpit-overlay-input'
     input.type = 'text'
@@ -1039,6 +1130,8 @@ function openTagOverlay(noteID){
     input.setAttribute('autocorrect', 'off')
     input.setAttribute('autocapitalize', 'off')
     input.setAttribute('spellcheck', 'false')
+    // Re-post the descriptor (throttled) as the user types, so a reload reconstructs the latest text.
+    input.addEventListener('input', queueOverlayState)
 
     var body = buildOverlay('Tags (comma separated)', [
         { label: 'Cancel', onClick: function(){ closeOverlay() } },
@@ -1049,13 +1142,22 @@ function openTagOverlay(noteID){
     ])
     body.appendChild(input)
 
-    // Prefill from the host, then focus. If the round-trip fails the input is simply left empty.
-    webviewApi.postMessage(['getNoteTags', noteID]).then(function(csv){
-        // Ignore a late reply if the overlay was already closed.
-        if (!overlayOpen || !input.isConnected) return
-        input.value = String(csv || '')
-    }).catch(function(){})
-    input.focus()
+    if (restore){
+        // Reconstruct: skip the round-trip and restore the text the user had typed before the reload.
+        input.value = String(restore.text || '')
+        input.focus()
+        pushOverlayState()
+    } else {
+        // Prefill from the host, then focus. If the round-trip fails the input is simply left empty.
+        webviewApi.postMessage(['getNoteTags', noteID]).then(function(csv){
+            // Ignore a late reply if the overlay was already closed.
+            if (!overlayOpen || !input.isConnected) return
+            input.value = String(csv || '')
+            pushOverlayState()
+        }).catch(function(){})
+        input.focus()
+        pushOverlayState()
+    }
 }
 
 /** Alarm overlay (mobile) **************************************************************************************************************************
@@ -1090,6 +1192,7 @@ function setAlarmDateOffset(days){
     document.getElementById('alarmDate').value = alarmDateToISO(date)
     alarmCalendarAnchor = new Date(date.getFullYear(), date.getMonth(), 1)
     renderAlarmCalendar()
+    pushOverlayState()
 }
 
 function setAlarmDateNextMonth(){
@@ -1104,6 +1207,7 @@ function setAlarmDateNextMonth(){
     document.getElementById('alarmDate').value = alarmDateToISO(target)
     alarmCalendarAnchor = new Date(target.getFullYear(), target.getMonth(), 1)
     renderAlarmCalendar()
+    pushOverlayState()
 }
 
 function onAlarmCalendarNavigate(delta){
@@ -1114,12 +1218,14 @@ function onAlarmCalendarNavigate(delta){
 function pickAlarmDay(isoDate){
     document.getElementById('alarmDate').value = isoDate
     renderAlarmCalendar()
+    pushOverlayState()
 }
 
 function onAlarmDateEdited(){
     var parsed = alarmParseISO(document.getElementById('alarmDate').value)
     if (parsed) alarmCalendarAnchor = new Date(parsed.getFullYear(), parsed.getMonth(), 1)
     renderAlarmCalendar()
+    queueOverlayState()
 }
 
 function renderAlarmCalendar(){
@@ -1179,15 +1285,17 @@ function pickAlarmHour(hours){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(hours)}:${alarmPad(time.minutes === null ? 0 : time.minutes)}`
     updateAlarmTimeSelection()
+    pushOverlayState()
 }
 
 function pickAlarmMinute(minutes){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(time.hours === null ? 9 : time.hours)}:${alarmPad(minutes)}`
     updateAlarmTimeSelection()
+    pushOverlayState()
 }
 
-function onAlarmTimeEdited(){ updateAlarmTimeSelection() }
+function onAlarmTimeEdited(){ updateAlarmTimeSelection(); queueOverlayState() }
 
 function updateAlarmTimeSelection(){
     var time = currentAlarmTime()
@@ -1225,9 +1333,10 @@ function scrollAlarmColumn(column, index, total){
  * Builds the alarm overlay for the given to-dos, prefills its fields from the host, and draws the calendar + time columns. OK / Clear alarm / Cancel  *
  * are the footer buttons.                                                                                                                            *
  ***************************************************************************************************************************************************/
-function openAlarmOverlay(ids){
+function openAlarmOverlay(ids, restore){
     ids = ids || []
     if (!ids.length) return
+    overlayContext = { kind: 'alarm', ids: ids }
     var count = ids.length === 1 ? '1 to-do' : ids.length + ' to-dos'
     var body = buildOverlay('Set alarm for ' + count, [
         { label: 'Cancel', onClick: function(){ closeOverlay() } },
@@ -1265,12 +1374,24 @@ function openAlarmOverlay(ids){
         </div>
     `
 
+    if (restore){
+        // Reconstruct: restore the date/time the user had before the reload; skip the round-trip.
+        document.getElementById('alarmDate').value = String(restore.date || '')
+        document.getElementById('alarmTime').value = String(restore.time || '')
+        alarmCalendarAnchor = null
+        renderAlarmCalendar()
+        renderAlarmTimeColumns()
+        pushOverlayState()
+        return
+    }
+
     // Draw the grid immediately from the (empty) fields so the overlay is always usable, even if the
     // prefill round-trip below rejects (e.g. computeInitialAlarm's data.get throws because a selected
     // note was just deleted). renderAlarmCalendar falls back to today when the date field is empty.
     alarmCalendarAnchor = null
     renderAlarmCalendar()
     renderAlarmTimeColumns()
+    pushOverlayState()
 
     // Prefill the fields from the host, then redraw the calendar and time columns from those values.
     webviewApi.postMessage(['getAlarmInitial', ids]).then(function(init){
@@ -1284,5 +1405,6 @@ function openAlarmOverlay(ids){
         alarmCalendarAnchor = null
         renderAlarmCalendar()
         renderAlarmTimeColumns()
+        pushOverlayState()
     }).catch(function(){})
 }

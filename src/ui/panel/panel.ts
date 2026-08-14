@@ -41,6 +41,17 @@ var renderNonce = 0
  ***************************************************************************************************************************************************/
 var searchFocused = false
 
+/** openOverlayState (mobile overlay reload-survival) ***********************************************************************************************
+ * A small, fully rebuildable descriptor of the in-panel overlay (notebook / tag / alarm picker) that is currently open, or null when none is. The     *
+ * webview posts it on open and on throttled input changes (['overlayState', descriptor]); the host clears it when the overlay closes (the dialogGuard  *
+ * false path). It exists because on mobile the panel WebView can be reloaded by the HOST at any time - an Android renderer-process kill under sync     *
+ * load remounts it and re-serves the last document Joplin held, which is the PRE-overlay snapshot (the refresh guard blocked any newer setHtml while    *
+ * the overlay was up). That reload wipes the overlay, and the plugin's guard cannot help: the reload is host-initiated, not a Cockpit setHtml. So the   *
+ * host holds the descriptor and, on the fresh webview's dialogGuardReset, re-renders once with it embedded (see refreshPanelData / the dialogGuardReset *
+ * handler) so the reloaded webview can reconstruct the overlay. Null on desktop (overlays are mobile-only), so desktop never embeds or reconstructs.    *
+ ***************************************************************************************************************************************************/
+var openOverlayState = null
+
 /** calendarViewState *******************************************************************************************************************************
  * Which month or week the calendar views are showing, and which day is selected. This is where the user has navigated to rather than a setting, so   *
  * it is kept in memory and starts again at today whenever the plugin restarts or the profile changes.                                               *
@@ -243,7 +254,21 @@ async function eventHandler(message){
         // on an OK close the picker's own handler already refreshes, so this extra render is a no-op via
         // the equality guard. Mobile-only in effect: overlays are never opened on desktop.
         setOverlayGuard(!!message[1])
-        if (!message[1] && !isDialogOpen()) await refreshPanelData()
+        if (!message[1]){
+            // An overlay just closed: it can no longer need reconstructing, so drop its descriptor now,
+            // synchronously, BEFORE the repaint below - otherwise a post-close render could still embed
+            // the stale descriptor and the reloaded webview would resurrect the overlay the user just
+            // dismissed. (The webview deliberately does NOT post a separate overlayState-null message on
+            // close, to avoid that race; the host owns the clear.)
+            openOverlayState = null
+            if (!isDialogOpen()) await refreshPanelData()
+        }
+    } else if (message[0] == 'overlayState'){
+        // The webview's descriptor of the overlay it is showing (posted on open and on throttled input
+        // changes). Held so a host-initiated webview reload mid-overlay can be reconstructed; never
+        // triggers a refresh of its own (the overlay is up, so refreshes are guarded anyway).
+        openOverlayState = message[1] || null
+        return
     } else if (message[0] == 'dialogGuardReset'){
         // Posted once per webview (re)load on mobile: clear any overlay guard leaked by a webview that was
         // torn down mid-overlay, so refreshPanelData is not paused forever. Clear the search-focus hold for
@@ -251,6 +276,14 @@ async function eventHandler(message){
         // panel tab closed while the search was focused) would otherwise pause refreshes forever.
         resetOverlayGuard()
         searchFocused = false
+        // Overlay reload-survival: message[1] is true when the freshly loaded document ALREADY carries the
+        // overlay descriptor (it will reconstruct the overlay itself, so nothing to do). When an overlay
+        // should be open but the loaded document does NOT carry it - the classic case being an Android
+        // renderer crash that re-served the stale pre-overlay snapshot - re-render once WITH the descriptor
+        // embedded so the fresh webview can rebuild it. The webview clears the leaked guard above first and
+        // re-arms it when it rebuilds, so this fires exactly once and cannot loop (a document that already
+        // carries the descriptor reports message[1] true and is skipped).
+        if (openOverlayState && !message[1]) await refreshPanelData()
     } else if (message[0] == 'getNoteTags'){
         // A two-way round-trip (like searchTitleSuggestions): the tag overlay awaits this to prefill its
         // input with the note's current tags, comma separated.
@@ -352,12 +385,23 @@ export async function togglePanelVisibility() {
     // wrapper, so mobile-only CSS/JS can branch off it. Empty on desktop, so the desktop markup and DOM
     // are unchanged.
     var rootMarker = mobile ? '<div id="cockpitPlatform" hidden></div>' : ''
+    // Overlay reload-survival (mobile): embed the open-overlay descriptor as a JSON data island so a
+    // host-reloaded webview can reconstruct the overlay (see openOverlayState). It is part of the
+    // equality-compared content below on purpose: openOverlayState is null in every ordinary render (an
+    // open overlay guards refreshes, so no render happens while it is up), leaving the island empty and
+    // the equality guard untouched; the ONE render where it is non-null is the reconstruct render, whose
+    // differing content is exactly what must get past the guard to reach setHtml. "</" is neutralised so a
+    // note id/title inside the descriptor cannot close the script element early. Empty on desktop.
+    var overlayStateIsland = (mobile && openOverlayState)
+        ? `<script id="cockpitOverlayState" type="application/json">${JSON.stringify(openOverlayState).replace(/</g, "\\u003c")}</script>`
+        : ''
     var contentHtml = panelTemplate
         .replace("<<THEME_CSS>>", () => themeCss)
         .replace("<<CUSTOM_CSS>>", () => customCss)
         .replace("<<ROOT_MARKER>>", () => rootMarker)
         .replace("<<CONTROLS>>", () => controlsHtml)
         .replace("<<TODOS>>", () => todosHtml)
+        .replace("<<OVERLAY_STATE>>", () => overlayStateIsland)
     // The equality guard compares content only: the scroll-top and render-nonce placeholders are still
     // present here and are filled in below. Comparing before they are stamped keeps the guard working -
     // otherwise the ever-incrementing nonce would defeat it, forcing a setHtml (a full webview reload on
