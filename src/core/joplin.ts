@@ -9,7 +9,7 @@ import joplin from 'api';
  * Returns the list of todos, sorted by due date. If show completed is true, it will include completed todos. If show no due is true, it will       *
  * include todos without due dates.                                                                                                                 *
  ***************************************************************************************************************************************************/
- export async function getTodos(showCompleted, showNoDue, searchCritera){
+ export async function getTodos(showCompleted, showNoDue, searchCritera, fast?){
     const completed = showCompleted ? "" : "iscompleted:0"
     const noDue = showNoDue ? "" : "due:19700201"
     var allTodos = [];
@@ -24,7 +24,7 @@ import joplin from 'api';
         })
         allTodos = allTodos.concat(response.items)
     } while (response.has_more)
-    await attachCheckboxCounts(allTodos)
+    await attachCheckboxCounts(allTodos, fast)
     // The search only orders by due date, which leaves to-dos sharing a due date - and the whole
     // "No Due Date" group - in arbitrary order. Ties are broken by title, so that a naming scheme
     // gives a deliberate order. The comparison is case insensitive and number aware ("2" < "10").
@@ -103,7 +103,7 @@ export async function searchTitleSuggestions(partial){
  * Returns the regular (non to-do) notes matching the given search criteria, sorted by title, each with its checkbox counts. Used when a profile     *
  * shows notes alongside the to-dos.                                                                                                                *
  ***************************************************************************************************************************************************/
-export async function getNotes(searchCriteria){
+export async function getNotes(searchCriteria, fast?){
     var allNotes = [];
     let pageNum = 1;
     do {
@@ -115,7 +115,7 @@ export async function getNotes(searchCriteria){
         })
         allNotes = allNotes.concat(response.items)
     } while (response.has_more)
-    await attachCheckboxCounts(allNotes)
+    await attachCheckboxCounts(allNotes, fast)
     return allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
 }
 
@@ -124,26 +124,33 @@ export async function getNotes(searchCriteria){
  * cached per note and a body is only re-fetched when the note's updated time has changed. A refresh therefore usually fetches no bodies at all.     *
  * On a cold start over a large set, at most maxBodyFetchesPerRefresh bodies are fetched per refresh and the rest fill in on following refreshes,    *
  * so the panel appears quickly instead of stalling.                                                                                                 *
+ *                                                                                                                                                  *
+ * fast (mobile first-paint after a profile switch/create): skip the body fetches entirely and render each row from whatever is already cached (an    *
+ * uncached row shows an empty ring). The ring is display-only, so a momentarily-empty ring is harmless, and this keeps the interactive switch off    *
+ * the up-to-300 serial bridge round-trips a fresh result set would otherwise need. It writes NOTHING to the cache, so the per-note stamp invariant    *
+ * (a cache entry always matches the body it was computed from) is preserved and the follow-up background refresh fetches the still-stale rows.        *
  ***************************************************************************************************************************************************/
 var checkboxCounts = new Map()
 const bodyFetchChunk = 20
 const maxBodyFetchesPerRefresh = 300
 
-async function attachCheckboxCounts(items){
-    var stale = items.filter(item => {
-        var cached = checkboxCounts.get(item.id)
-        return !cached || cached.stamp !== item.user_updated_time
-    }).slice(0, maxBodyFetchesPerRefresh)
-    for (var index = 0; index < stale.length; index += bodyFetchChunk){
-        await Promise.all(stale.slice(index, index + bodyFetchChunk).map(async item => {
-            try {
-                var note = await joplin.data.get(['notes', item.id], { fields: ['body'] })
-                var counts = countCheckboxes(note.body)
-                checkboxCounts.set(item.id, { stamp: item.user_updated_time, done: counts.done, total: counts.total })
-            } catch (error) {
-                checkboxCounts.set(item.id, { stamp: item.user_updated_time, done: 0, total: 0 })
-            }
-        }))
+async function attachCheckboxCounts(items, fast?){
+    if (!fast){
+        var stale = items.filter(item => {
+            var cached = checkboxCounts.get(item.id)
+            return !cached || cached.stamp !== item.user_updated_time
+        }).slice(0, maxBodyFetchesPerRefresh)
+        for (var index = 0; index < stale.length; index += bodyFetchChunk){
+            await Promise.all(stale.slice(index, index + bodyFetchChunk).map(async item => {
+                try {
+                    var note = await joplin.data.get(['notes', item.id], { fields: ['body'] })
+                    var counts = countCheckboxes(note.body)
+                    checkboxCounts.set(item.id, { stamp: item.user_updated_time, done: counts.done, total: counts.total })
+                } catch (error) {
+                    checkboxCounts.set(item.id, { stamp: item.user_updated_time, done: 0, total: 0 })
+                }
+            }))
+        }
     }
     for (var item of items){
         var counts = checkboxCounts.get(item.id)

@@ -119,7 +119,8 @@ abstract class BaseFormat {
             searchCriteria = `${searchCriteria} notebook:"${filterNotebook.title}"`
         }
         var showAnyCompleted = this.profile.showCompletedPast || this.profile.showCompletedToday || this.profile.showCompletedFuture || this.profile.showCompletedNoDue
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria)
+        var fast = this.viewState ? (this.viewState as any).fastCheckboxCounts : false
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast)
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -642,7 +643,8 @@ export async function renderNotesSection(profile, viewState){
     if (sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"')){
         searchCriteria = `${searchCriteria} notebook:"${sectionFilterNotebook.title}"`
     }
-    var notes = await getNotes(searchCriteria)
+    var fast = viewState ? viewState.fastCheckboxCounts : false
+    var notes = await getNotes(searchCriteria, fast)
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
         note.notebookTitle = notebook ? notebook.title : ""

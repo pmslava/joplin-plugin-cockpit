@@ -55,6 +55,20 @@ export function resetOverlayGuard(){
     dialogOpenCount = 0
 }
 
+/** pendingReopenRefresh ****************************************************************************************************************************
+ * Set when a dismiss-first dialog (profile editor / styler on mobile) has torn the panel viewer down. The plugin cannot reopen the viewer, so the    *
+ * next dialogGuardReset - posted when the user reopens it from the toolbar - is the first signal that Cockpit is visible again. The panel handler     *
+ * consumes this flag then and repaints immediately, so a profile just created/edited is current on reopen instead of waiting for the 120s mobile      *
+ * timer. Only set on mobile (the dismiss actually happens there); a no-op on desktop, whose viewer is never dismissed.                               *
+ ***************************************************************************************************************************************************/
+var pendingReopenRefresh = false
+
+export function consumePendingReopenRefresh(){
+    var pending = pendingReopenRefresh
+    pendingReopenRefresh = false
+    return pending
+}
+
 /** openPluginDialog ********************************************************************************************************************************
  * Opens a Joplin plugin dialog while holding the guard above, releasing it in the finally once the dialog is dismissed so the caller's own post-dialog *
  * refresh runs after the guard has cleared. Used directly on desktop for every dialog, and on mobile only for the dismiss-first dialogs below (where   *
@@ -85,6 +99,10 @@ export async function openDialogDismissingViewer(dialogHandle){
     } catch (error) {
         console.warn("Cockpit: dismissPluginPanels is not available; the dialog may open behind the panel", error)
     }
+    // The viewer's webview is now torn down, so any refresh the caller issues after this dialog resolves
+    // paints into redux off-screen. Arm a refresh for when the user reopens the viewer (its first
+    // dialogGuardReset), so a profile just created/edited shows immediately instead of after the 120s timer.
+    pendingReopenRefresh = true
     // Let the viewer's fade-out / unmount settle before the dialog's overlay mounts.
     await new Promise(resolve => setTimeout(resolve, 50))
     // The reopen hint is NOT shown here: the caller shows it via notifyViewerDismissed() AFTER any

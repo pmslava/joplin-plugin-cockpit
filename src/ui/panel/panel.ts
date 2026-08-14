@@ -16,7 +16,7 @@ import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
-import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
+import { consumePendingReopenRefresh, isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
 import { iconButton, icons } from "../icons";
 
@@ -183,7 +183,13 @@ async function eventHandler(message){
         resetCalendarViewState()
         // The profile carries its own header state: notebook filter, search and sorting.
         applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
-        await refreshInterfaces()
+        // Paint the switched-to view immediately (fast on mobile: rings from cache), and leave the
+        // all-profiles overview-note rewrite - which the switch does not change and the user is not waiting
+        // for - to the background scheduleRefresh. This is what turns a multi-second mobile switch into one
+        // search + one reload; desktop keeps the same immediate paint and gets its overview notes a beat
+        // later via the schedule (refreshInterfaces there is cheap, so this is safe and still instant).
+        await refreshPanelData({ fast: true })
+        scheduleRefresh()
     } else if (message[0] == 'notebookFilterChanged'){
         notebookFilter = String(message[1] || "")
         lastScrollTop = 0
@@ -223,7 +229,13 @@ async function eventHandler(message){
     } else if (message[0] == 'createProfileClicked'){
         await openEditor()
         lastRenderedHtml = null
-        await refreshInterfaces()
+        // Fast off-screen paint (mobile: rings from cache) so redux holds fresh content the moment the user
+        // reopens the viewer, then scheduleRefresh reconciles the new profile's overview note and fills the
+        // rings in the background. The create handler previously armed no follow-up, so a reopen before the
+        // slow all-profiles refresh finished showed a stale list until the 120s mobile timer; scheduleRefresh
+        // (plus the pendingReopenRefresh on reopen) covers that with the 5s/15s follow-ups instead.
+        await refreshPanelData({ fast: true })
+        scheduleRefresh()
     } else if (message[0] == 'editProfileClicked'){
         var id = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
         await openEditor(id)
@@ -284,6 +296,14 @@ async function eventHandler(message){
         // re-arms it when it rebuilds, so this fires exactly once and cannot loop (a document that already
         // carries the descriptor reports message[1] true and is skipped).
         if (openOverlayState && !message[1]) await refreshPanelData()
+        // Freshness on viewer reopen after a dismiss-first dialog (profile editor / styler on mobile): this
+        // reset is the first signal that the user reopened the viewer, so repaint once immediately rather
+        // than waiting for the periodic timer. Cheap after the create/switch fast path already stamped fresh
+        // content into redux. No-op when nothing armed it (every ordinary load, and always on desktop).
+        if (consumePendingReopenRefresh()){
+            lastRenderedHtml = null
+            await refreshPanelData()
+        }
     } else if (message[0] == 'getNoteTags'){
         // A two-way round-trip (like searchTitleSuggestions): the tag overlay awaits this to prefill its
         // input with the note's current tags, comma separated.
@@ -329,9 +349,15 @@ export async function togglePanelVisibility() {
  * Displays all todos in the panel, according to the formatting specified by the profile and format. The panel is only updated when the markup has   *
  * actually changed, as replacing it resets the scroll position and any in progress interaction.                                                    *
  ***************************************************************************************************************************************************/
- export async function refreshPanelData(){
+ export async function refreshPanelData(options?){
     if (!panel) return
     var mobile = await isMobile()
+    // Fast first-paint (mobile only): render the checkbox rings from cache without fetching note bodies, so
+    // a profile switch/create paints after one search instead of waiting on up to 300 serial body GETs. The
+    // caller (the switch/create handlers) pairs this with scheduleRefresh, whose background refresh fetches
+    // the bodies and repaints with the real rings. Gated to mobile: those body-fetch costs are mobile-only,
+    // and skipping them on desktop would flash empty rings, so desktop always renders the full counts.
+    var fast = mobile && !!(options && options.fast)
     // Dialog guard (mobile only): while a Cockpit dialog is open, a panel refresh calls setHtml, which
     // re-asserts the panel viewer's native React Native Modal on top of the dialog's Modal - the "the
     // dialog popped up behind the panel" bug. Skipping the refresh keeps the dialog on top. The guard
@@ -367,7 +393,7 @@ export async function togglePanelVisibility() {
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile) return
-    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection } }
+    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     if (profile.showNotes){
