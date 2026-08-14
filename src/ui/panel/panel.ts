@@ -413,7 +413,10 @@ export async function togglePanelVisibility() {
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile) return
-    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast }
+    // isMobile is carried into the view state so the row HTML generators (renderTodoRow / renderNotesSection)
+    // can omit the desktop-only action tooltips on mobile, where hover does not exist and the row already has
+    // its long-press flows. Every other platform branch in those generators keys off the same flag.
+    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, isMobile: mobile }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     if (profile.showNotes){

@@ -153,8 +153,16 @@ abstract class BaseFormat {
      ***********************************************************************************************************************************************/
     protected renderTodoRow(todo, label){
         var checkedString = todo.todo_completed ? "checked" : ""
+        // Desktop only: append the per-zone action hints to each tooltip, merged with the content the zone
+        // already shows (the checkbox's progress, the notebook pill's full path), on their own lines via the
+        // &#10; entity. Mobile keeps its long-press flows and has no hover, so it gets no action lines - the
+        // existing tooltips there are unchanged. isMobile is carried in the view state (see panel.ts).
+        var mobile = !!(this.viewState && (this.viewState as any).isMobile)
+        var checkboxHints = mobile ? "" : "&#10;Click: tick / untick&#10;Right-click: change due date"
+        var titleHint = mobile ? "" : ` title="Click: show to-do&#10;Right-click: options&#10;Double-click: open in separate window"`
+        var notebookHints = mobile ? "" : "&#10;Click: filter by this notebook&#10;Right-click: move to another notebook"
         var notebookString = todo.notebookTitle
-            ? `<span class="todo-notebook" title="${escapeHtml(todo.notebookPath)}">${escapeHtml(todo.notebookTitle)}</span>`
+            ? `<span class="todo-notebook" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
             : ""
         // The ring around the checkbox shows how many of the checkboxes inside the note are ticked.
         // It is display only: filling it does not complete the to-do, and completing the to-do does
@@ -170,9 +178,9 @@ abstract class BaseFormat {
                     oncontextmenu="onTodoContextMenu(event, '${todo.id}')"
                     ondragstart="onTodoDragStart(event, '${todo.id}')"
                     ondragend="onTodoDragEnd(event)">
-                    <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"
+                    <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
                         onchange="onTodoChecked('${todo.id}')" ${checkedString}>
-                    <a class="todo-title">${escapeHtml(label)}</a>
+                    <a class="todo-title"${titleHint}>${escapeHtml(label)}</a>
                     ${notebookString}
                 </div>
             `
@@ -659,12 +667,19 @@ export async function renderNotesSection(profile, viewState){
         notes.sort(itemComparator(viewState.sort))
     }
     if (!notes.length) return ""
+    // Desktop only: append the per-zone action hints, merged with the existing tooltips, on their own lines
+    // via &#10;. A note's progress ring is display-only (not tickable, no due date), so it gets no action
+    // lines - only the title and the notebook pill do. Mobile keeps its long-press flows and no hover, so no
+    // action lines there. isMobile is carried in the view state (see panel.ts).
+    var mobile = !!(viewState && viewState.isMobile)
+    var titleHint = mobile ? "" : ` title="Click: show note&#10;Right-click: options&#10;Double-click: open in separate window"`
+    var notebookHints = mobile ? "" : "&#10;Click: filter by this notebook&#10;Right-click: move to another notebook"
     var rows = notes.map(note => {
         var total = Number(note.checkboxTotal) || 0
         var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
         var progressTitle = total ? `${note.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
         var notebookString = note.notebookTitle
-            ? `<span class="todo-notebook" title="${escapeHtml(note.notebookPath)}">${escapeHtml(note.notebookTitle)}</span>`
+            ? `<span class="todo-notebook" title="${escapeHtml(note.notebookPath)}${notebookHints}">${escapeHtml(note.notebookTitle)}</span>`
             : ""
         return `
             <div class="todo -note" data-note-id="${note.id}"
@@ -673,7 +688,7 @@ export async function renderNotesSection(profile, viewState){
                 ondblclick="onRowDoubleClicked(event, '${note.id}')"
                 oncontextmenu="onNoteContextMenu(event, '${note.id}')">
                 <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
-                <a class="todo-title">${escapeHtml(note.title)}</a>
+                <a class="todo-title"${titleHint}>${escapeHtml(note.title)}</a>
                 ${notebookString}
             </div>
         `
