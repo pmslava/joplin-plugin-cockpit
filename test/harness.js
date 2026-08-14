@@ -20,6 +20,8 @@ function makeJoplin(options) {
         workspaceEvents: [],
         messageBoxes: [],
         notePuts: [],
+        dataPosts: [],
+        dataDeletes: [],
         onStart: null,
         panelMessageHandler: null,
         setHtmlCalls: 0,
@@ -85,17 +87,36 @@ function makeJoplin(options) {
         },
         workspace: {
             onNoteChange: async (h) => { state.workspaceEvents.push('onNoteChange'); state.noteChangeHandler = h },
+            onSyncStart: async () => { state.workspaceEvents.push('onSyncStart') },
             onSyncComplete: async () => { state.workspaceEvents.push('onSyncComplete') },
             onNoteAlarmTrigger: async () => { state.workspaceEvents.push('onNoteAlarmTrigger') },
         },
         data: {
             get: async (pathParts, query) => {
                 if (pathParts[0] === 'search') {
+                    // getTodos queries "type:todo ...", getNotes queries "type:note ...". Serve the
+                    // regular-note list only to the type:note query so a showNotes profile does not
+                    // list the to-do fixtures a second time as notes.
+                    const q = (query && query.query) || ''
+                    if (q.includes('type:note') && !q.includes('type:todo')) {
+                        return { items: options.searchNotes || [], has_more: false }
+                    }
                     return { items: options.todos || [], has_more: false }
                 }
+                // The notebook map and the tag autocomplete page through these endpoints.
+                if (pathParts[0] === 'folders') {
+                    return { items: options.folders || [], has_more: false }
+                }
+                if (pathParts[0] === 'tags') {
+                    return { items: options.tags || [], has_more: false }
+                }
                 if (pathParts[0] === 'notes') {
+                    // Bare ['notes'] is the search field's "recent notes" suggestion fetch.
+                    if (pathParts.length === 1) return { items: options.recentNotes || [], has_more: false }
                     const note = notes[pathParts[1]]
                     if (!note) throw new Error('Not Found')
+                    // ['notes', id, 'tags'] lists the tags currently on a note (tag picker).
+                    if (pathParts[2] === 'tags') return { items: note.tags || [] }
                     return note
                 }
                 throw new Error(`Unexpected data.get: ${pathParts}`)
@@ -104,6 +125,11 @@ function makeJoplin(options) {
                 state.notePuts.push({ id: pathParts[1], body: body.body })
                 if (notes[pathParts[1]]) Object.assign(notes[pathParts[1]], body)
             },
+            post: async (pathParts, _q, body) => {
+                state.dataPosts.push({ path: pathParts, body })
+                return Object.assign({ id: `created-${state.dataPosts.length}` }, body)
+            },
+            delete: async (pathParts) => { state.dataDeletes.push(pathParts) },
         },
     }
 

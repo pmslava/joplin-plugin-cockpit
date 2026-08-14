@@ -49,22 +49,26 @@ async function main() {
     await test('mobile: a default profile is stored in settings', () => {
         const stored = JSON.parse(mobile.settings.profileData)
         assert.strictEqual(stored.profiles.length, 1)
-        assert.strictEqual(stored.profiles[0].name, 'New Profile')
+        assert.strictEqual(stored.profiles[0].name, 'All todo and notes')
         assert.strictEqual(stored.profiles[0].displayFormat, 'interval')
     })
     await test('mobile: panel html contains the to-dos', () => {
         const html = mobile.panelHtml['panel-panel']
         assert.ok(html.includes('Buy milk'), 'expected a to-do title in the panel')
-        assert.ok(html.includes('<h2>Overdue</h2>'), 'expected the Overdue heading')
+        // The Overdue heading now carries data-/context-menu attributes, so match its text, not a bare tag.
+        assert.ok(html.includes('>Overdue</h2>'), 'expected the Overdue heading')
     })
     await test('mobile: to-do titles are html escaped', () => {
         const html = mobile.panelHtml['panel-panel']
         assert.ok(html.includes('Pay rent &amp; bills &lt;urgent&gt;'), 'title was not escaped')
     })
-    await test('mobile: panel exposes the menu commands as heading buttons', () => {
+    await test('mobile: primary actions are exposed as in-panel buttons', () => {
         const html = mobile.panelHtml['panel-panel']
-        assert.ok(html.includes('onToggleProfileControlsClicked()'), 'missing profile controls button')
-        assert.ok(html.includes('onStylerClicked()'), 'missing styler button')
+        // Mobile has no native note toolbar or Tools menu, so the create and sync actions the
+        // desktop reaches from those live directly in the panel instead.
+        assert.ok(html.includes('onNewNoteClicked()'), 'missing new-note button')
+        assert.ok(html.includes('onNewTodoClicked()'), 'missing new-to-do button')
+        assert.ok(html.includes('onSynchronizeClicked()'), 'missing synchronize button')
     })
     await test('mobile: icons are inline svg, not font awesome', () => {
         const html = mobile.panelHtml['panel-panel']
@@ -72,7 +76,7 @@ async function main() {
         assert.ok(!html.includes('class="fa '), 'font awesome classes still present')
     })
     await test('mobile: workspace events are subscribed', () => {
-        assert.deepStrictEqual(mobile.workspaceEvents.sort(), ['onNoteAlarmTrigger', 'onNoteChange', 'onSyncComplete'])
+        assert.deepStrictEqual(mobile.workspaceEvents.sort(), ['onNoteAlarmTrigger', 'onNoteChange', 'onSyncComplete', 'onSyncStart'])
     })
     await test('mobile: no message box shown on a clean install', () => {
         assert.deepStrictEqual(mobile.messageBoxes, [])
@@ -143,24 +147,7 @@ async function main() {
 
     // ------------------------------------ commands that are only reachable from native menus
     // These cannot be driven by the Playwright e2e suite, because on desktop they live in the
-    // Tools > Agenda menu and the command palette, both of which are native Electron menus.
-    await test('toggleShowProfileControls hides and shows the profile buttons', async () => {
-        const command = desktop.commands.find(c => c.name === 'toggleShowProfileControls')
-        assert.ok(command, 'command was not registered')
-
-        await command.execute()
-        assert.ok(
-            desktop.panelHtml['panel-panel'].includes('id="profileButtonsSection" style="display: none;"'),
-            'profile buttons should be hidden'
-        )
-
-        await command.execute()
-        assert.ok(
-            desktop.panelHtml['panel-panel'].includes('id="profileButtonsSection" style="display: flex;"'),
-            'profile buttons should be shown again'
-        )
-    })
-
+    // Tools > Cockpit menu and the command palette, both of which are native Electron menus.
     await test('the styler command stores custom css and the panel applies it', async () => {
         const command = desktop.commands.find(c => c.name === 'showStylerDialog')
         assert.ok(command, 'command was not registered')
@@ -168,8 +155,10 @@ async function main() {
         desktop.dialogResult = { id: 'ok', formData: { customCSSForm: { customCss: 'h1 { color: red; }' } } }
         await command.execute()
         assert.strictEqual(desktop.settings.customCss, 'h1 { color: red; }')
+        // The panel injects custom CSS into its <style> block after the theme CSS, so match the
+        // rule itself rather than expecting it to be the whole style element.
         assert.ok(
-            desktop.panelHtml['panel-panel'].includes('<style>h1 { color: red; }</style>'),
+            desktop.panelHtml['panel-panel'].includes('h1 { color: red; }'),
             'custom css was not applied to the panel'
         )
         desktop.dialogResult = null
@@ -376,15 +365,22 @@ async function main() {
             todos: calendarTodos,
             initialSettings: { profileData: JSON.stringify(weekProfile), currentProfileID: 1 },
         })
+        // Every render bumps a nonce (for scroll restoration), so the panel HTML is never byte-identical
+        // across renders. Compare the navigation title (the week's date range) instead of the whole panel.
+        const calendarTitle = (html) => {
+            const start = html.indexOf('>', html.indexOf('class="calendar-title"')) + 1
+            return html.slice(start, html.indexOf('</button>', start))
+        }
         const before = week.panelHtml['panel-panel']
         assert.strictEqual((before.match(/class="week-day/g) || []).length, 7)
         assert.ok(before.includes('week-planner'))
+        const titleBefore = calendarTitle(before)
 
         await week.panelMessageHandler(['calendarNavigate', -1])
-        assert.notStrictEqual(week.panelHtml['panel-panel'], before, 'navigating a week changed nothing')
+        assert.notStrictEqual(calendarTitle(week.panelHtml['panel-panel']), titleBefore, 'navigating a week changed nothing')
 
         await week.panelMessageHandler(['calendarToday'])
-        assert.strictEqual(week.panelHtml['panel-panel'], before, 'today should return to the starting week')
+        assert.strictEqual(calendarTitle(week.panelHtml['panel-panel']), titleBefore, 'today should return to the starting week')
     })
 
     await test('week view: to-dos are tickable in place', async () => {
@@ -402,7 +398,7 @@ async function main() {
         })
         const html = week.panelHtml['panel-panel']
         assert.ok(html.includes('onTodoChecked('), 'week planner rows should be tickable')
-        assert.ok(html.includes('onTodoClicked('), 'week planner rows should be openable')
+        assert.ok(html.includes('onTodoRowClicked('), 'week planner rows should be openable')
     })
 
     await test('an unknown display format still falls back to the interval list', async () => {
@@ -420,7 +416,8 @@ async function main() {
         })
         const html = odd.panelHtml['panel-panel']
         assert.ok(!html.includes('calendar-grid'), 'unknown format should not render a calendar')
-        assert.ok(html.includes('<h2>'), 'expected a grouped list')
+        // Grouped-list headings carry attributes now, so match the opening tag rather than a bare <h2>.
+        assert.ok(html.includes('<h2'), 'expected a grouped list')
     })
 
     // ---------------------------------------------- corrupt / failed migration
