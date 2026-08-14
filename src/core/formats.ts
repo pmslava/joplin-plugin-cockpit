@@ -158,9 +158,9 @@ abstract class BaseFormat {
         // &#10; entity. Mobile keeps its long-press flows and has no hover, so it gets no action lines - the
         // existing tooltips there are unchanged. isMobile is carried in the view state (see panel.ts).
         var mobile = !!(this.viewState && (this.viewState as any).isMobile)
-        var checkboxHints = mobile ? "" : "&#10;Click: tick / untick&#10;Right-click: change due date"
-        var titleHint = mobile ? "" : ` title="Click: show to-do&#10;Right-click: options&#10;Double-click: open in separate window"`
-        var notebookHints = mobile ? "" : "&#10;Click: filter by this notebook&#10;Right-click: move to another notebook"
+        var checkboxHints = mobile ? "" : "&#10;Left click to tick/untick&#10;Right click to change due"
+        var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
+        var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
         var notebookString = todo.notebookTitle
             ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(todo.parent_id)}" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
             : ""
@@ -672,8 +672,8 @@ export async function renderNotesSection(profile, viewState){
     // lines - only the title and the notebook pill do. Mobile keeps its long-press flows and no hover, so no
     // action lines there. isMobile is carried in the view state (see panel.ts).
     var mobile = !!(viewState && viewState.isMobile)
-    var titleHint = mobile ? "" : ` title="Click: show note&#10;Right-click: options&#10;Double-click: open in separate window"`
-    var notebookHints = mobile ? "" : "&#10;Click: filter by this notebook&#10;Right-click: move to another notebook"
+    var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
+    var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
     var rows = notes.map(note => {
         var total = Number(note.checkboxTotal) || 0
         var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
