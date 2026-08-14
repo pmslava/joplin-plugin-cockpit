@@ -987,6 +987,11 @@ table {
  * the same flex row; the standalone calendar-nav arrows keep the full square overlay above. */
 .cockpit-mobile #filterRow .icon-button::after { inset: -7px 0; }
 
+/* The two icon-only create buttons in the profile row sit directly against each other (and the profile
+ * dropdown) with only a 4px gap, so the full -7px square overlay would overlap the neighbour and occlude
+ * part of its icon. Constrain the growth to vertical only here, exactly like the filter row above. */
+.cockpit-mobile #profileControls .icon-button::after { inset: -7px 0; }
+
 /* Dropdown togglers in the flex filter row: vertical only, so the hit area never overflows the flex
  * neighbours. */
 .cockpit-mobile .dropdown-toggle { position: relative; }

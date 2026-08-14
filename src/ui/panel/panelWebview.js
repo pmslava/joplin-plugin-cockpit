@@ -854,13 +854,6 @@ function restoreSearchDraft(){
     await webviewApi.postMessage(['synchronizeClicked']);
 }
 
-/** onStylerClicked *********************************************************************************************************************************
- * Opens the panel styler dialog. This is only shown on mobile, where there is no Tools menu to run the command from                                *
- ***************************************************************************************************************************************************/
-async function onStylerClicked(){
-    await webviewApi.postMessage(['stylerClicked']);
-}
-
 /** onCalendarNavigate ******************************************************************************************************************************
  * Moves the calendar a month or a week backwards or forwards. The plugin holds the position, because the panel markup is replaced on every refresh  *
  ***************************************************************************************************************************************************/

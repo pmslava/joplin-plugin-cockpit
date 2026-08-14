@@ -233,9 +233,6 @@ async function eventHandler(message){
         // the onSyncStart / onSyncComplete events rather than by awaiting this. Routed through
         // runAppCommand so an absent command degrades to a message box like every other app command.
         await runAppCommand('synchronize')
-    } else if (message[0] == 'stylerClicked'){
-        // Executed as a command rather than called directly so that the panel does not have to import the styler dialog, which imports the panel.
-        await joplin.commands.execute('showStylerDialog')
     } else if (message[0] == 'dialogGuard'){
         // The panel webview brackets every in-panel overlay (notebook, tag, alarm) with dialogGuard
         // true/false so refreshPanelData pauses while it is open - the overlay must not be repainted out
@@ -403,8 +400,15 @@ async function getControlsHTML(currentProfileID){
     // notebook can be picked even when the active profile's filter hides its to-dos. getNotebookMap
     // is TTL-cached, so this is cheap.
     var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
-    var mobileButtons = (await isMobile()) ? iconButton("brush", "Set Panel CSS", "onStylerClicked()") : ""
+    var mobile = await isMobile()
     var sync = getSyncStatus()
+    // The create buttons are labelled on desktop; on mobile they become icon-only (the icon and the title
+    // tooltip are kept) so the narrow header gives its width to the profile dropdown instead. Custom panel
+    // CSS stays a desktop-only feature reached from the Tools menu, so there is no mobile styler button.
+    var createButtons = mobile
+        ? iconButton("notePlus", "New note", "onNewNoteClicked()") + iconButton("todoPlus", "New to-do", "onNewTodoClicked()")
+        : `<button type="button" class="create-button" title="New note" onclick="onNewNoteClicked()">${icons["notePlus"]}<span>New note</span></button>
+            <button type="button" class="create-button" title="New to-do" onclick="onNewTodoClicked()">${icons["todoPlus"]}<span>New to-do</span></button>`
     // The "-sync" class gives the button a stable selector for the mobile long-press adapter (which
     // shows its status tooltip as a toast, since touch has no hover). It has no CSS of its own, so it is
     // inert on desktop; "-syncing" still drives the spin animation while a sync runs.
@@ -426,14 +430,12 @@ async function getControlsHTML(currentProfileID){
     return `
         <section id="profileControls">
             ${getProfileDropdownHTML(await getAllProfiles(), currentProfileID)}
-            <button type="button" class="create-button" title="New note" onclick="onNewNoteClicked()">${icons["notePlus"]}<span>New note</span></button>
-            <button type="button" class="create-button" title="New to-do" onclick="onNewTodoClicked()">${icons["todoPlus"]}<span>New to-do</span></button>
+            ${createButtons}
         </section>
         <section id="filterRow">
             ${getNotebookDropdownHTML(notebooks)}
             ${getSortDropdownHTML()}
             ${iconButton(sortDirection === "desc" ? "arrowDown" : "arrowUp", `Sort direction: ${sortDirection === "desc" ? "descending" : "ascending"}`, "onSortDirectionClicked()")}
-            ${mobileButtons}
             ${syncButton}
         </section>
         <section id="searchRow">
