@@ -895,11 +895,13 @@ table {
 }
 
 /* Week planner cards -------------------------------------------------------------------------
- * The planner lays each to-do out as a three-zone card instead of the single list row, so the
- * title is never squeezed into a narrow left column beside a mostly empty right one. The card is
- * still a .todo[data-todo-id] carrying the same handlers and the same todo-checkbox / todo-title /
+ * The planner lays each to-do out as a two-zone card instead of the single list row, so the
+ * title is never squeezed into a narrow left column beside a mostly empty right one. The head line
+ * carries the circle and the due time on the left with the notebook pill right-aligned at its far
+ * end; the title drops to its own line(s) spanning the full card width. The card is still a
+ * .todo[data-todo-id] carrying the same handlers and the same todo-checkbox / todo-title /
  * todo-notebook zones, so selection, drag & drop, the circle, click-to-open, the pill and the
- * completed styling all behave exactly as in the list; only the axis and the three zones are new.
+ * completed styling all behave exactly as in the list; only the axis and the two zones are new.
  * Scoped under .week-day so the list rows elsewhere keep their one-line layout untouched. */
 .week-day .todo.-card {
     flex-direction: column;
@@ -907,18 +909,25 @@ table {
     gap: 3px;
 }
 
-/* First line: the circle and the due time. align-items:center keeps the circle centred on the
- * time text (and on the line when there is no time). No margin overrides on the circle, so its
- * optical offset and the mobile tap-target folding both carry over unchanged. */
+/* Head line: the circle and the due time on the left, the notebook pill pushed to the far right by
+ * its margin-left:auto (below). align-items:center keeps the circle centred on the time text and the
+ * pill (and on the line when there is neither). No margin overrides on the circle, so its optical
+ * offset and the mobile tap-target folding both carry over unchanged. */
 .week-card-head {
     display: flex;
     flex-direction: row;
     align-items: center;
     gap: 7px;
     min-height: var(--cockpit-circle-size);
+    /* The pill shrinks and ellipsises inside this row; without min-width:0 a flex container refuses
+     * to shrink its content below its intrinsic size and the long pill would overflow instead. */
+    min-width: 0;
 }
 
+/* The due time keeps its full width - flex-shrink:0 - so a long notebook pill can never squeeze or
+ * truncate it; only the pill gives way. */
 .week-card-time {
+    flex-shrink: 0;
     font-size: 0.85em;
     color: var(--cockpit-color-faded, #999999);
 }
@@ -931,17 +940,15 @@ table {
     margin-top: 0;
 }
 
-/* The notebook pill along the bottom, right-aligned to echo the list view. Freed from tracking a
- * title's first line, its optical top offset is dropped, and it may use the full card width before
- * ellipsising. */
-.week-card-foot {
-    display: flex;
-    justify-content: flex-end;
-    min-width: 0;
-}
-
+/* The notebook pill at the right end of the head line, echoing the list view. margin-left:auto
+ * pushes it past the circle and time; flex-shrink:1 + min-width:0 let it give up width and ellipsise
+ * (via the base rule's overflow/text-overflow) when the name is long, so it never squeezes the time.
+ * Freed from tracking a title's first line, its optical top offset is dropped. */
 .week-day .todo.-card .todo-notebook {
     margin-top: 0;
+    margin-left: auto;
+    flex-shrink: 1;
+    min-width: 0;
     max-width: 100%;
 }
 

@@ -618,9 +618,9 @@ class WeekFormat extends DateFormat {
     }
 
     /** renderWeekCard ******************************************************************************************************************************
-     * A to-do as a planner card, laid out in three stacked zones instead of the single list row: the circle and the due time share the first line,     *
-     * the title drops to its own line(s) spanning the full card width, and the notebook pill sits along the bottom, right-aligned like the list view.   *
-     * A card with no due time shows just the circle on the first line, and the title still starts on the second, so the rhythm is the same either way.  *
+     * A to-do as a planner card, laid out in two stacked zones instead of the single list row: the head line carries the circle and the due time on   *
+     * the left with the notebook pill right-aligned at its far end, and the title drops to its own line(s) spanning the full card width.               *
+     * A card with no due time shows the circle and the pill on the head line, and the title still starts on the second, so the rhythm is the same.     *
      * The wiring is identical to renderTodoRow - same wrapper class, data-todo-id, drag/select/click/contextmenu handlers and the todo-checkbox /       *
      * todo-title / todo-notebook zone classes the panel's handlers key off - so click-to-open, circle behaviours, pill filter/move, drag & drop,        *
      * selection highlighting and the completed styling all carry over unchanged; only the layout differs.                                               *
@@ -634,7 +634,6 @@ class WeekFormat extends DateFormat {
         var notebookString = todo.notebookTitle
             ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(todo.parent_id)}" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
             : ""
-        var foot = notebookString ? `<div class="week-card-foot">${notebookString}</div>` : ""
         var total = Number(todo.checkboxTotal) || 0
         var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
         var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
@@ -652,9 +651,9 @@ class WeekFormat extends DateFormat {
                         <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
                             onchange="onTodoChecked('${todo.id}')" ${checkedString}>
                         ${timeString}
+                        ${notebookString}
                     </div>
                     <a class="todo-title"${titleHint}>${escapeHtml(todo.title)}</a>
-                    ${foot}
                 </div>
             `
     }
