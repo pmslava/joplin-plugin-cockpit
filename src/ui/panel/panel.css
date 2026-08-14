@@ -939,6 +939,38 @@ table {
 .cockpit-mobile .todo-checkbox::after { inset: calc(var(--tap-pad) + 3px); }
 .cockpit-mobile .todo-checkbox::before { inset: calc(var(--tap-pad) + 4px); }
 
+/* Vertical alignment on mobile. The desktop circle/pill margins centre on a fixed 0.75px optical
+ * constant hand-calibrated for the ~13px desktop font. Mobile renders the whole panel at a larger base
+ * font (Joplin injects --joplin-font-size: 16px), so the line box is ~33% taller while that absolute
+ * 0.75px term does not scale - it under-corrects by a few px and the titles/pill sit below the circles.
+ * Mobile centres the glyph column and pill on the first text LINE instead, with one optical term that
+ * scales with the line height. --cockpit-m-optical is the ink offset of the mobile system font (Roboto)
+ * inside its line box; the 0.06 factor lands the circle/pill on the ink at 16px. Confirm on the Pixel
+ * and nudge this one number if needed. */
+.cockpit-mobile .todo {
+    --cockpit-m-optical: calc(var(--cockpit-row-line-height) * 0.06);
+}
+/* Circle: centre on the line box (drop the desktop -0.75) + ink offset, then fold the tap padding back
+ * in exactly as before so the 40px hit box is preserved. */
+.cockpit-mobile .todo-checkbox {
+    margin-top: calc(
+        max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2))
+        + var(--cockpit-m-optical)
+        - var(--tap-pad)
+    );
+}
+/* Note rows have no tap padding on the ring, so no -tap-pad term. */
+.cockpit-mobile .note-progress {
+    margin-top: calc(
+        max(0px, calc((var(--cockpit-row-line-height) - var(--cockpit-circle-size)) / 2))
+        + var(--cockpit-m-optical)
+    );
+}
+/* Pill: keep its 1px nudge, add the same ink offset so it tracks the title's first line. */
+.cockpit-mobile .todo-notebook {
+    margin-top: calc(1px + var(--cockpit-m-optical));
+}
+
 /* The per-row action buttons (profile / notebook dropdown rows), clustered with 4px gaps: grow
  * vertically by 18px and 2px into each 4px gap horizontally, so adjacent buttons never collide. */
 .cockpit-mobile .row-action { position: relative; }
