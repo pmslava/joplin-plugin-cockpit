@@ -228,17 +228,9 @@ export async function setupAlarmDialog(){
 export async function openAlarmDialog(todoIDs){
     if (!alarmDialog || !todoIDs.length) return
 
-    var firstTodo = await joplin.data.get(['notes', todoIDs[0]], { fields: ['todo_due'] })
-    var initial = new Date()
-    if (firstTodo.todo_due && firstTodo.todo_due > 0){
-        initial = new Date(firstTodo.todo_due)
-    } else {
-        var dayStart = await getDayStartTime()
-        initial.setHours(dayStart.hours, dayStart.minutes, 0, 0)
-    }
-    var pad = value => String(value).padStart(2, "0")
-    var initialDate = `${initial.getFullYear()}-${pad(initial.getMonth() + 1)}-${pad(initial.getDate())}`
-    var initialTime = `${pad(initial.getHours())}:${pad(initial.getMinutes())}`
+    var fields = await computeInitialAlarm(todoIDs)
+    var initialDate = fields.date
+    var initialTime = fields.time
     var count = todoIDs.length === 1 ? "1 to-do" : `${todoIDs.length} to-dos`
 
     // A hidden marker carried in the markup on mobile only. alarmWebview.js reads it and adds the
@@ -300,6 +292,61 @@ export async function openAlarmDialog(todoIDs){
     await setTodoDueTimestamps(todoIDs, timestamp)
     await refreshInterfaces()
     // The moved to-dos only settle into their new groups once the search index has caught up.
+    scheduleRefresh()
+}
+
+/** computeInitialAlarm *****************************************************************************************************************************
+ * The date (YYYY-MM-DD) and time (HH:MM) the picker should start at for the given to-dos: the first to-do's current due time, or the day start time   *
+ * today when it has none. Shared by the desktop alarm dialog and the mobile alarm overlay (via the getAlarmInitial round-trip) so both start the same. *
+ ***************************************************************************************************************************************************/
+async function computeInitialAlarm(todoIDs){
+    var firstTodo = await joplin.data.get(['notes', todoIDs[0]], { fields: ['todo_due'] })
+    var initial = new Date()
+    if (firstTodo.todo_due && firstTodo.todo_due > 0){
+        initial = new Date(firstTodo.todo_due)
+    } else {
+        var dayStart = await getDayStartTime()
+        initial.setHours(dayStart.hours, dayStart.minutes, 0, 0)
+    }
+    var pad = value => String(value).padStart(2, "0")
+    return {
+        date: `${initial.getFullYear()}-${pad(initial.getMonth() + 1)}-${pad(initial.getDate())}`,
+        time: `${pad(initial.getHours())}:${pad(initial.getMinutes())}`,
+    }
+}
+
+/** getAlarmInitialFields ***************************************************************************************************************************
+ * Round-trip target for the mobile alarm overlay: returns the { date, time } the overlay should prefill with. Empty for an empty selection.          *
+ ***************************************************************************************************************************************************/
+export async function getAlarmInitialFields(todoIDs){
+    if (!Array.isArray(todoIDs) || !todoIDs.length) return { date: "", time: "" }
+    return await computeInitialAlarm(todoIDs)
+}
+
+/** applyAlarmSet ***********************************************************************************************************************************
+ * Applies the mobile alarm overlay's OK result: parses the two field strings (rejecting an impossible date/time with the same message the dialog      *
+ * shows) and sets every selected to-do's due time, then refreshes. The host keeps this logic so the overlay only has to post the raw field strings.    *
+ ***************************************************************************************************************************************************/
+export async function applyAlarmSet(todoIDs, dateString, timeString){
+    if (!Array.isArray(todoIDs) || !todoIDs.length) return
+    var parsed = parseAlarmFields(dateString, timeString)
+    if (!parsed){
+        await joplin.views.dialogs.showMessageBox("Cockpit: the alarm was not set. The date must be YYYY-MM-DD and the time HH:MM (24 hour).")
+        return
+    }
+    await setTodoDueTimestamps(todoIDs, parsed.getTime())
+    await refreshInterfaces()
+    // The moved to-dos only settle into their new groups once the search index has caught up.
+    scheduleRefresh()
+}
+
+/** applyAlarmCleared *******************************************************************************************************************************
+ * Applies the mobile alarm overlay's "Clear alarm" result: clears the due time of every selected to-do (timestamp 0), then refreshes.                 *
+ ***************************************************************************************************************************************************/
+export async function applyAlarmCleared(todoIDs){
+    if (!Array.isArray(todoIDs) || !todoIDs.length) return
+    await setTodoDueTimestamps(todoIDs, 0)
+    await refreshInterfaces()
     scheduleRefresh()
 }
 

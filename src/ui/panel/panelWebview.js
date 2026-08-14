@@ -169,7 +169,7 @@ function onTodoContextMenu(event, todoID){
             lastClickedTodoID = todoID
             paintTodoSelection()
         }
-        void webviewApi.postMessage(['setAlarmClicked', [...selectedTodoIDs]]);
+        requestAlarm([...selectedTodoIDs])
     } else if (event.target.classList.contains('todo-notebook')){
         // Desktop opens Joplin's native "Move to notebook" dialog; mobile opens the in-panel notebook
         // overlay instead (a native dialog would open behind the panel there).
@@ -247,7 +247,7 @@ function showNoteContextMenu(event, noteID, isTodo){
     menu.addEventListener('click', clickEvent => {
         var action = clickEvent.target.dataset ? clickEvent.target.dataset.action : null
         hideNoteContextMenu()
-        if (action === 'setDueDate'){ void webviewApi.postMessage(['setAlarmClicked', [noteID]]); return }
+        if (action === 'setDueDate'){ requestAlarm([noteID]); return }
         // On mobile the notebook and tag pickers are in-panel overlays rather than native dialogs (which
         // would open behind the panel). Desktop keeps posting noteMenuAction so its native dialogs run.
         if (IS_MOBILE && action === 'moveToFolder'){ openNotebookOverlay('moveNotes', { noteIDs: [noteID] }); return }
@@ -288,7 +288,17 @@ function onHeadingContextMenu(event){
     selectedTodoIDs.clear()
     for (var id of ids) selectedTodoIDs.add(id)
     paintTodoSelection()
-    void webviewApi.postMessage(['setAlarmClicked', ids]);
+    requestAlarm(ids)
+}
+
+/** requestAlarm ************************************************************************************************************************************
+ * Opens the "Move to date" / set-alarm picker for the given to-dos. Desktop posts setAlarmClicked so the host opens its native alarm dialog; mobile   *
+ * opens the in-panel alarm overlay instead (a native dialog would open behind the panel there).                                                      *
+ ***************************************************************************************************************************************************/
+function requestAlarm(ids){
+    if (!ids || !ids.length) return
+    if (IS_MOBILE) openAlarmOverlay(ids)
+    else void webviewApi.postMessage(['setAlarmClicked', ids]);
 }
 
 /** Long-press adapter (mobile) *********************************************************************************************************************
@@ -1007,4 +1017,226 @@ function openTagOverlay(noteID){
         input.value = String(csv || '')
     }).catch(function(){})
     input.focus()
+}
+
+/** Alarm overlay (mobile) **************************************************************************************************************************
+ * The "Move to date" / set-alarm picker, drawn in-panel on mobile (the desktop alarm DIALOG is unchanged). The calendar grid and hour/minute columns  *
+ * are ported from alarmWebview.js unchanged - they read and write their own #alarm* elements by id, so they work the same inside the overlay body -    *
+ * minus that file's dialog-only bootstrap (its MutationObserver / init / platform-class helper): openAlarmOverlay draws them directly instead. The     *
+ * fields start at the first to-do's due time (or the day start today), fetched with the getAlarmInitial round-trip. OK posts ['alarmSet', ids, date,  *
+ * time], Clear posts ['alarmCleared', ids], and the host keeps parseAlarmFields + setTodoDueTimestamps. The ported names are all alarm*-prefixed and   *
+ * collide with nothing else in this file.                                                                                                            *
+ ***************************************************************************************************************************************************/
+
+// The first day of the month the calendar is showing. Reset from the date field every time the overlay opens.
+var alarmCalendarAnchor = null
+
+function alarmPad(value){ return String(value).padStart(2, '0') }
+
+function alarmDateToISO(date){
+    return `${date.getFullYear()}-${alarmPad(date.getMonth() + 1)}-${alarmPad(date.getDate())}`
+}
+
+function alarmParseISO(value){
+    var match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(value || '').trim())
+    if (!match) return null
+    var parsed = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    if (parsed.getFullYear() !== Number(match[1]) || parsed.getMonth() !== Number(match[2]) - 1 || parsed.getDate() !== Number(match[3])) return null
+    return parsed
+}
+
+function setAlarmDateOffset(days){
+    var date = new Date()
+    date.setDate(date.getDate() + days)
+    document.getElementById('alarmDate').value = alarmDateToISO(date)
+    alarmCalendarAnchor = new Date(date.getFullYear(), date.getMonth(), 1)
+    renderAlarmCalendar()
+}
+
+function setAlarmDateNextMonth(){
+    var current = alarmParseISO(document.getElementById('alarmDate').value) || new Date()
+    var weekday = current.getDay()
+    var ordinal = Math.floor((current.getDate() - 1) / 7)
+    var firstOfNext = new Date(current.getFullYear(), current.getMonth() + 1, 1)
+    var day = 1 + ((weekday - firstOfNext.getDay() + 7) % 7) + ordinal * 7
+    var daysInNext = new Date(firstOfNext.getFullYear(), firstOfNext.getMonth() + 1, 0).getDate()
+    while (day > daysInNext) day -= 7
+    var target = new Date(firstOfNext.getFullYear(), firstOfNext.getMonth(), day)
+    document.getElementById('alarmDate').value = alarmDateToISO(target)
+    alarmCalendarAnchor = new Date(target.getFullYear(), target.getMonth(), 1)
+    renderAlarmCalendar()
+}
+
+function onAlarmCalendarNavigate(delta){
+    alarmCalendarAnchor = new Date(alarmCalendarAnchor.getFullYear(), alarmCalendarAnchor.getMonth() + delta, 1)
+    renderAlarmCalendar()
+}
+
+function pickAlarmDay(isoDate){
+    document.getElementById('alarmDate').value = isoDate
+    renderAlarmCalendar()
+}
+
+function onAlarmDateEdited(){
+    var parsed = alarmParseISO(document.getElementById('alarmDate').value)
+    if (parsed) alarmCalendarAnchor = new Date(parsed.getFullYear(), parsed.getMonth(), 1)
+    renderAlarmCalendar()
+}
+
+function renderAlarmCalendar(){
+    var container = document.getElementById('alarmCalendar')
+    if (!container) return
+    var selected = alarmParseISO(document.getElementById('alarmDate').value)
+    if (!alarmCalendarAnchor){
+        var base = selected || new Date()
+        alarmCalendarAnchor = new Date(base.getFullYear(), base.getMonth(), 1)
+    }
+    var anchor = alarmCalendarAnchor
+    var title = anchor.toLocaleDateString('en', { month: 'long', year: 'numeric' })
+    var todayISO = alarmDateToISO(new Date())
+    var selectedISO = selected ? alarmDateToISO(selected) : null
+
+    var firstOfMonth = new Date(anchor.getFullYear(), anchor.getMonth(), 1)
+    var day = new Date(firstOfMonth)
+    day.setDate(firstOfMonth.getDate() - ((firstOfMonth.getDay() + 6) % 7))
+    var end = new Date(day)
+    end.setDate(day.getDate() + 41)
+
+    var headers = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map(label => `<th>${label}</th>`).join('')
+    var rows = '', cells = '', column = 0
+    while (day <= end){
+        var iso = alarmDateToISO(day)
+        var classes = ['alarm-cal-day']
+        if (day.getMonth() !== anchor.getMonth()) classes.push('-outside')
+        if (iso === todayISO) classes.push('-today')
+        if (iso === selectedISO) classes.push('-selected')
+        cells += `<td><button type="button" class="${classes.join(' ')}" onclick="pickAlarmDay('${iso}')">${day.getDate()}</button></td>`
+        if (++column === 7){
+            rows += `<tr>${cells}</tr>`
+            cells = ''
+            column = 0
+        }
+        day.setDate(day.getDate() + 1)
+    }
+
+    container.innerHTML = `
+        <div class="alarm-cal-nav">
+            <button type="button" title="Previous month" onclick="onAlarmCalendarNavigate(-1)">&#8249;</button>
+            <span class="alarm-cal-title">${title}</span>
+            <button type="button" title="Next month" onclick="onAlarmCalendarNavigate(1)">&#8250;</button>
+        </div>
+        <table class="alarm-cal-grid"><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>
+    `
+}
+
+function currentAlarmTime(){
+    var match = /^(\d{1,2}):(\d{2})$/.exec(String(document.getElementById('alarmTime').value || '').trim())
+    if (!match) return { hours: null, minutes: null }
+    var hours = Number(match[1]), minutes = Number(match[2])
+    return { hours: hours <= 23 ? hours : null, minutes: minutes <= 59 ? minutes : null }
+}
+
+function pickAlarmHour(hours){
+    var time = currentAlarmTime()
+    document.getElementById('alarmTime').value = `${alarmPad(hours)}:${alarmPad(time.minutes === null ? 0 : time.minutes)}`
+    updateAlarmTimeSelection()
+}
+
+function pickAlarmMinute(minutes){
+    var time = currentAlarmTime()
+    document.getElementById('alarmTime').value = `${alarmPad(time.hours === null ? 9 : time.hours)}:${alarmPad(minutes)}`
+    updateAlarmTimeSelection()
+}
+
+function onAlarmTimeEdited(){ updateAlarmTimeSelection() }
+
+function updateAlarmTimeSelection(){
+    var time = currentAlarmTime()
+    for (var button of document.querySelectorAll('.alarm-time-item')){
+        var isHour = button.dataset.hour !== undefined
+        var value = Number(isHour ? button.dataset.hour : button.dataset.minute)
+        button.classList.toggle('-selected', value === (isHour ? time.hours : time.minutes))
+    }
+}
+
+function renderAlarmTimeColumns(){
+    var hourColumn = document.getElementById('alarmHourCol')
+    var minuteColumn = document.getElementById('alarmMinuteCol')
+    if (!hourColumn || !minuteColumn) return
+    var hourButtons = '', minuteButtons = ''
+    for (var hour = 0; hour < 24; hour++){
+        hourButtons += `<button type="button" class="alarm-time-item" data-hour="${hour}" onclick="pickAlarmHour(${hour})">${alarmPad(hour)}</button>`
+    }
+    for (var minute = 0; minute < 60; minute++){
+        minuteButtons += `<button type="button" class="alarm-time-item" data-minute="${minute}" onclick="pickAlarmMinute(${minute})">${alarmPad(minute)}</button>`
+    }
+    hourColumn.innerHTML = hourButtons
+    minuteColumn.innerHTML = minuteButtons
+    updateAlarmTimeSelection()
+    var time = currentAlarmTime()
+    scrollAlarmColumn(hourColumn, time.hours === null ? 9 : time.hours, 24)
+    scrollAlarmColumn(minuteColumn, time.minutes === null ? 0 : time.minutes, 60)
+}
+
+function scrollAlarmColumn(column, index, total){
+    column.scrollTop = Math.max(0, (column.scrollHeight * index / total) - (column.clientHeight / 2))
+}
+
+/** openAlarmOverlay ********************************************************************************************************************************
+ * Builds the alarm overlay for the given to-dos, prefills its fields from the host, and draws the calendar + time columns. OK / Clear alarm / Cancel  *
+ * are the footer buttons.                                                                                                                            *
+ ***************************************************************************************************************************************************/
+function openAlarmOverlay(ids){
+    ids = ids || []
+    if (!ids.length) return
+    var count = ids.length === 1 ? '1 to-do' : ids.length + ' to-dos'
+    var body = buildOverlay('Set alarm for ' + count, [
+        { label: 'Cancel', onClick: function(){ closeOverlay() } },
+        { label: 'Clear alarm', kind: 'danger', onClick: function(){
+            void webviewApi.postMessage(['alarmCleared', ids]);
+            closeOverlay()
+        } },
+        { label: 'OK', kind: 'primary', onClick: function(){
+            var date = document.getElementById('alarmDate').value
+            var time = document.getElementById('alarmTime').value
+            void webviewApi.postMessage(['alarmSet', ids, date, time]);
+            closeOverlay()
+        } },
+    ])
+    body.classList.add('cockpit-alarm-overlay')
+    body.innerHTML = `
+        <div id="alarmFields">
+            <input id="alarmDate" placeholder="YYYY-MM-DD" oninput="onAlarmDateEdited()"
+                inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+            <input id="alarmTime" placeholder="HH:MM" oninput="onAlarmTimeEdited()"
+                inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+        <div id="alarmBody">
+            <div id="alarmCalendar"></div>
+            <div id="alarmTimePanel">
+                <div class="alarm-time-col" id="alarmHourCol"></div>
+                <div class="alarm-time-col" id="alarmMinuteCol"></div>
+            </div>
+        </div>
+        <div id="alarmQuick">
+            <button type="button" onclick="setAlarmDateOffset(0)">Today</button>
+            <button type="button" onclick="setAlarmDateOffset(1)">Tomorrow</button>
+            <button type="button" onclick="setAlarmDateOffset(7)">+1 week</button>
+            <button type="button" title="Same weekday next month: the 2nd Saturday stays the 2nd Saturday" onclick="setAlarmDateNextMonth()">+month</button>
+        </div>
+    `
+
+    // Prefill the fields from the host, then draw the calendar and time columns from those values.
+    webviewApi.postMessage(['getAlarmInitial', ids]).then(function(init){
+        if (!overlayOpen) return   // closed while awaiting
+        init = init || {}
+        var dateEl = document.getElementById('alarmDate')
+        var timeEl = document.getElementById('alarmTime')
+        if (!dateEl || !timeEl) return
+        dateEl.value = String(init.date || '')
+        timeEl.value = String(init.time || '')
+        alarmCalendarAnchor = null
+        renderAlarmCalendar()
+        renderAlarmTimeColumns()
+    }).catch(function(){})
 }

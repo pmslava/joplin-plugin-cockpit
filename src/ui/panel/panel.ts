@@ -6,7 +6,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { getAllTags, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, openTodo, searchTitleSuggestions, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
-import { openAlarmDialog } from "../alarm/alarm";
+import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
 import { getAllProfiles, getProfile } from "../../core/database";
@@ -229,6 +229,17 @@ async function eventHandler(message){
         await setNoteTagsFromCsv(String(message[1] || ""), String(message[2] || ""))
         await refreshInterfaces()
         scheduleRefresh()
+    } else if (message[0] == 'getAlarmInitial'){
+        // Round-trip: the alarm overlay awaits this to prefill its date/time fields (first to-do's due
+        // time, or the day start today). The desktop alarm dialog computes the same starting values.
+        return await getAlarmInitialFields(Array.isArray(message[1]) ? message[1] : [])
+    } else if (message[0] == 'alarmSet'){
+        // Result of the in-panel alarm overlay's OK: the raw YYYY-MM-DD / HH:MM strings. The host keeps
+        // parseAlarmFields + setTodoDueTimestamps.
+        await applyAlarmSet(Array.isArray(message[1]) ? message[1] : [], String(message[2] || ""), String(message[3] || ""))
+    } else if (message[0] == 'alarmCleared'){
+        // Result of the in-panel alarm overlay's "Clear alarm".
+        await applyAlarmCleared(Array.isArray(message[1]) ? message[1] : [])
     }
 }
 

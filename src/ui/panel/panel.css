@@ -1084,3 +1084,121 @@ table {
 .cockpit-overlay-input:focus {
     border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
 }
+
+/* The alarm overlay body: the "Move to date" picker ported from the alarm dialog into the panel, in the
+ * stacked (calendar on top, time columns below) layout - it is only ever shown on mobile. Everything is
+ * scoped under .cockpit-alarm-overlay so these rules never touch the panel itself. */
+.cockpit-alarm-overlay {
+    display: flex; flex-direction: column; gap: 10px;
+    font-size: var(--cockpit-font-size, inherit);
+}
+
+.cockpit-alarm-overlay #alarmFields {
+    display: flex; flex-direction: row; gap: 6px;
+}
+
+.cockpit-alarm-overlay #alarmFields input {
+    padding: 6px; min-height: 40px; box-sizing: border-box;
+    font-family: inherit; font-size: inherit; color: inherit;
+    background: none;
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 4px; outline: none;
+}
+
+.cockpit-alarm-overlay #alarmFields input:focus {
+    border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
+}
+
+.cockpit-alarm-overlay #alarmDate { width: 130px; }
+.cockpit-alarm-overlay #alarmTime { width: 80px; }
+
+.cockpit-alarm-overlay #alarmBody {
+    display: flex; flex-direction: column; gap: 10px;
+}
+
+.cockpit-alarm-overlay #alarmCalendar { min-height: 245px; }
+
+.cockpit-alarm-overlay #alarmTimePanel {
+    display: flex; flex-direction: row; gap: 6px; justify-content: center;
+}
+
+.cockpit-alarm-overlay .alarm-time-col {
+    flex: 1 1 0; max-width: 120px; height: 132px;
+    overflow-y: auto;
+}
+
+.cockpit-alarm-overlay .alarm-time-col::-webkit-scrollbar { width: 5px; }
+.cockpit-alarm-overlay .alarm-time-col::-webkit-scrollbar-track { background: transparent; }
+.cockpit-alarm-overlay .alarm-time-col::-webkit-scrollbar-thumb {
+    border-radius: 3px;
+    background: var(--cockpit-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
+}
+
+.cockpit-alarm-overlay .alarm-time-item {
+    display: block; width: 100%;
+    padding: 5px 0; min-height: 34px;
+    text-align: center;
+    font-family: inherit; font-size: inherit; color: inherit;
+    background: none;
+    border: 1px solid transparent; border-radius: 3px;
+    cursor: pointer;
+}
+
+.cockpit-alarm-overlay .alarm-time-item:hover { background-color: rgba(127, 127, 127, 0.2); }
+.cockpit-alarm-overlay .alarm-time-item.-selected {
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.35));
+    font-weight: 600;
+}
+
+.cockpit-alarm-overlay #alarmQuick {
+    display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px;
+}
+
+.cockpit-alarm-overlay #alarmQuick button {
+    padding: 6px 10px; min-height: 36px;
+    font-family: inherit; font-size: inherit; color: inherit;
+    background: none;
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 4px; cursor: pointer;
+}
+
+.cockpit-alarm-overlay #alarmQuick button:hover { background-color: rgba(127, 127, 127, 0.18); }
+
+.cockpit-alarm-overlay .alarm-cal-nav {
+    display: flex; flex-direction: row; align-items: center; justify-content: space-between;
+    margin-bottom: 4px;
+}
+
+.cockpit-alarm-overlay .alarm-cal-nav button {
+    min-width: 36px; min-height: 36px; padding: 2px 10px;
+    font-family: inherit; font-size: inherit; color: inherit;
+    background: none; border: none; border-radius: 4px; cursor: pointer;
+}
+
+.cockpit-alarm-overlay .alarm-cal-nav button:hover { background-color: rgba(127, 127, 127, 0.18); }
+.cockpit-alarm-overlay .alarm-cal-title { font-weight: 600; }
+
+.cockpit-alarm-overlay .alarm-cal-grid {
+    width: 100%; border-collapse: collapse; table-layout: fixed;
+}
+
+.cockpit-alarm-overlay .alarm-cal-grid th {
+    padding: 2px 0; font-size: 0.85em; font-weight: 600; opacity: 0.7; text-align: center;
+}
+
+.cockpit-alarm-overlay .alarm-cal-grid td { padding: 1px; text-align: center; }
+
+.cockpit-alarm-overlay .alarm-cal-day {
+    width: 100%; padding: 6px 0;
+    font-family: inherit; font-size: inherit; color: inherit;
+    background: none; border: 1px solid transparent; border-radius: 4px; cursor: pointer;
+}
+
+.cockpit-alarm-overlay .alarm-cal-day:hover { background-color: rgba(127, 127, 127, 0.2); }
+.cockpit-alarm-overlay .alarm-cal-day.-outside { opacity: 0.35; }
+.cockpit-alarm-overlay .alarm-cal-day.-today {
+    border-color: var(--cockpit-url-color, #2D6BDC); font-weight: 700;
+}
+.cockpit-alarm-overlay .alarm-cal-day.-selected {
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.35));
+}
