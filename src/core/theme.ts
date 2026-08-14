@@ -130,6 +130,9 @@ export async function buildThemeCss(): Promise<string> {
         decls.push("--cockpit-completed-opacity:0.5")
     } else if (completedStyle === "strikethrough") {
         decls.push("--cockpit-completed-decoration:line-through")
+    } else if (completedStyle === "grayedStrikethrough") {
+        decls.push("--cockpit-completed-opacity:0.5")
+        decls.push("--cockpit-completed-decoration:line-through")
     }
 
     if (!decls.length) return ""

@@ -133,6 +133,7 @@ export async function setupSettings(){
 				asNow: "Normal",
 				grayed: "Grayed out",
 				strikethrough: "Strikethrough",
+				grayedStrikethrough: "Grayed strikethrough",
 			},
 			public: true,
 			section: 'section',
