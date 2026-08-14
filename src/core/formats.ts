@@ -596,7 +596,7 @@ class WeekFormat extends DateFormat {
             var key = toISODate(day)
             var todos = grouped.byDate.get(key) || []
             var rows = todos.length
-                ? todos.map(todo => this.renderTodoRow(todo, `${this.getTimeString(todo.todo_due)} - ${todo.title}`)).join("")
+                ? todos.map(todo => this.renderWeekCard(todo)).join("")
                 : `<p class="calendar-empty">Nothing due</p>`
             var heading = day.toLocaleDateString(undefined, { weekday: this.profile.weekdayFormat || "long", day: "numeric", month: "short" })
             return `
@@ -615,6 +615,48 @@ class WeekFormat extends DateFormat {
             <section class="week-planner">${sections}</section>
             ${renderUndated(grouped.undated, (todo, label) => this.renderTodoRow(todo, label))}
         `
+    }
+
+    /** renderWeekCard ******************************************************************************************************************************
+     * A to-do as a planner card, laid out in three stacked zones instead of the single list row: the circle and the due time share the first line,     *
+     * the title drops to its own line(s) spanning the full card width, and the notebook pill sits along the bottom, right-aligned like the list view.   *
+     * A card with no due time shows just the circle on the first line, and the title still starts on the second, so the rhythm is the same either way.  *
+     * The wiring is identical to renderTodoRow - same wrapper class, data-todo-id, drag/select/click/contextmenu handlers and the todo-checkbox /       *
+     * todo-title / todo-notebook zone classes the panel's handlers key off - so click-to-open, circle behaviours, pill filter/move, drag & drop,        *
+     * selection highlighting and the completed styling all carry over unchanged; only the layout differs.                                               *
+     ***********************************************************************************************************************************************/
+    protected renderWeekCard(todo){
+        var checkedString = todo.todo_completed ? "checked" : ""
+        var mobile = !!(this.viewState && (this.viewState as any).isMobile)
+        var checkboxHints = mobile ? "" : "&#10;Left click to tick/untick&#10;Right click to change due"
+        var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
+        var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
+        var notebookString = todo.notebookTitle
+            ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(todo.parent_id)}" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
+            : ""
+        var foot = notebookString ? `<div class="week-card-foot">${notebookString}</div>` : ""
+        var total = Number(todo.checkboxTotal) || 0
+        var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
+        var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
+        var time = todo.todo_due ? this.getTimeString(todo.todo_due) : ""
+        var timeString = time ? `<span class="week-card-time">${escapeHtml(time)}</span>` : ""
+        return `
+                <div class="todo -card${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}" draggable="true"
+                    onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
+                    onclick="onTodoRowClicked(event, '${todo.id}')"
+                    ondblclick="onRowDoubleClicked(event, '${todo.id}')"
+                    oncontextmenu="onTodoContextMenu(event, '${todo.id}')"
+                    ondragstart="onTodoDragStart(event, '${todo.id}')"
+                    ondragend="onTodoDragEnd(event)">
+                    <div class="week-card-head">
+                        <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
+                            onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                        ${timeString}
+                    </div>
+                    <a class="todo-title"${titleHint}>${escapeHtml(todo.title)}</a>
+                    ${foot}
+                </div>
+            `
     }
 }
 

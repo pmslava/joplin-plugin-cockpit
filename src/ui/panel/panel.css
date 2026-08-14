@@ -894,6 +894,57 @@ table {
     background: none;
 }
 
+/* Week planner cards -------------------------------------------------------------------------
+ * The planner lays each to-do out as a three-zone card instead of the single list row, so the
+ * title is never squeezed into a narrow left column beside a mostly empty right one. The card is
+ * still a .todo[data-todo-id] carrying the same handlers and the same todo-checkbox / todo-title /
+ * todo-notebook zones, so selection, drag & drop, the circle, click-to-open, the pill and the
+ * completed styling all behave exactly as in the list; only the axis and the three zones are new.
+ * Scoped under .week-day so the list rows elsewhere keep their one-line layout untouched. */
+.week-day .todo.-card {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+}
+
+/* First line: the circle and the due time. align-items:center keeps the circle centred on the
+ * time text (and on the line when there is no time). No margin overrides on the circle, so its
+ * optical offset and the mobile tap-target folding both carry over unchanged. */
+.week-card-head {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    min-height: var(--cockpit-circle-size);
+}
+
+.week-card-time {
+    font-size: 0.85em;
+    color: var(--cockpit-color-faded, #999999);
+}
+
+/* The title on its own line(s), spanning the full card width (the stretch above). It no longer
+ * shares a line with the circle, so the first-line optical offset is dropped and it does not grow
+ * to eat the card's height. The -3px bleed for the hover background is kept. */
+.week-day .todo.-card .todo-title {
+    flex-grow: 0;
+    margin-top: 0;
+}
+
+/* The notebook pill along the bottom, right-aligned to echo the list view. Freed from tracking a
+ * title's first line, its optical top offset is dropped, and it may use the full card width before
+ * ellipsising. */
+.week-card-foot {
+    display: flex;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+.week-day .todo.-card .todo-notebook {
+    margin-top: 0;
+    max-width: 100%;
+}
+
 /** Touch layer (mobile) ****************************************************************************************************************************
  * Everything below is gated on the .cockpit-mobile class, which panelWebview.js adds to the
  * #joplin-plugin-content wrapper and to <body> on mobile only (from the #cockpitPlatform marker). On
