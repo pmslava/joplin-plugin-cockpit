@@ -24,5 +24,23 @@
 		"notes",
 		"due",
 		"schedule"
+	],
+	"categories": [
+		"productivity",
+		"personal knowledge management"
+	],
+	"screenshots": [
+		{
+			"src": "docs/images/hero-panel.png",
+			"label": "The Cockpit panel on desktop: every to-do and note grouped by due date, with a progress ring on each row"
+		},
+		{
+			"src": "docs/images/themes.png",
+			"label": "Theme presets and custom colours, with adjustable font and circle size"
+		},
+		{
+			"src": "docs/images/alarm-picker.png",
+			"label": "The alarm picker: ISO date, 24-hour time, a Monday-first calendar, and quick shortcuts"
+		}
 	]
 }
