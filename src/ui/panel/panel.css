@@ -1195,14 +1195,18 @@ table {
     font-weight: 600;
 }
 
+/* A two-column grid so the four unequal-width quick buttons always wrap EVENLY (2x2) instead of
+ * breaking 3+1 with "+month" stranded full-width on its own line. flex:1 1 auto (tried first) keys the
+ * wrap off each button's content width, so three narrow-enough buttons pack onto line 1 and the widest
+ * ("Tomorrow"/"+month") drops alone - exactly the DEFECT-2 look it was meant to remove. A fixed 2-column
+ * grid is width-independent and gives every button an equal cell. This block is mobile-only (overlays
+ * never open on desktop), so it cannot affect the desktop dialog. */
 .cockpit-alarm-overlay #alarmQuick {
-    display: flex; flex-wrap: wrap; gap: 6px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
 }
 
-/* flex:1 1 auto lets the 4 unequal-width quick buttons stretch to fill and wrap evenly
- * (2+2 on a narrow phone, one row when wide) instead of breaking 3+1. */
 .cockpit-alarm-overlay #alarmQuick button {
-    flex: 1 1 auto; min-width: 0;
+    min-width: 0;
     padding: 6px 10px; min-height: 36px;
     font-family: inherit; font-size: inherit; color: inherit;
     border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));

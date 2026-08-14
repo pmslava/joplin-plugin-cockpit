@@ -164,11 +164,15 @@ function startPanelObserver(){
 // overlay instead of navigating, so the guard is released down the same closeOverlay path.
 window.addEventListener('popstate', function(){ if (overlayOpen) closeOverlay() })
 
-if (document.body){
-    startPanelObserver()
-} else {
-    document.addEventListener('DOMContentLoaded', startPanelObserver)
-}
+// NOTE: startPanelObserver() is invoked at the very BOTTOM of this file, not here. On a mobile
+// reload-with-descriptor it reconstructs the open overlay synchronously (reconcile ->
+// reopenOverlayFromEmbeddedState -> openNotebookOverlay/openTagOverlay/openAlarmOverlay/openEditorOverlay),
+// which sets the overlay module state (overlayOpen, overlayContext, overlayNotebookSelection,
+// alarmCalendarAnchor, ...). Those variables are declared with initializers further down the file, so
+// invoking the bootstrap here (above them) would let their `var x = <initial>` initializers run AFTER the
+// reconstruct and clobber the freshly-set state back to its defaults - leaving overlayOpen=false while the
+// overlay is on screen and the guard is armed, so closing it never posts dialogGuard(false) and refreshes
+// stay frozen. Deferring the call to the end of the script guarantees every initializer has already run.
 
 /** onTodoRowMouseDown ******************************************************************************************************************************
  * Selection happens on press, like in a list: a plain press selects the row (replacing the selection), Ctrl+press toggles it, Shift+press selects   *
@@ -1735,4 +1739,17 @@ function openEditorOverlay(profileID, restore){
         if (init.profile) populateEditorForm(init.profile)
         pushOverlayState()
     }).catch(function(){})
+}
+
+/** Bootstrap **************************************************************************************************************************************
+ * Invoked here, at the end of the file, so that every module-level variable initializer above has already run before startPanelObserver() executes.  *
+ * This matters on a mobile reload-with-descriptor: the observer's first reconcile() reconstructs the open overlay synchronously and sets the overlay  *
+ * module state, which an earlier invocation would then see clobbered by the `var x = <initial>` initializers that run later in source order (see the  *
+ * note next to the popstate handler). Joplin injects plugin webview scripts after DOMContentLoaded, so the document.body branch is the live path; the *
+ * DOMContentLoaded fallback covers the reverse ordering just in case.                                                                               *
+ ***************************************************************************************************************************************************/
+if (document.body){
+    startPanelObserver()
+} else {
+    document.addEventListener('DOMContentLoaded', startPanelObserver)
 }
