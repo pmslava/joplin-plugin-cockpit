@@ -9,7 +9,7 @@ import { refreshPanelData } from "../panel/panel";
 import { escapeHtml } from "../../core/formats";
 import { getCustomCss, setCustomCss } from "../../core/settings";
 import { requireNodeModule, isMobile } from "../../core/platform";
-import { openDialogDismissingViewer } from "../../core/dialog";
+import { openDialogDismissingViewer, notifyViewerDismissed } from "../../core/dialog";
 import { stylerTemplate } from "./stylerTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -38,11 +38,14 @@ export async function openStyler(){
         await setCustomCss(formResult.formData['customCSSForm']['customCss'])
         await refreshPanelData()
     } else if (await isMobile()) {
-        // On mobile the dialog guard in refreshPanelData drops every refresh that came due while this
-        // dialog was open. Cancelling (or dismissing) arms no new refresh, so repaint once to pick up
-        // whatever was skipped. Desktop never skips refreshes, so its no-op cancel stays untouched.
+        // On mobile the dismiss-first path has already torn the panel viewer's webview down, so any
+        // refresh that fired while the dialog was open was a silent no-op repaint of redux (it could not
+        // re-assert the closed viewer). Repaint once on cancel so the panel is current when reopened.
+        // Desktop keeps its own working refresh untouched.
         await refreshPanelData()
     }
+    // Show the reopen hint last (no-op on desktop), consistent with the editor flow.
+    await notifyViewerDismissed()
 }
 
 /** importLegacyCssFile *****************************************************************************************************************************

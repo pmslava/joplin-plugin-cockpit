@@ -7,7 +7,7 @@ import joplin from "api";
 import { createProfile, deleteProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getNotebookMap } from "../../core/joplin";
 import { escapeHtml } from "../../core/html";
-import { openDialogDismissingViewer } from "../../core/dialog";
+import { openDialogDismissingViewer, notifyViewerDismissed } from "../../core/dialog";
 import { editorTemplate } from "./editorTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -50,6 +50,10 @@ export async function openEditor(profileID?){
     } else if (formResult.id == "delete") {
         await openDeleteDialog(profileID)
     }
+    // Point the user at the reopen control LAST, after the delete confirmation above, so the mobile
+    // dismiss-first flow does not tell them to reopen Cockpit before asking them to confirm the delete.
+    // No-op on desktop.
+    await notifyViewerDismissed()
 }
 
 /** openDeleteDialog ********************************************************************************************************************************

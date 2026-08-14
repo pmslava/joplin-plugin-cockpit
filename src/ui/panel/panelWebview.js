@@ -119,9 +119,12 @@ function reconcile(){
             savedTodosScrollTop = el.scrollTop
             queueScrollPost(el, nonce)
         })
-        // Desktop keeps its surviving module state (savedTodosScrollTop truthy, byte-identical to before);
-        // mobile's module state was zeroed by the reload, so fall through to the embedded data-scroll-top.
-        savedTodosScrollTop = savedTodosScrollTop || Number(el.dataset.scrollTop || 0)
+        // Mobile only: its module state was zeroed by the reload, so fall through to the embedded
+        // data-scroll-top. Desktop keeps its surviving module state untouched - byte-identical to the
+        // baseline - and must NOT consult the embed, because there a live savedTodosScrollTop of 0 means
+        // "genuinely at top" and the embed can lag it (throttled/nonce-guarded), which would wrongly
+        // restore a stale non-zero offset when a content-changing re-render lands at/near the top.
+        if (IS_MOBILE) savedTodosScrollTop = savedTodosScrollTop || Number(el.dataset.scrollTop || 0)
         restoreTodosScroll(el)
         paintTodoSelection()
         // The suggestion menu was in the replaced markup; drop its now-stale state (closing on a
@@ -1262,7 +1265,14 @@ function openAlarmOverlay(ids){
         </div>
     `
 
-    // Prefill the fields from the host, then draw the calendar and time columns from those values.
+    // Draw the grid immediately from the (empty) fields so the overlay is always usable, even if the
+    // prefill round-trip below rejects (e.g. computeInitialAlarm's data.get throws because a selected
+    // note was just deleted). renderAlarmCalendar falls back to today when the date field is empty.
+    alarmCalendarAnchor = null
+    renderAlarmCalendar()
+    renderAlarmTimeColumns()
+
+    // Prefill the fields from the host, then redraw the calendar and time columns from those values.
     webviewApi.postMessage(['getAlarmInitial', ids]).then(function(init){
         if (!overlayOpen) return   // closed while awaiting
         init = init || {}

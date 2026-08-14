@@ -32,26 +32,55 @@ unchanged**. When something below says "mobile only", that guard is why.
   (`lastRenderedHtml`); checkbox body fetches capped 300/refresh in chunks of 20, cached by
   `user_updated_time` (`src/core/joplin.ts`); notebook map + tag list TTL-cached 20s.
 
-## Implemented in the mobile phase
+## Overlay architecture — why dialogs no longer hide behind the panel
 
-Three commits, all mobile-gated, each verified to leave the desktop paths byte-for-byte unchanged.
+The earlier "timing guard" (a one-tick yield before `dialogs.open()`) was based on a wrong model and
+has been **removed**. The real mechanism, confirmed against Joplin mobile source, is *structural*, not
+a race:
 
-### 1. Dialog stacking guard — dialogs stay in front of the panel
+- The panel **viewer** is a React Native **native** `<Modal>` (a separate Android OS window).
+- Every plugin **dialog** is a react-native-paper **in-tree** overlay teleported through a `Portal`.
+- A native window *always* draws above an in-tree overlay. So a dialog opened while the viewer is up
+  is **unconditionally** behind it — no z-index, elevation, declaration order, or attach-timing trick
+  can lift it. This is why the device showed dialogs behind *consistently* and why the yield changed
+  nothing.
 
-On mobile Joplin renders the panel viewer and every custom dialog as separate React Native `<Modal>`
-windows and cannot reliably z-order two that are visible at once; the always-mounted panel viewer is
-declared last, so a dialog opening in the same commit as a panel re-render (or a mid-dialog refresh
-re-asserting the viewer) can land **behind** the panel. A plugin cannot set the native z-order from
-inside its webview, so the fix is pure timing (`src/core/dialog.ts`):
+Two strategies avoid the layering entirely (both gated on `isMobile()` / `.cockpit-mobile`; desktop
+keeps native dialogs with unchanged timing). See `src/core/dialog.ts`.
 
-- `openPluginDialog()` holds a shared `dialogOpenCount` guard and, on mobile, yields one tick before
-  `dialogs.open()` so the dialog's Modal commits in its own React Native commit and attaches last (on
-  top). Wired at all four dialog sites (alarm, editor, styler, notebook picker) — and now the tag
-  picker (commit 3).
-- `refreshPanelData` early-returns while a dialog is open (`isDialogOpen()`, mobile only), so a timer
-  tick's `setHtml` cannot re-assert the viewer Modal over an open dialog. The guard clears in
-  `openPluginDialog`'s `finally` after the dialog is dismissed, and every dialog site refreshes
-  afterwards, so nothing is lost.
+### 1a. In-panel HTML overlays — the frequent pickers (notebook, tag, alarm)
+
+Drawn as fixed-position HTML **inside** the panel webview (`panelWebview.js`), so they create no
+second Modal and are structurally immune to the bug; the panel is never torn down.
+
+- **Notebook picker** (move-to-notebook, create-in-notebook, move-notebook-under): a scrollable list
+  reusing the notebook rows the panel already embeds. On tap it posts a result; the host runs the same
+  `parent_id` PUT / create path as before.
+- **Tag picker**: a single comma-separated text input prefilled with the note's current tags; on OK
+  the host keeps the exact attach/detach diff (`setTagsFallback`).
+- **Alarm ("Move to date")**: the calendar grid + hour/minute columns + Today/Tomorrow/+week/+month
+  quick buttons, ported from the desktop alarm dialog into the panel with an OK / Clear / Cancel
+  footer. The grid is drawn immediately from the (possibly empty) fields so the picker is usable even
+  if the `getAlarmInitial` prefill round-trip rejects (e.g. a selected note was just deleted), then
+  redrawn from the prefilled values.
+- **Shared plumbing**: while an overlay is open the webview posts `['dialogGuard', true/false]`, which
+  bumps the shared `dialogOpenCount`; `refreshPanelData` (mobile only, `isDialogOpen()`) skips a
+  refresh so nothing repaints underneath. Overlays anchor on `document.body` so a stray re-render
+  cannot destroy them, and the long-press/scroll listeners ignore events inside an overlay. Each fresh
+  webload posts `['dialogGuardReset']` so a guard leaked by a webview torn down mid-overlay cannot
+  pause refreshes forever.
+
+### 1b. Dismiss-first native dialogs — the rare, form-heavy dialogs (editor, styler)
+
+The ~25-field profile editor and the CSS styler keep their native dialog (too heavy to port for a rare
+action). On mobile `openDialogDismissingViewer()` first runs `joplin.commands.execute('dismissPluginPanels')`
+to close the viewer's native window so the dialog's Paper overlay has nothing above it, then opens and
+awaits it. A plugin **cannot** reopen the viewer (no mobile command/API sets it visible), so the
+caller — **after** any follow-up dialog of its own (e.g. the editor's delete confirmation) — calls
+`notifyViewerDismissed()`, which shows a native message box telling the user to tap the toolbar panel
+button to reopen Cockpit. The hint is deliberately shown *last* so it never appears before the delete
+confirmation. This path does **not** touch `dialogOpenCount`: the viewer is already gone, so a
+background refresh is a silent no-op repaint of redux, not something to hold.
 
 ### 2. Touch-interaction layer + tap targets + viewport (`panelWebview.js`, `panel.css`)
 
@@ -62,7 +91,7 @@ All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click
   up/cancel, or a list scroll) synthesises the three desktop context-menu handlers (to-do row, note
   row, group heading). The trailing synthetic click is swallowed so tap-to-open does not also fire.
 - **Reschedule on touch**: a mobile-only "Move to date…" to-do menu entry (and a checkbox long-press)
-  posts the existing `setAlarmClicked`, i.e. opens the alarm dialog as the date picker.
+  opens the in-panel alarm overlay (§1a) as the date picker.
 - **Sync status without hover**: long-pressing the sync button shows its tooltip
   (last-sync time / duration / errors) as a transient bottom toast.
 - **Tap targets**: ~40 px hit areas via `::after` overlays and stacked-row `min-height`, with the
@@ -74,7 +103,41 @@ All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click
   iframe `dvh == vh`, so this is a harmless, future-proof line; the real fill guarantee is the flex
   column (`.todos { flex:1 1 auto; min-height:0; overflow-y:auto }`).
 
-### 3. Command fallbacks + responsive alarm dialog (this commit)
+### 3. List scroll persistence across refreshes (`panelWebview.js`, `panel.ts`, `panelTemplate`)
+
+Mobile updates the panel by a **full webview reload** (Joplin writes a fresh document to a temp file
+and swaps the `<WebView source>` uri), so all top-level webview state — including `savedTodosScrollTop`
+— is destroyed every refresh, and the list jumped back to the top. Fix: move the source of truth to
+the plugin.
+
+- The webview's `.todos` scroll listener posts `['scrollChanged', scrollTop, renderNonce]` (throttled
+  ~300 ms, only when moved >4 px). `panel.ts` holds `lastScrollTop` and a `renderNonce`, accepting a
+  post only when its nonce matches the current render (a stale post from an outgoing webview is
+  dropped). `refreshPanelData` bumps the nonce each render and embeds both on `<section class="todos"
+  data-scroll-top=… data-render-nonce=…>`.
+- On restore, `reconcile()` reads the embed **only on mobile**: `if (IS_MOBILE) savedTodosScrollTop =
+  savedTodosScrollTop || Number(el.dataset.scrollTop || 0)`. Desktop keeps its surviving module state
+  and must **not** consult the embed — there a live `savedTodosScrollTop` of 0 means "genuinely at
+  top", and the throttled/nonce-guarded embed can lag it, which would wrongly restore a stale offset.
+- Deliberate resets (profile / notebook / search / sort / calendar → top) set `lastScrollTop = 0`
+  before their refresh, so both platforms start at the top and the nonce guard discards any in-flight
+  post from the outgoing webview.
+
+### 4. Row alignment on the larger mobile font (`panel.css`, mobile-gated)
+
+Mobile renders the panel at a larger base font (`--joplin-font-size` ≈16px vs desktop's ~13px), which
+grows `--cockpit-row-line-height`. The desktop row-centering used a fixed `0.75px` optical constant
+hand-calibrated at ~13px; it does not scale, so at the mobile size the circle and notebook pill sat
+above the title's ink. The `.cockpit-mobile` rules re-centre the circle / note-ring / pill on the
+first text **line** using the real line-height plus one line-height-proportional optical term
+(`--cockpit-m-optical`), preserving the 40px tap box. Desktop (no `.cockpit-mobile`) is byte-identical.
+
+### 5. Icon-only create buttons; mobile styler button removed
+
+The create-note / create-notebook buttons render as icons only on mobile to save width; the separate
+mobile styler button was removed (the styler is reachable from the profile editor flow).
+
+### 6. Command fallbacks + responsive alarm dialog
 
 - **Data-API command fallbacks** (`src/ui/panel/panel.ts`). `moveToFolder`, `setTags` and
   `duplicateNote` are registered only on desktop; on mobile they throw. A new
@@ -189,11 +252,36 @@ success vs failure looks like. The build to install is
    - Failure: footer buttons are cut off the bottom → this is the pre-3.4.6 Android bug; note the
      device's Joplin version and consider bumping `app_min_version_mobile` to "3.4".
 
-9. **Dialog-behind-panel race (regression watch).** Repeat opening a dialog (alarm, tag picker,
-   notebook picker) several times, sometimes right as the list would refresh.
-   - Success: the dialog always appears **in front** of the panel.
-   - Failure: it occasionally opens behind the panel → the timing guard is not fully holding on this
-     device; capture how often and from which trigger.
+9. **Overlays render in front (structural, not a race).** Open the notebook, tag and alarm pickers
+   several times, sometimes right as the list would refresh.
+   - Success: each opens as an **in-panel overlay on top of** the list every time (they are HTML in the
+     panel webview, not native dialogs, so they cannot go behind); the list does not repaint
+     underneath while the overlay is open; Cancel / outside-tap / Android-back all close it.
+   - Failure: an overlay opens behind content, the list flickers/repaints under it, or the overlay
+     leaks (a later refresh stays paused) → capture the trigger.
+
+12. **Scroll persists across refreshes.** Scroll the to-do list down, then wait for (or trigger) a
+    refresh — e.g. check a to-do, or let a sync land.
+    - Success: the list stays at the scrolled position across the refresh. Scroll back to the **top**,
+      then trigger another refresh — it stays at the top (does not jump to a stale offset).
+    - Failure: the list jumps to the top after a refresh, or jumps to a stale position when at the top.
+    - Also confirm deliberate resets **do** go to top: change profile / notebook / sort / search — each
+      should start the list at the top.
+
+13. **Row alignment on the device font.** Look at a to-do row and a note row.
+    - Success: the checkbox circle, the title text and the notebook pill share one optical line — the
+      circle/pill are not floating above the title text.
+    - Failure: circle/pill sit noticeably above the title ink → nudge `--cockpit-m-optical` in
+      `panel.css` (the single documented magic number) and recheck.
+
+14. **Editor / styler dismiss-first flow.** Open **Edit profile** (and the styler).
+    - Success: the panel viewer closes and the native editor/styler dialog is **visible** (not behind
+      the panel); on close a message box says to tap the toolbar panel button to reopen Cockpit; tapping
+      it brings the panel back with content intact.
+    - On the editor **Delete** path: the "Delete <name>?" confirmation appears **before** the "reopen
+      Cockpit" message (not after) — the reopen hint is always last.
+    - Failure: the dialog opens behind the panel, no reopen hint appears, or the reopen hint appears
+      before the delete confirmation.
 
 10. **Autocomplete + soft keyboard.** In the search field type `tag:` or `title:` and tap a
     suggestion.

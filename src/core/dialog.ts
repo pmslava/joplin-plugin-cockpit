@@ -87,9 +87,19 @@ export async function openDialogDismissingViewer(dialogHandle){
     }
     // Let the viewer's fade-out / unmount settle before the dialog's overlay mounts.
     await new Promise(resolve => setTimeout(resolve, 50))
-    var result = await joplin.views.dialogs.open(dialogHandle)
-    // The plugin has no way to reopen the viewer, so point the user at the only control that can: the
-    // toolbar's panel button. A native message box (not a Paper overlay) shows correctly on mobile.
+    // The reopen hint is NOT shown here: the caller shows it via notifyViewerDismissed() AFTER any
+    // follow-up dialog of its own (e.g. the editor's delete confirmation), so the user is not told to
+    // reopen Cockpit before being asked to confirm a deletion that is still mid-flow.
+    return await joplin.views.dialogs.open(dialogHandle)
+}
+
+/** notifyViewerDismissed ***************************************************************************************************************************
+ * Tells the user how to reopen Cockpit after a dismiss-first dialog (and any follow-up dialogs) has finished. A no-op on desktop, where the viewer  *
+ * was never dismissed. On mobile the plugin has no way to reopen the viewer, so it points the user at the only control that can - the toolbar's      *
+ * panel button - via a native message box (not a Paper overlay), which shows correctly on mobile. Callers invoke this once, last, so the hint never  *
+ * interleaves ahead of their own follow-up dialogs.                                                                                                  *
+ ***************************************************************************************************************************************************/
+export async function notifyViewerDismissed(){
+    if (!(await isMobile())) return
     await joplin.views.dialogs.showMessageBox("Cockpit was closed to show this dialog. Tap the panel button in the toolbar to reopen Cockpit.")
-    return result
 }
