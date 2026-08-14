@@ -182,6 +182,9 @@ window.addEventListener('popstate', function(){ if (overlayOpen) closeOverlay() 
 function onTodoRowMouseDown(event, todoID){
     if (event.button !== 0) return
     if (event.target.classList.contains('todo-checkbox')) return
+    // A press on the notebook pill filters by that notebook on the following click; it takes no part in
+    // selection, so leave the current selection untouched (like the checkbox above).
+    if (event.target.classList.contains('todo-notebook')) return
     pickedNoteID = null
     if (event.shiftKey){
         var ids = allTodoRows().map(row => row.dataset.todoId)
@@ -203,9 +206,27 @@ function onTodoRowMouseDown(event, todoID){
     paintTodoSelection()
 }
 
+/** applyNotebookFilterFromPill *********************************************************************************************************************
+ * A left click (or a mobile tap) on a row's notebook pill applies that notebook as the panel's notebook filter, posting the same message the        *
+ * notebook dropdown posts. Like the dropdown path it zeroes the saved scroll first, so the filtered list starts at the top rather than restoring the *
+ * old pixel offset (which would point at unrelated rows). The pill carries its notebook id in data-notebook-id (see renderTodoRow /                  *
+ * renderNotesSection in formats.ts). On mobile a completed long press on the pill opens "move to notebook" instead; the click the browser then        *
+ * synthesises is swallowed by the click listener below (longPress.fired), so this filter never also fires - a tap filters, a long press moves.        *
+ ***************************************************************************************************************************************************/
+function applyNotebookFilterFromPill(pill){
+    var notebookID = pill && pill.dataset ? (pill.dataset.notebookId || '') : ''
+    if (!notebookID) return
+    savedTodosScrollTop = 0
+    void webviewApi.postMessage(['notebookFilterChanged', notebookID]);
+}
+
 function onTodoRowClicked(event, todoID){
     if (event.ctrlKey || event.metaKey || event.shiftKey) return
     if (event.target.classList.contains('todo-checkbox')) return
+    if (event.target.classList.contains('todo-notebook')){
+        applyNotebookFilterFromPill(event.target)
+        return
+    }
     if (event.target.classList.contains('todo-title')){
         void onTodoClicked(todoID)
     }
@@ -241,12 +262,19 @@ function onTodoContextMenu(event, todoID){
  ***************************************************************************************************************************************************/
 function onNoteRowMouseDown(event, noteID){
     if (event.button !== 0) return
+    // A press on the notebook pill filters by that notebook on the following click and takes no part in
+    // selection, so leave the current pick untouched.
+    if (event.target.classList.contains('todo-notebook')) return
     selectedTodoIDs.clear()
     pickedNoteID = noteID
     paintTodoSelection()
 }
 
 function onNoteRowClicked(event, noteID){
+    if (event.target.classList.contains('todo-notebook')){
+        applyNotebookFilterFromPill(event.target)
+        return
+    }
     if (event.target.classList.contains('todo-title')){
         void onTodoClicked(noteID)
     }

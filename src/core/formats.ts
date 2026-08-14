@@ -160,9 +160,9 @@ abstract class BaseFormat {
         var mobile = !!(this.viewState && (this.viewState as any).isMobile)
         var checkboxHints = mobile ? "" : "&#10;Click: tick / untick&#10;Right-click: change due date"
         var titleHint = mobile ? "" : ` title="Click: show to-do&#10;Right-click: options&#10;Double-click: open in separate window"`
-        var notebookHints = mobile ? "" : "&#10;Right-click: move to another notebook"
+        var notebookHints = mobile ? "" : "&#10;Click: filter by this notebook&#10;Right-click: move to another notebook"
         var notebookString = todo.notebookTitle
-            ? `<span class="todo-notebook" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
+            ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(todo.parent_id)}" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
             : ""
         // The ring around the checkbox shows how many of the checkboxes inside the note are ticked.
         // It is display only: filling it does not complete the to-do, and completing the to-do does
@@ -673,13 +673,13 @@ export async function renderNotesSection(profile, viewState){
     // action lines there. isMobile is carried in the view state (see panel.ts).
     var mobile = !!(viewState && viewState.isMobile)
     var titleHint = mobile ? "" : ` title="Click: show note&#10;Right-click: options&#10;Double-click: open in separate window"`
-    var notebookHints = mobile ? "" : "&#10;Right-click: move to another notebook"
+    var notebookHints = mobile ? "" : "&#10;Click: filter by this notebook&#10;Right-click: move to another notebook"
     var rows = notes.map(note => {
         var total = Number(note.checkboxTotal) || 0
         var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
         var progressTitle = total ? `${note.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
         var notebookString = note.notebookTitle
-            ? `<span class="todo-notebook" title="${escapeHtml(note.notebookPath)}${notebookHints}">${escapeHtml(note.notebookTitle)}</span>`
+            ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(note.parent_id)}" title="${escapeHtml(note.notebookPath)}${notebookHints}">${escapeHtml(note.notebookTitle)}</span>`
             : ""
         return `
             <div class="todo -note" data-note-id="${note.id}"
