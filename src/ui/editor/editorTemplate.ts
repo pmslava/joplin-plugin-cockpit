@@ -197,7 +197,7 @@ export var editorTemplate = `
         <legend>Display Format</legend>
         <select id="displayFormatSelect" name="displayFormat">
             <option value="basic">Basic</option>
-            <option value="interval">Interval</option>
+            <option value="interval" selected>Interval</option>
             <option value="date">Date</option>
             <option value="month">Month Calendar</option>
             <option value="week">Week Planner</option>

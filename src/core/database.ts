@@ -22,20 +22,24 @@ var migrationWarning = null
  * The values a profile is created with, and the values used for any field missing from a stored profile                                            *
  ***************************************************************************************************************************************************/
 const profileDefaults = {
-    name: "New Profile",
+    // The profile shipped on a fresh install: "All todo and notes", a broad everything-visible preset
+    // (all completed periods shown, notes shown after the to-dos, undated to-dos shown and sorted to
+    // the end) in the Interval view. These same values also fill any field missing from a stored
+    // profile, but a real stored profile carries every field, so existing profiles are untouched.
+    name: "All todo and notes",
     searchCriteria: "",
     noteID: "",
     // showCompleted is the pre-4.3 all-or-nothing switch. It is kept so that stored profiles can be
     // migrated to the three period switches below, which say whether completed to-dos are shown
     // depending on whether they belong to the past, to today or to the future.
     showCompleted: false,
-    showCompletedPast: false,
-    showCompletedToday: false,
-    showCompletedFuture: false,
-    showCompletedNoDue: false,
-    showNoDue: false,
+    showCompletedPast: true,
+    showCompletedToday: true,
+    showCompletedFuture: true,
+    showCompletedNoDue: true,
+    showNoDue: true,
     // Regular notes can be listed alongside the to-dos, in their own group before or after them
-    showNotes: false,
+    showNotes: true,
     notesPosition: "after",
     // The panel's header state this profile starts with, making a profile a complete view preset:
     // the notebook filter (a folder ID, empty for all), the search field, and the tie-break sorting
@@ -48,9 +52,9 @@ const profileDefaults = {
     monthFormat: "long",
     dayFormat: "numeric",
     weekdayFormat: "long",
-    timeIs12Hour: true,
+    timeIs12Hour: false,
     sortOrder: 0,
-    noDueDatesAtEnd: false,
+    noDueDatesAtEnd: true,
     // 0 for Sunday, 1 for Monday. Used by the calendar views and by the "This Week" group.
     weekStartsOn: 1,
     maxDotsPerDay: 4,
