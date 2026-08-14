@@ -160,7 +160,7 @@ abstract class BaseFormat {
         var mobile = !!(this.viewState && (this.viewState as any).isMobile)
         var checkboxHints = mobile ? "" : "&#10;Click: tick / untick&#10;Right-click: change due date"
         var titleHint = mobile ? "" : ` title="Click: show to-do&#10;Right-click: options&#10;Double-click: open in separate window"`
-        var notebookHints = mobile ? "" : "&#10;Click: filter by this notebook&#10;Right-click: move to another notebook"
+        var notebookHints = mobile ? "" : "&#10;Right-click: move to another notebook"
         var notebookString = todo.notebookTitle
             ? `<span class="todo-notebook" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
             : ""
@@ -673,7 +673,7 @@ export async function renderNotesSection(profile, viewState){
     // action lines there. isMobile is carried in the view state (see panel.ts).
     var mobile = !!(viewState && viewState.isMobile)
     var titleHint = mobile ? "" : ` title="Click: show note&#10;Right-click: options&#10;Double-click: open in separate window"`
-    var notebookHints = mobile ? "" : "&#10;Click: filter by this notebook&#10;Right-click: move to another notebook"
+    var notebookHints = mobile ? "" : "&#10;Right-click: move to another notebook"
     var rows = notes.map(note => {
         var total = Number(note.checkboxTotal) || 0
         var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
