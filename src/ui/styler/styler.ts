@@ -9,7 +9,7 @@ import { refreshPanelData } from "../panel/panel";
 import { escapeHtml } from "../../core/formats";
 import { getCustomCss, setCustomCss } from "../../core/settings";
 import { requireNodeModule, isMobile } from "../../core/platform";
-import { openPluginDialog } from "../../core/dialog";
+import { openDialogDismissingViewer } from "../../core/dialog";
 import { stylerTemplate } from "./stylerTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -31,7 +31,9 @@ export async function openStyler(){
     var cssData = escapeHtml(await getCustomCss())
     var formattedHtml = stylerTemplate.replace("<<CSS_DATA>>", () => cssData)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);
-    var formResult = await openPluginDialog(dialog)
+    // On mobile this dismisses the panel viewer first so the styler dialog is visible; the user is told
+    // how to reopen Cockpit afterwards. Desktop opens it as a native dialog as before.
+    var formResult = await openDialogDismissingViewer(dialog)
     if (formResult.id == 'ok') {
         await setCustomCss(formResult.formData['customCSSForm']['customCss'])
         await refreshPanelData()

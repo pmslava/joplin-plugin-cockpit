@@ -7,7 +7,7 @@ import joplin from "api";
 import { createProfile, deleteProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getNotebookMap } from "../../core/joplin";
 import { escapeHtml } from "../../core/html";
-import { openPluginDialog } from "../../core/dialog";
+import { openDialogDismissingViewer } from "../../core/dialog";
 import { editorTemplate } from "./editorTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -37,7 +37,10 @@ export async function openEditor(profileID?){
     var dialogButtons = profileID == null ? createButtons : editButtons
     await joplin.views.dialogs.setButtons(dialog, dialogButtons)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);
-    var formResult = await openPluginDialog(dialog)
+    // On mobile this dismisses the panel viewer first so the (form-heavy, rarely used) editor dialog is
+    // visible; the user is told how to reopen Cockpit afterwards. Desktop opens it as a native dialog as
+    // before. The editor is not ported to an in-panel overlay: ~25 fields make it too heavy for a rare action.
+    var formResult = await openDialogDismissingViewer(dialog)
     if (formResult.id == 'ok') {
         var profile = JSON.parse(decodeURI(atob(formResult.formData["profileDataForm"]["profileData"])))
         if (profileID == null){

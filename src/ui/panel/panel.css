@@ -986,3 +986,101 @@ table {
 }
 
 #cockpitToast.-show { opacity: 1; }
+
+/* In-panel overlays (mobile): the notebook / tag / alarm pickers, drawn as a fixed layer over the panel
+ * so a native dialog (which opens BEHIND the panel on mobile) is never needed. Appended to <body>, so a
+ * host re-render cannot destroy them; only ever created on mobile, so these rules are inert on desktop. */
+#cockpitOverlay {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; align-items: center; justify-content: center;
+    padding: 14px; box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.cockpit-overlay-panel {
+    display: flex; flex-direction: column;
+    width: 100%; max-width: 460px; max-height: 90vh;
+    background-color: var(--cockpit-background-color, #1D2024);
+    color: var(--cockpit-color, inherit);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+}
+
+.cockpit-overlay-header {
+    flex-shrink: 0;
+    padding: 12px 14px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+}
+
+.cockpit-overlay-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 8px;
+}
+
+.cockpit-overlay-body::-webkit-scrollbar { width: 6px; }
+.cockpit-overlay-body::-webkit-scrollbar-track { background: transparent; }
+.cockpit-overlay-body::-webkit-scrollbar-thumb {
+    border-radius: 3px;
+    background: var(--cockpit-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
+}
+
+.cockpit-overlay-footer {
+    flex-shrink: 0;
+    display: flex; flex-direction: row; justify-content: flex-end; gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+}
+
+.cockpit-overlay-footer button {
+    padding: 8px 16px; min-height: 40px;
+    font-family: inherit; font-size: inherit; color: inherit;
+    background: none;
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.cockpit-overlay-footer button.-primary {
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
+}
+
+.cockpit-overlay-footer button.-danger {
+    color: var(--cockpit-color-error, var(--cockpit-destructive-color, #e05a4f));
+    border-color: var(--cockpit-color-error, var(--cockpit-destructive-color, rgba(224, 90, 79, 0.5)));
+}
+
+.cockpit-overlay-list { display: flex; flex-direction: column; }
+
+.cockpit-overlay-item {
+    display: flex; align-items: center;
+    min-height: 40px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.cockpit-overlay-item:hover {
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+}
+
+.cockpit-overlay-item.-selected {
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
+}
+
+.cockpit-overlay-input {
+    width: 100%; box-sizing: border-box;
+    padding: 10px;
+    font-family: inherit; font-size: inherit; color: inherit;
+    background: none;
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 6px;
+    outline: none;
+}
+
+.cockpit-overlay-input:focus {
+    border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
+}

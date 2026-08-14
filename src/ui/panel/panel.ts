@@ -16,7 +16,7 @@ import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
-import { isDialogOpen, openPluginDialog } from "../../core/dialog";
+import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
 import { iconButton, icons } from "../icons";
 
@@ -200,6 +200,35 @@ async function eventHandler(message){
     } else if (message[0] == 'stylerClicked'){
         // Executed as a command rather than called directly so that the panel does not have to import the styler dialog, which imports the panel.
         await joplin.commands.execute('showStylerDialog')
+    } else if (message[0] == 'dialogGuard'){
+        // The panel webview brackets every in-panel overlay (notebook, tag, alarm) with dialogGuard
+        // true/false so refreshPanelData pauses while it is open - the overlay must not be repainted out
+        // from under the user, and on mobile a setHtml would also re-assert the panel viewer's native
+        // Modal. The message is posted false on EVERY close path (OK, Cancel, Escape, an outside tap, the
+        // Android back gesture), so the counter is always balanced. When the last overlay closes, repaint
+        // once to pick up any refresh that was skipped while it was up (a Cancel arms no other refresh);
+        // on an OK close the picker's own handler already refreshes, so this extra render is a no-op via
+        // the equality guard. Mobile-only in effect: overlays are never opened on desktop.
+        setOverlayGuard(!!message[1])
+        if (!message[1] && !isDialogOpen()) await refreshPanelData()
+    } else if (message[0] == 'dialogGuardReset'){
+        // Posted once per webview (re)load on mobile: clear any overlay guard leaked by a webview that was
+        // torn down mid-overlay, so refreshPanelData is not paused forever.
+        resetOverlayGuard()
+    } else if (message[0] == 'getNoteTags'){
+        // A two-way round-trip (like searchTitleSuggestions): the tag overlay awaits this to prefill its
+        // input with the note's current tags, comma separated.
+        return await currentTagsCsv(String(message[1] || ""))
+    } else if (message[0] == 'notebookPicked'){
+        // Result of the in-panel notebook overlay. The purpose carries which flow opened it, so the same
+        // data-API logic the desktop dialogs drive runs here unchanged.
+        await applyNotebookPicked(String(message[1] || ""), String(message[2] || ""), message[3])
+    } else if (message[0] == 'tagsPicked'){
+        // Result of the in-panel tag overlay: the desired comma-separated titles. The diff/attach/detach
+        // logic is exactly the desktop fallback's.
+        await setNoteTagsFromCsv(String(message[1] || ""), String(message[2] || ""))
+        await refreshInterfaces()
+        scheduleRefresh()
     }
 }
 
@@ -320,9 +349,14 @@ async function getControlsHTML(currentProfileID){
     // name from closing the script element early, and the webview builds the dropdown with
     // textContent so nothing here is interpreted as markup.
     var tags = await getAllTags()
+    // The notebook id is carried alongside title/path so the mobile in-panel notebook overlay can be
+    // built straight from this island (the same list the autocomplete reads), and notebookFilter lets the
+    // webview know whether "All notebooks" is active when deciding if a New note needs the notebook
+    // overlay. The autocomplete only reads title/path, so the extra fields are inert there and on desktop.
     var searchData = JSON.stringify({
         tags: tags.map(tag => tag.title),
-        notebooks: notebooks.map(notebook => ({ title: notebook.title, path: notebook.path })),
+        notebooks: notebooks.map(notebook => ({ id: notebook.id, title: notebook.title, path: notebook.path })),
+        notebookFilter: notebookFilter,
     }).replace(/</g, "\\u003c")
     return `
         <section id="profileControls">
@@ -446,11 +480,57 @@ function dropdownHTML(menuID, toggleLabel, itemsHtml){
  * Creates a note or a to-do and opens it. It goes into the notebook the panel is filtered to; with "All notebooks" selected, a dialog asks where.   *
  ***************************************************************************************************************************************************/
 async function createItem(isTodo){
-    var folderID = notebookFilter || await pickNotebook(isTodo ? "Create to-do in notebook" : "Create note in notebook")
+    var folderID = notebookFilter
+    if (!folderID){
+        // With "All notebooks" selected the user is asked where. Desktop asks with the native notebook
+        // picker dialog; mobile asks with the in-panel notebook overlay, which the webview shows itself
+        // before posting notebookPicked (createNote/createTodo), so createItem is only reached with a
+        // notebook already filtered - nothing to do here on mobile without one.
+        if (await isMobile()) return
+        folderID = await pickNotebook(isTodo ? "Create to-do in notebook" : "Create note in notebook")
+    }
+    if (!folderID) return
+    await createItemInFolder(isTodo, folderID)
+}
+
+/** createItemInFolder ******************************************************************************************************************************
+ * Creates a note or to-do in the given notebook and opens it. Shared by createItem (desktop picker / active filter) and the mobile notebook overlay's *
+ * createNote / createTodo result.                                                                                                                   *
+ ***************************************************************************************************************************************************/
+async function createItemInFolder(isTodo, folderID){
     if (!folderID) return
     var newItem = await joplin.data.post(['notes'], null, { parent_id: folderID, is_todo: isTodo ? 1 : 0, title: "" })
     await openTodo(newItem.id)
     scheduleRefresh()
+}
+
+/** applyNotebookPicked *****************************************************************************************************************************
+ * Applies the result of the in-panel notebook overlay (mobile). The purpose says which flow opened it, and each branch runs the same data-API logic  *
+ * its desktop counterpart does: move notes into a notebook, re-parent a notebook (folderId "" means top level, as the overlay's "(top level)" row     *
+ * sends), or create a note/to-do in the chosen notebook.                                                                                            *
+ ***************************************************************************************************************************************************/
+async function applyNotebookPicked(purpose, folderId, extra){
+    if (purpose === 'moveNotes'){
+        var moveIDs = Array.isArray(extra) ? extra : []
+        for (var id of moveIDs) await joplin.data.put(['notes', id], null, { parent_id: folderId })
+        await refreshInterfaces()
+        scheduleRefresh()
+    } else if (purpose === 'moveNotebookUnder'){
+        var sourceID = String(extra || "")
+        if (!sourceID) return
+        // A cancelled/absent redraw would leave the tree stale, so force one and drop the notebook cache.
+        lastRenderedHtml = null
+        invalidateNotebookMap()
+        try {
+            await joplin.data.put(['folders', sourceID], null, { parent_id: folderId })
+        } catch (error) {
+            await joplin.views.dialogs.showMessageBox(`Cockpit: the notebook could not be moved (${error.message}).`)
+        }
+        await refreshInterfaces()
+        scheduleRefresh()
+    } else if (purpose === 'createNote' || purpose === 'createTodo'){
+        await createItemInFolder(purpose === 'createTodo', folderId)
+    }
 }
 
 /** runNotebookAction *******************************************************************************************************************************
@@ -583,10 +663,7 @@ async function duplicateNoteFallback(noteID){
  * tag titles lowercased, so titles are compared case-insensitively.                                                                                  *
  ***************************************************************************************************************************************************/
 async function setTagsFallback(noteID){
-    var currentTags = await joplin.data.get(['notes', noteID, 'tags'], { fields: ['id', 'title'] })
-    var currentByTitle = new Map()
-    for (var tag of (currentTags.items || [])) currentByTitle.set(String(tag.title || "").toLowerCase(), tag.id)
-    var currentTitles = [...currentByTitle.keys()]
+    var currentTitles = String(await currentTagsCsv(noteID)).split(",").map(part => part.trim()).filter(Boolean)
 
     await joplin.views.dialogs.setHtml(tagPickerDialog, `
         <style>
@@ -601,10 +678,33 @@ async function setTagsFallback(noteID){
     `)
     var result = await openPluginDialog(tagPickerDialog)
     if (!result || result.id !== 'ok' || !result.formData || !result.formData.tagpicker) return
+    await setNoteTagsFromCsv(noteID, result.formData.tagpicker.tags)
+}
+
+/** currentTagsCsv **********************************************************************************************************************************
+ * The note's current tag titles as a comma-separated string, in the order Joplin returns them. Used to prefill both the desktop tag dialog and the    *
+ * mobile tag overlay (via the getNoteTags round-trip).                                                                                              *
+ ***************************************************************************************************************************************************/
+async function currentTagsCsv(noteID){
+    if (!noteID) return ""
+    var currentTags = await joplin.data.get(['notes', noteID, 'tags'], { fields: ['id', 'title'] })
+    return (currentTags.items || []).map(tag => String(tag.title || "")).filter(Boolean).join(", ")
+}
+
+/** setNoteTagsFromCsv ******************************************************************************************************************************
+ * Applies a comma-separated list of desired tag titles to a note: the desired titles are diffed against the current ones - missing tags are attached  *
+ * (reusing an existing tag id, or creating one), removed tags are detached. Joplin stores tag titles lowercased, so titles are compared case-         *
+ * insensitively. Shared by the desktop tag dialog (setTagsFallback) and the mobile tag overlay (the tagsPicked message).                             *
+ ***************************************************************************************************************************************************/
+async function setNoteTagsFromCsv(noteID, csv){
+    if (!noteID) return
+    var currentTags = await joplin.data.get(['notes', noteID, 'tags'], { fields: ['id', 'title'] })
+    var currentByTitle = new Map()
+    for (var tag of (currentTags.items || [])) currentByTitle.set(String(tag.title || "").toLowerCase(), tag.id)
 
     // Parse desired titles: trim, lowercase (Joplin stores lowercase), drop blanks and duplicates.
     var desired = new Set()
-    for (var raw of String(result.formData.tagpicker.tags || "").split(",")){
+    for (var raw of String(csv || "").split(",")){
         var title = raw.trim().toLowerCase()
         if (title) desired.add(title)
     }

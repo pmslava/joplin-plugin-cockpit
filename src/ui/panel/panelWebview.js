@@ -102,8 +102,16 @@ function reconcile(){
 // at top-level instead, with a fallback for the reverse ordering just in case.
 function startPanelObserver(){
     reconcile()
+    // reconcile() has just set IS_MOBILE from the platform marker. Clear any overlay refresh-guard leaked
+    // by a previous webview that was torn down mid-overlay (only meaningful on mobile, where overlays and
+    // the guard exist); a no-op on a normal fresh load.
+    if (IS_MOBILE) void webviewApi.postMessage(['dialogGuardReset']);
     new MutationObserver(reconcile).observe(document.body, { childList: true, subtree: true })
 }
+
+// The Android back gesture (when it pops webview history rather than the whole viewer) closes an open
+// overlay instead of navigating, so the guard is released down the same closeOverlay path.
+window.addEventListener('popstate', function(){ if (overlayOpen) closeOverlay() })
 
 if (document.body){
     startPanelObserver()
@@ -163,7 +171,10 @@ function onTodoContextMenu(event, todoID){
         }
         void webviewApi.postMessage(['setAlarmClicked', [...selectedTodoIDs]]);
     } else if (event.target.classList.contains('todo-notebook')){
-        void webviewApi.postMessage(['moveToNotebookClicked', [todoID]]);
+        // Desktop opens Joplin's native "Move to notebook" dialog; mobile opens the in-panel notebook
+        // overlay instead (a native dialog would open behind the panel there).
+        if (IS_MOBILE) openNotebookOverlay('moveNotes', { noteIDs: [todoID] })
+        else void webviewApi.postMessage(['moveToNotebookClicked', [todoID]]);
     } else {
         showNoteContextMenu(event, todoID, true)
     }
@@ -198,7 +209,8 @@ function onRowDoubleClicked(event, noteID){
 function onNoteContextMenu(event, noteID){
     event.preventDefault()
     if (event.target.classList.contains('todo-notebook')){
-        void webviewApi.postMessage(['moveToNotebookClicked', [noteID]]);
+        if (IS_MOBILE) openNotebookOverlay('moveNotes', { noteIDs: [noteID] })
+        else void webviewApi.postMessage(['moveToNotebookClicked', [noteID]]);
     } else {
         showNoteContextMenu(event, noteID, false)
     }
@@ -236,6 +248,10 @@ function showNoteContextMenu(event, noteID, isTodo){
         var action = clickEvent.target.dataset ? clickEvent.target.dataset.action : null
         hideNoteContextMenu()
         if (action === 'setDueDate'){ void webviewApi.postMessage(['setAlarmClicked', [noteID]]); return }
+        // On mobile the notebook and tag pickers are in-panel overlays rather than native dialogs (which
+        // would open behind the panel). Desktop keeps posting noteMenuAction so its native dialogs run.
+        if (IS_MOBILE && action === 'moveToFolder'){ openNotebookOverlay('moveNotes', { noteIDs: [noteID] }); return }
+        if (IS_MOBILE && action === 'tags'){ openTagOverlay(noteID); return }
         if (action) void webviewApi.postMessage(['noteMenuAction', action, noteID]);
     })
     document.body.appendChild(menu)
@@ -319,6 +335,8 @@ document.addEventListener('pointerdown', function(event){
     // ever consumed by its own gesture's click.
     longPress.fired = false
     if (!event.target.closest) return
+    // Events inside an in-panel overlay are the overlay's own; never treat them as a long press on the list.
+    if (event.target.closest('#cockpitOverlay')) return
     var todoRow = event.target.closest('.todo[data-todo-id]')
     var noteRow = event.target.closest('.todo[data-note-id]')
     var heading = event.target.closest('h2[data-todo-ids]')
@@ -463,6 +481,13 @@ function onDropdownItemClicked(event, messageName, value){
 function onDropdownActionClicked(event, messageName, value){
     event.stopPropagation()
     closeAllDropdowns()
+    // "Move notebook under..." asks for a target notebook. Desktop asks with the native picker dialog;
+    // mobile asks with the in-panel notebook overlay (includeRoot offers "(top level)"). Every other row
+    // action (rename, delete, edit/delete profile) is unchanged on both platforms.
+    if (IS_MOBILE && messageName === 'moveNotebookClicked'){
+        openNotebookOverlay('moveNotebookUnder', { sourceFolderId: value, includeRoot: true })
+        return
+    }
     void webviewApi.postMessage([messageName, value]);
 }
 
@@ -472,11 +497,22 @@ document.addEventListener('click', event => {
 
 /** onNewNoteClicked / onNewTodoClicked **************************************************************************************************************/
 async function onNewNoteClicked(){
+    if (createNeedsNotebookOverlay()){ openNotebookOverlay('createNote', {}); return }
     await webviewApi.postMessage(['newNoteClicked']);
 }
 
 async function onNewTodoClicked(){
+    if (createNeedsNotebookOverlay()){ openNotebookOverlay('createTodo', {}); return }
     await webviewApi.postMessage(['newTodoClicked']);
+}
+
+/** createNeedsNotebookOverlay **********************************************************************************************************************
+ * On mobile, with "All notebooks" active (no notebook filter), a new note has no notebook to go into, so the in-panel notebook overlay must ask first  *
+ * (a native picker dialog would open behind the panel). With a notebook filtered, or on desktop, the note is created directly / the host asks with the *
+ * native dialog, exactly as before.                                                                                                                  *
+ ***************************************************************************************************************************************************/
+function createNeedsNotebookOverlay(){
+    return IS_MOBILE && !currentNotebookFilter()
 }
 
 /** onSearchFilterChanged ****************************************************************************************************************************
@@ -793,4 +829,182 @@ async function onCalendarToday(){
  ***************************************************************************************************************************************************/
 async function onCalendarDaySelected(isoDate){
     await webviewApi.postMessage(['calendarDaySelected', isoDate]);
+}
+
+/** In-panel overlays (mobile) **********************************************************************************************************************
+ * On mobile every Joplin plugin dialog opens BEHIND the panel (the panel viewer is a native window that always draws above the dialog's in-tree      *
+ * overlay - structural, unfixable from a plugin). So the frequent pickers are drawn here instead, as a fixed-position overlay layer anchored on       *
+ * document.body (like the context menu and toast, so a stray host re-render cannot destroy them - though re-renders are paused via the guard below    *
+ * anyway). While an overlay is open the webview posts ['dialogGuard', true]; it posts ['dialogGuard', false] on EVERY close path (OK, Cancel, Escape, *
+ * an outside tap, the Android back gesture), so the host's refresh guard is always balanced and can never leak. On OK the overlay posts a result      *
+ * message (notebookPicked / tagsPicked / alarm*) and the host runs the same data-API logic its desktop dialogs use. These are only ever opened on     *
+ * mobile; on desktop the native dialogs are kept untouched.                                                                                          *
+ ***************************************************************************************************************************************************/
+
+// Whether an overlay is currently open, so the guard is posted exactly once per open/close.
+var overlayOpen = false
+
+function readNotebookData(){
+    var node = document.getElementById('cockpitSearchData')
+    if (!node) return { notebooks: [], notebookFilter: '' }
+    try {
+        var data = JSON.parse(node.textContent || '{}')
+        return { notebooks: data.notebooks || [], notebookFilter: String(data.notebookFilter || '') }
+    } catch (error) {
+        return { notebooks: [], notebookFilter: '' }
+    }
+}
+
+function currentNotebookFilter(){
+    return readNotebookData().notebookFilter
+}
+
+/** closeOverlay ************************************************************************************************************************************
+ * Removes the overlay layer and releases the refresh guard, exactly once. Called from every close path (OK, Cancel, Escape, an outside tap, the       *
+ * Android back gesture), so the guard cannot leak.                                                                                                  *
+ ***************************************************************************************************************************************************/
+function closeOverlay(){
+    var backdrop = document.getElementById('cockpitOverlay')
+    if (backdrop) backdrop.remove()
+    if (overlayOpen){
+        overlayOpen = false
+        document.removeEventListener('keydown', overlayKeydown, true)
+        void webviewApi.postMessage(['dialogGuard', false]);
+    }
+}
+
+function overlayKeydown(event){
+    if (event.key === 'Escape'){
+        // Swallow the Escape so it does not also reach the context-menu / suggestion Escape handlers.
+        event.preventDefault()
+        event.stopPropagation()
+        closeOverlay()
+    }
+}
+
+/** buildOverlay ************************************************************************************************************************************
+ * Creates the overlay shell (backdrop + panel with a header, a body and a footer of buttons) and opens it. footerButtons is an array of              *
+ * { label, kind, onClick }; kind "primary" / "danger" style the button, and onClick runs with the panel element so a handler can read its inputs.     *
+ * A tap on the backdrop outside the panel, or Escape, closes without committing. Returns the body element so the caller can fill it.                  *
+ ***************************************************************************************************************************************************/
+function buildOverlay(titleText, footerButtons){
+    // Only one overlay at a time; replacing one balances its guard via closeOverlay first.
+    if (overlayOpen) closeOverlay()
+    overlayOpen = true
+    void webviewApi.postMessage(['dialogGuard', true]);
+
+    var backdrop = document.createElement('div')
+    backdrop.id = 'cockpitOverlay'
+    var panelEl = document.createElement('div')
+    panelEl.className = 'cockpit-overlay-panel'
+
+    var header = document.createElement('div')
+    header.className = 'cockpit-overlay-header'
+    header.textContent = titleText
+    var body = document.createElement('div')
+    body.className = 'cockpit-overlay-body'
+    var footer = document.createElement('div')
+    footer.className = 'cockpit-overlay-footer'
+    for (var spec of footerButtons){
+        var button = document.createElement('button')
+        button.type = 'button'
+        button.textContent = spec.label
+        if (spec.kind) button.classList.add('-' + spec.kind)
+        button.addEventListener('click', (function(handler){ return function(){ handler(panelEl) } })(spec.onClick))
+        footer.appendChild(button)
+    }
+
+    panelEl.appendChild(header)
+    panelEl.appendChild(body)
+    panelEl.appendChild(footer)
+    backdrop.appendChild(panelEl)
+    // A tap on the backdrop itself (not the panel) closes without committing.
+    backdrop.addEventListener('pointerdown', function(event){
+        if (event.target === backdrop){ event.preventDefault(); closeOverlay() }
+    })
+    document.body.appendChild(backdrop)
+    document.addEventListener('keydown', overlayKeydown, true)
+    return body
+}
+
+/** openNotebookOverlay *****************************************************************************************************************************
+ * The in-panel notebook picker. purpose says which flow opened it (moveNotes, moveNotebookUnder, createNote, createTodo) and is echoed back in the    *
+ * notebookPicked result so the host runs the matching data-API logic. opts carries the flow's extra payload: noteIDs (moveNotes), sourceFolderId       *
+ * (moveNotebookUnder) and includeRoot (offer a "(top level)" row, sent as an empty id). A row is selected on tap; OK commits the selection.           *
+ ***************************************************************************************************************************************************/
+var overlayNotebookSelection = null
+
+function openNotebookOverlay(purpose, opts){
+    opts = opts || {}
+    var titles = {
+        moveNotes: 'Move to notebook',
+        moveNotebookUnder: 'Move notebook under...',
+        createNote: 'Create note in notebook',
+        createTodo: 'Create to-do in notebook',
+    }
+    overlayNotebookSelection = null
+    var body = buildOverlay(titles[purpose] || 'Select notebook', [
+        { label: 'Cancel', onClick: function(){ closeOverlay() } },
+        { label: 'OK', kind: 'primary', onClick: function(){
+            if (overlayNotebookSelection === null) return
+            var extra = purpose === 'moveNotes' ? (opts.noteIDs || [])
+                      : purpose === 'moveNotebookUnder' ? String(opts.sourceFolderId || '')
+                      : undefined
+            void webviewApi.postMessage(['notebookPicked', purpose, overlayNotebookSelection, extra]);
+            closeOverlay()
+        } },
+    ])
+
+    var list = document.createElement('div')
+    list.className = 'cockpit-overlay-list'
+    var rows = []
+    function makeRow(id, label){
+        var row = document.createElement('div')
+        row.className = 'cockpit-overlay-item'
+        row.textContent = label
+        row.addEventListener('click', function(){
+            overlayNotebookSelection = id
+            for (var other of rows) other.classList.remove('-selected')
+            row.classList.add('-selected')
+        })
+        rows.push(row)
+        list.appendChild(row)
+    }
+    if (opts.includeRoot) makeRow('', '(top level)')
+    for (var notebook of readNotebookData().notebooks){
+        makeRow(String(notebook.id), String(notebook.path))
+    }
+    body.appendChild(list)
+}
+
+/** openTagOverlay **********************************************************************************************************************************
+ * The in-panel tag picker: a single comma-separated input prefilled with the note's current tags, fetched with the getNoteTags round-trip (the host   *
+ * knows the tags, the webview does not). On OK it posts tagsPicked with the desired titles; the host keeps the diff/attach/detach logic.              *
+ ***************************************************************************************************************************************************/
+function openTagOverlay(noteID){
+    var input = document.createElement('input')
+    input.className = 'cockpit-overlay-input'
+    input.type = 'text'
+    input.setAttribute('inputmode', 'text')
+    input.setAttribute('autocomplete', 'off')
+    input.setAttribute('autocorrect', 'off')
+    input.setAttribute('autocapitalize', 'off')
+    input.setAttribute('spellcheck', 'false')
+
+    var body = buildOverlay('Tags (comma separated)', [
+        { label: 'Cancel', onClick: function(){ closeOverlay() } },
+        { label: 'OK', kind: 'primary', onClick: function(){
+            void webviewApi.postMessage(['tagsPicked', noteID, input.value]);
+            closeOverlay()
+        } },
+    ])
+    body.appendChild(input)
+
+    // Prefill from the host, then focus. If the round-trip fails the input is simply left empty.
+    webviewApi.postMessage(['getNoteTags', noteID]).then(function(csv){
+        // Ignore a late reply if the overlay was already closed.
+        if (!overlayOpen || !input.isConnected) return
+        input.value = String(csv || '')
+    }).catch(function(){})
+    input.focus()
 }
