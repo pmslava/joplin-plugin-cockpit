@@ -54,7 +54,7 @@ test.describe('Profiles', () => {
 
     await expect
       .poll(() => profileNames(win), { timeout: 30_000 })
-      .toEqual(expect.arrayContaining(['New Profile', 'Beta only']));
+      .toEqual(expect.arrayContaining(['All todo and notes', 'Beta only']));
   });
 
   test('the new profile becomes selectable and its search criteria filters the list', async () => {
@@ -68,7 +68,7 @@ test.describe('Profiles', () => {
 
   test('switching back to the other profile restores the full list', async () => {
     const { win } = joplin;
-    await selectProfile(win, 'New Profile');
+    await selectProfile(win, 'All todo and notes');
     await waitForPanelTodo(win, alphaTitle);
     await waitForPanelTodo(win, betaTitle);
   });
@@ -91,7 +91,7 @@ test.describe('Profiles', () => {
 
     await expect
       .poll(() => profileNames(win), { timeout: 60_000 })
-      .toEqual(expect.arrayContaining(['New Profile', 'Beta only']));
+      .toEqual(expect.arrayContaining(['All todo and notes', 'Beta only']));
     expect(await selectedProfileName(win)).toBe('Beta only');
 
     // Its settings survived too: still the 'Beta' search criteria from before the restart.

@@ -25,14 +25,16 @@ export const PANEL_REFRESH_TIMEOUT = 90_000;
  * ------------------------------------------------------------------------------------------- */
 
 /**
- * Find the iframe hosting the Agenda panel. Plugin panels are rendered in a Joplin webview iframe
- * whose id contains the plugin id, but the panel is located by the presence of its profile dropdown
- * instead, which is both simpler and independent of the plugin id.
+ * Find the iframe hosting the Cockpit panel. Plugin panels are rendered in a Joplin webview iframe
+ * whose id contains the plugin id, but the panel is located by the presence of its profile controls
+ * section instead, which is both simpler and independent of the plugin id. (`#profileControls` is
+ * emitted on every panel render; the profile picker inside it is a custom dropdown, not a native
+ * `<select>`, so there is no `#profileDropdown` to key off any more.)
  */
 async function findPanelFrame(win: Page): Promise<Frame | null> {
   for (const frame of win.frames()) {
     const found = await frame
-      .locator('#profileDropdown')
+      .locator('#profileControls')
       .count()
       .catch(() => 0);
     if (found) return frame;
@@ -56,19 +58,25 @@ export async function panelIsPresent(win: Page): Promise<boolean> {
 /**
  * The element in the main window that hosts the panel. Joplin names it after the plugin and view.
  * An attribute selector is required rather than `#id`, because the plugin id contains dots, which a
- * CSS id selector would read as class names.
+ * CSS id selector would read as class names. Used by the (opt-in) showcase capture spec.
  */
 export const PANEL_IFRAME = `iframe[id="plugin-view-${PLUGIN_ID}-panel"]`;
 
 /**
  * Whether the panel is visible to the user. Hiding a panel leaves its iframe in the DOM — the
  * application layout just stops showing it — so presence of the frame is not the same as visibility.
+ * The panel's own iframe element is reached from the frame itself, so this stays independent of how
+ * Joplin happens to spell the iframe's id.
  */
 export async function panelIsVisible(win: Page): Promise<boolean> {
-  return win
-    .locator(PANEL_IFRAME)
-    .isVisible()
-    .catch(() => false);
+  const frame = await findPanelFrame(win);
+  if (!frame) return false;
+  try {
+    const element = await frame.frameElement();
+    return await element.isVisible();
+  } catch {
+    return false;
+  }
 }
 
 /** The to-do titles currently listed in the panel, in display order. */
@@ -117,10 +125,19 @@ export async function clickPanelTodo(win: Page, title: string): Promise<void> {
   await win.waitForTimeout(SETTLE);
 }
 
-/** Click the panel's manual "Update Panel and Notes" button. */
+/**
+ * Force a panel + overview-note refresh.
+ *
+ * Cockpit has no manual "refresh" button: refreshes are driven by note-change events and a periodic
+ * timer. Re-selecting the currently active profile posts `profilesDropdownChanged`, whose handler
+ * schedules a full `refreshInterfaces()` (panel data *and* the overview notes), which is the promptest
+ * refresh a real GUI action can trigger. The scheduled refresh lands a beat later, so callers still
+ * poll for the result.
+ */
 export async function refreshPanel(win: Page): Promise<void> {
   const frame = await agendaPanel(win);
-  await frame.locator('button[title="Update Panel and Notes"]').click();
+  await frame.locator('#profileControls .dropdown-toggle').first().click();
+  await frame.locator('#profileMenu .dropdown-item.-current .dropdown-label').first().click();
   await win.waitForTimeout(SETTLE);
 }
 
@@ -266,61 +283,97 @@ async function fillProfileForm(frame: Frame, fields: ProfileFields): Promise<voi
   if (fields.noteID != null) await setText('#noteIDInput', fields.noteID);
   if (fields.displayFormat != null) {
     await frame.locator('#displayFormatSelect').selectOption(fields.displayFormat);
+    await frame.locator('#displayFormatSelect').dispatchEvent('change');
   }
-  if (fields.showCompleted != null) await setCheckbox('#showCompletedCheckbox', fields.showCompleted);
+  if (fields.showCompleted != null) {
+    // "Show completed" is no longer a single flag: the editor splits it into past/today/future/
+    // no-due checkboxes. Map the boolean onto all four so it behaves like the old single toggle.
+    for (const id of [
+      '#showCompletedPastCheckbox',
+      '#showCompletedTodayCheckbox',
+      '#showCompletedFutureCheckbox',
+      '#showCompletedNoDueCheckbox',
+    ]) {
+      await setCheckbox(id, fields.showCompleted);
+    }
+  }
   if (fields.showNoDue != null) await setCheckbox('#showNoDueCheckbox', fields.showNoDue);
   if (fields.noDueDatesAtEnd != null) {
     await setCheckbox('#noDueDatesAtEndCheckbox', fields.noDueDatesAtEnd);
   }
 }
 
+/** Open the panel's profile dropdown menu (a custom widget, not a native `<select>`). */
+async function openProfileMenu(win: Page): Promise<Frame> {
+  const frame = await agendaPanel(win);
+  const menu = frame.locator('#profileMenu');
+  if (!(await menu.isVisible().catch(() => false))) {
+    await frame.locator('#profileControls .dropdown-toggle').first().click();
+    await menu.waitFor({ state: 'visible', timeout: 5000 });
+  }
+  return frame;
+}
+
 /**
- * Create a profile using the panel's "Create New Profile" button, fill the form and confirm.
+ * Create a profile using the profile dropdown's "+ New profile..." action, fill the form and confirm.
  *
- * The dialog's buttons are rendered by Joplin in the main window, outside the iframe.
+ * The editor is a Joplin dialog: its fields live in an iframe, but its Cancel/Create buttons are
+ * rendered by Joplin in the main window, outside the iframe.
  */
 export async function createProfile(win: Page, fields: ProfileFields): Promise<void> {
-  const panel = await agendaPanel(win);
-  await panel.locator('button[title="Create New Profile"]').click();
-  const frame = await editorFrame(win);
-  await fillProfileForm(frame, fields);
+  const frame = await openProfileMenu(win);
+  // Target the action by its handler, not its label, so it is never confused with a profile that
+  // happens to be named "New Profile" (the editor's default name for a fresh profile).
+  await frame.locator('#profileMenu .dropdown-item[onclick*="createProfileClicked"]').click();
+  const editor = await editorFrame(win);
+  await fillProfileForm(editor, fields);
   await win.locator('button:has-text("Create")').last().click();
   await win.waitForTimeout(SETTLE);
 }
 
-/** Edit the currently selected profile using the panel's "Edit Profile" button. */
+/** Edit the currently selected profile using its "Edit profile" row action in the dropdown. */
 export async function editCurrentProfile(win: Page, fields: ProfileFields): Promise<void> {
-  const panel = await agendaPanel(win);
-  await panel.locator('button[title="Edit Profile"]').click();
-  const frame = await editorFrame(win);
-  await fillProfileForm(frame, fields);
+  const frame = await openProfileMenu(win);
+  await frame.locator('#profileMenu .dropdown-item.-current button[title="Edit profile"]').click();
+  const editor = await editorFrame(win);
+  await fillProfileForm(editor, fields);
   await win.locator('button:has-text("Save")').last().click();
   await win.waitForTimeout(SETTLE);
 }
 
-/** Read the profile names listed in the panel's dropdown. */
+/** Read the profile names listed in the panel's dropdown, in order. */
 export async function profileNames(win: Page): Promise<string[]> {
   const frame = await agendaPanel(win);
-  return frame.locator('#profileDropdown option').allInnerTexts();
+  // The dropdown is rendered with its menu hidden, so read textContent rather than innerText (which
+  // is empty for hidden elements). Only real profile rows carry the `profilesDropdownChanged` action;
+  // the trailing "+ New profile..." row is a different action and is excluded.
+  const labels = await frame
+    .locator('#profileMenu .dropdown-item[onclick*="profilesDropdownChanged"] .dropdown-label')
+    .allTextContents();
+  return labels.map((l) => l.trim());
 }
 
-/** The name of the profile currently selected in the panel dropdown. */
+/** The name of the profile currently selected, shown on the dropdown's toggle. */
 export async function selectedProfileName(win: Page): Promise<string> {
   const frame = await agendaPanel(win);
-  return frame.locator('#profileDropdown option[selected]').first().innerText();
+  return (await frame.locator('#profileControls .dropdown-toggle-label').first().innerText()).trim();
 }
 
 /** Select a profile by name in the panel dropdown. */
 export async function selectProfile(win: Page, name: string): Promise<void> {
-  const frame = await agendaPanel(win);
-  await frame.locator('#profileDropdown').selectOption({ label: name });
+  const frame = await openProfileMenu(win);
+  await frame
+    .locator('#profileMenu .dropdown-item', { hasText: name })
+    .locator('.dropdown-label')
+    .first()
+    .click();
   await win.waitForTimeout(SETTLE);
 }
 
-/** Whether the panel's create/edit/delete profile buttons are visible. */
+/** Whether the panel's profile controls (the profile dropdown and create buttons) are visible. */
 export async function profileControlsVisible(win: Page): Promise<boolean> {
   const frame = await agendaPanel(win);
-  return frame.locator('#profileButtonsSection').isVisible();
+  return frame.locator('#profileControls').isVisible();
 }
 
 /** ----------------------------------------------------------------------------------------------

@@ -26,7 +26,10 @@ const EXTRACT_DIR = path.join(CACHE_DIR, 'squashfs-root');
 const JOPLIN_BINARY = path.join(EXTRACT_DIR, 'joplin');
 const PLUGIN_DIST = path.join(REPO_ROOT, 'dist');
 
-export const PLUGIN_ID = 'com.github.thescriptingguy.joplin-plugin-agenda';
+// The plugin id this fork ships under (see src/manifest.json). Joplin embeds it in the panel/
+// background webview URLs (?pluginId=...) and in the panel iframe's element id, so the harness must
+// use the current id rather than the upstream Agenda one it was forked from.
+export const PLUGIN_ID = 'io.github.pmslava.cockpit';
 
 export interface JoplinInstance {
   browser: Browser;

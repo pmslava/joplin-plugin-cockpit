@@ -49,35 +49,39 @@ test.describe('Plugin loads', () => {
     await expect.poll(() => panelIsPresent(win), { timeout: 60_000 }).toBe(true);
 
     const panel = await agendaPanel(win);
-    await expect(panel.locator('.heading h1')).toHaveText('Agenda');
-    await expect(panel.locator('button[title="Update Panel and Notes"]')).toBeVisible();
+    // The panel header is the profile picker (showing the default profile's name) plus the New
+    // note / New to-do create buttons — a rendered panel, not a dead webview.
+    await expect(panel.locator('#profileControls .dropdown-toggle-label')).toHaveText(
+      'All todo and notes'
+    );
+    await expect(panel.locator('#profileControls button[title="New to-do"]')).toBeVisible();
   });
 
   test('a default profile exists on a fresh install', async () => {
-    expect(await profileNames(joplin.win)).toEqual(['New Profile']);
+    expect(await profileNames(joplin.win)).toEqual(['All todo and notes']);
   });
 
   test('the profile buttons use inline icons rather than an icon font', async () => {
     const panel = await agendaPanel(joplin.win);
     // Font Awesome is not available in plugin webviews on mobile, so the icons must be inline SVG.
-    await expect(panel.locator('button[title="Create New Profile"] svg')).toBeVisible();
+    await expect(panel.locator('#profileControls button[title="New to-do"] svg')).toBeVisible();
     expect(await panel.locator('.todos i.fa').count()).toBe(0);
   });
 
-  test('the Agenda toolbar button is registered', async () => {
+  test('the Cockpit toolbar button is registered', async () => {
     const { win } = joplin;
     await createNotebook(win, 'Loads NB');
     await createTodo(win, 'Loads Todo ' + Date.now());
 
     // Registered by the plugin against the note toolbar; only present when a note is open.
-    await expect(win.locator('button[title="Toggle Agenda Panel"]')).toBeVisible({
+    await expect(win.locator('button[title="Toggle Cockpit Panel"]')).toBeVisible({
       timeout: 20_000,
     });
   });
 
   test('the toolbar button hides and shows the panel', async () => {
     const { win } = joplin;
-    const button = win.locator('button[title="Toggle Agenda Panel"]');
+    const button = win.locator('button[title="Toggle Cockpit Panel"]');
 
     // The button is dispatched to rather than clicked: under the virtual display used in CI the
     // panel iframe sits over the note toolbar, so Playwright's hit testing refuses a real click.

@@ -13,8 +13,12 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e',
   // Launching Joplin + waiting for the plugin to register can take a while on a cold profile, and
-  // some tests wait out more than one of Agenda's fallback refresh intervals.
+  // some tests wait out more than one of the panel's fallback refresh intervals.
   timeout: 240_000,
+  // A stuck suite must stop itself before the CI job's timeout-minutes hard-cancels it: a global
+  // timeout ends the run gracefully and still writes the HTML report and traces (a hard cancel does
+  // not), so failures stay diagnosable. Kept comfortably under the workflow's 20-minute job cap.
+  globalTimeout: 18 * 60_000,
   expect: { timeout: 20_000 },
   // A single Joplin instance at a time.
   fullyParallel: false,

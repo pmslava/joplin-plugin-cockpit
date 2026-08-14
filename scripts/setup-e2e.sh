@@ -23,7 +23,20 @@ fi
 
 if [ ! -f "$APPIMAGE" ]; then
   echo "[setup-e2e] Downloading Joplin $JOPLIN_VERSION ..."
-  curl -sSL -o "$APPIMAGE" "$URL"
+  # -f: fail (non-zero exit) on an HTTP error such as a 404 for a mistyped/withdrawn version, rather
+  # than silently saving the error page as "Joplin.AppImage" and failing confusingly at extract time.
+  # --retry: ride out transient network/CDN blips. rm on failure so a partial file is not cached.
+  if ! curl -fSL --retry 3 --retry-delay 2 -o "$APPIMAGE" "$URL"; then
+    echo "[setup-e2e] ERROR: failed to download Joplin $JOPLIN_VERSION from $URL" >&2
+    rm -f "$APPIMAGE"
+    exit 1
+  fi
+  # A valid AppImage is well over 100 MB; anything tiny is an error page that slipped through.
+  if [ "$(stat -c%s "$APPIMAGE" 2>/dev/null || echo 0)" -lt 10000000 ]; then
+    echo "[setup-e2e] ERROR: downloaded AppImage is implausibly small — treating as a failed download" >&2
+    rm -f "$APPIMAGE"
+    exit 1
+  fi
   chmod +x "$APPIMAGE"
 fi
 
