@@ -24,6 +24,23 @@ import { iconButton, icons } from "../icons";
 var panel = null;
 var lastRenderedHtml = null;
 
+/** Scroll position (source of truth for mobile) ********************************************************************************************************
+ * On desktop the panel webview keeps the scroll position in its own module state (setHtml leaves it alone). On mobile every setHtml is a FULL WEBVIEW  *
+ * RELOAD that destroys that module state, so the plugin holds the position instead: the webview posts it (throttled) as scrollChanged, and every render *
+ * embeds it as data-scroll-top so the reloaded webview can restore it. renderNonce tags each render; a scrollChanged carrying an old nonce (a late post *
+ * from the outgoing webview) is dropped, which is what keeps the deliberate resets below robust. Deliberate view changes (profile, notebook, search,    *
+ * sort, calendar) set lastScrollTop = 0 before their refresh, so both platforms start those at the top.                                                *
+ ***************************************************************************************************************************************************/
+var lastScrollTop = 0
+var renderNonce = 0
+
+/** searchFocused (mobile hold) *********************************************************************************************************************
+ * True while the mobile search field has focus. refreshPanelData skips its setHtml then, because on mobile a setHtml is a full webview reload that      *
+ * would wipe the input, caret, suggestion list and soft keyboard mid-typing. The webview posts searchFocusChanged on focus/blur; the held refresh runs  *
+ * on blur. Desktop never posts it (it keeps its module-state draft restore), and the guard is mobile-gated, so desktop is unaffected.                   *
+ ***************************************************************************************************************************************************/
+var searchFocused = false
+
 /** calendarViewState *******************************************************************************************************************************
  * Which month or week the calendar views are showing, and which day is selected. This is where the user has navigated to rather than a setting, so   *
  * it is kept in memory and starts again at today whenever the plugin restarts or the profile changes.                                               *
@@ -95,7 +112,19 @@ function applyProfileHeaderState(profile){
  * Processes all events triggered by the panel's internal javascript                                                                                *
  ***************************************************************************************************************************************************/
 async function eventHandler(message){
-    if (message[0] == 'todoClicked'){
+    if (message[0] == 'scrollChanged'){
+        // The webview's throttled scroll position. Store it only when it carries the current render's
+        // nonce; a post tagged with an older nonce is a late one from an outgoing webview whose position
+        // has since been deliberately reset, so it is dropped. Never triggers a refresh of its own.
+        if (Number(message[2]) === renderNonce) lastScrollTop = Number(message[1]) || 0
+        return
+    } else if (message[0] == 'searchFocusChanged'){
+        // Mobile only: hold refreshes while the search field is focused (a setHtml there is a full webview
+        // reload that would wipe the field mid-typing), then run the held refresh on blur.
+        searchFocused = !!message[1]
+        if (!searchFocused) await refreshPanelData()
+        return
+    } else if (message[0] == 'todoClicked'){
         await openTodo(message[1])
     } else if (message[0] == 'openInNewWindow'){
         await runAppCommand('openNoteInNewWindow', String(message[1] || ""))
@@ -103,9 +132,11 @@ async function eventHandler(message){
         await createItem(message[0] == 'newTodoClicked')
     } else if (message[0] == 'sortFieldSelected'){
         if (sortFieldCycle.includes(String(message[1]))) sortField = String(message[1])
+        lastScrollTop = 0
         await refreshPanelData()
     } else if (message[0] == 'sortDirectionClicked'){
         sortDirection = sortDirection === "asc" ? "desc" : "asc"
+        lastScrollTop = 0
         await refreshPanelData()
     } else if (message[0] == 'renameNotebookClicked'){
         await runNotebookAction('rename', String(message[1] || ""))
@@ -135,6 +166,7 @@ async function eventHandler(message){
         scheduleRefresh()
     } else if (message[0] == 'profilesDropdownChanged'){
         // The last entries of the dropdown are actions rather than profiles
+        lastScrollTop = 0
         await setCurrentProfileID(message[1])
         // Another profile may show a different calendar, so start it at today rather than wherever the previous one was scrolled to.
         resetCalendarViewState()
@@ -143,12 +175,14 @@ async function eventHandler(message){
         await refreshInterfaces()
     } else if (message[0] == 'notebookFilterChanged'){
         notebookFilter = String(message[1] || "")
+        lastScrollTop = 0
         await refreshPanelData()
     } else if (message[0] == 'searchTitleSuggestions'){
         // A two-way round-trip: the webview awaits this handler's return value (title: autocomplete).
         return await searchTitleSuggestions(String(message[1] || ""))
     } else if (message[0] == 'searchFilterChanged'){
         searchFilter = String(message[1] || "").trim()
+        lastScrollTop = 0
         await refreshPanelData()
     } else if (message[0] == 'setAlarmClicked'){
         var alarmTodoIDs = Array.isArray(message[1]) ? message[1] : []
@@ -165,9 +199,11 @@ async function eventHandler(message){
     } else if (message[0] == 'calendarNavigate'){
         var profile = await getProfile(await getCurrentProfileID())
         calendarViewState.anchor = stepCalendarAnchor(profile, calendarViewState.anchor, Number(message[1]))
+        lastScrollTop = 0
         await refreshPanelData()
     } else if (message[0] == 'calendarToday'){
         resetCalendarViewState()
+        lastScrollTop = 0
         await refreshPanelData()
     } else if (message[0] == 'calendarDaySelected'){
         // Selecting the day that is already selected closes the list again.
@@ -213,8 +249,11 @@ async function eventHandler(message){
         if (!message[1] && !isDialogOpen()) await refreshPanelData()
     } else if (message[0] == 'dialogGuardReset'){
         // Posted once per webview (re)load on mobile: clear any overlay guard leaked by a webview that was
-        // torn down mid-overlay, so refreshPanelData is not paused forever.
+        // torn down mid-overlay, so refreshPanelData is not paused forever. Clear the search-focus hold for
+        // the same reason: a fresh load has no focused field, so a hold leaked by a torn-down webview (the
+        // panel tab closed while the search was focused) would otherwise pause refreshes forever.
         resetOverlayGuard()
+        searchFocused = false
     } else if (message[0] == 'getNoteTags'){
         // A two-way round-trip (like searchTitleSuggestions): the tag overlay awaits this to prefill its
         // input with the note's current tags, comma separated.
@@ -271,6 +310,11 @@ export async function togglePanelVisibility() {
     // mobile precisely so a skipped refresh is not lost), so nothing is left stale. Gated to mobile:
     // desktop has no such Modal stacking limitation, so its refresh timing stays byte-for-byte unchanged.
     if (mobile && isDialogOpen()) return
+    // Mobile only: hold the refresh while the search field has focus. A setHtml on mobile is a full webview
+    // reload that would wipe the search input, caret, suggestion list and soft keyboard mid-typing; the held
+    // refresh runs when the field blurs (searchFocusChanged). Gated to mobile: on desktop setHtml keeps the
+    // field's module-state draft, which restoreSearchDraft paints back, so its refresh timing is unchanged.
+    if (mobile && searchFocused) return
     // Building the markup runs the full search / notes / body query cycle, so it is skipped while the
     // panel is hidden (a closed desktop panel, or a plugin dialog the user has not opened on mobile),
     // which otherwise happens on every 60s timer tick and its follow-ups for no visible effect. The
@@ -311,14 +355,24 @@ export async function togglePanelVisibility() {
     // wrapper, so mobile-only CSS/JS can branch off it. Empty on desktop, so the desktop markup and DOM
     // are unchanged.
     var rootMarker = mobile ? '<div id="cockpitPlatform" hidden></div>' : ''
-    var htmlString = panelTemplate
+    var contentHtml = panelTemplate
         .replace("<<THEME_CSS>>", () => themeCss)
         .replace("<<CUSTOM_CSS>>", () => customCss)
         .replace("<<ROOT_MARKER>>", () => rootMarker)
         .replace("<<CONTROLS>>", () => controlsHtml)
         .replace("<<TODOS>>", () => todosHtml)
-    if (htmlString === lastRenderedHtml) return
-    lastRenderedHtml = htmlString
+    // The equality guard compares content only: the scroll-top and render-nonce placeholders are still
+    // present here and are filled in below. Comparing before they are stamped keeps the guard working -
+    // otherwise the ever-incrementing nonce would defeat it, forcing a setHtml (a full webview reload on
+    // mobile) on every 60s timer tick when nothing has actually changed.
+    if (contentHtml === lastRenderedHtml) return
+    lastRenderedHtml = contentHtml
+    // A real render is happening: bump the nonce and stamp it plus the current scroll position into the
+    // markup, so the (re)loaded webview restores the position and tags its scroll posts with this nonce.
+    renderNonce++
+    var htmlString = contentHtml
+        .replace("<<SCROLL_TOP>>", () => String(lastScrollTop))
+        .replace("<<RENDER_NONCE>>", () => String(renderNonce))
     await joplin.views.panels.setHtml(panel, htmlString);
 }
 

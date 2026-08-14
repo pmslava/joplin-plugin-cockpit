@@ -7,5 +7,5 @@ export var panelTemplate = `
     <style><<THEME_CSS>><<CUSTOM_CSS>></style>
     <<ROOT_MARKER>>
     <<CONTROLS>>
-    <section class="todos"><<TODOS>></section>
+    <section class="todos" data-scroll-top="<<SCROLL_TOP>>" data-render-nonce="<<RENDER_NONCE>>"><<TODOS>></section>
 `

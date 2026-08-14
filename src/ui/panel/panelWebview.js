@@ -29,6 +29,29 @@ var savedTodosScrollTop = 0
 var currentTodosEl = null
 var restoringScroll = false
 
+/** Scroll position posted to the plugin *****************************************************************************************************************
+ * On desktop the scroll position survives in savedTodosScrollTop above (setHtml keeps this module state). On mobile every setHtml is a FULL WEBVIEW    *
+ * RELOAD that destroys this module state, so the plugin has to be the source of truth: the .todos scroll handler posts the position (throttled) to the *
+ * host, which stores it and embeds it as data-scroll-top into every render. On the next (re)load reconcile reads that attribute back when its own      *
+ * module state is 0. The post carries the render nonce embedded in the current markup so the host can drop a late post from an outgoing webview whose   *
+ * position has already been deliberately reset (see panel.ts). This is unified: it also runs on desktop, where it merely hardens the same behaviour.   *
+ ***************************************************************************************************************************************************/
+var scrollPostTimer = null
+var lastPostedScrollTop = -1
+
+function queueScrollPost(el, nonce){
+    // Trailing-edge throttle: the first scroll arms a 300ms timer; the latest position is read when it
+    // fires. A move of 4px or less is treated as noise and not posted.
+    if (scrollPostTimer) return
+    scrollPostTimer = setTimeout(function(){
+        scrollPostTimer = null
+        var top = el.scrollTop
+        if (Math.abs(top - lastPostedScrollTop) <= 4) return
+        lastPostedScrollTop = top
+        void webviewApi.postMessage(['scrollChanged', top, nonce])
+    }, 300)
+}
+
 function restoreTodosScroll(el){
     restoringScroll = true
     requestAnimationFrame(() => {
@@ -85,9 +108,20 @@ function reconcile(){
     var el = document.querySelector('.todos')
     if (el && el !== currentTodosEl){
         currentTodosEl = el
+        // The render nonce embedded in this markup; posted back with every scrollChanged so the host can
+        // drop a stale post from an outgoing webview whose scroll it has already deliberately reset.
+        var nonce = Number(el.dataset.renderNonce || 0)
         // Save on genuine user scroll only; ignore the programmatic restore below (and any scroll-to-0
-        // fired as the old node is detached), which restoringScroll guards.
-        el.addEventListener('scroll', () => { if (!restoringScroll) savedTodosScrollTop = el.scrollTop })
+        // fired as the old node is detached), which restoringScroll guards. On a genuine scroll also post
+        // the position to the host (throttled), so it survives the mobile reload.
+        el.addEventListener('scroll', () => {
+            if (restoringScroll) return
+            savedTodosScrollTop = el.scrollTop
+            queueScrollPost(el, nonce)
+        })
+        // Desktop keeps its surviving module state (savedTodosScrollTop truthy, byte-identical to before);
+        // mobile's module state was zeroed by the reload, so fall through to the embedded data-scroll-top.
+        savedTodosScrollTop = savedTodosScrollTop || Number(el.dataset.scrollTop || 0)
         restoreTodosScroll(el)
         paintTodoSelection()
         // The suggestion menu was in the replaced markup; drop its now-stale state (closing on a
@@ -752,6 +786,11 @@ function updateSearchDraft(input){
 
 function onSearchFocus(){
     searchFocused = true
+    // Mobile only: hold the host's refreshes while the field is focused, so a setHtml (a full webview
+    // reload on mobile) cannot wipe the input, caret, suggestion list or soft keyboard mid-typing. The
+    // host releases the hold and runs the held refresh on blur. Desktop keeps its module-state draft
+    // restore instead, so it does not post this (and the host guard is mobile-gated anyway).
+    if (IS_MOBILE) void webviewApi.postMessage(['searchFocusChanged', true]);
 }
 
 function onSearchBlur(event){
@@ -765,6 +804,10 @@ function onSearchBlur(event){
     // later focus + refresh would resurrect this stale text over the freshly rendered field.
     searchDraft = null
     hideSearchSuggestions()
+    // Release the mobile refresh hold armed on focus, so the host runs any refresh it skipped while the
+    // field was focused. A commit (Enter / clear) also posts searchFilterChanged right after, which the
+    // host's equality guard collapses to a single render. Mobile only, matching onSearchFocus.
+    if (IS_MOBILE) void webviewApi.postMessage(['searchFocusChanged', false]);
 }
 
 /** restoreSearchDraft *****************************************************************************************************************************
