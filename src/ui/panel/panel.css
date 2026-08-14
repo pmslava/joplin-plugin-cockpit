@@ -1130,6 +1130,14 @@ table {
     font-size: var(--cockpit-font-size, inherit);
 }
 
+/* Neutralise the global button skin (panel button{height:26px;width:auto;border;background})
+ * on every ported alarm button so they match the frameless dialog: transparent, honest
+ * box metrics, borders only from each element's own scoped rule below. Out-specifies the
+ * global button rule (0,2,0 vs 0,0,1). */
+.cockpit-alarm-overlay button {
+    box-sizing: border-box; height: auto; width: auto; background: none;
+}
+
 .cockpit-alarm-overlay #alarmFields {
     display: flex; flex-direction: row; gap: 6px;
 }
@@ -1188,13 +1196,15 @@ table {
 }
 
 .cockpit-alarm-overlay #alarmQuick {
-    display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px;
+    display: flex; flex-wrap: wrap; gap: 6px;
 }
 
+/* flex:1 1 auto lets the 4 unequal-width quick buttons stretch to fill and wrap evenly
+ * (2+2 on a narrow phone, one row when wide) instead of breaking 3+1. */
 .cockpit-alarm-overlay #alarmQuick button {
+    flex: 1 1 auto; min-width: 0;
     padding: 6px 10px; min-height: 36px;
     font-family: inherit; font-size: inherit; color: inherit;
-    background: none;
     border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 4px; cursor: pointer;
 }

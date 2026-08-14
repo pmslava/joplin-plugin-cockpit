@@ -1338,18 +1338,20 @@ function openAlarmOverlay(ids, restore){
     if (!ids.length) return
     overlayContext = { kind: 'alarm', ids: ids }
     var count = ids.length === 1 ? '1 to-do' : ids.length + ' to-dos'
+    // Footer order mirrors the desktop dialog (setButtons [ok, clear, cancel], alarm.ts): OK first
+    // (primary emphasis), Clear alarm (destructive) middle, Cancel last. The footer right-aligns them.
     var body = buildOverlay('Set alarm for ' + count, [
-        { label: 'Cancel', onClick: function(){ closeOverlay() } },
-        { label: 'Clear alarm', kind: 'danger', onClick: function(){
-            void webviewApi.postMessage(['alarmCleared', ids]);
-            closeOverlay()
-        } },
         { label: 'OK', kind: 'primary', onClick: function(){
             var date = document.getElementById('alarmDate').value
             var time = document.getElementById('alarmTime').value
             void webviewApi.postMessage(['alarmSet', ids, date, time]);
             closeOverlay()
         } },
+        { label: 'Clear alarm', kind: 'danger', onClick: function(){
+            void webviewApi.postMessage(['alarmCleared', ids]);
+            closeOverlay()
+        } },
+        { label: 'Cancel', onClick: function(){ closeOverlay() } },
     ])
     body.classList.add('cockpit-alarm-overlay')
     body.innerHTML = `
