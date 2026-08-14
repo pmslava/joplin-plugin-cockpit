@@ -301,6 +301,37 @@ export async function openTodo(todoID){
     await joplin.commands.execute('openNote', todoID);
 }
 
+/** focusNewItemEditor ******************************************************************************************************************************
+ * After Cockpit creates and opens a fresh note/to-do, put the cursor where Joplin's own "When creating a new note/to-do" setting says. A note      *
+ * created through the data API is not provisional, so Joplin's own auto-focus (useFormNote's handleAutoFocus, which only runs for provisional       *
+ * notes) never fires for it - which is exactly why the panel has to honour the setting itself. Joplin keeps two separate desktop-only settings,     *
+ * newTodoFocus (default "title") and newNoteFocus (default "body"), each valued "title" or "body"; its editor focuses the title on "title" and the  *
+ * body otherwise. This mirrors that: "title" runs focusElementNoteTitle, "body" runs focusElementNoteBody, and any other value (a hypothetical      *
+ * "none") leaves the focus wherever the app placed it. Both the setting and the two focus commands are desktop-only, so on mobile the globalValue    *
+ * read throws (guarded) and, even if a value came through, the command execute throws (guarded) - a silent no-op there, never a message box.        *
+ ***************************************************************************************************************************************************/
+export async function focusNewItemEditor(isTodo){
+    var settingKey = isTodo ? 'newTodoFocus' : 'newNoteFocus'
+    var focusValue
+    try {
+        focusValue = await joplin.settings.globalValue(settingKey)
+    } catch (error) {
+        // The setting is registered on desktop only; on mobile (or any app without it) there is nothing to honour.
+        return
+    }
+    var command = focusValue === 'title' ? 'focusElementNoteTitle'
+        : focusValue === 'body' ? 'focusElementNoteBody'
+        : null
+    // Anything that is neither "title" nor "body" (e.g. a future "none") means "do not move the focus", so leave it be.
+    if (!command) return
+    try {
+        await joplin.commands.execute(command)
+    } catch (error) {
+        // The focus commands exist on desktop only; on mobile this is a guarded no-op rather than a "not available here" box.
+        console.warn(`Cockpit: could not focus the new note (${command})`, error)
+    }
+}
+
 /** getNoteContent **********************************************************************************************************************************
  * Gets the body of the note with the given noteID                                                                                                  *
  ***************************************************************************************************************************************************/

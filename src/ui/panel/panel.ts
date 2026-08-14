@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getAllTags, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, openTodo, searchTitleSuggestions, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
+import { focusNewItemEditor, getAllTags, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, openTodo, searchTitleSuggestions, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
@@ -658,6 +658,11 @@ async function createItemInFolder(isTodo, folderID){
     if (!folderID) return
     var newItem = await joplin.data.post(['notes'], null, { parent_id: folderID, is_todo: isTodo ? 1 : 0, title: "" })
     await openTodo(newItem.id)
+    // Honour Joplin's own "When creating a new note/to-do" setting (title vs body). A data-API note is not
+    // provisional, so the app's own auto-focus never fires for it; this applies the same choice. Desktop-only
+    // in effect (the setting and the focus commands are desktop-only, guarded to a no-op on mobile), so this
+    // also covers the mobile notebook-overlay create path (applyNotebookPicked -> createItemInFolder) safely.
+    await focusNewItemEditor(isTodo)
     scheduleRefresh()
 }
 
