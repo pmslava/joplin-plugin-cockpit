@@ -333,7 +333,14 @@ async function eventHandler(message){
         await updateProfile(savedID, message[2])
         if (savedID == await getCurrentProfileID()) applyProfileHeaderState(await getProfile(savedID))
         lastRenderedHtml = null
-        await refreshInterfaces()
+        // Mobile-only path (the editor overlay is never opened on desktop, so this never runs there). Paint
+        // fast from cache and defer the all-profiles overview-note rewrite to the background, mirroring the
+        // switch/create handlers, instead of the heavy inline refreshInterfaces the round meant to remove
+        // from the interactive create/save path. Editing may change which to-dos show, so a full (fast)
+        // paint is still issued - the search runs; only the ring body-fetches are deferred - and
+        // scheduleRefresh then reconciles the overview notes and fills the rings a beat later.
+        await refreshPanelData({ fast: true })
+        scheduleRefresh()
     } else if (message[0] == 'profileDeleteRequested'){
         // Result of the in-panel profile editor overlay's Delete. openDeleteDialog keeps its native confirm
         // message box (which shows correctly above the panel on mobile) and the ">1 profile must exist"

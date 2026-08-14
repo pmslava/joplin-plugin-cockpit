@@ -48,10 +48,11 @@ a race:
 Two strategies avoid the layering entirely (both gated on `isMobile()` / `.cockpit-mobile`; desktop
 keeps native dialogs with unchanged timing). See `src/core/dialog.ts`.
 
-### 1a. In-panel HTML overlays — the frequent pickers (notebook, tag, alarm)
+### 1a. In-panel HTML overlays — every picker and the profile editor (notebook, tag, alarm, editor)
 
 Drawn as fixed-position HTML **inside** the panel webview (`panelWebview.js`), so they create no
-second Modal and are structurally immune to the bug; the panel is never torn down.
+second Modal and are structurally immune to the bug; the panel is never torn down. As of this round
+the profile editor joins the pickers — the dismiss-first native-dialog flow is gone (see §1b).
 
 - **Notebook picker** (move-to-notebook, create-in-notebook, move-notebook-under): a scrollable list
   reusing the notebook rows the panel already embeds. On tap it posts a result; the host runs the same
@@ -63,6 +64,14 @@ second Modal and are structurally immune to the bug; the panel is never torn dow
   footer. The grid is drawn immediately from the (possibly empty) fields so the picker is usable even
   if the `getAlarmInitial` prefill round-trip rejects (e.g. a selected note was just deleted), then
   redrawn from the prefilled values.
+- **Profile editor** (`openEditorOverlay`): the full ~25-field form ported into the overlay body
+  (`EDITOR_FORM_HTML`, scoped `.cockpit-editor-overlay` CSS), replacing the old native dialog. Create
+  starts at the template defaults; edit prefills via a `getEditorInitial` round-trip (mode + the
+  profile as a plain object, no base64). Footer is Cancel / Create, or Cancel / Delete / Save; Save
+  posts `['profileSaved', id, obj]`, Delete posts `['profileDeleteRequested', id]` — whose host handler
+  **keeps the native "Delete <name>?" confirm message box and the ">1 profile must exist" guard**
+  unchanged (a native message box draws correctly above the panel). Desktop still opens the native
+  editor dialog untouched.
 - **Shared plumbing**: while an overlay is open the webview posts `['dialogGuard', true/false]`, which
   bumps the shared `dialogOpenCount`; `refreshPanelData` (mobile only, `isDialogOpen()`) skips a
   refresh so nothing repaints underneath. Overlays anchor on `document.body` so a stray re-render
@@ -70,17 +79,50 @@ second Modal and are structurally immune to the bug; the panel is never torn dow
   webload posts `['dialogGuardReset']` so a guard leaked by a webview torn down mid-overlay cannot
   pause refreshes forever.
 
-### 1b. Dismiss-first native dialogs — the rare, form-heavy dialogs (editor, styler)
+### 1a-bis. Overlay reload-survival — reconstructing an overlay after a host-initiated webview reload
 
-The ~25-field profile editor and the CSS styler keep their native dialog (too heavy to port for a rare
-action). On mobile `openDialogDismissingViewer()` first runs `joplin.commands.execute('dismissPluginPanels')`
-to close the viewer's native window so the dialog's Paper overlay has nothing above it, then opens and
-awaits it. A plugin **cannot** reopen the viewer (no mobile command/API sets it visible), so the
-caller — **after** any follow-up dialog of its own (e.g. the editor's delete confirmation) — calls
-`notifyViewerDismissed()`, which shows a native message box telling the user to tap the toolbar panel
-button to reopen Cockpit. The hint is deliberately shown *last* so it never appears before the delete
-confirmation. This path does **not** touch `dialogOpenCount`: the viewer is already gone, so a
-background refresh is a silent no-op repaint of redux, not something to hold.
+An in-panel overlay is immune to Cockpit's own refreshes (the guard above), but **not** to a
+*host-initiated* WebView reload: an Android renderer-process kill under sync load remounts the panel
+webview with a fresh document, and Joplin re-serves the **last** document it held — the pre-overlay
+snapshot (the guard blocked any newer `setHtml` while the overlay was up). That reload wipes the
+overlay, and the plugin's guard cannot help (the reload is host-initiated, not a Cockpit `setHtml`).
+
+Fix, mirroring the scroll-persistence pattern: the **host owns** an `openOverlayState` descriptor.
+
+- The webview posts `['overlayState', descriptor]` on open and (throttled, `queueOverlayState`) as the
+  user edits. The descriptor is small and fully rebuildable — notebook: purpose/opts/selection; tag:
+  noteID + text; alarm: ids + date + time; editor: profileID + serialized field values.
+- On the fresh webview's `['dialogGuardReset', hasIsland]`: if an overlay should be open and the loaded
+  document does **not** already carry the descriptor island, the host re-renders **once** with the
+  descriptor embedded as a `<script id="cockpitOverlayState">` JSON island next to `cockpitSearchData`
+  (tagged by `renderNonce`, `</` neutralised). `reconcile()` on the reloaded webview reads it and calls
+  `openNotebookOverlay/openTagOverlay/openAlarmOverlay/openEditorOverlay(..., restore)` to rebuild the
+  overlay from the saved values, which re-arms the guard. A document that already carries the island
+  reports `hasIsland` true and reconstructs itself, so the host skips and the flow cannot loop.
+- The host **clears** the descriptor synchronously on the `dialogGuard(false)` close path (the webview
+  posts no separate `overlayState:null`, to avoid a close/refresh ordering race), so a post-close
+  render can never resurrect a just-dismissed overlay.
+- **Prefill-window safety**: the tag / alarm / edit-mode-editor overlays post their descriptor **only
+  after** their prefill round-trip resolves, never from the empty/default fields beforehand. A reload
+  landing in that sub-second window would otherwise leave the host holding a *defaults* descriptor
+  (empty tags, empty alarm, or an edit form full of create-defaults) and a reconstruct would resurrect
+  a wrong overlay whose commit resets the profile / clears the note's tags. Not posting until real
+  values are in hand means a reload strictly inside the window loses the overlay (safe — nothing to
+  commit) while it stays reload-survivable for the rest of its life. (Create mode has no round-trip and
+  posts its correct defaults immediately.)
+- **Known gap (accepted):** a *second* renderer kill within one overlay session can reconstruct from
+  the first served-document snapshot rather than the host's fresher `openOverlayState`, losing edits
+  made after the first reconstruct. Requires two kills in one overlay session, is non-looping and
+  non-destructive; tightening it would need a version/nonce on the descriptor, disproportionate here.
+
+### 1b. Native dialogs that remain (desktop only)
+
+The dismiss-first machinery (`openDialogDismissingViewer` / `notifyViewerDismissed` /
+`dismissPluginPanels`) is **removed** — the profile editor is now an overlay (§1a) and no mobile caller
+remained. The CSS **styler** keeps its native dialog, but it is reachable on **desktop only** (from the
+Tools menu; the mobile styler button was removed), where `openPluginDialog` opens it directly with no
+viewer stacking to work around. The editor's **delete confirmation** stays a native message box on both
+platforms (it draws above the panel on mobile).
 
 ### 2. Touch-interaction layer + tap targets + viewport (`panelWebview.js`, `panel.css`)
 
@@ -135,7 +177,28 @@ first text **line** using the real line-height plus one line-height-proportional
 ### 5. Icon-only create buttons; mobile styler button removed
 
 The create-note / create-notebook buttons render as icons only on mobile to save width; the separate
-mobile styler button was removed (the styler is reachable from the profile editor flow).
+mobile styler button was removed (custom panel CSS stays a desktop-only feature, reached from the
+Tools menu).
+
+### 5a. Mobile paint perf — instant profile switch / create (`panel.ts`, `joplin.ts`)
+
+A mobile `setHtml` is a full webview reload, and the old switch/create path ran the **heavy**
+`refreshInterfaces` (an all-profiles overview-note search + body GET/PUT for every profile) *inline*
+before the user saw anything. Two mobile-gated trims make the switch feel instant; desktop paint is
+byte-identical.
+
+- **Defer the overview-note rewrite.** Profile switch (`profilesDropdownChanged`), create
+  (`createProfileClicked`) and the overlay Save/Create (`profileSaved`, mobile-only) now call
+  `refreshPanelData({ fast: true })` + `scheduleRefresh()` instead of `refreshInterfaces()`. The
+  interactive path does **one** search + one reload; the all-profiles overview notes reconcile in the
+  background schedule (a switch/create changes no to-do data, so they write nothing new anyway). On
+  desktop `fast` resolves to `false`, so the paint is unchanged — only the (no-op) overview write moves
+  a beat later, an intentional, invisible timing change.
+- **Fast first paint — rings from cache.** `refreshPanelData({ fast: true })` (gated `mobile && fast`)
+  threads a `fastCheckboxCounts` flag through `getFormatter → getTodos → attachCheckboxCounts` so the
+  first paint renders checkbox rings from **already-cached** counts only, issuing **no** note-body GETs
+  (up to 300, serial-chunked). The paired `scheduleRefresh` then fetches the bodies and repaints with
+  the real rings. Desktop always renders full counts (skipping them would flash empty rings).
 
 ### 6. Command fallbacks + responsive alarm dialog
 
@@ -274,14 +337,30 @@ success vs failure looks like. The build to install is
     - Failure: circle/pill sit noticeably above the title ink → nudge `--cockpit-m-optical` in
       `panel.css` (the single documented magic number) and recheck.
 
-14. **Editor / styler dismiss-first flow.** Open **Edit profile** (and the styler).
-    - Success: the panel viewer closes and the native editor/styler dialog is **visible** (not behind
-      the panel); on close a message box says to tap the toolbar panel button to reopen Cockpit; tapping
-      it brings the panel back with content intact.
-    - On the editor **Delete** path: the "Delete <name>?" confirmation appears **before** the "reopen
-      Cockpit" message (not after) — the reopen hint is always last.
-    - Failure: the dialog opens behind the panel, no reopen hint appears, or the reopen hint appears
-      before the delete confirmation.
+14. **Profile editor overlay (create / edit / delete).** From the profile dropdown open **+ New
+    profile…**, then **Edit profile** on an existing one.
+    - Success: each opens as an **in-panel overlay on top of** the list (no native dialog, nothing
+      behind the panel); create shows the template defaults, edit prefills the profile's real values
+      within a moment; Save/Create persists and the list updates; Cancel / outside-tap / Android-back
+      discard. On **Delete**, the native "Delete <name>?" confirm still appears, and the last-profile
+      guard still blocks deleting the only profile.
+    - Failure: a native editor dialog opens (mobile should use the overlay), edit shows create-defaults
+      instead of the profile's values, Delete skips the confirmation, or Save on an edit resets fields.
+
+15. **Overlay survives a mid-overlay reload.** With the tag or edit-profile overlay open and edited (a
+    few keystrokes), force a panel reload — background the app during a sync, or otherwise provoke the
+    Android renderer to reload the panel — then return.
+    - Success: the overlay **reappears** reconstructed with the values you had typed (not the empty /
+      default form); committing it applies those values. If instead it reappears empty right after
+      opening (before prefill finished), it should simply have **closed** rather than come back empty.
+    - Failure: the overlay comes back showing empty/default fields whose OK/Save would wipe the note's
+      tags or reset the profile, or the list is left with refreshes paused (guard leak).
+
+16. **Instant profile switch / create.** Switch between profiles a few times, then create one.
+    - Success: the switched-to list paints after a single reload (near-instant); checkbox rings fill in
+      a beat later; the created profile appears without a multi-second stall.
+    - Failure: a multi-second freeze on each switch/create → the deferred-overview-note / fast-first-
+      paint trims (§5a) are not taking effect; record rough timings.
 
 10. **Autocomplete + soft keyboard.** In the search field type `tag:` or `title:` and tap a
     suggestion.
@@ -293,3 +372,9 @@ success vs failure looks like. The build to install is
     - Success: the panel paints quickly; checkbox rings fill in over the next refresh or two.
     - Failure: a long stall or janky scroll on first open → candidate for the mobile perf trims
       (lower the body-fetch cap / trim follow-up refreshes); record rough timings.
+
+17. **Completed-todo style — "Grayed strikethrough" (cross-platform).** In settings set the
+    completed-to-do style to **Grayed strikethrough** and complete a to-do shown in the list.
+    - Success: the completed title is both dimmed (opacity 0.5) **and** struck through, in every theme
+      mode; the other three styles (Normal / Grayed out / Strikethrough) still behave as before.
+    - Failure: only one of dim/strike applies, or the option is missing.

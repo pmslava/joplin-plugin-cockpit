@@ -1164,6 +1164,11 @@ function openTagOverlay(noteID, restore){
         pushOverlayState()
     } else {
         // Prefill from the host, then focus. If the round-trip fails the input is simply left empty.
+        // The descriptor is posted ONLY after the prefill resolves (not before): a reload landing inside
+        // the sub-second prefill window would otherwise have made the host hold an EMPTY-text descriptor,
+        // so a reconstruct would resurrect an empty tag input whose OK detaches every tag. Not posting until
+        // the real tags are in hand means a reload strictly inside that window loses the overlay entirely,
+        // which is safe (nothing to commit), while the overlay is reload-survivable for the rest of its life.
         webviewApi.postMessage(['getNoteTags', noteID]).then(function(csv){
             // Ignore a late reply if the overlay was already closed.
             if (!overlayOpen || !input.isConnected) return
@@ -1171,7 +1176,6 @@ function openTagOverlay(noteID, restore){
             pushOverlayState()
         }).catch(function(){})
         input.focus()
-        pushOverlayState()
     }
 }
 
@@ -1408,8 +1412,11 @@ function openAlarmOverlay(ids, restore){
     alarmCalendarAnchor = null
     renderAlarmCalendar()
     renderAlarmTimeColumns()
-    pushOverlayState()
 
+    // Post the descriptor ONLY after the prefill resolves (below), not from the empty fields here: a reload
+    // landing inside the sub-second prefill window would otherwise leave the host holding an empty-date/time
+    // descriptor, and a reconstruct would resurrect an empty picker. A reload strictly inside that window
+    // loses the overlay instead (safe), while the overlay stays reload-survivable for the rest of its life.
     // Prefill the fields from the host, then redraw the calendar and time columns from those values.
     webviewApi.postMessage(['getAlarmInitial', ids]).then(function(init){
         if (!overlayOpen) return   // closed while awaiting
@@ -1730,9 +1737,14 @@ function openEditorOverlay(profileID, restore){
         return
     }
 
-    // The form starts at the template defaults (usable immediately). For edit, fetch the profile and fill.
-    pushOverlayState()
-    if (!isEdit) return
+    // The form starts at the template defaults (usable immediately). In CREATE mode those defaults ARE the
+    // intended values, so post the descriptor now (there is no round-trip). In EDIT mode the defaults are
+    // placeholder junk until the profile arrives, so DO NOT post them: a reload inside the sub-second prefill
+    // window would otherwise leave the host holding a defaults descriptor with the real profileID and the
+    // edit footer, and a reconstruct would resurrect an edit form full of create-defaults whose Save would
+    // reset the profile. Posting only after the profile is filled means a reload strictly inside that window
+    // loses the overlay (safe) rather than resurrecting a committable wrong one.
+    if (!isEdit){ pushOverlayState(); return }
     webviewApi.postMessage(['getEditorInitial', profileID]).then(function(init){
         if (!overlayOpen) return   // closed while awaiting
         init = init || {}
