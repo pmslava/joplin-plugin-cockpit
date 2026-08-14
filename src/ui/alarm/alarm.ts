@@ -28,35 +28,37 @@ const dialogCss = `
     #joplin-plugin-content {
         width: 424px;
     }
-    /* On a narrow (mobile) screen the fixed width would overflow, so the wrapper is allowed to shrink
-     * there, and the calendar / time columns stack instead of sitting side by side (which crushes the
-     * 7-column calendar below ~340px inner). Everything narrow lives inside this one media query so the
-     * desktop measurement stays an unconditional 424px, an unconditional side-by-side layout, and never
-     * depends on the pre-sized 100vw, which the note above documents starts at a small minimum. The
-     * breakpoint matches the width switch above (440px), so there is exactly one narrow/wide transition
-     * and side-by-side is only ever rendered at >=440px, where it comfortably fits. */
-    @media (max-width: 440px) {
-        #joplin-plugin-content {
-            width: calc(100vw - 16px);
-        }
-        /* Use the full narrow width rather than capping at 400px */
-        #alarmForm {
-            max-width: none;
-        }
-        /* Calendar on top, the hour/minute columns below it */
-        #alarmBody {
-            flex-direction: column;
-        }
-        #alarmTimePanel {
-            justify-content: center;
-        }
-        .alarm-time-col {
-            /* Compact (~4-5 rows) so a stacked column under the 245px-min calendar does not make a very
-             * tall dialog; the hour & minute lists share the full width instead of 46px each. */
-            height: 132px;
-            flex: 1 1 0;
-            max-width: 120px;
-        }
+    /* On a narrow (mobile) screen the fixed 424px width would overflow, and the side-by-side calendar /
+     * time layout crushes the 7-column calendar (below ~340px inner). The narrow layout is therefore
+     * gated on a .cockpit-mobile marker class that the plugin adds - via the #cockpitPlatform marker
+     * emitted into the dialog markup below - ONLY when running on mobile, and NEVER on a viewport
+     * @media (max-width) query. A max-width media query would also match during Joplin's fit-to-content
+     * measurement pass, which starts the dialog iframe at a ~200px minimum even on desktop: at that
+     * moment a mobile-stacked layout would leak into the measured content and corrupt the final desktop
+     * frame width. The marker class is absent on desktop, so the desktop measurement stays an
+     * unconditional 424px, side-by-side layout, exactly as before mobile support was added. (The class
+     * selectors also out-specify the base rules below, so their order among the base rules never
+     * matters.) */
+    #joplin-plugin-content.cockpit-mobile {
+        width: calc(100vw - 16px);
+    }
+    /* Use the full narrow width rather than capping at 400px */
+    .cockpit-mobile #alarmForm {
+        max-width: none;
+    }
+    /* Calendar on top, the hour/minute columns below it */
+    .cockpit-mobile #alarmBody {
+        flex-direction: column;
+    }
+    .cockpit-mobile #alarmTimePanel {
+        justify-content: center;
+    }
+    .cockpit-mobile .alarm-time-col {
+        /* Compact (~4-5 rows) so a stacked column under the 245px-min calendar does not make a very
+         * tall dialog; the hour & minute lists share the full width instead of 46px each. */
+        height: 132px;
+        flex: 1 1 0;
+        max-width: 120px;
     }
     #alarmForm {
         display: flex;
@@ -239,8 +241,16 @@ export async function openAlarmDialog(todoIDs){
     var initialTime = `${pad(initial.getHours())}:${pad(initial.getMinutes())}`
     var count = todoIDs.length === 1 ? "1 to-do" : `${todoIDs.length} to-dos`
 
+    // A hidden marker carried in the markup on mobile only. alarmWebview.js reads it and adds the
+    // cockpit-mobile class to the persistent #joplin-plugin-content wrapper, which is what the narrow
+    // layout in dialogCss is gated on. Empty on desktop, so the desktop markup, DOM and measured width
+    // are untouched. This mirrors the panel's #cockpitPlatform marker pattern.
+    var mobile = await isMobile()
+    var rootMarker = mobile ? '<div id="cockpitPlatform" hidden></div>' : ''
+
     await joplin.views.dialogs.setHtml(alarmDialog, `
         <style>${dialogCss}</style>
+        ${rootMarker}
         <form name="alarm" id="alarmForm">
             <strong>Set alarm for ${count}</strong>
             <div id="alarmFields">
@@ -272,7 +282,7 @@ export async function openAlarmDialog(todoIDs){
         // checked, or the periodic day-boundary tick). Cancelling clears the guard but arms no new
         // refresh, so the panel could stay stale until the next tick. Repaint once here to pick up
         // whatever was skipped. Desktop never skips refreshes, so it keeps its no-op cancel untouched.
-        if (await isMobile()) await refreshInterfaces()
+        if (mobile) await refreshInterfaces()
         return
     }
 

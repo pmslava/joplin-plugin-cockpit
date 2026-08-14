@@ -191,11 +191,24 @@ function scrollAlarmColumn(column, index, total){
  * appears without a grid inside it. The anchor is reset so that a reopened dialog starts at the month of its date field.                            *
  ***************************************************************************************************************************************************/
 function initAlarmCalendarIfNeeded(){
+    applyAlarmPlatformClass()
     var container = document.getElementById('alarmCalendar')
     if (!container || container.querySelector('.alarm-cal-grid')) return
     alarmCalendarAnchor = null
     renderAlarmCalendar()
     renderAlarmTimeColumns()
+}
+
+/** applyAlarmPlatformClass *************************************************************************************************************************
+ * The dialog is mobile when its markup carries the #cockpitPlatform marker, which the plugin emits into the setHtml only on mobile. Mirror that    *
+ * onto the persistent #joplin-plugin-content wrapper as the cockpit-mobile class, so the narrow (stacked) layout in dialogCss - which is gated on   *
+ * that class rather than a viewport media query - takes effect. Add-only and gated on the marker's presence, so on desktop (no marker) the wrapper  *
+ * is never touched and the layout stays the unconditional 424px side-by-side one. Mirrors panelWebview.js's applyPlatformClass.                     *
+ ***************************************************************************************************************************************************/
+function applyAlarmPlatformClass(){
+    if (!document.getElementById('cockpitPlatform')) return
+    var wrapper = document.getElementById('joplin-plugin-content')
+    if (wrapper) wrapper.classList.add('cockpit-mobile')
 }
 
 new MutationObserver(initAlarmCalendarIfNeeded).observe(document.documentElement, { childList: true, subtree: true })
