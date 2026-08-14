@@ -253,9 +253,12 @@ function onNoteRowClicked(event, noteID){
 }
 
 /** onRowDoubleClicked ******************************************************************************************************************************
- * Double clicking a title opens the note in its own window, like in Joplin's note list                                                             *
+ * Double clicking a title opens the note in its own window, like in Joplin's note list. Desktop only: mobile has no separate windows, so the        *
+ * openNoteInNewWindow command is absent there and a double-tap only reached the "not available here" box. Guarded to a no-op on mobile (where the    *
+ * gesture is instead a fast double-tap during scrolling/reading), leaving the desktop double-click path byte-identical.                             *
  ***************************************************************************************************************************************************/
 function onRowDoubleClicked(event, noteID){
+    if (IS_MOBILE) return
     if (event.target.classList.contains('todo-title')){
         void webviewApi.postMessage(['openInNewWindow', noteID]);
     }
