@@ -8,8 +8,8 @@ import joplin from "api";
 import { refreshPanelData } from "../panel/panel";
 import { escapeHtml } from "../../core/formats";
 import { getCustomCss, setCustomCss } from "../../core/settings";
-import { requireNodeModule, isMobile } from "../../core/platform";
-import { openDialogDismissingViewer, notifyViewerDismissed } from "../../core/dialog";
+import { requireNodeModule } from "../../core/platform";
+import { openPluginDialog } from "../../core/dialog";
 import { stylerTemplate } from "./stylerTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -31,21 +31,13 @@ export async function openStyler(){
     var cssData = escapeHtml(await getCustomCss())
     var formattedHtml = stylerTemplate.replace("<<CSS_DATA>>", () => cssData)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);
-    // On mobile this dismisses the panel viewer first so the styler dialog is visible; the user is told
-    // how to reopen Cockpit afterwards. Desktop opens it as a native dialog as before.
-    var formResult = await openDialogDismissingViewer(dialog)
+    // Desktop-only: the mobile styler button was removed, so openStyler is only reachable on desktop, where
+    // the native dialog opens above the panel with no layering problem.
+    var formResult = await openPluginDialog(dialog)
     if (formResult.id == 'ok') {
         await setCustomCss(formResult.formData['customCSSForm']['customCss'])
         await refreshPanelData()
-    } else if (await isMobile()) {
-        // On mobile the dismiss-first path has already torn the panel viewer's webview down, so any
-        // refresh that fired while the dialog was open was a silent no-op repaint of redux (it could not
-        // re-assert the closed viewer). Repaint once on cancel so the panel is current when reopened.
-        // Desktop keeps its own working refresh untouched.
-        await refreshPanelData()
     }
-    // Show the reopen hint last (no-op on desktop), consistent with the editor flow.
-    await notifyViewerDismissed()
 }
 
 /** importLegacyCssFile *****************************************************************************************************************************

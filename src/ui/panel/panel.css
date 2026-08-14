@@ -1249,3 +1249,93 @@ table {
 .cockpit-alarm-overlay .alarm-cal-day.-selected {
     background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.35));
 }
+
+/* The profile editor overlay body: the profile form ported from the native editor dialog into the panel -
+ * only ever shown on mobile. These rules port editorTemplate.ts's inline dialog CSS with two changes: the
+ * dialog-sizing rules (#joplin-plugin-content fixed size, #editorScroll fixed inset) are dropped because the
+ * overlay panel sizes itself, and --joplin-* vars are swapped for --cockpit-* so themes apply. Scoped under
+ * .cockpit-editor-overlay so nothing touches the panel itself. */
+.cockpit-editor-overlay {
+    display: flex; flex-direction: column; gap: 8px;
+    font-size: var(--cockpit-font-size, inherit);
+}
+
+.cockpit-editor-overlay fieldset {
+    margin: 0;
+    padding: 6px 10px 8px;
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 6px;
+    /* Fieldsets refuse to shrink below their content by default, which lets a select with long options
+     * blow the whole overlay out sideways. */
+    min-inline-size: 0;
+}
+
+.cockpit-editor-overlay legend {
+    padding: 0 4px;
+    font-size: 0.85em;
+    font-weight: 600;
+    opacity: 0.75;
+}
+
+.cockpit-editor-overlay section {
+    display: flex; flex-direction: row; align-items: center; gap: 6px;
+    margin: 4px 0;
+}
+
+/* Appearance of every field; the layout (block vs flex row) is set separately below. Touch targets are
+ * bumped to 40px like the other overlays. */
+.cockpit-editor-overlay input[type="text"],
+.cockpit-editor-overlay input[type="number"],
+.cockpit-editor-overlay select {
+    box-sizing: border-box;
+    padding: 6px; min-height: 40px;
+    font-family: inherit; font-size: inherit;
+    color: inherit;
+    background: none;
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 4px;
+    outline: none;
+}
+
+/* Fields directly inside a fieldset span its full width. */
+.cockpit-editor-overlay fieldset > input,
+.cockpit-editor-overlay fieldset > select {
+    display: block; width: 100%;
+}
+
+/* Labelled rows: a fixed label column, the control takes the rest. The zero flex basis matters: with basis
+ * auto, a select with long options would widen the row past the overlay instead of shrinking to fit. */
+.cockpit-editor-overlay section > label:first-child {
+    flex: 0 0 90px;
+}
+
+.cockpit-editor-overlay section input[type="text"],
+.cockpit-editor-overlay section select {
+    flex: 1 1 0; min-width: 0; width: auto;
+}
+
+.cockpit-editor-overlay input:focus,
+.cockpit-editor-overlay select:focus {
+    border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
+}
+
+/* Explicit option colours, because the dropdown list otherwise mixes the theme's light text with the
+ * platform's white popup background and becomes unreadable. */
+.cockpit-editor-overlay option {
+    background-color: var(--cockpit-background-color, #1D2024);
+    color: var(--cockpit-color, #ffffff);
+}
+
+.cockpit-editor-overlay input[type="checkbox"] {
+    flex: 0 0 auto;
+    width: 15px; height: 15px;
+    margin: 0;
+}
+
+.cockpit-editor-overlay section > input[type="checkbox"] + label {
+    flex: 1 1 auto;
+}
+
+.cockpit-editor-overlay table { width: 100%; border-collapse: collapse; }
+.cockpit-editor-overlay td { padding: 2px 4px 2px 0; }
+.cockpit-editor-overlay td select { width: 100%; }

@@ -9,14 +9,14 @@ import { getAllTags, getNotebookMap, invalidateNotebookMap, invalidateTagsCache,
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
-import { getAllProfiles, getProfile } from "../../core/database";
-import { openDeleteDialog, openEditor } from "../editor/editor";
+import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
+import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
 import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
-import { consumePendingReopenRefresh, isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
+import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
 import { iconButton, icons } from "../icons";
 
@@ -227,13 +227,12 @@ async function eventHandler(message){
         calendarViewState.selectedDate = calendarViewState.selectedDate === message[1] ? null : message[1]
         await refreshPanelData()
     } else if (message[0] == 'createProfileClicked'){
+        // Desktop only: on mobile the create-profile button opens the in-panel editor overlay (which posts
+        // profileSaved) rather than this native-dialog flow. Fast off-screen paint so redux holds fresh
+        // content immediately, then scheduleRefresh reconciles the new profile's overview note and fills the
+        // rings in the background.
         await openEditor()
         lastRenderedHtml = null
-        // Fast off-screen paint (mobile: rings from cache) so redux holds fresh content the moment the user
-        // reopens the viewer, then scheduleRefresh reconciles the new profile's overview note and fills the
-        // rings in the background. The create handler previously armed no follow-up, so a reopen before the
-        // slow all-profiles refresh finished showed a stale list until the 120s mobile timer; scheduleRefresh
-        // (plus the pendingReopenRefresh on reopen) covers that with the 5s/15s follow-ups instead.
         await refreshPanelData({ fast: true })
         scheduleRefresh()
     } else if (message[0] == 'editProfileClicked'){
@@ -296,14 +295,6 @@ async function eventHandler(message){
         // re-arms it when it rebuilds, so this fires exactly once and cannot loop (a document that already
         // carries the descriptor reports message[1] true and is skipped).
         if (openOverlayState && !message[1]) await refreshPanelData()
-        // Freshness on viewer reopen after a dismiss-first dialog (profile editor / styler on mobile): this
-        // reset is the first signal that the user reopened the viewer, so repaint once immediately rather
-        // than waiting for the periodic timer. Cheap after the create/switch fast path already stamped fresh
-        // content into redux. No-op when nothing armed it (every ordinary load, and always on desktop).
-        if (consumePendingReopenRefresh()){
-            lastRenderedHtml = null
-            await refreshPanelData()
-        }
     } else if (message[0] == 'getNoteTags'){
         // A two-way round-trip (like searchTitleSuggestions): the tag overlay awaits this to prefill its
         // input with the note's current tags, comma separated.
@@ -329,6 +320,28 @@ async function eventHandler(message){
     } else if (message[0] == 'alarmCleared'){
         // Result of the in-panel alarm overlay's "Clear alarm".
         await applyAlarmCleared(Array.isArray(message[1]) ? message[1] : [])
+    } else if (message[0] == 'getEditorInitial'){
+        // Round-trip: the in-panel profile editor overlay awaits this to prefill its fields. For create it
+        // returns a null profile (the overlay keeps the template defaults); for edit it returns the profile
+        // as a plain object. Mirrors the desktop openEditor's base64 prefill without the encoding.
+        return await getEditorInitial(message[1] != null ? Number(message[1]) : undefined)
+    } else if (message[0] == 'profileSaved'){
+        // Result of the in-panel profile editor overlay's Create/Save. message[1] is the profile id (null on
+        // create), message[2] the profile object. Same DB CRUD the desktop editor uses, then the same
+        // post-editor refresh as the editProfileClicked branch.
+        var savedID = message[1] == null ? await createProfile() : Number(message[1])
+        await updateProfile(savedID, message[2])
+        if (savedID == await getCurrentProfileID()) applyProfileHeaderState(await getProfile(savedID))
+        lastRenderedHtml = null
+        await refreshInterfaces()
+    } else if (message[0] == 'profileDeleteRequested'){
+        // Result of the in-panel profile editor overlay's Delete. openDeleteDialog keeps its native confirm
+        // message box (which shows correctly above the panel on mobile) and the ">1 profile must exist"
+        // guard, unchanged. Then refresh as the deleteProfileClicked branch does.
+        await openDeleteDialog(Number(message[1]))
+        applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+        lastRenderedHtml = null
+        await refreshInterfaces()
     }
 }
 

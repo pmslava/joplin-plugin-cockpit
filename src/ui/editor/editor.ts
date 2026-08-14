@@ -7,7 +7,7 @@ import joplin from "api";
 import { createProfile, deleteProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getNotebookMap } from "../../core/joplin";
 import { escapeHtml } from "../../core/html";
-import { openDialogDismissingViewer, notifyViewerDismissed } from "../../core/dialog";
+import { openPluginDialog } from "../../core/dialog";
 import { editorTemplate } from "./editorTemplate";
 
 /** Variable Setup *********************************************************************************************************************************/
@@ -26,7 +26,8 @@ export async function setupEditor(){
 
 /** openEditor **************************************************************************************************************************************
  * Opens the profile editor dialog for the given profile ID. If Save is clicked, the changes are saved to the database. IF delete is clicked, the   *
- * delete confirmation dialog is opened                                                                                                             *
+ * delete confirmation dialog is opened. DESKTOP ONLY: on mobile the profile editor is an in-panel overlay (openEditorOverlay in the panel webview,  *
+ * with getEditorInitial / profileSaved / profileDeleteRequested round-trips), so the create/edit-profile webview buttons never reach this handler.  *
  ***************************************************************************************************************************************************/
 export async function openEditor(profileID?){
     var profileData = profileID == null ? null : btoa(encodeURI(JSON.stringify(await getProfile(profileID))))
@@ -37,10 +38,7 @@ export async function openEditor(profileID?){
     var dialogButtons = profileID == null ? createButtons : editButtons
     await joplin.views.dialogs.setButtons(dialog, dialogButtons)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);
-    // On mobile this dismisses the panel viewer first so the (form-heavy, rarely used) editor dialog is
-    // visible; the user is told how to reopen Cockpit afterwards. Desktop opens it as a native dialog as
-    // before. The editor is not ported to an in-panel overlay: ~25 fields make it too heavy for a rare action.
-    var formResult = await openDialogDismissingViewer(dialog)
+    var formResult = await openPluginDialog(dialog)
     if (formResult.id == 'ok') {
         var profile = JSON.parse(decodeURI(atob(formResult.formData["profileDataForm"]["profileData"])))
         if (profileID == null){
@@ -50,10 +48,16 @@ export async function openEditor(profileID?){
     } else if (formResult.id == "delete") {
         await openDeleteDialog(profileID)
     }
-    // Point the user at the reopen control LAST, after the delete confirmation above, so the mobile
-    // dismiss-first flow does not tell them to reopen Cockpit before asking them to confirm the delete.
-    // No-op on desktop.
-    await notifyViewerDismissed()
+}
+
+/** getEditorInitial ********************************************************************************************************************************
+ * Prefill round-trip for the mobile in-panel editor overlay (mirrors getAlarmInitialFields). Returns the mode plus, when editing, the profile as a  *
+ * plain object the overlay populates its fields from directly (no base64). For create it returns a null profile so the overlay keeps the template    *
+ * defaults.                                                                                                                                          *
+ ***************************************************************************************************************************************************/
+export async function getEditorInitial(profileID?){
+    if (profileID == null) return { mode: "create", profile: null }
+    return { mode: "edit", profile: await getProfile(profileID) }
 }
 
 /** openDeleteDialog ********************************************************************************************************************************

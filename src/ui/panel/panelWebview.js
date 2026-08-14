@@ -536,6 +536,9 @@ function onDropdownItemClicked(event, messageName, value){
     // changes; the scroll position is otherwise restored across the re-render.
     if (messageName === 'profilesDropdownChanged' || messageName === 'notebookFilterChanged' || messageName === 'sortFieldSelected') savedTodosScrollTop = 0
     closeAllDropdowns()
+    // The profile editor is an in-panel overlay on mobile (a native dialog would open behind the panel);
+    // desktop still posts createProfileClicked and gets the native editor dialog.
+    if (IS_MOBILE && messageName === 'createProfileClicked'){ openEditorOverlay(); return }
     void webviewApi.postMessage(value === null ? [messageName] : [messageName, value]);
 }
 
@@ -549,6 +552,8 @@ function onDropdownActionClicked(event, messageName, value){
         openNotebookOverlay('moveNotebookUnder', { sourceFolderId: value, includeRoot: true })
         return
     }
+    // Editing a profile opens the in-panel editor overlay on mobile; desktop keeps the native editor dialog.
+    if (IS_MOBILE && messageName === 'editProfileClicked'){ openEditorOverlay(value); return }
     void webviewApi.postMessage([messageName, value]);
 }
 
@@ -932,6 +937,11 @@ function currentOverlayDescriptor(){
         var timeEl = document.getElementById('alarmTime')
         return { kind: 'alarm', ids: overlayContext.ids, date: dateEl ? dateEl.value : '', time: timeEl ? timeEl.value : '' }
     }
+    if (overlayContext.kind === 'editor'){
+        // The serialized form IS the descriptor's payload, so a reload rebuilds every field (incl. in-progress
+        // edits) verbatim. profileID null => create mode; the footer is derived from it on reconstruct.
+        return { kind: 'editor', profileID: overlayContext.profileID, values: serializeEditorForm() }
+    }
     return null
 }
 
@@ -971,6 +981,7 @@ function reopenOverlayFromState(state){
     if (state.kind === 'notebook') openNotebookOverlay(state.purpose, state.opts || {}, state)
     else if (state.kind === 'tag') openTagOverlay(state.noteID, state)
     else if (state.kind === 'alarm') openAlarmOverlay(state.ids || [], state)
+    else if (state.kind === 'editor') openEditorOverlay(state.profileID, state)
 }
 
 function readNotebookData(){
@@ -1407,6 +1418,321 @@ function openAlarmOverlay(ids, restore){
         alarmCalendarAnchor = null
         renderAlarmCalendar()
         renderAlarmTimeColumns()
+        pushOverlayState()
+    }).catch(function(){})
+}
+
+/** Profile editor overlay **************************************************************************************************************************
+ * The profile editor ported from the native editor dialog (editorTemplate.ts / editorWebview.js) into an in-panel overlay - only ever shown on       *
+ * mobile, where a native dialog opens behind the panel. The full ~25-field form is scrolled inside the overlay body. getEditorInitial prefills it     *
+ * (mode + profile object, no base64); Create/Save post ['profileSaved', id, obj], Delete posts ['profileDeleteRequested', id] (the host keeps the     *
+ * native delete confirmation), Cancel/Escape/backdrop just close. The descriptor carries the serialized form so a host-initiated reload mid-edit       *
+ * reconstructs every field. Desktop keeps the native editor dialog untouched.                                                                          *
+ ***************************************************************************************************************************************************/
+
+// The editor form markup, copied verbatim from editorTemplate.ts's fieldset tree minus the dialog-only
+// wrapper (#editorScroll), the inline <style> (styled by the scoped .cockpit-editor-overlay CSS instead)
+// and the trailing hidden form (the overlay serialises straight to an object). The notebook <select> is
+// left empty and populated from the embedded notebook list after the markup is inserted.
+var EDITOR_FORM_HTML = `
+    <fieldset>
+        <legend>Name</legend>
+        <input type="text" id="nameInput" name="name" value="New Profile">
+    </fieldset>
+    <fieldset>
+        <legend>Panel View (applied when this profile is selected)</legend>
+        <section>
+            <label for="notebookSelect">Notebook</label>
+            <select id="notebookSelect" name="notebook"></select>
+        </section>
+        <section>
+            <label for="panelSearchInput">Search</label>
+            <input type="text" id="panelSearchInput" name="panelSearch">
+        </section>
+        <section>
+            <label for="sortFieldSelect">Sort ties by</label>
+            <select id="sortFieldSelect" name="sortField">
+                <option value="title">Title</option>
+                <option value="updated">Updated date</option>
+                <option value="created">Created date</option>
+            </select>
+        </section>
+        <section>
+            <label for="sortDirectionSelect">Direction</label>
+            <select id="sortDirectionSelect" name="sortDirection">
+                <option value="asc">Ascending</option>
+                <option value="desc">Descending</option>
+            </select>
+        </section>
+    </fieldset>
+    <fieldset>
+        <legend>Sort Order</legend>
+        <input type="number" id="sortOrderInput" name="sortOrder" value="0">
+    </fieldset>
+    <fieldset>
+        <legend>Search Criteria</legend>
+        <input type="text" id="searchCriteriaInput" name="searchCriteria">
+    </fieldset>
+    <fieldset>
+        <legend>Overview Note ID</legend>
+        <input type="text" id="noteIDInput" name="noteID">
+    </fieldset>
+    <fieldset>
+        <legend>Show Completed</legend>
+        <section>
+            <input type="checkbox" id="showCompletedPastCheckbox" name="showCompletedPast">
+            <label for="showCompletedPastCheckbox">Completed todos from the past</label>
+        </section>
+        <section>
+            <input type="checkbox" id="showCompletedTodayCheckbox" name="showCompletedToday">
+            <label for="showCompletedTodayCheckbox">Completed todos from today</label>
+        </section>
+        <section>
+            <input type="checkbox" id="showCompletedFutureCheckbox" name="showCompletedFuture">
+            <label for="showCompletedFutureCheckbox">Completed todos from the future</label>
+        </section>
+        <section>
+            <input type="checkbox" id="showCompletedNoDueCheckbox" name="showCompletedNoDue">
+            <label for="showCompletedNoDueCheckbox">Completed todos with no due date</label>
+        </section>
+    </fieldset>
+    <fieldset>
+        <legend>Notes</legend>
+        <section>
+            <input type="checkbox" id="showNotesCheckbox" name="showNotes">
+            <label for="showNotesCheckbox">Show regular notes matching the search criteria</label>
+        </section>
+        <section>
+            <label for="notesPositionSelect">Show notes</label>
+            <select id="notesPositionSelect" name="notesPosition">
+                <option value="after">After todos</option>
+                <option value="before">Before todos</option>
+            </select>
+        </section>
+    </fieldset>
+    <fieldset>
+        <legend>Show No Due Dates</legend>
+        <section>
+            <input type="checkbox" id="showNoDueCheckbox" name="showNoDue">
+            <label for="showNoDueCheckbox">Show todos with no due date</label>
+        </section>
+    </fieldset>
+    <fieldset>
+        <legend>Move No Due Dates To End</legend>
+        <section>
+            <input type="checkbox" id="noDueDatesAtEndCheckbox" name="noDueDatesAtEnd">
+            <label for="noDueDatesAtEndCheckbox">Sort todos with no due dates to the end of list</label>
+        </section>
+    </fieldset>
+    <fieldset>
+        <legend>Display Format</legend>
+        <select id="displayFormatSelect" name="displayFormat">
+            <option value="basic">Basic</option>
+            <option value="interval">Interval</option>
+            <option value="date">Date</option>
+            <option value="month">Month Calendar</option>
+            <option value="week">Week Planner</option>
+        </select>
+    </fieldset>
+    <fieldset>
+        <legend>Week Starts On</legend>
+        <select id="weekStartsOnSelect" name="weekStartsOn">
+            <option value="1">Monday</option>
+            <option value="0">Sunday</option>
+        </select>
+    </fieldset>
+    <fieldset>
+        <legend>Dots Per Day</legend>
+        <input type="number" id="maxDotsPerDayInput" name="maxDotsPerDay" min="1" max="10" value="4">
+    </fieldset>
+    <fieldset>
+        <legend>Date Format</legend>
+        <table>
+            <tr>
+                <td>Year</td>
+                <td>Month</td>
+                <td>Day</td>
+            </tr>
+            <tr>
+                <td>
+                    <select id="yearFormatSelect" name="yearFormat">
+                        <option value="numeric">2022</option>
+                        <option value="2-digit">22</option>
+                    </select>
+                </td>
+                <td>
+                    <select id="monthFormatSelect" name="monthFormat">
+                        <option value="long">January</option>
+                        <option value="short">Jan</option>
+                        <option value="narrow">J</option>
+                        <option value="2-digit">01</option>
+                    </select>
+                </td>
+                <td>
+                    <select id="dayFormatSelect" name="dayFormat">
+                        <option value="numeric">9</option>
+                        <option value="2-digit">09</option>
+                    </select>
+                </td>
+            </tr>
+        </table>
+    </fieldset>
+    <fieldset>
+        <legend>Weekday Format</legend>
+        <select id="weekdayFormatSelect" name="weekdayFormat">
+            <option value="long">Monday</option>
+            <option value="short">Mon</option>
+            <option value="narrow">M</option>
+        </select>
+    </fieldset>
+    <fieldset>
+        <legend>Time Format</legend>
+        <section>
+            <input type="checkbox" id="timeIs12HourCheckbox" name="timeIs12Hour">
+            <label for="timeIs12HourCheckbox">Use AM/PM Format</label>
+        </section>
+    </fieldset>
+`
+
+// Every editor field id, so the form can be wired and serialized without repeating the list.
+var EDITOR_TEXT_IDS = ['nameInput', 'sortOrderInput', 'searchCriteriaInput', 'noteIDInput', 'panelSearchInput', 'maxDotsPerDayInput']
+var EDITOR_SELECT_IDS = ['notesPositionSelect', 'notebookSelect', 'sortFieldSelect', 'sortDirectionSelect', 'displayFormatSelect', 'yearFormatSelect', 'monthFormatSelect', 'dayFormatSelect', 'weekdayFormatSelect', 'weekStartsOnSelect']
+var EDITOR_CHECK_IDS = ['showCompletedPastCheckbox', 'showCompletedTodayCheckbox', 'showCompletedFutureCheckbox', 'showCompletedNoDueCheckbox', 'showNotesCheckbox', 'showNoDueCheckbox', 'timeIs12HourCheckbox', 'noDueDatesAtEndCheckbox']
+
+function editorField(id){ return document.getElementById(id) }
+
+// Fill the notebook <select> from the embedded notebook island (readNotebookData: id + path), prepended
+// with an "All notebooks" empty-value option - mirroring the desktop editor's notebookOptions. Built via
+// DOM so notebook names are escaped by textContent rather than string concatenation.
+function populateEditorNotebooks(){
+    var select = editorField('notebookSelect')
+    if (!select) return
+    var all = document.createElement('option')
+    all.value = ''
+    all.textContent = 'All notebooks'
+    select.appendChild(all)
+    var notebooks = readNotebookData().notebooks.slice().sort(function(first, second){
+        return String(first.path || '').localeCompare(String(second.path || ''))
+    })
+    for (var notebook of notebooks){
+        var option = document.createElement('option')
+        option.value = String(notebook.id || '')
+        option.textContent = String(notebook.path || '')
+        select.appendChild(option)
+    }
+}
+
+// Populate the form from a profile-shaped object (the getEditorInitial round-trip's init.profile, or a
+// restored descriptor's values). Mirrors editorWebview.js loadProfileData's mapping, including the same
+// "" / "after" / "title" / "asc" fallbacks so an unset field round-trips sanely.
+function populateEditorForm(profile){
+    if (!profile) return
+    editorField('nameInput').value = profile['name']
+    editorField('sortOrderInput').value = profile['sortOrder']
+    editorField('searchCriteriaInput').value = profile['searchCriteria']
+    editorField('noteIDInput').value = profile['noteID']
+    editorField('showCompletedPastCheckbox').checked = profile['showCompletedPast']
+    editorField('showCompletedTodayCheckbox').checked = profile['showCompletedToday']
+    editorField('showCompletedFutureCheckbox').checked = profile['showCompletedFuture']
+    editorField('showCompletedNoDueCheckbox').checked = profile['showCompletedNoDue']
+    editorField('showNotesCheckbox').checked = profile['showNotes']
+    editorField('notesPositionSelect').value = profile['notesPosition'] || 'after'
+    editorField('notebookSelect').value = profile['notebook'] || ''
+    editorField('panelSearchInput').value = profile['panelSearch'] || ''
+    editorField('sortFieldSelect').value = profile['sortField'] || 'title'
+    editorField('sortDirectionSelect').value = profile['sortDirection'] || 'asc'
+    editorField('showNoDueCheckbox').checked = profile['showNoDue']
+    editorField('displayFormatSelect').value = profile['displayFormat']
+    editorField('yearFormatSelect').value = profile['yearFormat']
+    editorField('monthFormatSelect').value = profile['monthFormat']
+    editorField('dayFormatSelect').value = profile['dayFormat']
+    editorField('weekdayFormatSelect').value = profile['weekdayFormat']
+    editorField('timeIs12HourCheckbox').checked = profile['timeIs12Hour']
+    editorField('noDueDatesAtEndCheckbox').checked = profile['noDueDatesAtEnd']
+    editorField('weekStartsOnSelect').value = String(profile['weekStartsOn'])
+    editorField('maxDotsPerDayInput').value = profile['maxDotsPerDay']
+}
+
+// Serialize the form to a plain object with the exact key set editorWebview.js saveProfileData produces,
+// so the host CRUD (updateProfile) receives the same shape the desktop editor sends.
+function serializeEditorForm(){
+    return {
+        'name': editorField('nameInput') ? editorField('nameInput').value : '',
+        'sortOrder': editorField('sortOrderInput') ? editorField('sortOrderInput').value : '',
+        'searchCriteria': editorField('searchCriteriaInput') ? editorField('searchCriteriaInput').value : '',
+        'noteID': editorField('noteIDInput') ? editorField('noteIDInput').value : '',
+        'showCompletedPast': editorField('showCompletedPastCheckbox') ? editorField('showCompletedPastCheckbox').checked : false,
+        'showCompletedToday': editorField('showCompletedTodayCheckbox') ? editorField('showCompletedTodayCheckbox').checked : false,
+        'showCompletedFuture': editorField('showCompletedFutureCheckbox') ? editorField('showCompletedFutureCheckbox').checked : false,
+        'showCompletedNoDue': editorField('showCompletedNoDueCheckbox') ? editorField('showCompletedNoDueCheckbox').checked : false,
+        'showNotes': editorField('showNotesCheckbox') ? editorField('showNotesCheckbox').checked : false,
+        'notesPosition': editorField('notesPositionSelect') ? editorField('notesPositionSelect').value : 'after',
+        'notebook': editorField('notebookSelect') ? editorField('notebookSelect').value : '',
+        'panelSearch': editorField('panelSearchInput') ? editorField('panelSearchInput').value : '',
+        'sortField': editorField('sortFieldSelect') ? editorField('sortFieldSelect').value : 'title',
+        'sortDirection': editorField('sortDirectionSelect') ? editorField('sortDirectionSelect').value : 'asc',
+        'showNoDue': editorField('showNoDueCheckbox') ? editorField('showNoDueCheckbox').checked : false,
+        'displayFormat': editorField('displayFormatSelect') ? editorField('displayFormatSelect').value : '',
+        'yearFormat': editorField('yearFormatSelect') ? editorField('yearFormatSelect').value : '',
+        'monthFormat': editorField('monthFormatSelect') ? editorField('monthFormatSelect').value : '',
+        'dayFormat': editorField('dayFormatSelect') ? editorField('dayFormatSelect').value : '',
+        'weekdayFormat': editorField('weekdayFormatSelect') ? editorField('weekdayFormatSelect').value : '',
+        'timeIs12Hour': editorField('timeIs12HourCheckbox') ? editorField('timeIs12HourCheckbox').checked : false,
+        'noDueDatesAtEnd': editorField('noDueDatesAtEndCheckbox') ? editorField('noDueDatesAtEndCheckbox').checked : false,
+        'weekStartsOn': editorField('weekStartsOnSelect') ? editorField('weekStartsOnSelect').value : '1',
+        'maxDotsPerDay': editorField('maxDotsPerDayInput') ? editorField('maxDotsPerDayInput').value : '4'
+    }
+}
+
+// Throttle-post the descriptor as the user edits, so a mid-edit reload reconstructs the latest field values.
+function wireEditorInputs(){
+    var ids = EDITOR_TEXT_IDS.concat(EDITOR_SELECT_IDS, EDITOR_CHECK_IDS)
+    for (var id of ids){
+        var element = editorField(id)
+        if (element) element.addEventListener('input', queueOverlayState)
+    }
+}
+
+function openEditorOverlay(profileID, restore){
+    var isEdit = profileID != null
+    overlayContext = { kind: 'editor', profileID: isEdit ? profileID : null }
+    var footerButtons = isEdit ? [
+        { label: 'Cancel', onClick: function(){ closeOverlay() } },
+        { label: 'Delete', kind: 'danger', onClick: function(){
+            void webviewApi.postMessage(['profileDeleteRequested', profileID]);
+            closeOverlay()
+        } },
+        { label: 'Save', kind: 'primary', onClick: function(){
+            void webviewApi.postMessage(['profileSaved', profileID, serializeEditorForm()]);
+            closeOverlay()
+        } },
+    ] : [
+        { label: 'Cancel', onClick: function(){ closeOverlay() } },
+        { label: 'Create', kind: 'primary', onClick: function(){
+            void webviewApi.postMessage(['profileSaved', null, serializeEditorForm()]);
+            closeOverlay()
+        } },
+    ]
+    var body = buildOverlay(isEdit ? 'Edit profile' : 'New profile', footerButtons)
+    body.classList.add('cockpit-editor-overlay')
+    body.innerHTML = EDITOR_FORM_HTML
+    populateEditorNotebooks()
+    wireEditorInputs()
+
+    if (restore){
+        // Reconstruct: restore the field values the user had before the reload; skip the round-trip.
+        populateEditorForm(restore.values)
+        pushOverlayState()
+        return
+    }
+
+    // The form starts at the template defaults (usable immediately). For edit, fetch the profile and fill.
+    pushOverlayState()
+    if (!isEdit) return
+    webviewApi.postMessage(['getEditorInitial', profileID]).then(function(init){
+        if (!overlayOpen) return   // closed while awaiting
+        init = init || {}
+        if (init.profile) populateEditorForm(init.profile)
         pushOverlayState()
     }).catch(function(){})
 }
