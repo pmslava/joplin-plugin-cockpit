@@ -31,8 +31,10 @@ export { escapeHtml } from "./html";
  * The markup for a single to-do row: a progress-ringed checkbox that completes it, a title link that opens it, and its notebook pill. Shared by      *
  * BaseFormat.renderTodoRow (the normal list) and renderOutsideResultsSection (the read-only peek), so both stay identical in look and behaviour.     *
  * options.mobile drops the desktop-only hover action hints (mobile has long-press flows and no hover). options.draggable === false suppresses the     *
- * draggable attribute and the drag start/end handlers, which is how the peek's rows are kept from being drag-reschedule sources; every ordinary row   *
- * passes draggable:true and is byte-for-byte what renderTodoRow emitted before this was extracted.                                                    *
+ * draggable attribute, the drag start/end handlers AND the selection onmousedown, which is how the peek's rows are kept from being drag-reschedule    *
+ * sources: selection is desktop module state that survives re-renders and exists only to power dragging/bulk actions the read-only peek cannot use,   *
+ * so a peek row that entered it would otherwise persist and be swept into a later multi-row drag of an ordinary row. Every ordinary row passes         *
+ * draggable:true and is byte-for-byte what renderTodoRow emitted before this was extracted.                                                           *
  ***************************************************************************************************************************************************/
 function renderTodoRowHtml(todo, label, options?){
     var mobile = !!(options && options.mobile)
@@ -56,9 +58,12 @@ function renderTodoRowHtml(todo, label, options?){
                     ondragstart="onTodoDragStart(event, '${todo.id}')"
                     ondragend="onTodoDragEnd(event)"`
         : ""
+    // Selection is suppressed on non-draggable (peek) rows: it only powers dragging/bulk actions they cannot
+    // use, and being persisted desktop state it would otherwise leak a clicked peek row into a later drag.
+    var selectHandler = draggable ? `
+                    onmousedown="onTodoRowMouseDown(event, '${todo.id}')"` : ""
     return `
-                <div class="todo${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}"${draggableAttr}
-                    onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
+                <div class="todo${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}"${draggableAttr}${selectHandler}
                     onclick="onTodoRowClicked(event, '${todo.id}')"
                     ondblclick="onRowDoubleClicked(event, '${todo.id}')"
                     oncontextmenu="onTodoContextMenu(event, '${todo.id}')"${dragHandlers}>

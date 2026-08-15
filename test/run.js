@@ -503,6 +503,11 @@ async function main() {
         // The peek rows must not be drag-reschedule sources: no other .todo rows exist here, so nothing is draggable.
         assert.ok(!html.includes('draggable="true"'), 'outside rows must not be draggable')
         assert.ok(!html.includes('ondragstart'), 'outside rows must not carry drag handlers')
+        // Nor may they enter the persistent selection set: selection survives re-renders on desktop and only
+        // powers dragging/bulk actions the peek cannot use, so a selectable peek row would leak into a later
+        // multi-row drag of an ordinary row. With todos:[] the only rows here are peek rows, so no selection
+        // onmousedown may appear at all.
+        assert.ok(!html.includes('onTodoRowMouseDown('), 'outside rows must not be selectable')
         // They otherwise behave like normal rows (checkbox ticks, title opens).
         assert.ok(html.includes('onTodoChecked('), 'outside rows should keep their checkbox')
         assert.ok(html.includes('onTodoRowClicked('), 'outside rows should be openable')
