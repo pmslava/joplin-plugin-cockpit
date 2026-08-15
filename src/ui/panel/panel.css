@@ -16,6 +16,9 @@
  * completed-to-do setting. */
 :root {
     --cockpit-color: var(--joplin-color);
+    /* Scheme 2 is Joplin's sidebar pair. Cockpit deliberately uses its background for the panel,
+     * so panel-native text must use the matching foreground rather than scheme 1's content colour. */
+    --cockpit-color2: var(--joplin-color2, var(--joplin-color));
     --cockpit-color-faded: var(--joplin-color-faded);
     --cockpit-color-warn: var(--joplin-color-warn);
     --cockpit-color-error: var(--joplin-color-error);
@@ -71,6 +74,7 @@ body {
     font-family: var(--cockpit-font-family, sans-serif);
     /* The sidebar colour rather than the note editor's, so the panel reads as part of the app
      * chrome and stands apart from the note content */
+    color: var(--cockpit-color2, var(--cockpit-color, inherit));
     background-color: var(--cockpit-background-color2, inherit);
 }
 
@@ -81,6 +85,8 @@ body {
     height: 100vh;
     padding: 12px 12px 0;
     overflow: hidden;
+    /* Joplin's webview wrapper can carry scheme-1 text of its own, so pin the panel pair here too. */
+    color: var(--cockpit-color2, var(--cockpit-color, inherit));
 }
 
 /* Mobile viewport refinement. On mobile Cockpit runs in an iframe inside Joplin's native plugin-panel
@@ -178,7 +184,8 @@ body {
     overflow: hidden;
     font-family: inherit;
     font-size: inherit;
-    color: inherit;
+    /* This is a scheme-3 surface even though it sits on the scheme-2 panel. */
+    color: var(--cockpit-color, inherit);
     background-color: var(--cockpit-background-color3, rgba(127, 127, 127, 0.12));
     border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 3px;
@@ -289,6 +296,8 @@ option {
     padding: 2px 7px;
     background: none;
     border-color: transparent;
+    /* The compact face is transparent on the panel, unlike the scheme-4 picker face. */
+    color: var(--cockpit-color2, inherit);
     opacity: 0.85;
 }
 
@@ -328,6 +337,7 @@ option {
     overflow-y: auto;
     padding: 4px;
     background-color: var(--cockpit-background-color, #1D2024);
+    color: var(--cockpit-color, inherit);
     border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 6px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
@@ -459,7 +469,7 @@ h2 {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--cockpit-color-faded, #999999);
+    color: var(--cockpit-color2, inherit);
 }
 
 .todos > h2:first-child {
@@ -491,7 +501,7 @@ h2 {
 }
 
 .todo.-selected {
-    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
+    background-color: var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35));
 }
 
 .todo.-dragging {
@@ -676,6 +686,7 @@ h2 {
     min-width: 220px;
     padding: 4px;
     background-color: var(--cockpit-background-color, #1D2024);
+    color: var(--cockpit-color, inherit);
     border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 6px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
@@ -822,7 +833,7 @@ table {
 }
 
 .calendar-day.-selected .calendar-day-button {
-    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
+    background-color: var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35));
 }
 
 .calendar-dots {
@@ -929,7 +940,8 @@ table {
 .week-card-time {
     flex-shrink: 0;
     font-size: 0.85em;
-    color: var(--cockpit-color-faded, #999999);
+    color: var(--cockpit-color2, inherit);
+    opacity: 0.72;
 }
 
 /* The title on its own line(s), spanning the full card width (the stretch above). It no longer

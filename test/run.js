@@ -164,6 +164,72 @@ async function main() {
         desktop.dialogResult = null
     })
 
+    // --------------------------------------------------------- light theme colours
+    // These assertions exercise the generated panel markup rather than importing buildThemeCss
+    // directly. That keeps the coverage on the same settings -> render path Joplin uses.
+    const inlineStyle = (state) => {
+        const html = state.panelHtml['panel-panel']
+        const start = html.indexOf('<style>') + '<style>'.length
+        const end = html.indexOf('</style>', start)
+        assert.ok(start >= '<style>'.length && end > start, 'panel has no inline style block')
+        return html.slice(start, end)
+    }
+
+    const lightTheme = await run({
+        dataDir: path.join(tmp, 'light-theme-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos,
+        initialSettings: {
+            themeMode: 'light',
+            customCss: '.custom-order-marker { color: rebeccapurple; }',
+        },
+    })
+    await test('light theme: generated CSS emits both foreground/background pairs', () => {
+        const css = inlineStyle(lightTheme)
+        assert.ok(css.includes('--cockpit-color:#32373F'), 'missing content foreground')
+        assert.ok(css.includes('--cockpit-background-color:#ffffff'), 'missing content background')
+        assert.ok(css.includes('--cockpit-color2:#ffffff'), 'missing panel foreground')
+        assert.ok(css.includes('--cockpit-background-color2:#313640'), 'missing panel background')
+    })
+    await test('theme CSS is emitted before custom CSS', () => {
+        const css = inlineStyle(lightTheme)
+        const themeIndex = css.indexOf('--cockpit-color:#32373F')
+        const customIndex = css.indexOf('.custom-order-marker')
+        assert.ok(themeIndex >= 0 && customIndex > themeIndex, 'custom CSS did not follow the theme block')
+    })
+
+    const solarizedLightTheme = await run({
+        dataDir: path.join(tmp, 'solarized-light-theme-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos,
+        initialSettings: { themeMode: 'solarizedLight' },
+    })
+    await test('solarized light theme: generated CSS emits both foreground/background pairs', () => {
+        const css = inlineStyle(solarizedLightTheme)
+        assert.ok(css.includes('--cockpit-color:#657b83'), 'missing content foreground')
+        assert.ok(css.includes('--cockpit-background-color:#fdf6e3'), 'missing content background')
+        assert.ok(css.includes('--cockpit-color2:#eee8d5'), 'missing panel foreground')
+        assert.ok(css.includes('--cockpit-background-color2:#002b36'), 'missing panel background')
+    })
+
+    const customTheme = await run({
+        dataDir: path.join(tmp, 'custom-theme-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos,
+        initialSettings: { themeMode: 'custom', customTextColor: '#123abc' },
+    })
+    await test('custom theme: text colour sets both foreground variables', () => {
+        const css = inlineStyle(customTheme)
+        assert.ok(css.includes('--cockpit-color:#123abc'), 'missing content foreground')
+        assert.ok(css.includes('--cockpit-color2:#123abc'), 'missing panel foreground')
+    })
+
     // ------------------------------------------------------- idempotent refresh
     await test('desktop: refreshing again rewrites neither the note nor the panel', async () => {
         const putsBefore = desktop.notePuts.length

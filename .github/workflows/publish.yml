@@ -8,8 +8,8 @@ name: Publish to npm
 # npmjs.com -> the package -> Settings -> Trusted publisher, with:
 #
 #   Provider:  GitHub Actions
-#   Owner:     TheScriptingGuy
-#   Repository: Joplin-Agenda-Plugin
+#   Owner:     pmslava
+#   Repository: joplin-plugin-cockpit
 #   Workflow:  publish.yml
 #   Environment: npm
 #
@@ -50,14 +50,6 @@ jobs:
         with:
           node-version: 20
           cache: npm
-
-      # Trusted publishing needs npm 11.5.1 or later, which is newer than the npm bundled with Node.
-      # The 11.x line is pinned on purpose: npm 12 requires Node 22 or later and installing it here
-      # fails with EBADENGINE.
-      - name: Use an npm that supports trusted publishing
-        run: |
-          npm install -g 'npm@^11.5.1'
-          echo "node $(node --version), npm $(npm --version)"
 
       # Resolve the version to publish: on a Release, take it from the tag (e.g. v1.2.0 -> 1.2.0);
       # otherwise (manual workflow_dispatch) use the existing package.json version. The resolved
@@ -105,6 +97,22 @@ jobs:
           done
           echo "Packing $(node -p "require('./package.json').name")@$PUBLISH_VERSION:"
           npm pack --dry-run --ignore-scripts
+
+      # Keep the project's established Node 20 runtime for its older sqlite3 dependency and test
+      # suite, then switch only the registry-facing steps to a runtime supported by npm trusted
+      # publishing (Node 22.14.0 or newer).
+      - name: Use a current Node runtime for trusted publishing
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Trusted publishing requires npm 11.5.1 or later. Stay on npm 11 for reproducible behavior;
+      # Node 24 satisfies both npm 11's engine requirements and npm's trusted-publishing runtime
+      # requirement.
+      - name: Use an npm that supports trusted publishing
+        run: |
+          npm install -g 'npm@^11.5.1'
+          echo "node $(node --version), npm $(npm --version)"
 
       # No NODE_AUTH_TOKEN, no --provenance: both are handled by trusted publishing.
       # publishConfig.access is already "public" in package.json.
