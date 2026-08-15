@@ -5,7 +5,8 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { focusNewItemEditor, getAllTags, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, openTodo, searchTitleSuggestions, setTodoDueDates, toggleTodoCompletion } from "../../core/joplin";
+import { focusNewItemEditor, getAllTags, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates } from "../../core/joplin";
+import { clearOptimisticItem, clearTodoCompletionOverride, removeOptimisticItem, setTodoCompletionOverride, upsertOptimisticItem } from "../../core/optimistic";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
 import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
@@ -105,6 +106,65 @@ export async function setupPanel(){
     notebookPickerDialog = await joplin.views.dialogs.create('notebookPicker')
     tagPickerDialog = await joplin.views.dialogs.create('tagPicker')
     applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+    setupFolderPoll()
+}
+
+/** Notebook picker freshness (folder poll) *****************************************************************************************************
+ * Joplin exposes no folder/notebook-change workspace event, so a notebook created, renamed or moved elsewhere (or by sync) would otherwise only reach  *
+ * the picker when the 20s notebook-map TTL lapsed on the next 60s/120s timer tick - 10s+ stale. This adds a light poll: at most one small metadata      *
+ * request every few seconds (the first page of folders by most-recently-updated), hashed; only a real change drops the cached map and repaints. Renames *
+ * and moves are covered by the hash; a deletion is caught too (the row leaves the page), and otherwise still resolves via the TTL path. Desktop polls    *
+ * only while the panel is visible; mobile always polls but repaints through refreshPanelData, whose guard leaves an open overlay untouched.             *
+ ***************************************************************************************************************************************************/
+const folderPollIntervalMs = 3000
+var folderPollTimer = null
+var folderPollInFlight = false
+var lastFolderSignature = null
+
+function setupFolderPoll(){
+    clearInterval(folderPollTimer)
+    // The callback returns the promise so the work is awaitable (harnessable); setInterval ignores it.
+    folderPollTimer = setInterval(() => pollFoldersOnce(), folderPollIntervalMs)
+}
+
+async function pollFoldersOnce(){
+    // At most one request per interval: a still-running poll skips this tick rather than stacking requests.
+    if (folderPollInFlight) return
+    folderPollInFlight = true
+    try {
+        var mobile = await isMobile()
+        // Desktop: a hidden panel needs nothing, so do not even issue the request. Mobile: always poll (the
+        // panel is a tab the user opens and panels.visible() is unreliable there).
+        if (!mobile){
+            var visible = true
+            try { visible = await joplin.views.panels.visible(panel) } catch (error) { visible = true }
+            if (!visible) return
+        }
+        var response = await joplin.data.get(['folders'], {
+            fields: ['id', 'title', 'parent_id', 'updated_time'],
+            order_by: 'updated_time',
+            order_dir: 'DESC',
+            page: 1,
+            limit: 20,
+        })
+        var signature = JSON.stringify(response.items || [])
+        if (lastFolderSignature === null){
+            // The first poll only records the baseline; there is nothing to compare against yet.
+            lastFolderSignature = signature
+            return
+        }
+        if (signature === lastFolderSignature) return
+        lastFolderSignature = signature
+        // A notebook changed: drop the cached map so the breadcrumbs rebuild, then repaint. refreshPanelData's
+        // own guards handle a hidden desktop panel or an open mobile overlay, and its equality guard suppresses
+        // the render when nothing visible actually changed (e.g. only an updated_time bumped).
+        invalidateNotebookMap()
+        await refreshPanelData()
+    } catch (error) {
+        console.warn("Cockpit: folder poll failed", error)
+    } finally {
+        folderPollInFlight = false
+    }
 }
 
 /** applyProfileHeaderState *************************************************************************************************************************
@@ -171,10 +231,7 @@ async function eventHandler(message){
     } else if (message[0] == 'noteMenuAction'){
         await runNoteMenuAction(String(message[1] || ""), String(message[2] || ""))
     } else if (message[0] == 'todoChecked'){
-        await toggleTodoCompletion(message[1])
-        await refreshInterfaces()
-        // The completed to-do only disappears from the list once the search index has caught up.
-        scheduleRefresh()
+        await applyTodoChecked(String(message[1] || ""), !!message[2])
     } else if (message[0] == 'profilesDropdownChanged'){
         // The last entries of the dropdown are actions rather than profiles
         lastScrollTop = 0
@@ -352,6 +409,141 @@ async function eventHandler(message){
     }
 }
 
+/** applyTodoChecked ********************************************************************************************************************************
+ * Applies a checkbox tick: one idempotent PUT of the completion state the user set (a ms timestamp, or 0), held optimistically on the plugin side so  *
+ * every render shows it until the search index agrees. There is deliberately NO immediate search-based refresh - that was the old flicker (a search   *
+ * run before the index caught up repainted the tick away). Instead an optimistic repaint shows the new state at once from cache, and scheduleRefresh  *
+ * runs the follow-ups that let the index catch up and retire the override. A failed write rolls the optimistic state back and repaints the truth.     *
+ ***************************************************************************************************************************************************/
+async function applyTodoChecked(todoID, checked){
+    if (!todoID) return
+    var completed = checked ? Date.now() : 0
+    setTodoCompletionOverride(todoID, completed)
+    try {
+        await setTodoCompleted(todoID, completed)
+    } catch (error) {
+        clearTodoCompletionOverride(todoID)
+        console.error("Cockpit: could not update the to-do's completion", error)
+        await refreshInterfaces()
+        return
+    }
+    await refreshPanelData({ optimistic: true })
+    scheduleRefresh()
+}
+
+/** completedBucketOf *******************************************************************************************************************************
+ * Which completed-period switch governs a to-do (mirrors BaseFormat.getCompletedBucket), used to decide whether a completed to-do is visible in the   *
+ * active profile when evaluating an optimistic insert locally.                                                                                       *
+ ***************************************************************************************************************************************************/
+function completedBucketOf(record){
+    if (!record.todo_due || record.todo_due <= 0) return "nodue"
+    var startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0)
+    var endOfToday = new Date(); endOfToday.setHours(23, 59, 59, 999)
+    if (record.todo_due < startOfToday.getTime()) return "past"
+    if (record.todo_due <= endOfToday.getTime()) return "today"
+    return "future"
+}
+
+/** isLocallyEvaluableView **************************************************************************************************************************
+ * Whether the active view's membership can be decided on the plugin side without a search. It cannot when the profile carries its own search criteria  *
+ * or the user has typed extra search text, because those are arbitrary Joplin queries (tag:, title:, free words, any:1 ...). The notebook filter,      *
+ * type visibility and completed switches ARE locally evaluable (see noteMatchesView), so a view with no search text can be reasoned about directly.    *
+ ***************************************************************************************************************************************************/
+function isLocallyEvaluableView(profile){
+    return !String(profile.searchCriteria || "").trim() && !String(searchFilter || "").trim()
+}
+
+/** noteMatchesView *********************************************************************************************************************************
+ * Whether a note/to-do record belongs in the active view, judged only by the locally-evaluable constraints: the notebook filter (including its sub-   *
+ * notebooks), whether the profile lists notes, the no-due switch, and the completed-period switches. The caller must have confirmed the view is        *
+ * locally evaluable (no search text) first.                                                                                                          *
+ ***************************************************************************************************************************************************/
+function noteMatchesView(record, profile, notebooks){
+    if (notebookFilter){
+        var allowed = notebookWithDescendants(notebooks, notebookFilter)
+        if (!allowed.has(record.parent_id)) return false
+    }
+    if (record.is_todo){
+        if ((!record.todo_due || record.todo_due <= 0) && !profile.showNoDue) return false
+        if (record.todo_completed && record.todo_completed > 0){
+            var bucket = completedBucketOf(record)
+            if (bucket === "nodue") return !!profile.showCompletedNoDue
+            if (bucket === "past") return !!profile.showCompletedPast
+            if (bucket === "today") return !!profile.showCompletedToday
+            return !!profile.showCompletedFuture
+        }
+        return true
+    }
+    // A regular note appears only when the profile shows notes alongside the to-dos.
+    return !!profile.showNotes
+}
+
+/** insertCreatedItemOptimistically *****************************************************************************************************************
+ * After Cockpit creates a note/to-do, put it into the current view at once from the POST response, so the user does not wait for the search index. It  *
+ * is inserted only when the active view is locally evaluable AND the fresh item satisfies it; otherwise the deferred scheduleRefresh reconciles it.    *
+ ***************************************************************************************************************************************************/
+async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
+    try {
+        var profile = await getProfile(await getCurrentProfileID())
+        if (!profile || !isLocallyEvaluableView(profile)) return
+        var record = {
+            id: newItem.id,
+            title: String(newItem.title || ""),
+            parent_id: folderID,
+            is_todo: isTodo ? 1 : 0,
+            todo_completed: 0,
+            todo_due: 0,
+            user_updated_time: Date.now(),
+            user_created_time: Date.now(),
+        }
+        var notebooks = await getNotebookMap()
+        if (!noteMatchesView(record, profile, notebooks)) return
+        upsertOptimisticItem(record)
+        await refreshPanelData({ optimistic: true })
+    } catch (error) {
+        console.warn("Cockpit: could not optimistically insert the new item", error)
+    }
+}
+
+/** reconcileExternalNoteChange *********************************************************************************************************************
+ * A single external note change (onNoteChange, not one Cockpit itself is mid-flight on): fetch that one note and upsert or suppress it in the current  *
+ * view under the same locally-evaluable rule, so an externally created / moved / trashed note shows or disappears without waiting for the periodic     *
+ * timer. Search stays the eventual authority - the overlay entry retires as soon as a real search agrees. The single GET is the caller's cost; the     *
+ * caller (timer.ts) skips it entirely while a sync is running, where hundreds of notes change and the post-sync reconciliation covers them instead.    *
+ ***************************************************************************************************************************************************/
+export async function reconcileExternalNoteChange(noteID){
+    if (!noteID) return
+    try {
+        var profile = await getProfile(await getCurrentProfileID())
+        if (!profile) return
+        if (!isLocallyEvaluableView(profile)){
+            // The view needs a search to decide membership; drop any stale overlay entry and let search rule.
+            clearOptimisticItem(noteID)
+            return
+        }
+        var note = await joplin.data.get(['notes', noteID], {
+            fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'],
+        })
+        if (!note){ removeOptimisticItem(noteID); return }
+        var trashed = note.deleted_time && note.deleted_time > 0
+        var notebooks = await getNotebookMap()
+        if (trashed || !noteMatchesView(note, profile, notebooks)){
+            removeOptimisticItem(noteID, !!note.is_todo)
+        } else {
+            upsertOptimisticItem(note)
+        }
+        // An optimistic repaint (no search) so a newly appearing / disappearing item shows at once; the
+        // equality guard suppresses it when nothing visible changed, so a mere content edit does not churn.
+        await refreshPanelData({ optimistic: true })
+    } catch (error) {
+        if (error && error.message === "Not Found"){
+            removeOptimisticItem(noteID)
+        } else {
+            console.warn("Cockpit: could not reconcile the changed note", error)
+        }
+    }
+}
+
 /** togglePanelVisibility ***************************************************************************************************************************
  * Toggles the main panel between shown and hidden. On mobile the panel is a tab in Joplin's own plugin panel dialog, which the user opens and       *
  * closes from the app itself, so hiding it here would leave no way of getting it back.                                                             *
@@ -378,6 +570,10 @@ export async function togglePanelVisibility() {
     // the bodies and repaints with the real rings. Gated to mobile: those body-fetch costs are mobile-only,
     // and skipping them on desktop would flash empty rings, so desktop always renders the full counts.
     var fast = mobile && !!(options && options.fast)
+    // Optimistic render: reuse the last search for the active query and layer the host-held overlay/overrides
+    // on top (getTodos/getNotes via the viewState flag below), so a tick/create/external-change shows at once
+    // without another search. Any-platform; the equality guard still suppresses a render that changes nothing.
+    var optimistic = !!(options && options.optimistic)
     // Dialog guard (mobile only): while a Cockpit dialog is open, a panel refresh calls setHtml, which
     // re-asserts the panel viewer's native React Native Modal on top of the dialog's Modal - the "the
     // dialog popped up behind the panel" bug. Skipping the refresh keeps the dialog on top. The guard
@@ -416,7 +612,7 @@ export async function togglePanelVisibility() {
     // isMobile is carried into the view state so the row HTML generators (renderTodoRow / renderNotesSection)
     // can omit the desktop-only action tooltips on mobile, where hover does not exist and the row already has
     // its long-press flows. Every other platform branch in those generators keys off the same flag.
-    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, isMobile: mobile }
+    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, optimistic: optimistic, isMobile: mobile }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     if (profile.showNotes){
@@ -666,6 +862,9 @@ async function createItemInFolder(isTodo, folderID){
     // in effect (the setting and the focus commands are desktop-only, guarded to a no-op on mobile), so this
     // also covers the mobile notebook-overlay create path (applyNotebookPicked -> createItemInFolder) safely.
     await focusNewItemEditor(isTodo)
+    // Show the new row at once from the POST response (the record is already in hand) when the active view
+    // can be evaluated locally; otherwise the deferred scheduleRefresh reconciles it via a search.
+    await insertCreatedItemOptimistically(newItem, isTodo, folderID)
     scheduleRefresh()
 }
 

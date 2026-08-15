@@ -524,10 +524,12 @@ async function onTodoDropped(event){
 }
 
 /** onTodoChecked ***********************************************************************************************************************************
- * When a todo item is checked as complete/incomplete, this function sends a message to the main plugin containing the todo id                      *
- ***************************************************************************************************************************************************/ 
-async function onTodoChecked(todoID){
-    await webviewApi.postMessage(['todoChecked', todoID]);
+ * When a to-do's checkbox is ticked, this sends the id AND the state the tick just set to the plugin. The browser has already flipped the checkbox   *
+ * in the DOM, so passing that state lets the host write it with a single idempotent PUT (no read-modify-write) and hold it optimistically, instead of *
+ * inferring the intended state from a search that has not caught up yet.                                                                             *
+ ***************************************************************************************************************************************************/
+async function onTodoChecked(todoID, checked){
+    await webviewApi.postMessage(['todoChecked', todoID, checked]);
 }
 
 /** onSortFieldClicked / onSortDirectionClicked ******************************************************************************************************/

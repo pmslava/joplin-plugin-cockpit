@@ -120,7 +120,10 @@ abstract class BaseFormat {
         }
         var showAnyCompleted = this.profile.showCompletedPast || this.profile.showCompletedToday || this.profile.showCompletedFuture || this.profile.showCompletedNoDue
         var fast = this.viewState ? (this.viewState as any).fastCheckboxCounts : false
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast)
+        // Optimistic re-render: reuse the last search for this query and layer the host-held overlay on top,
+        // so a just-ticked / just-created item shows without another round-trip. Off for ordinary refreshes.
+        var useCache = this.viewState ? (this.viewState as any).optimistic : false
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache)
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -179,7 +182,7 @@ abstract class BaseFormat {
                     ondragstart="onTodoDragStart(event, '${todo.id}')"
                     ondragend="onTodoDragEnd(event)">
                     <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
-                        onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                        onchange="onTodoChecked('${todo.id}', this.checked)" ${checkedString}>
                     <a class="todo-title"${titleHint}>${escapeHtml(label)}</a>
                     ${notebookString}
                 </div>
@@ -649,7 +652,7 @@ class WeekFormat extends DateFormat {
                     ondragend="onTodoDragEnd(event)">
                     <div class="week-card-head">
                         <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
-                            onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                            onchange="onTodoChecked('${todo.id}', this.checked)" ${checkedString}>
                         ${timeString}
                         ${notebookString}
                     </div>
@@ -693,7 +696,8 @@ export async function renderNotesSection(profile, viewState){
         searchCriteria = `${searchCriteria} notebook:"${sectionFilterNotebook.title}"`
     }
     var fast = viewState ? viewState.fastCheckboxCounts : false
-    var notes = await getNotes(searchCriteria, fast)
+    var useCache = viewState ? viewState.optimistic : false
+    var notes = await getNotes(searchCriteria, fast, useCache)
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
         note.notebookTitle = notebook ? notebook.title : ""

@@ -25,6 +25,12 @@ function makeJoplin(options) {
         onStart: null,
         panelMessageHandler: null,
         setHtmlCalls: 0,
+        // Every data.get, recorded as { path, query }, so tests can count search round-trips, single-note
+        // reads (the removed GET-before-PUT), and the folder poll's request.
+        gets: [],
+        // setInterval callbacks captured during startup (the periodic timer + the folder poll) so the suite
+        // can drive them by hand rather than on a real clock. Each is { fn, ms, cleared }.
+        intervals: [],
         // Set to a DialogResult to make the next dialogs.open() return it instead of a cancel.
         dialogResult: null,
     }
@@ -93,6 +99,7 @@ function makeJoplin(options) {
         },
         data: {
             get: async (pathParts, query) => {
+                state.gets.push({ path: pathParts.slice(), query })
                 if (pathParts[0] === 'search') {
                     // getTodos queries "type:todo ...", getNotes queries "type:note ...". Serve the
                     // regular-note list only to the type:note query so a showNotes profile does not
@@ -122,7 +129,9 @@ function makeJoplin(options) {
                 throw new Error(`Unexpected data.get: ${pathParts}`)
             },
             put: async (pathParts, _q, body) => {
-                state.notePuts.push({ id: pathParts[1], body: body.body })
+                // `fields` keeps the whole PUT body so a test can assert the exact shape (e.g. that a tick
+                // writes a numeric todo_completed); `body` stays the note-body string the older checks read.
+                state.notePuts.push({ id: pathParts[1], body: body.body, fields: body })
                 if (notes[pathParts[1]]) Object.assign(notes[pathParts[1]], body)
             },
             post: async (pathParts, _q, body) => {
@@ -144,7 +153,20 @@ async function run(options) {
     delete require.cache[require.resolve(bundlePath)]
     require(bundlePath)
     if (!state.onStart) throw new Error('Plugin did not register an onStart handler')
-    await state.onStart({})
+    // Capture the intervals the plugin arms at startup (the periodic refresh timer and the folder poll)
+    // instead of scheduling them on a real clock: the suite invokes them by hand, and leaving many run()s'
+    // worth of live intervals ticking would otherwise pollute later tests. Restored right after onStart, so
+    // the test's own timers are unaffected.
+    const realSetInterval = global.setInterval
+    const realClearInterval = global.clearInterval
+    global.setInterval = (fn, ms) => { const id = state.intervals.length; state.intervals.push({ fn, ms, cleared: false }); return id }
+    global.clearInterval = (id) => { if (typeof id === 'number' && state.intervals[id]) state.intervals[id].cleared = true }
+    try {
+        await state.onStart({})
+    } finally {
+        global.setInterval = realSetInterval
+        global.clearInterval = realClearInterval
+    }
     return state
 }
 

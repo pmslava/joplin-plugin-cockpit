@@ -4,27 +4,63 @@
 
 /* Imports *****************************************************************************************************************************************/
 import joplin from 'api';
+import { applyTodoCompletionOverrides, mergeOptimisticNotes, mergeOptimisticTodos } from './optimistic';
+
+/** Result-set cache ********************************************************************************************************************************
+ * The last search result for each distinct query, so an optimistic re-render (a tick, a Cockpit create, an external note change) can repaint from    *
+ * the item already in hand without issuing another search. Keyed by the full query string and bounded, so the panel query is not evicted by the       *
+ * overview-note queries that run in the same refresh cycle. Only read when the caller asks for the cache (useCache); an ordinary refresh always        *
+ * searches and refreshes the entry, so the cache never serves stale data on its own - it is a fast lane for the optimistic paths, which layer the      *
+ * host-held overlay/overrides on top so the just-changed item still shows.                                                                            *
+ ***************************************************************************************************************************************************/
+const resultCacheCap = 24
+var todosResultCache = new Map()
+var notesResultCache = new Map()
+
+function cloneItems(items){
+    return items.map(item => ({ ...item }))
+}
+
+function cacheResult(cache, query, items){
+    if (cache.has(query)) cache.delete(query)
+    cache.set(query, cloneItems(items))
+    while (cache.size > resultCacheCap) cache.delete(cache.keys().next().value)
+}
 
 /** getTodos ****************************************************************************************************************************************
  * Returns the list of todos, sorted by due date. If show completed is true, it will include completed todos. If show no due is true, it will       *
  * include todos without due dates.                                                                                                                 *
  ***************************************************************************************************************************************************/
- export async function getTodos(showCompleted, showNoDue, searchCritera, fast?){
+ export async function getTodos(showCompleted, showNoDue, searchCritera, fast?, useCache?){
     const completed = showCompleted ? "" : "iscompleted:0"
     const noDue = showNoDue ? "" : "due:19700201"
-    var allTodos = [];
-    let pageNum = 1;
-    do {
-        var response = await joplin.data.get(['search'], {
-            query: `type:todo ${completed} ${noDue} ${searchCritera}`,
-            fields: ['id', 'title', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time'],
-            type: 'note',
-            order_by: 'todo_due',
-            page: pageNum++,
-        })
-        allTodos = allTodos.concat(response.items)
-    } while (response.has_more)
-    await attachCheckboxCounts(allTodos, fast)
+    var query = `type:todo ${completed} ${noDue} ${searchCritera}`
+    var allTodos;
+    if (useCache && todosResultCache.has(query)){
+        // Optimistic re-render: reuse the last search for this query (with its checkbox counts already
+        // attached) instead of searching again. The overlay/overrides below still layer the just-changed
+        // item on top, so the user's action shows without waiting on the index.
+        allTodos = cloneItems(todosResultCache.get(query))
+    } else {
+        allTodos = [];
+        let pageNum = 1;
+        do {
+            var response = await joplin.data.get(['search'], {
+                query: query,
+                fields: ['id', 'title', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time'],
+                type: 'note',
+                order_by: 'todo_due',
+                page: pageNum++,
+            })
+            allTodos = allTodos.concat(response.items)
+        } while (response.has_more)
+        await attachCheckboxCounts(allTodos, fast)
+        cacheResult(todosResultCache, query, allTodos)
+    }
+    // Fold in the host-held optimistic layer: created/newly-matching to-dos the index has not returned
+    // yet, then the completion overrides (applied last so they also correct an overlay record).
+    mergeOptimisticTodos(allTodos)
+    applyTodoCompletionOverrides(allTodos)
     // The search only orders by due date, which leaves to-dos sharing a due date - and the whole
     // "No Due Date" group - in arbitrary order. Ties are broken by title, so that a naming scheme
     // gives a deliberate order. The comparison is case insensitive and number aware ("2" < "10").
@@ -103,19 +139,29 @@ export async function searchTitleSuggestions(partial){
  * Returns the regular (non to-do) notes matching the given search criteria, sorted by title, each with its checkbox counts. Used when a profile     *
  * shows notes alongside the to-dos.                                                                                                                *
  ***************************************************************************************************************************************************/
-export async function getNotes(searchCriteria, fast?){
-    var allNotes = [];
-    let pageNum = 1;
-    do {
-        var response = await joplin.data.get(['search'], {
-            query: `type:note ${searchCriteria}`,
-            fields: ['id', 'title', 'parent_id', 'user_updated_time', 'user_created_time'],
-            type: 'note',
-            page: pageNum++,
-        })
-        allNotes = allNotes.concat(response.items)
-    } while (response.has_more)
-    await attachCheckboxCounts(allNotes, fast)
+export async function getNotes(searchCriteria, fast?, useCache?){
+    var query = `type:note ${searchCriteria}`
+    var allNotes;
+    if (useCache && notesResultCache.has(query)){
+        allNotes = cloneItems(notesResultCache.get(query))
+    } else {
+        allNotes = [];
+        let pageNum = 1;
+        do {
+            var response = await joplin.data.get(['search'], {
+                query: query,
+                fields: ['id', 'title', 'parent_id', 'user_updated_time', 'user_created_time'],
+                type: 'note',
+                page: pageNum++,
+            })
+            allNotes = allNotes.concat(response.items)
+        } while (response.has_more)
+        await attachCheckboxCounts(allNotes, fast)
+        cacheResult(notesResultCache, query, allNotes)
+    }
+    // A created regular note (is_todo 0) shows here before the index returns it; the overlay filters to
+    // the notes list, so a created to-do never leaks into this section.
+    mergeOptimisticNotes(allNotes)
     return allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
 }
 
@@ -346,10 +392,11 @@ export async function setNoteContent(noteID, noteBody){
     await joplin.data.put(['notes', noteID], null, { body: noteBody})
 }
 
-/** toggleTodoCompletion ****************************************************************************************************************************
- * Toggles between done and undone, the todo with the given ID                                                                                      *
+/** setTodoCompleted ********************************************************************************************************************************
+ * Sets a to-do's completion to the given value with a single idempotent PUT: a millisecond timestamp when completed (Joplin's documented shape),     *
+ * 0 when not. The caller already knows the state the user set (the checkbox posts it), so there is no read-modify-write - the old pre-GET both cost    *
+ * a round-trip on every tick and wrote a boolean where a timestamp belongs. Being idempotent, a rapid double-tick is safe: the last call wins.        *
  ***************************************************************************************************************************************************/
-export async function toggleTodoCompletion(todoID){
-    var note = await joplin.data.get(['notes', todoID], {fields: ['todo_completed']});
-    await joplin.data.put(['notes', todoID], null, { todo_completed: !note.todo_completed});
+export async function setTodoCompleted(todoID, completed){
+    await joplin.data.put(['notes', todoID], null, { todo_completed: completed });
 }

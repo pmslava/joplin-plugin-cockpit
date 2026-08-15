@@ -463,6 +463,123 @@ async function main() {
         assert.strictEqual(legacyMobile.toolbarButtons.length, 0)
     })
 
+    // ------------------------------------------------ optimistic checkbox toggle (A1)
+    // The webview now posts { id, checked } and the host applies it with a single idempotent PUT, holding
+    // the state optimistically so a render before the search index catches up still shows the tick.
+    const toggleTodos = [
+        { id: 'a'.repeat(32), title: 'Tick me', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: 'n'.repeat(32) },
+    ]
+    const toggle = await run({
+        dataDir: path.join(tmp, 'toggle-data'),
+        installationDir: path.join(tmp, 'toggle-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: toggleTodos,
+    })
+    await test('toggle: one idempotent PUT (numeric ms), no GET-before-PUT, no immediate search', async () => {
+        const id = 'a'.repeat(32)
+        const getsMark = toggle.gets.length
+        const searchesBefore = toggle.gets.filter(g => g.path[0] === 'search').length
+        const putsBefore = toggle.notePuts.length
+        await toggle.panelMessageHandler(['todoChecked', id, true])
+        const newPuts = toggle.notePuts.slice(putsBefore)
+        assert.strictEqual(newPuts.length, 1, 'expected exactly one PUT')
+        assert.strictEqual(newPuts[0].id, id)
+        assert.strictEqual(typeof newPuts[0].fields.todo_completed, 'number', 'todo_completed must be a numeric ms timestamp')
+        assert.ok(newPuts[0].fields.todo_completed > 0, 'completing writes a positive ms timestamp, not a boolean')
+        const newGets = toggle.gets.slice(getsMark)
+        assert.ok(!newGets.some(g => g.path[0] === 'notes' && g.path.length === 2 && g.path[1] === id), 'no read-modify-write: nothing GETs the note before the PUT')
+        assert.strictEqual(toggle.gets.filter(g => g.path[0] === 'search').length, searchesBefore, 'toggle must not trigger a search (optimistic repaint comes from cache)')
+    })
+    await test('toggle: a search-based render before the index agrees still shows the ticked state', async () => {
+        const id = 'a'.repeat(32)
+        await toggle.panelMessageHandler(['todoChecked', id, true])
+        // Force a real, non-optimistic render. The search fixture still returns the to-do as incomplete, so
+        // only the host-held override can make the row render completed.
+        await toggle.panelMessageHandler(['sortDirectionClicked'])
+        const html = toggle.panelHtml['panel-panel']
+        const at = html.indexOf('data-todo-id="' + id + '"')
+        assert.ok(at >= 0, 'the toggled to-do should be present')
+        const openTag = html.slice(html.lastIndexOf('<div', at), at)
+        assert.ok(openTag.includes('-completed'), 'the override should render the row completed despite the stale search')
+    })
+    await test('toggle: unticking writes todo_completed 0', async () => {
+        const id = 'a'.repeat(32)
+        const putsBefore = toggle.notePuts.length
+        await toggle.panelMessageHandler(['todoChecked', id, false])
+        const newPuts = toggle.notePuts.slice(putsBefore)
+        assert.strictEqual(newPuts.length, 1)
+        assert.strictEqual(newPuts[0].fields.todo_completed, 0, 'unticking writes 0, a single idempotent PUT')
+    })
+
+    // ------------------------------------------------ optimistic create (A2)
+    const createFolders = [{ id: 'f'.repeat(32), title: 'Inbox', parent_id: '' }]
+    const create = await run({
+        dataDir: path.join(tmp, 'create-data'),
+        installationDir: path.join(tmp, 'create-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: [],
+        folders: createFolders,
+    })
+    await test('create: a Cockpit-created to-do appears at once with no search round-trip', async () => {
+        const folderId = 'f'.repeat(32)
+        await create.panelMessageHandler(['notebookFilterChanged', folderId])
+        const searchesBefore = create.gets.filter(g => g.path[0] === 'search').length
+        await create.panelMessageHandler(['newTodoClicked'])
+        assert.ok(create.dataPosts.some(p => p.path[0] === 'notes' && p.path.length === 1), 'a note should have been POSTed')
+        assert.ok(create.panelHtml['panel-panel'].includes('data-todo-id="created-1"'), 'the created to-do should be inserted from the POST response')
+        assert.strictEqual(create.gets.filter(g => g.path[0] === 'search').length, searchesBefore, 'the optimistic insert must not issue a search')
+    })
+    const createSearch = await run({
+        dataDir: path.join(tmp, 'create-search-data'),
+        installationDir: path.join(tmp, 'create-search-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: [],
+        folders: createFolders,
+    })
+    await test('create: no optimistic insert when the view has search text', async () => {
+        const folderId = 'f'.repeat(32)
+        await createSearch.panelMessageHandler(['notebookFilterChanged', folderId])
+        await createSearch.panelMessageHandler(['searchFilterChanged', 'urgent'])
+        await createSearch.panelMessageHandler(['newTodoClicked'])
+        assert.ok(createSearch.dataPosts.some(p => p.path[0] === 'notes' && p.path.length === 1), 'the note is still created')
+        assert.ok(!createSearch.panelHtml['panel-panel'].includes('data-todo-id="created-'), 'an arbitrary search cannot be evaluated locally, so nothing is inserted optimistically')
+    })
+
+    // ------------------------------------------------ notebook picker folder poll (A3)
+    const pollFolders = [{ id: 'f'.repeat(32), title: 'Inbox', parent_id: '', updated_time: 1000 }]
+    const pollOptions = {
+        dataDir: path.join(tmp, 'poll-data'),
+        installationDir: path.join(tmp, 'poll-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: [],
+        folders: pollFolders,
+    }
+    const poll = await run(pollOptions)
+    await test('folder poll: one request per tick, re-renders only when the folders change', async () => {
+        const entry = poll.intervals.find(i => i.ms === 3000)
+        assert.ok(entry, 'the folder poll interval should be armed')
+        const pollGets = () => poll.gets.filter(g => g.path[0] === 'folders' && g.query && g.query.order_by === 'updated_time').length
+        // First tick establishes the baseline: one request, no re-render.
+        let getsMark = pollGets(); let htmlMark = poll.setHtmlCalls
+        await entry.fn()
+        assert.strictEqual(pollGets() - getsMark, 1, 'exactly one folder request per tick')
+        assert.strictEqual(poll.setHtmlCalls, htmlMark, 'the baseline tick must not re-render')
+        // Second tick, folders unchanged: one request, still no re-render.
+        getsMark = pollGets(); htmlMark = poll.setHtmlCalls
+        await entry.fn()
+        assert.strictEqual(pollGets() - getsMark, 1, 'exactly one folder request per tick')
+        assert.strictEqual(poll.setHtmlCalls, htmlMark, 'no change must not re-render')
+        // Third tick after a rename: the hash changes, so the panel re-renders.
+        pollOptions.folders = [{ id: 'f'.repeat(32), title: 'Inbox renamed', parent_id: '', updated_time: 2000 }]
+        htmlMark = poll.setHtmlCalls
+        await entry.fn()
+        assert.ok(poll.setHtmlCalls > htmlMark, 'a folder rename must trigger a re-render')
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

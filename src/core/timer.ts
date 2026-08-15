@@ -7,10 +7,10 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { refreshPanelData } from "../ui/panel/panel";
+import { reconcileExternalNoteChange, refreshPanelData } from "../ui/panel/panel";
 import { getOverviewNoteIDs, refreshNoteData } from "./markdown";
 import { updateFrequencySettingKey } from "./settings";
-import { markSyncComplete, markSyncStart } from "./syncStatus";
+import { getSyncStatus, markSyncComplete, markSyncStart } from "./syncStatus";
 import { isMobile } from "./platform";
 
 /** Variable Initialization ************************************************************************************************************************/
@@ -95,6 +95,13 @@ export async function setupWorkspaceEvents(){
     await registerEvent("onNoteChange", async (event) => {
         // Cockpit writes the overview notes itself, so refreshing on those changes would loop.
         if (event && (await getOverviewNoteIDs()).includes(event.id)) return
+        // Targeted optimistic reconcile for a single external change, so a note created / moved / trashed
+        // elsewhere shows or disappears without waiting for the periodic timer. Skipped while a sync runs -
+        // sync changes hundreds of notes, which would be hundreds of per-note GETs, and the post-sync
+        // reconciliation covers that set instead. Cockpit's own edits are corrected by the same call (an
+        // item already in the search results self-retires from the overlay), and the completion override,
+        // applied last, protects a just-ticked to-do from a stale read here.
+        if (event && event.id && !getSyncStatus().syncing) await reconcileExternalNoteChange(event.id)
         scheduleRefresh()
     })
     // onSyncStart carries no payload (its withErrors is only known at the end), so the button state
