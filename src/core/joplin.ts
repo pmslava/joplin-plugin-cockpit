@@ -124,13 +124,14 @@ export async function getNotes(searchCriteria, fast?){
  * filters, this runs the user's search text VERBATIM - no profile searchCriteria, no notebook:"..." narrowing, no iscompleted:/type: tokens the       *
  * plugin would otherwise add - so it finds whatever that text matches anywhere in the vault. Tokens the user typed themselves (notebook:, tag:, ...)  *
  * are kept exactly as typed, since they are passed through untouched. Both regular notes and to-dos come back: type:'note' is the item type searched   *
- * (to-dos are notes), not a query filter, and no type: token is added. The Joplin search API already excludes trashed notes. One page only, capped at  *
- * 50, with the API's has_more surfaced so the caller can show a "+more" hint. Checkbox rings fill from cache like the main lists (skipped under fast).  *
+ * (to-dos are notes), not a query filter, and no type: token is added. is_todo is fetched too, so the caller can tell the two apart and render each in  *
+ * kind. The Joplin search API already excludes trashed notes. One page only, capped at 50, with the API's has_more surfaced so the caller can show a     *
+ * "+more" hint. Checkbox rings fill from cache like the main lists (skipped under fast).                                                                 *
  ***************************************************************************************************************************************************/
 export async function searchOutsideFilters(searchText, fast?){
     var response = await joplin.data.get(['search'], {
         query: String(searchText || ""),
-        fields: ['id', 'title', 'todo_completed', 'parent_id', 'user_updated_time'],
+        fields: ['id', 'title', 'is_todo', 'todo_completed', 'parent_id', 'user_updated_time'],
         type: 'note',
         limit: 50,
         page: 1,

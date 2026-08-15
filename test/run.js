@@ -478,8 +478,8 @@ async function main() {
         }],
     })
     const outsideResults = [
-        { id: 'a1'.repeat(16), title: 'Milk run in Shopping', todo_completed: 0, parent_id: 'nbShopping', user_updated_time: 10 },
-        { id: 'a2'.repeat(16), title: 'Milk delivery notes', todo_completed: 0, parent_id: 'nbShopping', user_updated_time: 11 },
+        { id: 'a1'.repeat(16), title: 'Milk run in Shopping', is_todo: 1, todo_completed: 0, parent_id: 'nbShopping', user_updated_time: 10 },
+        { id: 'a2'.repeat(16), title: 'Milk delivery notes', is_todo: 1, todo_completed: 0, parent_id: 'nbShopping', user_updated_time: 11 },
     ]
     let outsideRunSeq = 0
     const runOutside = (extra) => run(Object.assign({
@@ -515,7 +515,7 @@ async function main() {
 
     await test('outside results: display is capped at 15 with a +more footer when there are more', async () => {
         const many = []
-        for (let i = 0; i < 18; i++) many.push({ id: String(i).padStart(32, 'z'), title: 'Match number ' + i, todo_completed: 0, parent_id: 'nbX', user_updated_time: i })
+        for (let i = 0; i < 18; i++) many.push({ id: String(i).padStart(32, 'z'), title: 'Match number ' + i, is_todo: 1, todo_completed: 0, parent_id: 'nbX', user_updated_time: i })
         const state = await runOutside({ outsideResults: many, outsideHasMore: true })
         await state.panelMessageHandler(['searchFilterChanged', 'match'])
         const html = state.panelHtml['panel-panel']
@@ -558,6 +558,40 @@ async function main() {
         const html = state.panelHtml['panel-panel']
         assert.ok(!html.includes('<img src=x onerror=1>'), 'raw search markup survived into the output')
         assert.ok(html.includes('Nothing in current filters matches "&lt;img src=x onerror=1&gt;"'), 'the search text was not escaped in the message line')
+    })
+
+    await test('outside results: a to-do stays tickable but a regular note renders like the Notes section', async () => {
+        // type:'note' brings back BOTH to-dos and regular notes, told apart by is_todo. A to-do (is_todo:1) must
+        // keep its tickable checkbox and completion handler; a regular note (is_todo:0) must be drawn the way the
+        // panel's Notes section draws it - a display-only progress circle, no tickable checkbox, no to-do
+        // completion handler - so ticking a non-to-do is impossible, while it stays openable.
+        const todoId = 'to'.repeat(16)
+        const noteId = 'no'.repeat(16)
+        const mixed = [
+            { id: todoId, title: 'A real to-do', is_todo: 1, todo_completed: 0, parent_id: 'nbMix', user_updated_time: 3 },
+            { id: noteId, title: 'A plain note', is_todo: 0, todo_completed: 0, parent_id: 'nbMix', user_updated_time: 4 },
+        ]
+        const state = await runOutside({ outsideResults: mixed })
+        await state.panelMessageHandler(['searchFilterChanged', 'thing'])
+        const html = state.panelHtml['panel-panel']
+        assert.ok(html.includes('class="outside-results"'), 'precondition: the peek should be shown')
+
+        // The to-do renders as a to-do row: a tickable checkbox and the completion handler.
+        const todoAt = html.indexOf('data-todo-id="' + todoId + '"')
+        assert.notStrictEqual(todoAt, -1, 'the to-do should render as a to-do row')
+        const todoRow = html.slice(html.lastIndexOf('<div class="todo', todoAt), html.indexOf('</div>', todoAt))
+        assert.ok(todoRow.includes('onTodoChecked('), 'the peek to-do should keep its completion handler')
+        assert.ok(todoRow.includes('type="checkbox"'), 'the peek to-do should keep its tickable checkbox')
+
+        // The regular note renders as a note row: display-only circle, no checkbox, no completion handler, openable.
+        const noteAt = html.indexOf('data-note-id="' + noteId + '"')
+        assert.notStrictEqual(noteAt, -1, 'the regular note should render as a note row, not a to-do row')
+        assert.ok(!html.includes('data-todo-id="' + noteId + '"'), 'the note must not be given a to-do row')
+        const noteRow = html.slice(html.lastIndexOf('<div class="todo', noteAt), html.indexOf('</div>', noteAt))
+        assert.ok(!noteRow.includes('onTodoChecked('), 'the peek note must not get a to-do completion handler')
+        assert.ok(!noteRow.includes('type="checkbox"'), 'the peek note must not get a tickable checkbox')
+        assert.ok(noteRow.includes('note-progress'), 'the peek note should show the display-only progress circle')
+        assert.ok(noteRow.includes('onNoteRowClicked('), 'the peek note should still be openable')
     })
 
     await fs.remove(tmp)

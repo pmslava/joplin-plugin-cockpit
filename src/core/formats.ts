@@ -75,6 +75,39 @@ function renderTodoRowHtml(todo, label, options?){
             `
 }
 
+/** renderNoteRowHtml *******************************************************************************************************************************
+ * The markup for a single regular-note row: a display-only progress circle (a note has no due date and cannot be ticked), a title link that opens it, *
+ * and its notebook pill. Shared by renderNotesSection (the panel's Notes group) and renderOutsideResultsSection (the read-only peek, for the items      *
+ * that are notes rather than to-dos), so a note looks and behaves the same wherever it appears. options.mobile drops the desktop-only hover action      *
+ * hints. options.selectable === false suppresses the selection onmousedown, exactly as renderTodoRowHtml's draggable:false does for the peek's rows:     *
+ * pickedNoteID is persisted desktop state that only powers selection highlighting/bulk actions a read-only peek row cannot use, so a peek row is kept    *
+ * out of it. Every ordinary Notes-section row passes selectable:true and is byte-for-byte what renderNotesSection emitted before this was extracted.     *
+ ***************************************************************************************************************************************************/
+function renderNoteRowHtml(note, options?){
+    var mobile = !!(options && options.mobile)
+    var selectable = !options || options.selectable !== false
+    var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
+    var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
+    var notebookString = note.notebookTitle
+        ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(note.parent_id)}" title="${escapeHtml(note.notebookPath)}${notebookHints}">${escapeHtml(note.notebookTitle)}</span>`
+        : ""
+    var total = Number(note.checkboxTotal) || 0
+    var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
+    var progressTitle = total ? `${note.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
+    var selectHandler = selectable ? `
+                onmousedown="onNoteRowMouseDown(event, '${note.id}')"` : ""
+    return `
+            <div class="todo -note" data-note-id="${note.id}"${selectHandler}
+                onclick="onNoteRowClicked(event, '${note.id}')"
+                ondblclick="onRowDoubleClicked(event, '${note.id}')"
+                oncontextmenu="onNoteContextMenu(event, '${note.id}')">
+                <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
+                <a class="todo-title"${titleHint}>${escapeHtml(note.title)}</a>
+                ${notebookString}
+            </div>
+        `
+}
+
 /** BaseFormat **************************************************************************************************************************************
  * This is the abstract class that all other formats must inherit from.                                                                             *
  ***************************************************************************************************************************************************/
@@ -746,32 +779,12 @@ export async function renderNotesSection(profile, viewState){
         notes.sort(itemComparator(viewState.sort))
     }
     if (!notes.length) return ""
-    // Desktop only: append the per-zone action hints, merged with the existing tooltips, on their own lines
-    // via &#10;. A note's progress ring is display-only (not tickable, no due date), so it gets no action
-    // lines - only the title and the notebook pill do. Mobile keeps its long-press flows and no hover, so no
-    // action lines there. isMobile is carried in the view state (see panel.ts).
+    // The row markup lives in the shared renderNoteRowHtml so the read-only "results outside current filters"
+    // peek can reuse it for its note items. isMobile is carried in the view state (see panel.ts) and drops the
+    // desktop-only hover action hints (a note's progress ring is display-only, so only its title and notebook
+    // pill carry action lines); selectable stays true here so ordinary Notes-section rows are unchanged.
     var mobile = !!(viewState && viewState.isMobile)
-    var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
-    var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
-    var rows = notes.map(note => {
-        var total = Number(note.checkboxTotal) || 0
-        var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
-        var progressTitle = total ? `${note.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
-        var notebookString = note.notebookTitle
-            ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(note.parent_id)}" title="${escapeHtml(note.notebookPath)}${notebookHints}">${escapeHtml(note.notebookTitle)}</span>`
-            : ""
-        return `
-            <div class="todo -note" data-note-id="${note.id}"
-                onmousedown="onNoteRowMouseDown(event, '${note.id}')"
-                onclick="onNoteRowClicked(event, '${note.id}')"
-                ondblclick="onRowDoubleClicked(event, '${note.id}')"
-                oncontextmenu="onNoteContextMenu(event, '${note.id}')">
-                <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
-                <a class="todo-title"${titleHint}>${escapeHtml(note.title)}</a>
-                ${notebookString}
-            </div>
-        `
-    }).join("")
+    var rows = notes.map(note => renderNoteRowHtml(note, { mobile: mobile })).join("")
     return `
         <section class="notes-section">
             <h2>Notes</h2>
@@ -783,8 +796,10 @@ export async function renderNotesSection(profile, viewState){
 /** renderOutsideResultsSection *********************************************************************************************************************
  * The read-only "results outside current filters" peek, composed server side in the panel render path. It is only ever called when the search box has *
  * text AND the fully-filtered view came out empty (the caller decides that; see refreshPanelData), so reaching here means running one unfiltered      *
- * search (searchOutsideFilters) with the user's text verbatim and laying its hits out as a FLAT list - no due-date grouping - via the same row         *
- * pipeline as the main list, but with dragging suppressed so a peeked row cannot be dragged onto a date. The search text is user input, so it is       *
+ * search (searchOutsideFilters) with the user's text verbatim and laying its hits out as a FLAT list - no due-date grouping. Each hit is drawn in its   *
+ * own kind: a to-do as a to-do row, a regular note (is_todo falsy) as a note row with the display-only progress circle and no tickable checkbox, so a   *
+ * non-to-do is never given a to-do's checkbox or completion menu. Selection and dragging are suppressed so a peeked row cannot be dragged onto a date   *
+ * or leak into a later selection. The search text is user input, so it is                                                                               *
  * escaped everywhere it is interpolated. Nothing here writes a setting, a profile or the notebook picker: it is a pure read.                           *
  *   - No hits anywhere: a single muted line and nothing else.                                                                                          *
  *   - Hits: a "nothing matched in your filters" line, a group-style heading with the count, up to 15 rows, and a "…and N more" footer when there were  *
@@ -803,8 +818,8 @@ export async function renderOutsideResultsSection(profile, viewState, searchText
         </section>
     `
     }
-    // The rows reuse renderTodoRowHtml, which reads notebookTitle/notebookPath for the pill, so attach the
-    // notebook the same way fetchTodos / renderNotesSection do.
+    // The rows reuse renderTodoRowHtml / renderNoteRowHtml, which read notebookTitle/notebookPath for the pill,
+    // so attach the notebook the same way fetchTodos / renderNotesSection do.
     var notebooks = await getNotebookMap()
     for (var item of items){
         var notebook = notebooks.get(item.parent_id)
@@ -812,10 +827,17 @@ export async function renderOutsideResultsSection(profile, viewState, searchText
         item.notebookPath = notebook ? notebook.path : ""
     }
     var mobile = !!(viewState && viewState.isMobile)
-    // Display the first 15 in the API's order; anything beyond is summarised in the footer. draggable:false
-    // keeps these rows from being drag-reschedule sources (they carry no drop target either).
+    // Display the first 15 in the API's order; anything beyond is summarised in the footer. Each hit is drawn in
+    // its own kind: a to-do as a to-do row (draggable:false keeps it from being a drag-reschedule source, and it
+    // carries no drop target either), and a regular note (is_todo falsy) as a note row - the display-only progress
+    // circle the panel's Notes section uses, with no tickable checkbox and no to-do-completion menu, so ticking a
+    // non-to-do is impossible here. Both are read-only: selection is suppressed the same way it is for the peek's
+    // to-do rows. Click-to-open and the notebook pill carry over from the shared row markup in both cases.
     var shown = items.slice(0, 15)
-    var rows = shown.map(item => renderTodoRowHtml(item, item.title, { mobile: mobile, draggable: false })).join("")
+    var rows = shown.map(item => item.is_todo
+        ? renderTodoRowHtml(item, item.title, { mobile: mobile, draggable: false })
+        : renderNoteRowHtml(item, { mobile: mobile, selectable: false })
+    ).join("")
     var footer = ""
     if (items.length > shown.length){
         var moreCount = items.length - shown.length
