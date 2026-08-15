@@ -38,6 +38,12 @@
     --cockpit-scrollbar-thumb-color-hover: var(--joplin-scrollbar-thumb-color-hover);
     --cockpit-checkbox-color: var(--joplin-color-correct);
     --cockpit-progress-color: var(--joplin-color-correct);
+    /* Semantic panel colours default to the high-contrast scheme-2 pair. Individual presets may
+     * override them when their established visual treatment differs (notably the classic Dark
+     * preset's muted headings and neutral-grey current-item highlight). */
+    --cockpit-group-heading-color: var(--cockpit-color2, var(--cockpit-color, inherit));
+    --cockpit-current-item-color: var(--cockpit-color2, var(--cockpit-color, inherit));
+    --cockpit-current-item-background-color: var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35));
     --cockpit-font-family: var(--joplin-font-family, sans-serif);
     --cockpit-completed-decoration: none;
     --cockpit-completed-opacity: 1;
@@ -469,7 +475,7 @@ h2 {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--cockpit-color2, inherit);
+    color: var(--cockpit-group-heading-color, var(--cockpit-color2, inherit));
 }
 
 .todos > h2:first-child {
@@ -501,7 +507,8 @@ h2 {
 }
 
 .todo.-selected {
-    background-color: var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35));
+    color: var(--cockpit-current-item-color, var(--cockpit-color2, inherit));
+    background-color: var(--cockpit-current-item-background-color, var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35)));
 }
 
 .todo.-dragging {
@@ -833,7 +840,8 @@ table {
 }
 
 .calendar-day.-selected .calendar-day-button {
-    background-color: var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35));
+    color: var(--cockpit-current-item-color, var(--cockpit-color2, inherit));
+    background-color: var(--cockpit-current-item-background-color, var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35)));
 }
 
 .calendar-dots {

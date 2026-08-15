@@ -216,6 +216,21 @@ async function main() {
         assert.ok(css.includes('--cockpit-background-color2:#002b36'), 'missing panel background')
     })
 
+    const darkTheme = await run({
+        dataDir: path.join(tmp, 'dark-theme-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos,
+        initialSettings: { themeMode: 'dark' },
+    })
+    await test('dark theme: restores the muted heading and neutral current-item colours', () => {
+        const css = inlineStyle(darkTheme)
+        assert.ok(css.includes('--cockpit-group-heading-color:#999999'), 'heading is not the former muted grey')
+        assert.ok(css.includes('--cockpit-current-item-color:#dddddd'), 'selected item foreground is not the former grey')
+        assert.ok(css.includes('--cockpit-current-item-background-color:#616161'), 'selected item background is not the former neutral grey')
+    })
+
     const customTheme = await run({
         dataDir: path.join(tmp, 'custom-theme-data'),
         installationDir: path.join(tmp, 'desktop-install'),

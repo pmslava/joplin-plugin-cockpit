@@ -26,14 +26,14 @@ import {
 } from "./settings"
 
 /** THEME_PRESETS ***********************************************************************************************************************************
- * The colours of Joplin's own built-in themes, resolved after Joplin's theme inheritance and derived-colour computation, keyed by the same camelCase *
- * names Joplin's theme objects use. colorCorrect drives both the checked disc and the progress ring (mapped to two --cockpit-* variables below), and *
- * the alpha-derived values (backgroundColorHoverDim3, scrollbarThumbColor*) are the pre-computed rgba() strings. Font size and family are the same    *
- * for every theme, so presets pin colours only.                                                                                                     *
+ * The colours of Joplin's own built-in themes, resolved after Joplin's theme inheritance and derived-colour computation. Most keys match Joplin's   *
+ * camelCase theme names; the Dark preset also carries three Cockpit semantic colours that preserve its established muted heading/current-item look. *
+ * colorCorrect drives both the checked disc and the progress ring (mapped to two --cockpit-* variables below), and alpha-derived values are stored as *
+ * pre-computed rgba() strings. Font size and family are the same for every theme, so presets pin colours only.                                       *
  ***************************************************************************************************************************************************/
 export const THEME_PRESETS: Record<string, Record<string, string>> = {
     light: { color: "#32373F", color2: "#ffffff", colorFaded: "#627184", colorCorrect: "green", colorWarn: "rgb(228,86,0)", colorError: "red", dividerColor: "#dddddd", urlColor: "#155BDA", selectedColor: "#e5e5e5", selectedColor2: "#131313", destructiveColor: "#D00707", backgroundColor: "#ffffff", backgroundColor2: "#313640", backgroundColor3: "#F4F5F6", backgroundColor4: "#ffffff", backgroundColorHover3: "#CBDAF1", backgroundColorHoverDim3: "rgba(203, 218, 241, 0.3)", focusOutlineColor: "rgb(228,86,0)", scrollbarThumbColor: "rgba(50, 55, 63, 0.54)", scrollbarThumbColorHover: "rgba(50, 55, 63, 0.63)" },
-    dark: { color: "#dddddd", color2: "#ffffff", colorFaded: "#999999", colorCorrect: "#72b972", colorWarn: "#9A5B00", colorError: "#ff4444", dividerColor: "#555555", urlColor: "rgb(166,166,255)", selectedColor: "#616161", selectedColor2: "#013F74", destructiveColor: "#F07777", backgroundColor: "#1D2024", backgroundColor2: "#181A1D", backgroundColor3: "#2E3138", backgroundColor4: "#1D2024", backgroundColorHover3: "#4E4E4E", backgroundColorHoverDim3: "rgba(78, 78, 78, 0.3)", focusOutlineColor: "#9A5B00", scrollbarThumbColor: "rgba(221, 221, 221, 0.54)", scrollbarThumbColorHover: "rgba(221, 221, 221, 0.63)" },
+    dark: { color: "#dddddd", color2: "#ffffff", colorFaded: "#999999", colorCorrect: "#72b972", colorWarn: "#9A5B00", colorError: "#ff4444", dividerColor: "#555555", urlColor: "rgb(166,166,255)", selectedColor: "#616161", selectedColor2: "#013F74", destructiveColor: "#F07777", backgroundColor: "#1D2024", backgroundColor2: "#181A1D", backgroundColor3: "#2E3138", backgroundColor4: "#1D2024", backgroundColorHover3: "#4E4E4E", backgroundColorHoverDim3: "rgba(78, 78, 78, 0.3)", focusOutlineColor: "#9A5B00", scrollbarThumbColor: "rgba(221, 221, 221, 0.54)", scrollbarThumbColorHover: "rgba(221, 221, 221, 0.63)", groupHeadingColor: "#999999", currentItemColor: "#dddddd", currentItemBackgroundColor: "#616161" },
     solarizedLight: { color: "#657b83", color2: "#eee8d5", colorFaded: "#839496", colorCorrect: "green", colorWarn: "#cb4b16", colorError: "#dc322f", dividerColor: "#eee8d5", urlColor: "#268bd2", selectedColor: "#eee8d5", selectedColor2: "#6c71c4", destructiveColor: "#D00707", backgroundColor: "#fdf6e3", backgroundColor2: "#002b36", backgroundColor3: "#F4F5F6", backgroundColor4: "#ffffff", backgroundColorHover3: "#CBDAF1", backgroundColorHoverDim3: "rgba(203, 218, 241, 0.3)", focusOutlineColor: "#cb4b16", scrollbarThumbColor: "rgba(101, 123, 131, 0.54)", scrollbarThumbColorHover: "rgba(101, 123, 131, 0.63)" },
     solarizedDark: { color: "#839496", color2: "#eee8d5", colorFaded: "#657b83", colorCorrect: "#72b972", colorWarn: "#cb4b16", colorError: "#dc322f", dividerColor: "#586e75", urlColor: "#268bd2", selectedColor: "#073642", selectedColor2: "#586e75", destructiveColor: "#F07777", backgroundColor: "#002b36", backgroundColor2: "#073642", backgroundColor3: "#012732", backgroundColor4: "#073642", backgroundColorHover3: "#2aa19870", backgroundColorHoverDim3: "rgba(42, 161, 152, 0.3)", focusOutlineColor: "#cb4b16", scrollbarThumbColor: "rgba(131, 148, 150, 0.54)", scrollbarThumbColorHover: "rgba(131, 148, 150, 0.63)" },
     nord: { color: "#e5e9f0", color2: "#88c0d0", colorFaded: "#d8dee9", colorCorrect: "#72b972", colorWarn: "#d08770", colorError: "#bf616a", dividerColor: "#5e81ac", urlColor: "#88c0d0", selectedColor: "#81a1c1", selectedColor2: "#5e81ac", destructiveColor: "#F07777", backgroundColor: "#2e3440", backgroundColor2: "#434c5e", backgroundColor3: "#2E3138", backgroundColor4: "#1D2024", backgroundColorHover3: "#4E4E4E", backgroundColorHoverDim3: "rgba(78, 78, 78, 0.3)", focusOutlineColor: "#d08770", scrollbarThumbColor: "rgba(229, 233, 240, 0.54)", scrollbarThumbColorHover: "rgba(229, 233, 240, 0.63)" },
@@ -42,8 +42,8 @@ export const THEME_PRESETS: Record<string, Record<string, string>> = {
 }
 
 /** PRESET_VAR_MAP **********************************************************************************************************************************
- * Maps each THEME_PRESETS colour key onto the --cockpit-* variable(s) it sets (colorCorrect feeds both the checkbox and the progress ring). Every    *
- * key the base :root alias block defines is covered here, so a preset restyles the whole panel.                                                     *
+ * Maps each THEME_PRESETS colour key onto the --cockpit-* variable(s) it sets (colorCorrect feeds both the checkbox and the progress ring), including *
+ * the optional semantic overrides used by Dark. Every base theme key is covered here, so a preset restyles the whole panel.                         *
  ***************************************************************************************************************************************************/
 const PRESET_VAR_MAP: Record<string, string | string[]> = {
     color: "color",
@@ -66,6 +66,9 @@ const PRESET_VAR_MAP: Record<string, string | string[]> = {
     focusOutlineColor: "focus-outline-color",
     scrollbarThumbColor: "scrollbar-thumb-color",
     scrollbarThumbColorHover: "scrollbar-thumb-color-hover",
+    groupHeadingColor: "group-heading-color",
+    currentItemColor: "current-item-color",
+    currentItemBackgroundColor: "current-item-background-color",
 }
 
 /** sanitizeColor ***********************************************************************************************************************************
