@@ -25,6 +25,15 @@ function makeJoplin(options) {
         onStart: null,
         panelMessageHandler: null,
         setHtmlCalls: 0,
+        // An ordered log of the two events the fast-first-paint checks care about: a panel paint ('setHtml')
+        // and a checkbox-count note-body fetch ('bodyFetch', a ['notes', id] GET asking only for the body).
+        // Recording them in one sequence lets a test assert a paint happened BEFORE any body was fetched.
+        callLog: [],
+        // Optional one-shot gate for the out-of-order-paint (generation token) check: when set to
+        // { promise, todos, searchNotes, onEnter }, the FIRST search awaits promise before returning the
+        // given snapshot, so an older refresh can be held mid-flight while a newer one paints past it.
+        searchGate: null,
+        searchGateUsed: false,
         // Every data.get, recorded as { path, query }, so tests can count search round-trips, single-note
         // reads (the removed GET-before-PUT), and the folder poll's request.
         gets: [],
@@ -72,7 +81,7 @@ function makeJoplin(options) {
                 create: async (id) => { state.panels.push(id); return `panel-${id}` },
                 addScript: async (handle, script) => { state.panelScripts.push(script) },
                 onMessage: async (handle, handler) => { state.panelMessageHandler = handler },
-                setHtml: async (handle, html) => { state.setHtmlCalls++; state.panelHtml[handle] = html },
+                setHtml: async (handle, html) => { state.setHtmlCalls++; state.callLog.push('setHtml'); state.panelHtml[handle] = html },
                 show: async () => {},
                 visible: async () => true,
             },
@@ -100,15 +109,34 @@ function makeJoplin(options) {
         data: {
             get: async (pathParts, query) => {
                 state.gets.push({ path: pathParts.slice(), query })
+                // A checkbox-count body fetch is a single-note read asking only for the body. Log it in the
+                // shared call sequence so the fast-paint checks can prove a paint preceded any body fetch.
+                if (pathParts[0] === 'notes' && pathParts.length === 2 && query && Array.isArray(query.fields) && query.fields.length === 1 && query.fields[0] === 'body') {
+                    state.callLog.push('bodyFetch')
+                }
                 if (pathParts[0] === 'search') {
                     // getTodos queries "type:todo ...", getNotes queries "type:note ...". Serve the
                     // regular-note list only to the type:note query so a showNotes profile does not
                     // list the to-do fixtures a second time as notes.
                     const q = (query && query.query) || ''
-                    if (q.includes('type:note') && !q.includes('type:todo')) {
+                    const isNoteQuery = q.includes('type:note') && !q.includes('type:todo')
+                    // One-shot gate: the first search to arrive is held on the gate's promise and answered
+                    // from the gate's own snapshot, so a test can freeze an older refresh here (with a
+                    // deliberately smaller result) while a newer refresh runs to completion past it.
+                    if (state.searchGate && !state.searchGateUsed) {
+                        state.searchGateUsed = true
+                        const gate = state.searchGate
+                        if (gate.onEnter) gate.onEnter()
+                        await gate.promise
+                        return { items: (isNoteQuery ? (gate.searchNotes || []) : (gate.todos || [])), has_more: false }
+                    }
+                    if (isNoteQuery) {
                         return { items: options.searchNotes || [], has_more: false }
                     }
-                    return { items: options.todos || [], has_more: false }
+                    // options.todos may be a function of the query, so a test can give different profiles
+                    // different to-do sets (e.g. distinct ids, so a switch hits uncached checkbox bodies).
+                    const todoItems = typeof options.todos === 'function' ? (options.todos(q) || []) : (options.todos || [])
+                    return { items: todoItems, has_more: false }
                 }
                 // The notebook map and the tag autocomplete page through these endpoints.
                 if (pathParts[0] === 'folders') {

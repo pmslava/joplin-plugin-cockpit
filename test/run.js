@@ -580,6 +580,155 @@ async function main() {
         assert.ok(poll.setHtmlCalls > htmlMark, 'a folder rename must trigger a re-render')
     })
 
+    // ------------------------------------------------ fast first paint + background fill (B1)
+    // A fully-shaped profile so a hand-built profileData renders without falling back. Spread and override
+    // per test. searchCriteria differs between profiles so each has its own cache key.
+    const baseProfile = {
+        name: 'P', searchCriteria: '', noteID: '',
+        showCompletedPast: true, showCompletedToday: true, showCompletedFuture: true, showCompletedNoDue: true,
+        showNoDue: true, showNotes: false, noDueDatesAtEnd: false, displayFormat: 'interval',
+        yearFormat: 'numeric', monthFormat: 'long', dayFormat: 'numeric', weekdayFormat: 'long',
+        timeIs12Hour: true, sortOrder: 0, weekStartsOn: 1, maxDotsPerDay: 4,
+    }
+    const b1Todos = [
+        { id: 'a'.repeat(32), title: 'Alpha', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: 'n'.repeat(32), user_updated_time: 1 },
+        { id: 'b'.repeat(32), title: 'Beta', todo_completed: 0, todo_due: Date.now() + 7200000, parent_id: 'n'.repeat(32), user_updated_time: 1 },
+    ]
+    const countBodyFetches = (state) => state.gets.filter(g =>
+        g.path[0] === 'notes' && g.path.length === 2 && g.query && Array.isArray(g.query.fields) &&
+        g.query.fields.length === 1 && g.query.fields[0] === 'body').length
+    const countSearches = (state) => state.gets.filter(g => g.path[0] === 'search').length
+
+    // (a) A desktop profile switch must paint the whole list before it fetches a single checkbox body.
+    // Profile Two gets DISTINCT ids so its checkbox bodies are genuinely uncached at switch time (startup
+    // already warmed profile One's), forcing the background fill to fetch them - after the fast paint.
+    const b1TodosTwo = [
+        { id: 'c'.repeat(32), title: 'Gamma', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: 'n'.repeat(32), user_updated_time: 1 },
+        { id: 'd'.repeat(32), title: 'Delta', todo_completed: 0, todo_due: Date.now() + 7200000, parent_id: 'n'.repeat(32), user_updated_time: 1 },
+    ]
+    const switchDesktop = await run({
+        dataDir: path.join(tmp, 'b1-switch-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: (q) => q.includes('tag:two') ? b1TodosTwo : b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...baseProfile, id: 1, name: 'One', searchCriteria: 'tag:one', sortOrder: 0 },
+                { ...baseProfile, id: 2, name: 'Two', searchCriteria: 'tag:two', sortOrder: 1 },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    await test('desktop fast paint: a profile switch paints the list before any checkbox-body fetch', async () => {
+        const mark = switchDesktop.callLog.length
+        await switchDesktop.panelMessageHandler(['profilesDropdownChanged', 2])
+        const seq = switchDesktop.callLog.slice(mark)
+        const firstPaint = seq.indexOf('setHtml')
+        const firstBody = seq.indexOf('bodyFetch')
+        assert.ok(firstPaint >= 0, 'the switch should paint the panel')
+        assert.ok(firstBody >= 0, 'the switch should still fetch the checkbox bodies in the background')
+        assert.ok(firstPaint < firstBody, 'the fast paint must precede the first note-body fetch')
+    })
+
+    // (b) Generating an overview note must fetch zero checkbox bodies. Proven by a diff: an extra profile
+    // whose to-do list is written to a note adds NO body fetches over the same run without it.
+    const mdNoOverview = await run({
+        dataDir: path.join(tmp, 'b1-md-none-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [
+                { ...baseProfile, id: 1, name: 'Active', searchCriteria: 'tag:active', noteID: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    const mdWithOverview = await run({
+        dataDir: path.join(tmp, 'b1-md-note-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...baseProfile, id: 1, name: 'Active', searchCriteria: 'tag:active', noteID: '' },
+                { ...baseProfile, id: 2, name: 'Overview', searchCriteria: 'tag:other', noteID: 'ov' },
+            ] }),
+            currentProfileID: 1,
+        },
+        notes: { ov: { id: 'ov', title: 'Overview', body: 'stale' } },
+    })
+    await test('markdown overview: writing the note fetches zero checkbox bodies', () => {
+        assert.ok(mdWithOverview.notePuts.some(p => p.id === 'ov'), 'the overview note should have been written')
+        assert.ok(mdWithOverview.notePuts.some(p => p.id === 'ov' && p.body.includes('](:/')), 'the overview note is a to-do list')
+        assert.strictEqual(
+            countBodyFetches(mdWithOverview), countBodyFetches(mdNoOverview),
+            'the overview-note profile must add no checkbox-body fetches')
+    })
+
+    // (c) Switching back to an already-viewed profile paints from the cached result set with zero searches
+    // (the background scheduleRefresh, on a real timer, is what refetches later - it is not driven here).
+    const cacheDesktop = await run({
+        dataDir: path.join(tmp, 'b1-cache-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...baseProfile, id: 1, name: 'One', searchCriteria: 'tag:one', sortOrder: 0 },
+                { ...baseProfile, id: 2, name: 'Two', searchCriteria: 'tag:two', sortOrder: 1 },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    await test('switch cache: returning to a viewed profile paints from cache with zero searches', async () => {
+        // View both profiles once so each result set is cached, then switch away.
+        await cacheDesktop.panelMessageHandler(['profilesDropdownChanged', 2])
+        await cacheDesktop.panelMessageHandler(['profilesDropdownChanged', 1])
+        await cacheDesktop.panelMessageHandler(['profilesDropdownChanged', 2])
+        const before = countSearches(cacheDesktop)
+        const paintsBefore = cacheDesktop.setHtmlCalls
+        await cacheDesktop.panelMessageHandler(['profilesDropdownChanged', 1])   // switch BACK to the cached profile
+        assert.strictEqual(countSearches(cacheDesktop) - before, 0, 'a switch back to a cached profile must not search')
+        assert.ok(cacheDesktop.setHtmlCalls > paintsBefore, 'it still repaints for the switched-to profile')
+        assert.ok(cacheDesktop.panelHtml['panel-panel'].includes('Alpha'), 'the cached rows are painted')
+    })
+
+    // (d) Out-of-order guard: an older refresh frozen mid-search must not overwrite a newer paint once it
+    // resumes. The gate freezes the older run with only ONE to-do; the newer run paints BOTH.
+    const tokenDesktop = await run({
+        dataDir: path.join(tmp, 'b1-token-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [
+                { ...baseProfile, id: 1, name: 'Solo', searchCriteria: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    await test('generation token: a delayed older refresh does not overwrite a newer paint', async () => {
+        let releaseGate, entered
+        const gatePromise = new Promise(resolve => { releaseGate = resolve })
+        const enteredPromise = new Promise(resolve => { entered = resolve })
+        tokenDesktop.searchGateUsed = false
+        tokenDesktop.searchGate = { promise: gatePromise, todos: [b1Todos[0]], onEnter: entered }
+        const older = tokenDesktop.panelMessageHandler(['sortDirectionClicked'])   // older: held mid-search
+        await enteredPromise                                                       // ...confirmed parked on the gate
+        await tokenDesktop.panelMessageHandler(['sortDirectionClicked'])           // newer: searches fresh, paints both
+        const htmlAfterNewer = tokenDesktop.panelHtml['panel-panel']
+        assert.ok(htmlAfterNewer.includes('b'.repeat(32)), 'the newer refresh painted both to-dos')
+        releaseGate()                                                              // older resumes, now stale
+        await older
+        assert.strictEqual(tokenDesktop.panelHtml['panel-panel'], htmlAfterNewer, 'the stale older refresh must not overwrite the newer paint')
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

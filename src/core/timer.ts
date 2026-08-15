@@ -50,8 +50,17 @@ export async function refreshInterfaces(){
     try {
         do {
             refreshQueued = false
-            await refreshPanelData()
+            // Fast first paint: render the whole list from whatever counts are cached, fetching NO note
+            // bodies, so a cold start or any full refresh shows at once instead of stalling the paint on up
+            // to ~600 body GETs.
+            await refreshPanelData({ fast: true })
+            // The overview notes never render checkbox rings, so this refresh fetches zero note bodies
+            // (fetchTodos forces the fast path for markdown). Previously it fetched up to 300 bodies per
+            // profile with a noteID, multiplied across the follow-up cascade - the bulk of the switch stall.
             await refreshNoteData()
+            // Background count-fill: fetch the note bodies (nearest the viewport first) and repaint once with
+            // the real rings. A no-op via the equality guard whenever the cache is already warm.
+            await refreshPanelData({ fillCounts: true })
         } while (refreshQueued)
     } catch (error) {
         console.error("Cockpit: could not refresh the to-do list", error)
@@ -109,13 +118,16 @@ export async function setupWorkspaceEvents(){
     // Synchronize button starts spinning without waiting for a data refresh.
     await registerEvent("onSyncStart", () => {
         markSyncStart()
-        void refreshPanelData()
+        // Fast paint: the button only needs to start spinning; there is no reason to fetch note bodies for a
+        // sync-status change, so this renders the rings from cache and leaves the fill to the next refresh.
+        void refreshPanelData({ fast: true })
     })
     await registerEvent("onSyncComplete", (event) => {
         markSyncComplete(event && event.withErrors)
-        // Re-render at once so the button stops spinning immediately, then schedule the data
-        // refreshes that let the search index catch up with whatever the sync pulled in.
-        void refreshPanelData()
+        // Re-render at once so the button stops spinning immediately (fast: no body fetches just for the
+        // button), then schedule the data refreshes that let the search index catch up with whatever the
+        // sync pulled in - those fill the rings.
+        void refreshPanelData({ fast: true })
         scheduleRefresh()
     })
     await registerEvent("onNoteAlarmTrigger", () => scheduleRefresh())

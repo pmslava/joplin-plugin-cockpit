@@ -119,11 +119,20 @@ abstract class BaseFormat {
             searchCriteria = `${searchCriteria} notebook:"${filterNotebook.title}"`
         }
         var showAnyCompleted = this.profile.showCompletedPast || this.profile.showCompletedToday || this.profile.showCompletedFuture || this.profile.showCompletedNoDue
-        var fast = this.viewState ? (this.viewState as any).fastCheckboxCounts : false
+        // The overview-note markdown never renders checkbox rings (getTodoString emits a plain "- [ ] [title]"
+        // list), so generating it must NOT fetch a single note body. Forcing fast here cuts that dependency:
+        // the whole refreshNoteData pass - one search per profile with a noteID - fetches zero bodies. On the
+        // panel (html) fast is driven by the view state instead, so the first paint skips the bodies too.
+        var isMarkdown = (this as any).outputFormat === 'markdown'
+        var fast = isMarkdown ? true : (this.viewState ? !!(this.viewState as any).fastCheckboxCounts : false)
         // Optimistic re-render: reuse the last search for this query and layer the host-held overlay on top,
         // so a just-ticked / just-created item shows without another round-trip. Off for ordinary refreshes.
-        var useCache = this.viewState ? (this.viewState as any).optimistic : false
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache)
+        var useCache = this.viewState ? !!(this.viewState as any).optimistic : false
+        // fillCounts: the background body-fetch pass after a fast first paint. priorityStart: the estimated
+        // first-visible row, so the on-screen rings fill before the off-screen ones.
+        var fillCounts = this.viewState ? !!(this.viewState as any).fillCounts : false
+        var priorityStart = this.viewState ? ((this.viewState as any).priorityStart || 0) : 0
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart })
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -695,9 +704,12 @@ export async function renderNotesSection(profile, viewState){
     if (sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"')){
         searchCriteria = `${searchCriteria} notebook:"${sectionFilterNotebook.title}"`
     }
-    var fast = viewState ? viewState.fastCheckboxCounts : false
-    var useCache = viewState ? viewState.optimistic : false
-    var notes = await getNotes(searchCriteria, fast, useCache)
+    var fast = viewState ? !!viewState.fastCheckboxCounts : false
+    var useCache = viewState ? !!viewState.optimistic : false
+    var fillCounts = viewState ? !!viewState.fillCounts : false
+    // The notes section renders after the to-dos, so it inherits no separate viewport estimate; its bodies
+    // are fetched in list order (0), while the to-dos above it get the viewport-first ordering.
+    var notes = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0 })
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
         note.notebookTitle = notebook ? notebook.title : ""

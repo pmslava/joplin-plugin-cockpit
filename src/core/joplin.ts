@@ -31,16 +31,28 @@ function cacheResult(cache, query, items){
  * Returns the list of todos, sorted by due date. If show completed is true, it will include completed todos. If show no due is true, it will       *
  * include todos without due dates.                                                                                                                 *
  ***************************************************************************************************************************************************/
- export async function getTodos(showCompleted, showNoDue, searchCritera, fast?, useCache?){
+ export async function getTodos(showCompleted, showNoDue, searchCritera, fast?, useCache?, opts?){
     const completed = showCompleted ? "" : "iscompleted:0"
     const noDue = showNoDue ? "" : "due:19700201"
     var query = `type:todo ${completed} ${noDue} ${searchCritera}`
+    // fillCounts is the background pass of the fast-first-paint flow: reuse the search the fast paint
+    // already cached (no new round-trip) but this time DO fetch the note bodies so the checkbox rings
+    // fill in. priorityStart is the estimated first-visible row, so the bodies nearest the viewport are
+    // fetched before the rest of the (body-fetch-capped) set.
+    var fillCounts = !!(opts && opts.fillCounts)
+    var priorityStart = (opts && opts.priorityStart) || 0
     var allTodos;
-    if (useCache && todosResultCache.has(query)){
-        // Optimistic re-render: reuse the last search for this query (with its checkbox counts already
-        // attached) instead of searching again. The overlay/overrides below still layer the just-changed
-        // item on top, so the user's action shows without waiting on the index.
+    if ((useCache || fillCounts) && todosResultCache.has(query)){
+        // Optimistic / fill re-render: reuse the last search for this query instead of searching again.
+        // The overlay/overrides below still layer the just-changed item on top, so the user's action shows
+        // without waiting on the index.
         allTodos = cloneItems(todosResultCache.get(query))
+        if (fillCounts){
+            // The fast paint cached these with empty rings; fetch the bodies now (viewport first) and
+            // refresh the cache so the follow-up render and any later optimistic paint show real counts.
+            await attachCheckboxCounts(allTodos, false, priorityStart)
+            cacheResult(todosResultCache, query, allTodos)
+        }
     } else {
         allTodos = [];
         let pageNum = 1;
@@ -54,7 +66,7 @@ function cacheResult(cache, query, items){
             })
             allTodos = allTodos.concat(response.items)
         } while (response.has_more)
-        await attachCheckboxCounts(allTodos, fast)
+        await attachCheckboxCounts(allTodos, fast, priorityStart)
         cacheResult(todosResultCache, query, allTodos)
     }
     // Fold in the host-held optimistic layer: created/newly-matching to-dos the index has not returned
@@ -139,11 +151,17 @@ export async function searchTitleSuggestions(partial){
  * Returns the regular (non to-do) notes matching the given search criteria, sorted by title, each with its checkbox counts. Used when a profile     *
  * shows notes alongside the to-dos.                                                                                                                *
  ***************************************************************************************************************************************************/
-export async function getNotes(searchCriteria, fast?, useCache?){
+export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var query = `type:note ${searchCriteria}`
+    var fillCounts = !!(opts && opts.fillCounts)
+    var priorityStart = (opts && opts.priorityStart) || 0
     var allNotes;
-    if (useCache && notesResultCache.has(query)){
+    if ((useCache || fillCounts) && notesResultCache.has(query)){
         allNotes = cloneItems(notesResultCache.get(query))
+        if (fillCounts){
+            await attachCheckboxCounts(allNotes, false, priorityStart)
+            cacheResult(notesResultCache, query, allNotes)
+        }
     } else {
         allNotes = [];
         let pageNum = 1;
@@ -156,7 +174,7 @@ export async function getNotes(searchCriteria, fast?, useCache?){
             })
             allNotes = allNotes.concat(response.items)
         } while (response.has_more)
-        await attachCheckboxCounts(allNotes, fast)
+        await attachCheckboxCounts(allNotes, fast, priorityStart)
         cacheResult(notesResultCache, query, allNotes)
     }
     // A created regular note (is_todo 0) shows here before the index returns it; the overlay filters to
@@ -180,12 +198,32 @@ var checkboxCounts = new Map()
 const bodyFetchChunk = 20
 const maxBodyFetchesPerRefresh = 300
 
-async function attachCheckboxCounts(items, fast?){
+/** viewportRank ************************************************************************************************************************************
+ * Orders a row for the background body-fetch pass by its distance from the viewport: rows at or below the estimated first-visible row rank first     *
+ * (nearest first), then the rows above it (nearest-above next). So when the per-refresh cap truncates a large set, the on-screen rings fill before    *
+ * the off-screen ones, which fill on the following refreshes.                                                                                        *
+ ***************************************************************************************************************************************************/
+function viewportRank(idx, start, total){
+    return idx >= start ? idx - start : total + (start - idx)
+}
+
+async function attachCheckboxCounts(items, fast?, priorityStart?){
     if (!fast){
-        var stale = items.filter(item => {
+        // Collect the rows whose body needs (re)fetching, keeping each row's position in the rendered
+        // list so the fetch order can be biased toward the viewport.
+        var staleEntries = []
+        items.forEach((item, idx) => {
             var cached = checkboxCounts.get(item.id)
-            return !cached || cached.stamp !== item.user_updated_time
-        }).slice(0, maxBodyFetchesPerRefresh)
+            if (!cached || cached.stamp !== item.user_updated_time) staleEntries.push({ item: item, idx: idx })
+        })
+        // Viewport-first: when the caller passed the estimated first-visible row (from the host-held
+        // scroll position), fetch the rows at/after it before the rows above it, so what the user is
+        // looking at fills its rings first when the per-refresh body-fetch cap truncates a large set.
+        if (priorityStart && priorityStart > 0 && staleEntries.length){
+            var total = items.length
+            staleEntries.sort((first, second) => viewportRank(first.idx, priorityStart, total) - viewportRank(second.idx, priorityStart, total))
+        }
+        var stale = staleEntries.slice(0, maxBodyFetchesPerRefresh).map(entry => entry.item)
         for (var index = 0; index < stale.length; index += bodyFetchChunk){
             await Promise.all(stale.slice(index, index + bodyFetchChunk).map(async item => {
                 try {

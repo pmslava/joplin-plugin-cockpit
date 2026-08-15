@@ -35,6 +35,31 @@ var lastRenderedHtml = null;
 var lastScrollTop = 0
 var renderNonce = 0
 
+/** refreshGeneration (out-of-order paint guard) ****************************************************************************************************
+ * A monotonically increasing id stamped on every refreshPanelData run. refreshPanelData awaits many data calls (search, note bodies, notebook map)  *
+ * before it paints, and it is entered from many uncoordinated triggers (a profile switch, the periodic timer, a sync event, an onNoteChange, the     *
+ * background count-fill), so two runs can overlap and finish in the wrong order - a slow older run resolving last would otherwise setHtml its stale   *
+ * markup over a newer run's paint. Each run captures the current value; just before it would paint it checks the value is still current and discards  *
+ * itself if a newer run has since started. Any note bodies a discarded run fetched still warm the shared cache, so the newer run keeps that work.     *
+ ***************************************************************************************************************************************************/
+var refreshGeneration = 0
+
+/** Row-height estimate for viewport-first body fetching ******************************************************************************************
+ * The background checkbox-count pass fetches the note bodies nearest the viewport first. The host holds the scroll position in pixels (lastScrollTop) *
+ * but the body fetch works in row indices, so this rough per-row height converts one to the other. It is only a hint that biases fetch order when the *
+ * per-refresh body-fetch cap truncates a large set; being an estimate, a fixed value is enough (rows vary a little and headings add slack).           *
+ ***************************************************************************************************************************************************/
+const rowHeightEstimate = 40
+
+/** estimateFirstVisibleIndex **********************************************************************************************************************
+ * The approximate index of the first row inside the viewport, from the host-held scroll position, with a couple of rows of slack above so a row       *
+ * straddling the top edge is still fetched early. Clamped at 0.                                                                                       *
+ ***************************************************************************************************************************************************/
+function estimateFirstVisibleIndex(){
+    var index = Math.floor((Number(lastScrollTop) || 0) / rowHeightEstimate) - 2
+    return index > 0 ? index : 0
+}
+
 /** searchFocused (mobile hold) *********************************************************************************************************************
  * True while the mobile search field has focus. refreshPanelData skips its setHtml then, because on mobile a setHtml is a full webview reload that      *
  * would wipe the input, caret, suggestion list and soft keyboard mid-typing. The webview posts searchFocusChanged on focus/blur; the held refresh runs  *
@@ -240,12 +265,13 @@ async function eventHandler(message){
         resetCalendarViewState()
         // The profile carries its own header state: notebook filter, search and sorting.
         applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
-        // Paint the switched-to view immediately (fast on mobile: rings from cache), and leave the
-        // all-profiles overview-note rewrite - which the switch does not change and the user is not waiting
-        // for - to the background scheduleRefresh. This is what turns a multi-second mobile switch into one
-        // search + one reload; desktop keeps the same immediate paint and gets its overview notes a beat
-        // later via the schedule (refreshInterfaces there is cheap, so this is safe and still instant).
-        await refreshPanelData({ fast: true })
+        // Paint the switched-to view immediately, then fill the rings from note bodies in the background.
+        // optimistic reuses the switched-to profile's cached result set, so a previously viewed profile paints
+        // with ZERO searches (with the host-held override map still layered on); a first visit does one search
+        // and no body fetches. Either way the whole list is on screen before any body GET - the fix for the
+        // multi-minute switch stall. The all-profiles overview-note rewrite, which the switch does not change
+        // and the user is not waiting for, is left to the background scheduleRefresh.
+        await refreshPanelFastThenFill({ optimistic: true })
         scheduleRefresh()
     } else if (message[0] == 'notebookFilterChanged'){
         notebookFilter = String(message[1] || "")
@@ -285,12 +311,12 @@ async function eventHandler(message){
         await refreshPanelData()
     } else if (message[0] == 'createProfileClicked'){
         // Desktop only: on mobile the create-profile button opens the in-panel editor overlay (which posts
-        // profileSaved) rather than this native-dialog flow. Fast off-screen paint so redux holds fresh
-        // content immediately, then scheduleRefresh reconciles the new profile's overview note and fills the
-        // rings in the background.
+        // profileSaved) rather than this native-dialog flow. Fast off-screen paint so the panel holds fresh
+        // content immediately, then the background fill fetches the rings and scheduleRefresh reconciles the
+        // new profile's overview note.
         await openEditor()
         lastRenderedHtml = null
-        await refreshPanelData({ fast: true })
+        await refreshPanelFastThenFill()
         scheduleRefresh()
     } else if (message[0] == 'editProfileClicked'){
         var id = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
@@ -391,12 +417,12 @@ async function eventHandler(message){
         if (savedID == await getCurrentProfileID()) applyProfileHeaderState(await getProfile(savedID))
         lastRenderedHtml = null
         // Mobile-only path (the editor overlay is never opened on desktop, so this never runs there). Paint
-        // fast from cache and defer the all-profiles overview-note rewrite to the background, mirroring the
-        // switch/create handlers, instead of the heavy inline refreshInterfaces the round meant to remove
-        // from the interactive create/save path. Editing may change which to-dos show, so a full (fast)
-        // paint is still issued - the search runs; only the ring body-fetches are deferred - and
-        // scheduleRefresh then reconciles the overview notes and fills the rings a beat later.
-        await refreshPanelData({ fast: true })
+        // fast and defer the all-profiles overview-note rewrite to the background, mirroring the switch/create
+        // handlers, instead of the heavy inline refreshInterfaces the round meant to remove from the
+        // interactive create/save path. Editing may change which to-dos show, so a full (fast) paint is still
+        // issued - the search runs; only the ring body-fetches are deferred to the fill - and scheduleRefresh
+        // then reconciles the overview notes.
+        await refreshPanelFastThenFill()
         scheduleRefresh()
     } else if (message[0] == 'profileDeleteRequested'){
         // Result of the in-panel profile editor overlay's Delete. openDeleteDialog keeps its native confirm
@@ -564,12 +590,16 @@ export async function togglePanelVisibility() {
  export async function refreshPanelData(options?){
     if (!panel) return
     var mobile = await isMobile()
-    // Fast first-paint (mobile only): render the checkbox rings from cache without fetching note bodies, so
-    // a profile switch/create paints after one search instead of waiting on up to 300 serial body GETs. The
-    // caller (the switch/create handlers) pairs this with scheduleRefresh, whose background refresh fetches
-    // the bodies and repaints with the real rings. Gated to mobile: those body-fetch costs are mobile-only,
-    // and skipping them on desktop would flash empty rings, so desktop always renders the full counts.
-    var fast = mobile && !!(options && options.fast)
+    // Fast first-paint (both platforms): render the checkbox rings from whatever is already cached WITHOUT
+    // fetching note bodies, so a profile switch / startup / full refresh paints the whole row list after one
+    // search instead of waiting on up to ~600 body GETs. An uncached ring renders empty (no layout shift -
+    // the disc keeps its box), and the follow-up fillCounts pass below fills it. The switch/create handlers
+    // and refreshInterfaces pair this fast paint with the fill so the rings arrive a beat later.
+    var fast = !!(options && options.fast)
+    // Background count-fill: the follow-up render after a fast paint. It reuses the fast paint's cached search
+    // (no new round-trip) but fetches the note bodies (viewport first) so the rings fill, then paints once.
+    // The lastRenderedHtml guard makes it a no-op when nothing changed (a warm cache / a switch back).
+    var fillCounts = !!(options && options.fillCounts)
     // Optimistic render: reuse the last search for the active query and layer the host-held overlay/overrides
     // on top (getTodos/getNotes via the viewState flag below), so a tick/create/external-change shows at once
     // without another search. Any-platform; the equality guard still suppresses a render that changes nothing.
@@ -606,13 +636,18 @@ export async function togglePanelVisibility() {
         console.warn("Cockpit: could not read panel visibility; assuming visible", error)
     }
     if (!panelVisible) return
+    // Claim a generation for this run BEFORE any of the awaited data work below. A later run started while
+    // this one is still awaiting will claim a higher number; this run then discards itself at the paint
+    // guard rather than clobbering the newer paint. Claimed after the early no-paint returns above so those
+    // do not needlessly supersede an in-flight run.
+    var myGeneration = ++refreshGeneration
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile) return
     // isMobile is carried into the view state so the row HTML generators (renderTodoRow / renderNotesSection)
     // can omit the desktop-only action tooltips on mobile, where hover does not exist and the row already has
     // its long-press flows. Every other platform branch in those generators keys off the same flag.
-    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, optimistic: optimistic, isMobile: mobile }
+    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     if (profile.showNotes){
@@ -647,6 +682,11 @@ export async function togglePanelVisibility() {
         .replace("<<CONTROLS>>", () => controlsHtml)
         .replace("<<TODOS>>", () => todosHtml)
         .replace("<<OVERLAY_STATE>>", () => overlayStateIsland)
+    // Out-of-order guard: if a newer run has started while this one was awaiting its data, discard this run
+    // now - BEFORE touching lastRenderedHtml or painting - so a slow older run cannot overwrite the newer
+    // paint (nor corrupt the equality baseline with markup that never reached the panel). The newer run owns
+    // the paint. Any note bodies this run fetched already warmed the shared cache, so nothing is wasted.
+    if (myGeneration !== refreshGeneration) return
     // The equality guard compares content only: the scroll-top and render-nonce placeholders are still
     // present here and are filled in below. Comparing before they are stamped keeps the guard working -
     // otherwise the ever-incrementing nonce would defeat it, forcing a setHtml (a full webview reload on
@@ -660,6 +700,20 @@ export async function togglePanelVisibility() {
         .replace("<<SCROLL_TOP>>", () => String(lastScrollTop))
         .replace("<<RENDER_NONCE>>", () => String(renderNonce))
     await joplin.views.panels.setHtml(panel, htmlString);
+}
+
+/** refreshPanelFastThenFill ***********************************************************************************************************************
+ * The interactive first-paint path. It paints the whole row list at once WITHOUT any note-body fetches (empty rings), then runs the background pass    *
+ * that fetches the bodies (nearest the viewport first) and repaints once with the real rings. A profile switch / create / save uses it so the panel    *
+ * appears after a single search instead of stalling on up to ~600 body GETs. options carries the render flags: a switch passes optimistic so a         *
+ * previously viewed profile paints straight from the cached result set (zero searches) with the host-held override map layered on. The generation      *
+ * guard inside refreshPanelData discards either paint if a newer refresh has superseded it, and the equality guard makes the fill a no-op when the     *
+ * rings did not actually change (a warm cache, a switch back).                                                                                         *
+ ***************************************************************************************************************************************************/
+async function refreshPanelFastThenFill(options?){
+    var base = options || {}
+    await refreshPanelData({ ...base, fast: true })
+    await refreshPanelData({ ...base, fillCounts: true })
 }
 
 /** syncButtonTooltip *******************************************************************************************************************************
