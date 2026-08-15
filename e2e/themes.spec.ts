@@ -57,14 +57,15 @@ test.describe('Light theme', () => {
 
   test('panel and content controls use readable matching colour pairs', async () => {
     const panel = await agendaPanel(joplin.win);
-    const appearance = await panel.locator(':root').evaluate((element) =>
-      getComputedStyle(element).getPropertyValue('--joplin-appearance').trim()
-    );
-    expect(appearance).toBe('light');
-
     // Cockpit paints its panel with Joplin's scheme-2/sidebar background. This assertion caught the
     // original regression: scheme-1 text (#32373f) on scheme-2 background (#313640), just 1.01:1.
+    // The exact pair also proves the throwaway profile loaded Joplin Light; Joplin 3.6 does not
+    // expose --joplin-appearance inside plugin webviews.
     const body = await computedColours(panel.locator('body'));
+    expect(body).toEqual({
+      color: 'rgb(255, 255, 255)',
+      backgroundColor: 'rgb(49, 54, 64)',
+    });
     expect(contrastRatio(body.color, body.backgroundColor)).toBeGreaterThanOrEqual(4.5);
 
     // The profile picker is a scheme-4/content surface. Pinning the panel foreground must not turn
