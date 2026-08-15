@@ -11,7 +11,7 @@ import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
-import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, stepCalendarAnchor } from "../../core/formats";
+import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
@@ -419,9 +419,22 @@ export async function togglePanelVisibility() {
     var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, isMobile: mobile }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
+    var notesHtml = ""
     if (profile.showNotes){
-        var notesHtml = await renderNotesSection(profile, panelViewState)
+        notesHtml = await renderNotesSection(profile, panelViewState)
         todosHtml = profile.notesPosition === "before" ? notesHtml + todosHtml : todosHtml + notesHtml
+    }
+    // Results outside current filters (read-only peek). Trigger: the search box holds non-empty text AND the
+    // fully-filtered view - the to-dos the formatter just rendered (getRenderedTodoCount, recorded by its own
+    // fetchTodos) plus the notes section when the profile shows one - came out with zero rows. renderNotesSection
+    // returns "" for zero notes, so this decision needs no extra query. Only in that case is ONE unfiltered
+    // search run (renderOutsideResultsSection); with any visible row, or an empty search box, nothing extra runs
+    // and the markup stays byte-for-byte as before. This is a pure read - no profile, notebook-picker or setting
+    // is touched - and it honours the fast option, which is carried in panelViewState for the checkbox rings.
+    var outsideSearchText = String(searchFilter || "").trim()
+    var filteredViewIsEmpty = formatter.getRenderedTodoCount() === 0 && notesHtml === ""
+    if (outsideSearchText && filteredViewIsEmpty){
+        todosHtml += await renderOutsideResultsSection(profile, panelViewState, outsideSearchText)
     }
     var controlsHtml = await getControlsHTML(profileID)
     // The theme block is rebuilt on every render (never memoised) so that a theme-setting change

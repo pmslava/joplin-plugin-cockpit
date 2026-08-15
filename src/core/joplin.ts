@@ -119,6 +119,27 @@ export async function getNotes(searchCriteria, fast?){
     return allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
 }
 
+/** searchOutsideFilters ****************************************************************************************************************************
+ * The read-only "results outside current filters" peek. When the panel's search box has text but nothing matches inside the active profile's        *
+ * filters, this runs the user's search text VERBATIM - no profile searchCriteria, no notebook:"..." narrowing, no iscompleted:/type: tokens the       *
+ * plugin would otherwise add - so it finds whatever that text matches anywhere in the vault. Tokens the user typed themselves (notebook:, tag:, ...)  *
+ * are kept exactly as typed, since they are passed through untouched. Both regular notes and to-dos come back: type:'note' is the item type searched   *
+ * (to-dos are notes), not a query filter, and no type: token is added. The Joplin search API already excludes trashed notes. One page only, capped at  *
+ * 50, with the API's has_more surfaced so the caller can show a "+more" hint. Checkbox rings fill from cache like the main lists (skipped under fast).  *
+ ***************************************************************************************************************************************************/
+export async function searchOutsideFilters(searchText, fast?){
+    var response = await joplin.data.get(['search'], {
+        query: String(searchText || ""),
+        fields: ['id', 'title', 'todo_completed', 'parent_id', 'user_updated_time'],
+        type: 'note',
+        limit: 50,
+        page: 1,
+    })
+    var items = response.items || []
+    await attachCheckboxCounts(items, fast)
+    return { items: items, hasMore: !!response.has_more }
+}
+
 /** attachCheckboxCounts ****************************************************************************************************************************
  * Fills in checkboxDone/checkboxTotal for each item. The counts need the note bodies, which are by far the heaviest thing to transfer, so they are  *
  * cached per note and a body is only re-fetched when the note's updated time has changed. A refresh therefore usually fetches no bodies at all.     *

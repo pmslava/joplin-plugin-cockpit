@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getTodos, getNotes, getNotebookMap, notebookWithDescendants } from "./joplin";
+import { getTodos, getNotes, getNotebookMap, notebookWithDescendants, searchOutsideFilters } from "./joplin";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
     CalendarViewState,
@@ -26,6 +26,49 @@ import {
 } from "./calendar";
 
 export { escapeHtml } from "./html";
+
+/** renderTodoRowHtml *******************************************************************************************************************************
+ * The markup for a single to-do row: a progress-ringed checkbox that completes it, a title link that opens it, and its notebook pill. Shared by      *
+ * BaseFormat.renderTodoRow (the normal list) and renderOutsideResultsSection (the read-only peek), so both stay identical in look and behaviour.     *
+ * options.mobile drops the desktop-only hover action hints (mobile has long-press flows and no hover). options.draggable === false suppresses the     *
+ * draggable attribute and the drag start/end handlers, which is how the peek's rows are kept from being drag-reschedule sources; every ordinary row   *
+ * passes draggable:true and is byte-for-byte what renderTodoRow emitted before this was extracted.                                                    *
+ ***************************************************************************************************************************************************/
+function renderTodoRowHtml(todo, label, options?){
+    var mobile = !!(options && options.mobile)
+    var draggable = !options || options.draggable !== false
+    var checkedString = todo.todo_completed ? "checked" : ""
+    var checkboxHints = mobile ? "" : "&#10;Left click to tick/untick&#10;Right click to change due"
+    var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
+    var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
+    var notebookString = todo.notebookTitle
+        ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(todo.parent_id)}" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
+        : ""
+    // The ring around the checkbox shows how many of the checkboxes inside the note are ticked.
+    // It is display only: filling it does not complete the to-do, and completing the to-do does
+    // not fill it.
+    var total = Number(todo.checkboxTotal) || 0
+    var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
+    var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
+    var draggableAttr = draggable ? ` draggable="true"` : ""
+    var dragHandlers = draggable
+        ? `
+                    ondragstart="onTodoDragStart(event, '${todo.id}')"
+                    ondragend="onTodoDragEnd(event)"`
+        : ""
+    return `
+                <div class="todo${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}"${draggableAttr}
+                    onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
+                    onclick="onTodoRowClicked(event, '${todo.id}')"
+                    ondblclick="onRowDoubleClicked(event, '${todo.id}')"
+                    oncontextmenu="onTodoContextMenu(event, '${todo.id}')"${dragHandlers}>
+                    <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
+                        onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                    <a class="todo-title"${titleHint}>${escapeHtml(label)}</a>
+                    ${notebookString}
+                </div>
+            `
+}
 
 /** BaseFormat **************************************************************************************************************************************
  * This is the abstract class that all other formats must inherit from.                                                                             *
@@ -50,6 +93,21 @@ abstract class BaseFormat {
      * This stores the current profile data used to customize the formatting of the todos                                                           *
      ***********************************************************************************************************************************************/
     protected profile = null
+
+    /** lastFetchedTodos ****************************************************************************************************************************
+     * The to-dos the most recent fetchTodos produced, i.e. after every profile / notebook / search filter has been applied. Every renderHtml path  *
+     * (the grouped list and both calendar views) runs fetchTodos exactly once, so this always reflects what the panel just rendered. It is recorded *
+     * only so the panel can tell, without re-running the query, whether the filtered view came out empty - the trigger for the outside-results peek.*
+     ***********************************************************************************************************************************************/
+    private lastFetchedTodos: any[] = []
+
+    /** getRenderedTodoCount ************************************************************************************************************************
+     * How many to-dos the last renderHtml produced (after all filtering). The panel reads this straight after renderHtml to decide, together with   *
+     * the notes section, whether the fully-filtered view is empty.                                                                                  *
+     ***********************************************************************************************************************************************/
+    public getRenderedTodoCount(){
+        return this.lastFetchedTodos ? this.lastFetchedTodos.length : 0
+    }
 
     /** outputFormat ********************************************************************************************************************************
      * This stores the output format that the todos are requested in. Valid values are "html" and "markdown"                                        *
@@ -145,6 +203,9 @@ abstract class BaseFormat {
             var compare = itemComparator(sort)
             todos.sort((first, second) => (first.todo_due - second.todo_due) || compare(first, second))
         }
+        // Record the fully-filtered set so the panel can detect an empty view (the outside-results trigger)
+        // without re-running the query. Kept here, the single choke point every renderHtml path passes through.
+        this.lastFetchedTodos = todos
         return todos
     }
 
@@ -152,38 +213,10 @@ abstract class BaseFormat {
      * A single to-do as it appears in the panel: a checkbox that completes it and a link that opens it                                              *
      ***********************************************************************************************************************************************/
     protected renderTodoRow(todo, label){
-        var checkedString = todo.todo_completed ? "checked" : ""
-        // Desktop only: append the per-zone action hints to each tooltip, merged with the content the zone
-        // already shows (the checkbox's progress, the notebook pill's full path), on their own lines via the
-        // &#10; entity. Mobile keeps its long-press flows and has no hover, so it gets no action lines - the
-        // existing tooltips there are unchanged. isMobile is carried in the view state (see panel.ts).
-        var mobile = !!(this.viewState && (this.viewState as any).isMobile)
-        var checkboxHints = mobile ? "" : "&#10;Left click to tick/untick&#10;Right click to change due"
-        var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
-        var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
-        var notebookString = todo.notebookTitle
-            ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(todo.parent_id)}" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
-            : ""
-        // The ring around the checkbox shows how many of the checkboxes inside the note are ticked.
-        // It is display only: filling it does not complete the to-do, and completing the to-do does
-        // not fill it.
-        var total = Number(todo.checkboxTotal) || 0
-        var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
-        var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
-        return `
-                <div class="todo${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}" draggable="true"
-                    onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
-                    onclick="onTodoRowClicked(event, '${todo.id}')"
-                    ondblclick="onRowDoubleClicked(event, '${todo.id}')"
-                    oncontextmenu="onTodoContextMenu(event, '${todo.id}')"
-                    ondragstart="onTodoDragStart(event, '${todo.id}')"
-                    ondragend="onTodoDragEnd(event)">
-                    <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
-                        onchange="onTodoChecked('${todo.id}')" ${checkedString}>
-                    <a class="todo-title"${titleHint}>${escapeHtml(label)}</a>
-                    ${notebookString}
-                </div>
-            `
+        // The row markup lives in the shared renderTodoRowHtml so the read-only "results outside current
+        // filters" peek can reuse it verbatim. isMobile is carried in the view state (see panel.ts) and drops
+        // the desktop-only hover action hints; draggable stays true here so ordinary rows are unchanged.
+        return renderTodoRowHtml(todo, label, { mobile: !!(this.viewState && (this.viewState as any).isMobile), draggable: true })
     }
 
     /** getHeadingDropTarget ************************************************************************************************************************
@@ -738,6 +771,57 @@ export async function renderNotesSection(profile, viewState){
         <section class="notes-section">
             <h2>Notes</h2>
             ${rows}
+        </section>
+    `
+}
+
+/** renderOutsideResultsSection *********************************************************************************************************************
+ * The read-only "results outside current filters" peek, composed server side in the panel render path. It is only ever called when the search box has *
+ * text AND the fully-filtered view came out empty (the caller decides that; see refreshPanelData), so reaching here means running one unfiltered      *
+ * search (searchOutsideFilters) with the user's text verbatim and laying its hits out as a FLAT list - no due-date grouping - via the same row         *
+ * pipeline as the main list, but with dragging suppressed so a peeked row cannot be dragged onto a date. The search text is user input, so it is       *
+ * escaped everywhere it is interpolated. Nothing here writes a setting, a profile or the notebook picker: it is a pure read.                           *
+ *   - No hits anywhere: a single muted line and nothing else.                                                                                          *
+ *   - Hits: a "nothing matched in your filters" line, a group-style heading with the count, up to 15 rows, and a "…and N more" footer when there were  *
+ *     more (N gets a trailing "+" when the API reported still more beyond the 50 fetched).                                                              *
+ ***************************************************************************************************************************************************/
+export async function renderOutsideResultsSection(profile, viewState, searchText){
+    var fast = viewState ? viewState.fastCheckboxCounts : false
+    var found = await searchOutsideFilters(searchText, fast)
+    var items = found.items || []
+    var escaped = escapeHtml(searchText)
+    // No hits anywhere: a single muted line, matching the panel's plain-spoken voice, and nothing else.
+    if (!items.length){
+        return `
+        <section class="outside-results">
+            <p class="outside-results-message">No matches for "${escaped}" anywhere.</p>
+        </section>
+    `
+    }
+    // The rows reuse renderTodoRowHtml, which reads notebookTitle/notebookPath for the pill, so attach the
+    // notebook the same way fetchTodos / renderNotesSection do.
+    var notebooks = await getNotebookMap()
+    for (var item of items){
+        var notebook = notebooks.get(item.parent_id)
+        item.notebookTitle = notebook ? notebook.title : ""
+        item.notebookPath = notebook ? notebook.path : ""
+    }
+    var mobile = !!(viewState && viewState.isMobile)
+    // Display the first 15 in the API's order; anything beyond is summarised in the footer. draggable:false
+    // keeps these rows from being drag-reschedule sources (they carry no drop target either).
+    var shown = items.slice(0, 15)
+    var rows = shown.map(item => renderTodoRowHtml(item, item.title, { mobile: mobile, draggable: false })).join("")
+    var footer = ""
+    if (items.length > shown.length){
+        var moreCount = items.length - shown.length
+        footer = `<p class="outside-results-message">…and ${moreCount}${found.hasMore ? "+" : ""} more matches</p>`
+    }
+    return `
+        <section class="outside-results">
+            <p class="outside-results-message">Nothing in current filters matches "${escaped}".</p>
+            <h2 class="outside-results-heading">Results outside current filters (${items.length})</h2>
+            ${rows}
+            ${footer}
         </section>
     `
 }

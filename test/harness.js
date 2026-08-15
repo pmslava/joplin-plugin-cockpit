@@ -22,6 +22,8 @@ function makeJoplin(options) {
         notePuts: [],
         dataPosts: [],
         dataDeletes: [],
+        // Every settings.setValue, so a test can assert a render wrote no profile/setting (the outside-results peek is read-only).
+        settingWrites: [],
         onStart: null,
         panelMessageHandler: null,
         setHtmlCalls: 0,
@@ -49,6 +51,7 @@ function makeJoplin(options) {
             },
             value: async (key) => settings[key],
             setValue: async (key, value) => {
+                state.settingWrites.push({ key, value })
                 settings[key] = value
                 for (const handler of state.settingHandlers) await handler({ keys: [key] })
             },
@@ -98,8 +101,17 @@ function makeJoplin(options) {
                     // regular-note list only to the type:note query so a showNotes profile does not
                     // list the to-do fixtures a second time as notes.
                     const q = (query && query.query) || ''
-                    if (q.includes('type:note') && !q.includes('type:todo')) {
+                    const hasTodo = q.includes('type:todo')
+                    const hasNote = q.includes('type:note')
+                    if (hasNote && !hasTodo) {
                         return { items: options.searchNotes || [], has_more: false }
+                    }
+                    // The "results outside current filters" peek searches the user's text verbatim, with
+                    // none of the type:/iscompleted:/notebook: tokens the plugin otherwise adds - so a search
+                    // carrying neither type token is that peek. (Title autocomplete is also type-less, but the
+                    // suite never drives it.) outsideHasMore feeds the "+more" footer.
+                    if (!hasTodo && !hasNote) {
+                        return { items: options.outsideResults || [], has_more: !!options.outsideHasMore }
                     }
                     return { items: options.todos || [], has_more: false }
                 }
