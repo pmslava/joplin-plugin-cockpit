@@ -7,3 +7,4 @@ publish/
 e2e/.profiles/
 test-results/
 playwright-report/
+.vscode/
