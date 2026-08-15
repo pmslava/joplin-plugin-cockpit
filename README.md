@@ -5,6 +5,7 @@ One panel for your to-dos, notes, and the checkboxes inside them, grouped by whe
 Cockpit is a single [Joplin](https://joplinapp.org) panel built to replace the notes and notebooks sidebars. It gathers every to-do, every note, and the checkboxes inside them into one view, grouped by due date — so it is your plan and your whole archive at the same time. Switch it between an Overdue / Today / This Week rundown, a flat date list, a month calendar, or a week planner. It is built for one thing: deciding what to do right now.
 
 ![The Cockpit panel on desktop](docs/images/hero-panel.png)
+
 *One panel: every to-do and note, grouped by due date, with a progress ring on each row.*
 
 <!-- HERO SHOT (docs/images/hero-panel.png): the desktop panel docked beside the note list,
@@ -14,6 +15,7 @@ Cockpit is a single [Joplin](https://joplinapp.org) panel built to replace the n
 Save any set-up as a profile — its view, filters, search, and what counts as done — then switch profiles to switch the whole view. Narrow the list by notebook or full Joplin search, with autocomplete for `tag:`, `notebook:`, and `title:`. Reschedule by dragging a to-do onto a day or a group, or open the alarm picker for an exact date and time. Recolour the panel to match Joplin or a built-in theme. It runs on Android too, where the pickers and the profile editor are drawn as touch-native overlays.
 
 ![Theme presets and custom colours](docs/images/themes.png)
+
 *Theme presets and custom colours, with adjustable font and circle size.*
 
 <!-- themes.png: the panel under a non-default theme (e.g. Nord or a custom colour set), with the
@@ -21,6 +23,7 @@ Save any set-up as a profile — its view, filters, search, and what counts as d
      show. Include at least one completed to-do so its style reads. -->
 
 ![The set-alarm picker](docs/images/alarm-picker.png)
+
 *The alarm picker: ISO date, 24-hour time, a Monday-first calendar, and quick shortcuts.*
 
 <!-- alarm-picker.png: the picker open (desktop or the mobile overlay), showing the Monday-first
