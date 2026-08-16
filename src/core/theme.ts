@@ -81,13 +81,19 @@ function sanitizeColor(value: string): string {
 }
 
 /** buildThemeCss ***********************************************************************************************************************************
- * The generated :root override block for the current theme settings, or "" when nothing needs overriding (Match Joplin with default font size and    *
- * completed style). It must be rebuilt on every render so that a settings change actually changes the panel markup and gets past the panel's         *
- * equality guard; it is never memoised.                                                                                                            *
+ * The generated :root block for the current theme settings. It always contains the internal Match-Joplin marker, followed by any visual overrides.  *
+ * It must be rebuilt on every render so that a settings change actually changes the panel markup and gets past the panel's equality guard; it is     *
+ * never memoised.                                                                                                                                   *
  ***************************************************************************************************************************************************/
 export async function buildThemeCss(): Promise<string> {
     var mode = String(await joplin.settings.value(themeModeSettingKey) || "matchJoplin")
     var decls: string[] = []
+
+    // The webview cannot read Joplin's appearance directly: Joplin deliberately omits that value
+    // from plugin theme CSS. Expose only whether Cockpit is following Joplin, so panelWebview.js can
+    // classify the effective Joplin palette without applying host-theme overrides to an explicit
+    // Cockpit preset or a custom theme.
+    decls.push(`--cockpit-match-joplin:${mode === "matchJoplin" ? "1" : "0"}`)
 
     // Font size applies in every mode: 0 keeps the "match Joplin" calc default in panel.css; any
     // positive value pins the panel's base font size.
@@ -142,6 +148,5 @@ export async function buildThemeCss(): Promise<string> {
         decls.push("--cockpit-completed-decoration:line-through")
     }
 
-    if (!decls.length) return ""
     return `:root{${decls.join(";")}}`
 }

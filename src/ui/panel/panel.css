@@ -10,11 +10,15 @@
  * ------------------------------------------------------------------------------------------- */
 
 /* Base theme: --cockpit-* variables default to the live Joplin theme, so "Match Joplin" needs no
- * generated CSS at all. The colour-correct green is exposed as two independent variables - the
+ * generated colour overrides (its inline block carries only internal mode/size markers). The
+ * colour-correct green is exposed as two independent variables - the
  * checked disc/tick and the progress-ring filler - so a custom theme can set them apart. The two
  * completed-to-do variables drive how a finished to-do's title looks and are overridden by the
  * completed-to-do setting. */
 :root {
+    /* Internal mode marker emitted by buildThemeCss. Fail closed until that inline block loads, so
+     * an explicit preset is never mistaken for Match Joplin during initial paint. */
+    --cockpit-match-joplin: 0;
     --cockpit-color: var(--joplin-color);
     /* Scheme 2 is Joplin's sidebar pair. Cockpit deliberately uses its background for the panel,
      * so panel-native text must use the matching foreground rather than scheme 1's content colour. */
@@ -63,6 +67,17 @@
      * below so it survives a font-size setting change. The item glyph is centred on the first text
      * line of its row against this, independent of the circle size. */
     --cockpit-row-line-height: calc(var(--cockpit-font-size, calc(var(--joplin-font-size, 12px) * 1.0833)) * 1.5);
+}
+
+/* Joplin does not expose a light/dark appearance flag to plugin webviews. panelWebview.js therefore
+ * resolves the effective Joplin foreground/background pair and adds this class only when Cockpit is
+ * in Match Joplin mode and that pair is dark. These are the exact pre-1.7.6 Dark-theme semantics:
+ * muted group headings and the neutral scheme-1 selection pair. :where() contributes no extra
+ * specificity, so the later generated theme block and the user's still-later custom CSS can win. */
+:root:where(.cockpit-dark-appearance) {
+    --cockpit-group-heading-color: var(--cockpit-color-faded, #999999);
+    --cockpit-current-item-color: var(--cockpit-color, var(--cockpit-color2, inherit));
+    --cockpit-current-item-background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
 }
 
 * {

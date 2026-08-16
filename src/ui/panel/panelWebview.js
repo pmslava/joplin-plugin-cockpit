@@ -100,11 +100,103 @@ function applyPlatformClass(){
     document.body.classList.add('cockpit-mobile')
 }
 
+/** Effective Joplin appearance *********************************************************************************************************************
+ * Joplin injects its colour variables into plugin webviews, but deliberately omits its `appearance` value. OS `prefers-color-scheme` is not a       *
+ * substitute because users can choose a Joplin theme independently of the OS. When Cockpit is in Match Joplin mode, resolve Joplin's effective      *
+ * scheme-1 foreground/background pair on a hidden probe and compare their luminance. A dark palette has a lighter foreground than background. The    *
+ * resulting class restores the established Dark-theme heading and selection semantics in panel.css; explicit Cockpit presets/custom themes are      *
+ * excluded by the --cockpit-match-joplin marker emitted by buildThemeCss().                                                                          *
+ ***************************************************************************************************************************************************/
+var themeAppearanceProbe = null
+var themeAppearanceFrame = null
+var themeAppearanceObserverStarted = false
+
+function themeColourLuminance(value){
+    var values = String(value || '').match(/[\d.]+/g)
+    if (!values || values.length < 3) return null
+    var channels = values.slice(0, 3).map(function(value){
+        var srgb = Number(value) / 255
+        return srgb <= 0.04045 ? srgb / 12.92 : Math.pow((srgb + 0.055) / 1.055, 2.4)
+    })
+    if (channels.some(function(value){ return !Number.isFinite(value) })) return null
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+}
+
+function getThemeAppearanceProbe(){
+    if (themeAppearanceProbe && themeAppearanceProbe.isConnected) return themeAppearanceProbe
+    themeAppearanceProbe = document.createElement('span')
+    themeAppearanceProbe.id = 'cockpitThemeAppearanceProbe'
+    themeAppearanceProbe.setAttribute('aria-hidden', 'true')
+    themeAppearanceProbe.style.cssText = [
+        'position:fixed',
+        'width:0',
+        'height:0',
+        'overflow:hidden',
+        'visibility:hidden',
+        'pointer-events:none',
+        // Classify Joplin itself, not a user override of Cockpit's public colour variables.
+        'color:var(--joplin-color, rgb(0, 0, 0))',
+        'background-color:var(--joplin-background-color, rgb(255, 255, 255))',
+    ].join(';')
+    document.body.appendChild(themeAppearanceProbe)
+    return themeAppearanceProbe
+}
+
+function applyEffectiveThemeClass(){
+    var root = document.documentElement
+    var followsJoplin = getComputedStyle(root).getPropertyValue('--cockpit-match-joplin').trim() === '1'
+    if (!followsJoplin){
+        root.classList.remove('cockpit-dark-appearance')
+        return
+    }
+
+    var probeStyle = getComputedStyle(getThemeAppearanceProbe())
+    var foregroundLuminance = themeColourLuminance(probeStyle.color)
+    var backgroundLuminance = themeColourLuminance(probeStyle.backgroundColor)
+    if (foregroundLuminance == null || backgroundLuminance == null){
+        root.classList.remove('cockpit-dark-appearance')
+        return
+    }
+    root.classList.toggle('cockpit-dark-appearance', backgroundLuminance < foregroundLuminance)
+}
+
+function scheduleEffectiveThemeClass(){
+    if (themeAppearanceFrame != null) return
+    themeAppearanceFrame = requestAnimationFrame(function(){
+        themeAppearanceFrame = null
+        applyEffectiveThemeClass()
+    })
+}
+
+function startThemeAppearanceObserver(){
+    if (themeAppearanceObserverStarted) return
+    themeAppearanceObserverStarted = true
+
+    // A capturing load listener fires after a replacement stylesheet has actually loaded. The head
+    // observer also covers inline style replacement and href changes; both paths are coalesced into
+    // one animation-frame read so a Joplin theme switch updates without waiting for Cockpit's timer.
+    document.addEventListener('load', function(event){
+        if (event.target && event.target.tagName === 'LINK') scheduleEffectiveThemeClass()
+    }, true)
+    if (document.head){
+        new MutationObserver(scheduleEffectiveThemeClass).observe(document.head, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['href', 'media', 'disabled'],
+        })
+    }
+    applyEffectiveThemeClass()
+}
+
 function reconcile(){
     // Refresh IS_MOBILE and the class on every render (the marker is re-emitted each time); it must run
     // unconditionally, not only when the .todos node identity changes, so the flag is set before the
     // first pointer event even on renders that reuse the scroll container.
     applyPlatformClass()
+    // The inline theme marker can change when Cockpit settings re-render the panel. Host Joplin
+    // stylesheet changes are covered separately by startThemeAppearanceObserver().
+    scheduleEffectiveThemeClass()
     var el = document.querySelector('.todos')
     if (el && el !== currentTodosEl){
         currentTodosEl = el
@@ -145,6 +237,7 @@ function startPanelObserver(){
     // Set IS_MOBILE from the platform marker before anything below reads it (reconcile() sets it too, but
     // the dialogGuardReset post has to know the platform first).
     applyPlatformClass()
+    startThemeAppearanceObserver()
     if (IS_MOBILE){
         // Clear any overlay refresh-guard leaked by a previous webview torn down mid-overlay, and drive the
         // overlay reload-survival handshake. message[1] tells the host whether THIS freshly loaded document

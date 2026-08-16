@@ -175,6 +175,13 @@ async function main() {
         return html.slice(start, end)
     }
 
+    await test('Match Joplin emits the effective-theme detection marker', () => {
+        assert.ok(
+            inlineStyle(desktop).includes('--cockpit-match-joplin:1'),
+            'default Match Joplin mode did not enable effective-theme detection'
+        )
+    })
+
     const lightTheme = await run({
         dataDir: path.join(tmp, 'light-theme-data'),
         installationDir: path.join(tmp, 'desktop-install'),
@@ -188,6 +195,7 @@ async function main() {
     })
     await test('light theme: generated CSS emits both foreground/background pairs', () => {
         const css = inlineStyle(lightTheme)
+        assert.ok(css.includes('--cockpit-match-joplin:0'), 'explicit preset was marked as Match Joplin')
         assert.ok(css.includes('--cockpit-color:#32373F'), 'missing content foreground')
         assert.ok(css.includes('--cockpit-background-color:#ffffff'), 'missing content background')
         assert.ok(css.includes('--cockpit-color2:#ffffff'), 'missing panel foreground')
@@ -226,6 +234,7 @@ async function main() {
     })
     await test('dark theme: restores the muted heading and neutral current-item colours', () => {
         const css = inlineStyle(darkTheme)
+        assert.ok(css.includes('--cockpit-match-joplin:0'), 'explicit preset was marked as Match Joplin')
         assert.ok(css.includes('--cockpit-group-heading-color:#999999'), 'heading is not the former muted grey')
         assert.ok(css.includes('--cockpit-current-item-color:#dddddd'), 'selected item foreground is not the former grey')
         assert.ok(css.includes('--cockpit-current-item-background-color:#616161'), 'selected item background is not the former neutral grey')
@@ -241,6 +250,7 @@ async function main() {
     })
     await test('custom theme: text colour sets both foreground variables', () => {
         const css = inlineStyle(customTheme)
+        assert.ok(css.includes('--cockpit-match-joplin:0'), 'custom theme was marked as Match Joplin')
         assert.ok(css.includes('--cockpit-color:#123abc'), 'missing content foreground')
         assert.ok(css.includes('--cockpit-color2:#123abc'), 'missing panel foreground')
     })
