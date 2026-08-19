@@ -2251,17 +2251,53 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.8.6', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.8.7', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.8.6'
+        const expected = '1.8.7'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
         assert.strictEqual(lock.packages[''].version, expected, 'package-lock.json root package entry version')
+    })
+
+    // The plain to-do disc (a to-do with no checkbox ring, and the count-pending fast-paint row that shares the
+    // same .-plain class) gets a border so it reads clearly on the panel background. The border must derive from
+    // the SAME --cockpit-* variable the progress ring's stroke uses - never a new colour literal - and it must NOT
+    // disturb the circle geometry (the 18px --cockpit-circle-size box, the 3px ring inset, the 4px disc inset).
+    // Read panel.css as source text, the same way the other markup/CSS checks read their files.
+    await test('plain disc: bordered from the ring stroke variable, circle geometry untouched', () => {
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        const ruleBody = (selector) => {
+            const at = css.indexOf(selector)
+            assert.ok(at >= 0, `panel.css is missing the ${selector} rule`)
+            const open = css.indexOf('{', at)
+            const close = css.indexOf('}', open)
+            assert.ok(open >= 0 && close > open, `panel.css ${selector} rule is malformed`)
+            return css.slice(open + 1, close)
+        }
+        // The ring's stroke: the .todo-checkbox conic-gradient track that is always drawn (the unfilled part) is
+        // --cockpit-divider-color. This is the variable the plain-disc border must reuse.
+        assert.ok(
+            /background:\s*conic-gradient\([^;]*var\(--cockpit-divider-color/.test(ruleBody('.todo-checkbox {')),
+            "precondition: the progress ring's stroke (its conic-gradient track) is drawn in --cockpit-divider-color"
+        )
+        // The plain disc carries a border in that SAME variable - no new colour literal, so it tracks every theme.
+        const plainBefore = ruleBody('.todo-checkbox.-plain::before')
+        assert.ok(/border:\s*[^;]*var\(--cockpit-divider-color/.test(plainBefore),
+            'the .-plain disc must get a border derived from the ring stroke variable --cockpit-divider-color')
+        assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(plainBefore),
+            'the plain-disc border must not introduce a new hex colour literal')
+        // Geometry is untouched: the circle-size default and the two fixed insets that the "circles saga" depends
+        // on are all still exactly what they were, and the plain-disc border rule did not touch any of them.
+        assert.ok(/--cockpit-circle-size:\s*18px/.test(css), 'the 18px --cockpit-circle-size default must be intact')
+        assert.ok(/inset:\s*3px/.test(ruleBody('.todo-checkbox::after')), 'the 3px ring inset must be intact')
+        assert.ok(/inset:\s*4px/.test(ruleBody('.todo-checkbox::before')), 'the 4px disc inset must be intact')
+        assert.ok(!/inset|width|height|margin/.test(plainBefore),
+            'the plain-disc border rule must add only a border - never an inset/size/margin that would move the outer box')
     })
 
     await fs.remove(tmp)

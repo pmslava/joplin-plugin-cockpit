@@ -611,6 +611,24 @@ h2 {
     background: none;
 }
 
+/* Without a surrounding ring to define it, the plain disc's bare fill reads faintly on the panel
+ * background. Give it the progress ring's own stroke - same colour, same treatment - as a fine 1px
+ * border so the small disc reads as a defined circle in every theme. The colour is the SAME
+ * --cockpit-divider-color the ring's conic-gradient track uses (with the ring's own fallback), never
+ * a new literal, so it tracks presets, Match Joplin light/dark and custom colours identically. This
+ * also covers the count-pending fast-paint row, which renders with the same .-plain class.
+ *
+ * Geometry is untouched. The disc is the absolutely-positioned ::before with all four insets pinned
+ * (4px desktop, tap-pad + 4px mobile), so its border-BOX outer edge is fixed by those insets: the
+ * 1px border grows INWARD (content 10px -> 8px at the 18px default) while the outer edge stays exactly
+ * at inset 4px. The 18px --cockpit-circle-size box, the 3px ring inset, the 4px disc inset and the
+ * row's optical vertical centring are all unchanged - not one pixel of the outer box or its position
+ * moves. box-sizing is irrelevant here because auto width/height under four pinned insets already
+ * constrains the border-box to the inset rectangle. */
+.todo-checkbox.-plain::before {
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.45));
+}
+
 /* A note with no checkboxes inside shows no circle at all; the invisible spacer keeps the titles
  * of the notes group aligned */
 .note-progress.-empty,
