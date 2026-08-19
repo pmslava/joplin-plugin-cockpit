@@ -137,6 +137,7 @@ const dialogCss = `
     #alarmQuick {
         display: flex;
         flex-direction: row;
+        flex-wrap: wrap;
         gap: 6px;
     }
     #alarmQuick button {
@@ -213,6 +214,9 @@ const dialogCss = `
  ***************************************************************************************************************************************************/
 export async function setupAlarmDialog(){
     alarmDialog = await joplin.views.dialogs.create('alarmDialog')
+    // The shared quick-button math (window.AlarmQuick) is loaded first, so it exists before alarmWebview.js wires
+    // the buttons to it. The same file backs the mobile overlay (panel.addScript) and the Node unit tests.
+    await joplin.views.dialogs.addScript(alarmDialog, '/ui/alarm/alarmQuick.js')
     await joplin.views.dialogs.addScript(alarmDialog, '/ui/alarm/alarmWebview.js')
     await joplin.views.dialogs.setButtons(alarmDialog, [
         { id: 'ok', title: 'OK' },
@@ -231,6 +235,7 @@ export async function openAlarmDialog(todoIDs){
     var fields = await computeInitialAlarm(todoIDs)
     var initialDate = fields.date
     var initialTime = fields.time
+    var hadAlarm = fields.hasAlarm
     var count = todoIDs.length === 1 ? "1 to-do" : `${todoIDs.length} to-dos`
 
     // A hidden marker carried in the markup on mobile only. alarmWebview.js reads it and adds the
@@ -258,11 +263,13 @@ export async function openAlarmDialog(todoIDs){
                     <div class="alarm-time-col" id="alarmMinuteCol"></div>
                 </div>
             </div>
+            ${hadAlarm ? '<div id="alarmHadAlarm" hidden></div>' : ''}
             <div id="alarmQuick">
-                <button type="button" onclick="setAlarmDateOffset(0)">Today</button>
-                <button type="button" onclick="setAlarmDateOffset(1)">Tomorrow</button>
-                <button type="button" onclick="setAlarmDateOffset(7)">+1 week</button>
-                <button type="button" title="Same weekday next month: the 2nd Saturday stays the 2nd Saturday" onclick="setAlarmDateNextMonth()">+month</button>
+                <button type="button" onclick="onAlarmQuickToday()">Today</button>
+                <button type="button" onclick="onAlarmQuickTomorrow()">Tomorrow</button>
+                <button type="button" onclick="onAlarmQuickWeek()">+week</button>
+                <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
+                <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
             </div>
         </form>
     `)
@@ -304,8 +311,14 @@ export async function openAlarmDialog(todoIDs){
 async function computeInitialAlarm(todoIDs){
     var firstTodo = await joplin.data.get(['notes', todoIDs[0]], { fields: ['todo_due'] })
     var initial = new Date()
+    // hasAlarm records whether the FIRST selected to-do already had a due time - the same source the picker's
+    // starting time is read from. The quick buttons use it to decide preservedTime: with a multi-select, this
+    // means the whole selection follows the first to-do's alarm (its time is kept; if it has none, the buttons
+    // substitute ceilHour(now) even when a later selected to-do does have an alarm).
+    var hasAlarm = false
     if (firstTodo.todo_due && firstTodo.todo_due > 0){
         initial = new Date(firstTodo.todo_due)
+        hasAlarm = true
     } else {
         var dayStart = await getDayStartTime()
         initial.setHours(dayStart.hours, dayStart.minutes, 0, 0)
@@ -314,6 +327,7 @@ async function computeInitialAlarm(todoIDs){
     return {
         date: `${initial.getFullYear()}-${pad(initial.getMonth() + 1)}-${pad(initial.getDate())}`,
         time: `${pad(initial.getHours())}:${pad(initial.getMinutes())}`,
+        hasAlarm,
     }
 }
 
@@ -321,7 +335,7 @@ async function computeInitialAlarm(todoIDs){
  * Round-trip target for the mobile alarm overlay: returns the { date, time } the overlay should prefill with. Empty for an empty selection.          *
  ***************************************************************************************************************************************************/
 export async function getAlarmInitialFields(todoIDs){
-    if (!Array.isArray(todoIDs) || !todoIDs.length) return { date: "", time: "" }
+    if (!Array.isArray(todoIDs) || !todoIDs.length) return { date: "", time: "", hasAlarm: false }
     return await computeInitialAlarm(todoIDs)
 }
 

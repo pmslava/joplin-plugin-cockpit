@@ -6,6 +6,13 @@
 /** The first day of the month the calendar is showing. Reset from the date field every time the dialog is (re)opened. */
 var alarmCalendarAnchor = null
 
+/** Whether the selected to-do(s) already had an alarm when the dialog opened (read from the #alarmHadAlarm marker
+ * the host emits only then), and whether the user has set the time this session (typed it or picked an hour/minute).
+ * Together they drive preservedTime: a quick button keeps the shown clock time when EITHER is true, and substitutes
+ * ceilHour(now) only when BOTH are false (a fresh picker with an untouched time). Both reset on every (re)open. */
+var alarmHadExistingAlarm = false
+var alarmTimeUserSet = false
+
 function alarmPad(value){
     return String(value).padStart(2, '0')
 }
@@ -22,34 +29,42 @@ function alarmParseISO(value){
     return parsed
 }
 
-/** setAlarmDateOffset ******************************************************************************************************************************
- * Fills the date field with today plus the given number of days. Used by the Today / Tomorrow / +1 week buttons.                                   *
+/** Quick buttons ***********************************************************************************************************************************
+ * Today / Tomorrow / +week / +month(day) / +month(date). The date/time math lives in the shared, unit-tested window.AlarmQuick module (alarmQuick.js, *
+ * loaded into this dialog before this script); these thin wrappers only read the DOM for the button arguments and write the result back. Both this   *
+ * dialog and the mobile overlay wire the identical five buttons to the same functions, so the math is never forked.                                 *
  ***************************************************************************************************************************************************/
-function setAlarmDateOffset(days){
-    var date = new Date()
-    date.setDate(date.getDate() + days)
-    document.getElementById('alarmDate').value = alarmDateToISO(date)
-    alarmCalendarAnchor = new Date(date.getFullYear(), date.getMonth(), 1)
-    renderAlarmCalendar()
+
+// The date the +week / +month buttons walk forward from: the date field's value, or today when it is empty/invalid.
+// Repeated presses walk forward because each press writes the field the next press reads.
+function alarmBaseDate(){
+    return alarmParseISO(document.getElementById('alarmDate').value) || new Date()
 }
 
-/** setAlarmDateNextMonth ***************************************************************************************************************************
- * Moves the date to the same occurrence of the same weekday in the next month: the 1st Saturday stays the 1st Saturday. When the next month has no  *
- * such occurrence (a 5th one), the last occurrence of that weekday is used instead.                                                                *
- ***************************************************************************************************************************************************/
-function setAlarmDateNextMonth(){
-    var current = alarmParseISO(document.getElementById('alarmDate').value) || new Date()
-    var weekday = current.getDay()
-    var ordinal = Math.floor((current.getDate() - 1) / 7)
-    var firstOfNext = new Date(current.getFullYear(), current.getMonth() + 1, 1)
-    var day = 1 + ((weekday - firstOfNext.getDay() + 7) % 7) + ordinal * 7
-    var daysInNext = new Date(firstOfNext.getFullYear(), firstOfNext.getMonth() + 1, 0).getDate()
-    while (day > daysInNext) day -= 7
-    var target = new Date(firstOfNext.getFullYear(), firstOfNext.getMonth(), day)
-    document.getElementById('alarmDate').value = alarmDateToISO(target)
-    alarmCalendarAnchor = new Date(target.getFullYear(), target.getMonth(), 1)
-    renderAlarmCalendar()
+// The clock time a quick button should keep ({hours,minutes}), or null when it should substitute ceilHour(now).
+// Non-null only when the to-do already had an alarm at open, or the user set the time this session.
+function alarmPreservedTime(){
+    if (!alarmHadExistingAlarm && !alarmTimeUserSet) return null
+    var time = currentAlarmTime()
+    if (time.hours === null || time.minutes === null) return null
+    return { hours: time.hours, minutes: time.minutes }
 }
+
+// Write an { date, time } result from AlarmQuick into the two fields and re-sync the calendar month + time highlight.
+function applyAlarmQuick(result){
+    document.getElementById('alarmDate').value = result.date
+    document.getElementById('alarmTime').value = result.time
+    var parsed = alarmParseISO(result.date)
+    if (parsed) alarmCalendarAnchor = new Date(parsed.getFullYear(), parsed.getMonth(), 1)
+    renderAlarmCalendar()
+    updateAlarmTimeSelection()
+}
+
+function onAlarmQuickToday(){ applyAlarmQuick(AlarmQuick.today(new Date())) }
+function onAlarmQuickTomorrow(){ applyAlarmQuick(AlarmQuick.tomorrow(new Date(), alarmPreservedTime())) }
+function onAlarmQuickWeek(){ applyAlarmQuick(AlarmQuick.week(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+function onAlarmQuickMonthWeekday(){ applyAlarmQuick(AlarmQuick.monthWeekday(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+function onAlarmQuickMonthDate(){ applyAlarmQuick(AlarmQuick.monthDate(new Date(), alarmBaseDate(), alarmPreservedTime())) }
 
 /** onAlarmCalendarNavigate *************************************************************************************************************************/
 function onAlarmCalendarNavigate(delta){
@@ -136,16 +151,19 @@ function currentAlarmTime(){
 function pickAlarmHour(hours){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(hours)}:${alarmPad(time.minutes === null ? 0 : time.minutes)}`
+    alarmTimeUserSet = true
     updateAlarmTimeSelection()
 }
 
 function pickAlarmMinute(minutes){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(time.hours === null ? 9 : time.hours)}:${alarmPad(minutes)}`
+    alarmTimeUserSet = true
     updateAlarmTimeSelection()
 }
 
 function onAlarmTimeEdited(){
+    alarmTimeUserSet = true
     updateAlarmTimeSelection()
 }
 
@@ -194,6 +212,10 @@ function initAlarmCalendarIfNeeded(){
     applyAlarmPlatformClass()
     var container = document.getElementById('alarmCalendar')
     if (!container || container.querySelector('.alarm-cal-grid')) return
+    // Fresh (re)open: the host emits the #alarmHadAlarm marker only when the first to-do already had a due time,
+    // and the time field starts untouched, so seed the quick-button preservedTime state from those two facts.
+    alarmHadExistingAlarm = !!document.getElementById('alarmHadAlarm')
+    alarmTimeUserSet = false
     alarmCalendarAnchor = null
     renderAlarmCalendar()
     renderAlarmTimeColumns()

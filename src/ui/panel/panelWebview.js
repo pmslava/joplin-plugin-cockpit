@@ -1099,7 +1099,10 @@ function currentOverlayDescriptor(){
     if (overlayContext.kind === 'alarm'){
         var dateEl = document.getElementById('alarmDate')
         var timeEl = document.getElementById('alarmTime')
-        return { kind: 'alarm', ids: overlayContext.ids, date: dateEl ? dateEl.value : '', time: timeEl ? timeEl.value : '' }
+        // hasAlarm/timeUserSet ride along so a mid-overlay reload reconstructs the quick-button preservedTime state
+        // (whether the shown time is kept or replaced by ceilHour) exactly as it was before the reload.
+        return { kind: 'alarm', ids: overlayContext.ids, date: dateEl ? dateEl.value : '', time: timeEl ? timeEl.value : '',
+            hasAlarm: alarmHadExistingAlarm, timeUserSet: alarmTimeUserSet }
     }
     if (overlayContext.kind === 'editor'){
         // The serialized form IS the descriptor's payload, so a reload rebuilds every field (incl. in-progress
@@ -1351,6 +1354,14 @@ function openTagOverlay(noteID, restore){
 // The first day of the month the calendar is showing. Reset from the date field every time the overlay opens.
 var alarmCalendarAnchor = null
 
+// Whether the selected to-do(s) already had an alarm when the overlay opened (from the getAlarmInitial round-trip),
+// and whether the user has set the time this session (typed it or picked an hour/minute). Together they drive
+// preservedTime: a quick button keeps the shown clock time when EITHER is true, and substitutes ceilHour(now) only
+// when BOTH are false. Both reset on open and are carried in the overlay descriptor so a mid-overlay reload restores
+// them. Mirrors the desktop dialog's alarmWebview.js state, and calls the same shared window.AlarmQuick math.
+var alarmHadExistingAlarm = false
+var alarmTimeUserSet = false
+
 function alarmPad(value){ return String(value).padStart(2, '0') }
 
 function alarmDateToISO(date){
@@ -1365,29 +1376,36 @@ function alarmParseISO(value){
     return parsed
 }
 
-function setAlarmDateOffset(days){
-    var date = new Date()
-    date.setDate(date.getDate() + days)
-    document.getElementById('alarmDate').value = alarmDateToISO(date)
-    alarmCalendarAnchor = new Date(date.getFullYear(), date.getMonth(), 1)
+// Quick buttons: Today / Tomorrow / +week / +month(day) / +month(date). The date/time math lives in the shared,
+// unit-tested window.AlarmQuick module (alarmQuick.js, loaded into the panel before this script); these wrappers
+// only read the DOM for the arguments, write the result back, and push the overlay state so a reload survives. The
+// desktop dialog wires the identical buttons to the same functions, so the math is never forked across the two.
+function alarmBaseDate(){
+    return alarmParseISO(document.getElementById('alarmDate').value) || new Date()
+}
+
+function alarmPreservedTime(){
+    if (!alarmHadExistingAlarm && !alarmTimeUserSet) return null
+    var time = currentAlarmTime()
+    if (time.hours === null || time.minutes === null) return null
+    return { hours: time.hours, minutes: time.minutes }
+}
+
+function applyAlarmQuick(result){
+    document.getElementById('alarmDate').value = result.date
+    document.getElementById('alarmTime').value = result.time
+    var parsed = alarmParseISO(result.date)
+    if (parsed) alarmCalendarAnchor = new Date(parsed.getFullYear(), parsed.getMonth(), 1)
     renderAlarmCalendar()
+    updateAlarmTimeSelection()
     pushOverlayState()
 }
 
-function setAlarmDateNextMonth(){
-    var current = alarmParseISO(document.getElementById('alarmDate').value) || new Date()
-    var weekday = current.getDay()
-    var ordinal = Math.floor((current.getDate() - 1) / 7)
-    var firstOfNext = new Date(current.getFullYear(), current.getMonth() + 1, 1)
-    var day = 1 + ((weekday - firstOfNext.getDay() + 7) % 7) + ordinal * 7
-    var daysInNext = new Date(firstOfNext.getFullYear(), firstOfNext.getMonth() + 1, 0).getDate()
-    while (day > daysInNext) day -= 7
-    var target = new Date(firstOfNext.getFullYear(), firstOfNext.getMonth(), day)
-    document.getElementById('alarmDate').value = alarmDateToISO(target)
-    alarmCalendarAnchor = new Date(target.getFullYear(), target.getMonth(), 1)
-    renderAlarmCalendar()
-    pushOverlayState()
-}
+function onAlarmQuickToday(){ applyAlarmQuick(AlarmQuick.today(new Date())) }
+function onAlarmQuickTomorrow(){ applyAlarmQuick(AlarmQuick.tomorrow(new Date(), alarmPreservedTime())) }
+function onAlarmQuickWeek(){ applyAlarmQuick(AlarmQuick.week(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+function onAlarmQuickMonthWeekday(){ applyAlarmQuick(AlarmQuick.monthWeekday(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+function onAlarmQuickMonthDate(){ applyAlarmQuick(AlarmQuick.monthDate(new Date(), alarmBaseDate(), alarmPreservedTime())) }
 
 function onAlarmCalendarNavigate(delta){
     alarmCalendarAnchor = new Date(alarmCalendarAnchor.getFullYear(), alarmCalendarAnchor.getMonth() + delta, 1)
@@ -1463,6 +1481,7 @@ function currentAlarmTime(){
 function pickAlarmHour(hours){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(hours)}:${alarmPad(time.minutes === null ? 0 : time.minutes)}`
+    alarmTimeUserSet = true
     updateAlarmTimeSelection()
     pushOverlayState()
 }
@@ -1470,11 +1489,12 @@ function pickAlarmHour(hours){
 function pickAlarmMinute(minutes){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(time.hours === null ? 9 : time.hours)}:${alarmPad(minutes)}`
+    alarmTimeUserSet = true
     updateAlarmTimeSelection()
     pushOverlayState()
 }
 
-function onAlarmTimeEdited(){ updateAlarmTimeSelection(); queueOverlayState() }
+function onAlarmTimeEdited(){ alarmTimeUserSet = true; updateAlarmTimeSelection(); queueOverlayState() }
 
 function updateAlarmTimeSelection(){
     var time = currentAlarmTime()
@@ -1516,6 +1536,9 @@ function openAlarmOverlay(ids, restore){
     ids = ids || []
     if (!ids.length) return
     overlayContext = { kind: 'alarm', ids: ids }
+    // Fresh open defaults; the restore branch and the prefill round-trip below set the real values.
+    alarmHadExistingAlarm = false
+    alarmTimeUserSet = false
     var count = ids.length === 1 ? '1 to-do' : ids.length + ' to-dos'
     // Footer order mirrors the desktop dialog (setButtons [ok, clear, cancel], alarm.ts): OK first
     // (primary emphasis), Clear alarm (destructive) middle, Cancel last. The footer right-aligns them.
@@ -1548,17 +1571,21 @@ function openAlarmOverlay(ids, restore){
             </div>
         </div>
         <div id="alarmQuick">
-            <button type="button" onclick="setAlarmDateOffset(0)">Today</button>
-            <button type="button" onclick="setAlarmDateOffset(1)">Tomorrow</button>
-            <button type="button" onclick="setAlarmDateOffset(7)">+1 week</button>
-            <button type="button" title="Same weekday next month: the 2nd Saturday stays the 2nd Saturday" onclick="setAlarmDateNextMonth()">+month</button>
+            <button type="button" onclick="onAlarmQuickToday()">Today</button>
+            <button type="button" onclick="onAlarmQuickTomorrow()">Tomorrow</button>
+            <button type="button" onclick="onAlarmQuickWeek()">+week</button>
+            <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
+            <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
         </div>
     `
 
     if (restore){
-        // Reconstruct: restore the date/time the user had before the reload; skip the round-trip.
+        // Reconstruct: restore the date/time the user had before the reload, plus the preservedTime state
+        // (whether the shown time is kept or replaced by ceilHour on the next quick press); skip the round-trip.
         document.getElementById('alarmDate').value = String(restore.date || '')
         document.getElementById('alarmTime').value = String(restore.time || '')
+        alarmHadExistingAlarm = !!restore.hasAlarm
+        alarmTimeUserSet = !!restore.timeUserSet
         alarmCalendarAnchor = null
         renderAlarmCalendar()
         renderAlarmTimeColumns()
@@ -1586,6 +1613,8 @@ function openAlarmOverlay(ids, restore){
         if (!dateEl || !timeEl) return
         dateEl.value = String(init.date || '')
         timeEl.value = String(init.time || '')
+        // The first selected to-do already had an alarm -> keep its shown time on a quick press (preservedTime).
+        alarmHadExistingAlarm = !!init.hasAlarm
         alarmCalendarAnchor = null
         renderAlarmCalendar()
         renderAlarmTimeColumns()

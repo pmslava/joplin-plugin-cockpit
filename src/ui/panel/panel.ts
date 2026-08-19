@@ -127,6 +127,9 @@ var tagPickerDialog = null
  ***************************************************************************************************************************************************/
 export async function setupPanel(){
     panel = await joplin.views.panels.create('panel')
+    // The shared quick-button math (window.AlarmQuick) is loaded first, so it exists before panelWebview.js wires
+    // the mobile alarm overlay's buttons to it - the same module the desktop alarm dialog and the unit tests use.
+    await joplin.views.panels.addScript(panel, '/ui/alarm/alarmQuick.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panelWebview.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panel.css')
     await joplin.views.panels.onMessage(panel, eventHandler)
