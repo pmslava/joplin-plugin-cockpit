@@ -97,9 +97,15 @@ const dialogCss = `
     }
     #alarmDate { width: 120px; }
     #alarmTime { width: 70px; }
+    /* Reserve the grid's exact drawn height (see the .alarm-cal-* rules: 224px) at measurement time. Joplin
+     * measures this fit-to-content dialog while #alarmCalendar is still EMPTY - before alarmWebview.js draws the
+     * grid - and never re-measures, so without this the empty calendar measures 0 and the dialog ships ~224px too
+     * short, clipping the grid. Because the drawn grid is deterministically 224px too, min-height == drawn height:
+     * the align-items: stretch row keeps the time columns flush with the grid's bottom edge with no overshoot. */
     #alarmCalendar {
         flex: 1 1 auto;
         min-width: 0;
+        min-height: 224px;
     }
     #alarmTimePanel {
         display: flex;
@@ -162,12 +168,18 @@ const dialogCss = `
         cursor: pointer;
     }
     #alarmQuick button:hover { background-color: rgba(127, 127, 127, 0.18); }
+    /* Every calendar row carries an EXPLICIT box-sizing: border-box height so the drawn grid is a fixed pixel
+     * total independent of the font's line-height metrics: nav 30 + its 4 margin + weekday row 22 + six week
+     * rows of 28 = 224px. That constant is what #alarmCalendar reserves as its min-height below, so the empty
+     * dialog Joplin measures is exactly as tall as the populated grid it will later draw (no clip, no overshoot). */
     .alarm-cal-nav {
         display: flex;
         flex-direction: row;
         align-items: center;
         justify-content: space-between;
         margin-bottom: 4px;
+        height: 30px;
+        box-sizing: border-box;
     }
     .alarm-cal-nav button {
         min-width: 28px;
@@ -188,19 +200,26 @@ const dialogCss = `
         table-layout: fixed;
     }
     .alarm-cal-grid th {
-        padding: 2px 0;
+        height: 22px;
+        box-sizing: border-box;
+        padding: 0;
         font-size: 0.85em;
         font-weight: 600;
         opacity: 0.7;
         text-align: center;
     }
     .alarm-cal-grid td {
+        height: 28px;
+        box-sizing: border-box;
         padding: 1px;
         text-align: center;
     }
     .alarm-cal-day {
+        display: block;
         width: 100%;
-        padding: 4px 0;
+        height: 26px;
+        box-sizing: border-box;
+        padding: 0;
         font-family: inherit;
         font-size: inherit;
         color: inherit;
