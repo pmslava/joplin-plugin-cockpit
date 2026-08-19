@@ -1330,6 +1330,26 @@ table {
 }
 
 .cockpit-alarm-overlay #alarmQuick button:hover { background-color: rgba(127, 127, 127, 0.18); }
+.cockpit-alarm-overlay #alarmQuick button.-active {
+    border-color: var(--cockpit-url-color, #2D6BDC);
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.28));
+    font-weight: 600;
+}
+
+/* The multi-select explanation line and mode picker (mobile overlay). Unlike the desktop dialog these need no fixed
+ * height reservation - the overlay sizes itself dynamically, there is no measure-before-draw pass - so they flow
+ * naturally. Both are emitted only for a multi selection. */
+.cockpit-alarm-overlay #alarmExplain {
+    font-size: 0.9em; line-height: 1.35; opacity: 0.75;
+}
+.cockpit-alarm-overlay #alarmMode {
+    display: flex; flex-direction: column; gap: 8px; font-size: 0.95em;
+}
+.cockpit-alarm-overlay #alarmMode label {
+    display: flex; flex-direction: row; align-items: center; gap: 8px;
+    min-height: 32px; cursor: pointer;
+}
+.cockpit-alarm-overlay #alarmMode input { margin: 0; cursor: pointer; }
 
 .cockpit-alarm-overlay .alarm-cal-nav {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between;

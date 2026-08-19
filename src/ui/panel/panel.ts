@@ -455,9 +455,10 @@ async function eventHandler(message){
         // time, or the day start today). The desktop alarm dialog computes the same starting values.
         return await getAlarmInitialFields(Array.isArray(message[1]) ? message[1] : [])
     } else if (message[0] == 'alarmSet'){
-        // Result of the in-panel alarm overlay's OK: the raw YYYY-MM-DD / HH:MM strings. The host keeps
-        // parseAlarmFields + setTodoDueTimestamps.
-        await applyAlarmSet(Array.isArray(message[1]) ? message[1] : [], String(message[2] || ""), String(message[3] || ""))
+        // Result of the in-panel alarm overlay's OK: the anchor YYYY-MM-DD / HH:MM strings plus the chosen mode and
+        // active plan. The host validates the anchor and applies the plan through the shared applyAlarmPlan.
+        await applyAlarmSet(Array.isArray(message[1]) ? message[1] : [], String(message[2] || ""), String(message[3] || ""),
+            message[4] != null ? String(message[4]) : undefined, message[5] != null ? String(message[5]) : undefined)
     } else if (message[0] == 'alarmCleared'){
         // Result of the in-panel alarm overlay's "Clear alarm".
         await applyAlarmCleared(Array.isArray(message[1]) ? message[1] : [])

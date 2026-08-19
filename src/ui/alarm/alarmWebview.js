@@ -6,12 +6,23 @@
 /** The first day of the month the calendar is showing. Reset from the date field every time the dialog is (re)opened. */
 var alarmCalendarAnchor = null
 
-/** Whether the selected to-do(s) already had an alarm when the dialog opened (read from the #alarmHadAlarm marker
- * the host emits only then), and whether the user has set the time this session (typed it or picked an hour/minute).
- * Together they drive preservedTime: a quick button keeps the shown clock time when EITHER is true, and substitutes
- * ceilHour(now) only when BOTH are false (a fresh picker with an untouched time). Both reset on every (re)open. */
+/** Whether the selected to-do(s) already had an alarm when the dialog opened (read from the #alarmInitData island the
+ * host emits), and whether the user has set the time this session (typed it or picked an hour/minute). Together they
+ * drive preservedTime: a quick button keeps the shown clock time when EITHER is true, and substitutes ceilHour(now)
+ * only when BOTH are false (a fresh picker with an untouched time). Both reset on every (re)open. */
 var alarmHadExistingAlarm = false
 var alarmTimeUserSet = false
+
+/** Multi-select plan state. A single-select dialog leaves these at their defaults and never shows a plan/mode; only a
+ * multi-select dialog carries the mode picker + explanation line. alarmMode is 'respect' (each to-do keeps its own
+ * time; '+' plans shift from its own date) by default or 'same' (one datetime for all, the 1.8.3 behaviour).
+ * alarmActivePlan is the last quick button pressed, or 'anchor' for a manual calendar pick / no press. alarmTodoDues
+ * is every selected to-do's current { id, due } (from the island), which the shared describeAlarmPlan reads to word
+ * the explanation. All reset on every (re)open from the island. */
+var alarmIsMulti = false
+var alarmMode = 'same'
+var alarmActivePlan = 'anchor'
+var alarmTodoDues = []
 
 function alarmPad(value){
     return String(value).padStart(2, '0')
@@ -60,11 +71,55 @@ function applyAlarmQuick(result){
     updateAlarmTimeSelection()
 }
 
-function onAlarmQuickToday(){ applyAlarmQuick(AlarmQuick.today(new Date())) }
-function onAlarmQuickTomorrow(){ applyAlarmQuick(AlarmQuick.tomorrow(new Date(), alarmPreservedTime())) }
-function onAlarmQuickWeek(){ applyAlarmQuick(AlarmQuick.week(new Date(), alarmBaseDate(), alarmPreservedTime())) }
-function onAlarmQuickMonthWeekday(){ applyAlarmQuick(AlarmQuick.monthWeekday(new Date(), alarmBaseDate(), alarmPreservedTime())) }
-function onAlarmQuickMonthDate(){ applyAlarmQuick(AlarmQuick.monthDate(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+// A quick button press. In a multi-select dialog under RESPECT mode the button only chooses the PLAN (each to-do
+// keeps its own time / shifts from its own date), so the anchor fields are left untouched and the explanation is
+// re-worded. In single-select or SAME mode the button writes the anchor fields, exactly like 1.8.3. Either way the
+// active plan is remembered (so switching mode keeps the pressed button) and highlighted.
+function runAlarmQuick(plan, quickResult){
+    setAlarmActivePlan(plan)
+    if (!(alarmIsMulti && alarmMode === 'respect')) applyAlarmQuick(quickResult)
+    updateAlarmPlanDescription()
+}
+
+function onAlarmQuickToday(){ runAlarmQuick('today', AlarmQuick.today(new Date())) }
+function onAlarmQuickTomorrow(){ runAlarmQuick('tomorrow', AlarmQuick.tomorrow(new Date(), alarmPreservedTime())) }
+function onAlarmQuickWeek(){ runAlarmQuick('week', AlarmQuick.week(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+function onAlarmQuickMonthWeekday(){ runAlarmQuick('monthWeekday', AlarmQuick.monthWeekday(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+function onAlarmQuickMonthDate(){ runAlarmQuick('monthDate', AlarmQuick.monthDate(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+
+/** Plan + mode (multi-select) *********************************************************************************************************************/
+
+// The current anchor the plan is described/applied against: the two field values.
+function alarmAnchor(){
+    return { date: document.getElementById('alarmDate').value, time: document.getElementById('alarmTime').value }
+}
+
+// Record the active plan, mirror it into the hidden #alarmPlan field (so it rides back to the host in formData), and
+// move the -active highlight to the matching quick button. The highlight is a multi-only affordance (single-select
+// has no plan concept and stays visually as 1.8.3), so it is suppressed when not multi.
+function setAlarmActivePlan(plan){
+    alarmActivePlan = plan
+    var field = document.getElementById('alarmPlan')
+    if (field) field.value = plan
+    var byPlan = { today: 0, tomorrow: 1, week: 2, monthWeekday: 3, monthDate: 4 }
+    var buttons = document.querySelectorAll('#alarmQuick button')
+    for (var i = 0; i < buttons.length; i++) buttons[i].classList.toggle('-active', alarmIsMulti && byPlan[plan] === i)
+}
+
+// Re-word the explanation line (multi only) from the shared, unit-tested describeAlarmPlan, using the live dues,
+// plan, anchor and mode. A no-op when the line is absent (single-select).
+function updateAlarmPlanDescription(){
+    var line = document.getElementById('alarmExplain')
+    if (!line) return
+    line.textContent = AlarmQuick.describeAlarmPlan(alarmTodoDues, alarmActivePlan, alarmAnchor(), alarmMode, new Date())
+}
+
+// The mode radio changed: adopt it and re-describe the plan (the pressed button is kept).
+function onAlarmModeChanged(){
+    var checked = document.querySelector('#alarmMode input[name="mode"]:checked')
+    alarmMode = checked && checked.value === 'same' ? 'same' : 'respect'
+    updateAlarmPlanDescription()
+}
 
 /** onAlarmCalendarNavigate *************************************************************************************************************************/
 function onAlarmCalendarNavigate(delta){
@@ -72,19 +127,26 @@ function onAlarmCalendarNavigate(delta){
     renderAlarmCalendar()
 }
 
-/** pickAlarmDay ************************************************************************************************************************************/
+/** pickAlarmDay ************************************************************************************************************************************
+ * A manual calendar day pick sets the anchor date. Under a multi RESPECT plan that means "set this date for all,
+ * keeping each to-do's own time", so the plan reverts to 'anchor'.                                                                                 *
+ ***************************************************************************************************************************************************/
 function pickAlarmDay(isoDate){
     document.getElementById('alarmDate').value = isoDate
+    setAlarmActivePlan('anchor')
     renderAlarmCalendar()
+    updateAlarmPlanDescription()
 }
 
 /** onAlarmDateEdited *******************************************************************************************************************************
- * Keeps the calendar in step while the date field is edited by hand                                                                                *
+ * Keeps the calendar in step while the date field is edited by hand. Editing the date by hand is a manual anchor pick, so the plan reverts too.    *
  ***************************************************************************************************************************************************/
 function onAlarmDateEdited(){
     var parsed = alarmParseISO(document.getElementById('alarmDate').value)
     if (parsed) alarmCalendarAnchor = new Date(parsed.getFullYear(), parsed.getMonth(), 1)
+    setAlarmActivePlan('anchor')
     renderAlarmCalendar()
+    updateAlarmPlanDescription()
 }
 
 /** renderAlarmCalendar *****************************************************************************************************************************
@@ -148,11 +210,14 @@ function currentAlarmTime(){
     return { hours: hours <= 23 ? hours : null, minutes: minutes <= 59 ? minutes : null }
 }
 
+// A manual time pick/edit updates the anchor time only (the plan is kept); under a RESPECT plan the anchor time
+// affects just the no-alarm to-dos, so re-describe the plan without touching the pressed button.
 function pickAlarmHour(hours){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(hours)}:${alarmPad(time.minutes === null ? 0 : time.minutes)}`
     alarmTimeUserSet = true
     updateAlarmTimeSelection()
+    updateAlarmPlanDescription()
 }
 
 function pickAlarmMinute(minutes){
@@ -160,11 +225,13 @@ function pickAlarmMinute(minutes){
     document.getElementById('alarmTime').value = `${alarmPad(time.hours === null ? 9 : time.hours)}:${alarmPad(minutes)}`
     alarmTimeUserSet = true
     updateAlarmTimeSelection()
+    updateAlarmPlanDescription()
 }
 
 function onAlarmTimeEdited(){
     alarmTimeUserSet = true
     updateAlarmTimeSelection()
+    updateAlarmPlanDescription()
 }
 
 /** updateAlarmTimeSelection ************************************************************************************************************************
@@ -212,13 +279,28 @@ function initAlarmCalendarIfNeeded(){
     applyAlarmPlatformClass()
     var container = document.getElementById('alarmCalendar')
     if (!container || container.querySelector('.alarm-cal-grid')) return
-    // Fresh (re)open: the host emits the #alarmHadAlarm marker only when the first to-do already had a due time,
-    // and the time field starts untouched, so seed the quick-button preservedTime state from those two facts.
-    alarmHadExistingAlarm = !!document.getElementById('alarmHadAlarm')
+    // Fresh (re)open: read the host's #alarmInitData island (hasAlarm, multi, per-to-do dues). hasAlarm seeds the
+    // quick-button preservedTime state; multi + dues drive the plan/mode model and the explanation line. The time
+    // field starts untouched, the mode defaults to RESPECT for a multi selection (SAME for single), no plan pressed.
+    var init = readAlarmInitData()
+    alarmHadExistingAlarm = !!init.hasAlarm
+    alarmIsMulti = !!init.multi
+    alarmTodoDues = Array.isArray(init.dues) ? init.dues : []
+    alarmMode = alarmIsMulti ? 'respect' : 'same'
+    alarmActivePlan = 'anchor'
     alarmTimeUserSet = false
     alarmCalendarAnchor = null
     renderAlarmCalendar()
     renderAlarmTimeColumns()
+    setAlarmActivePlan('anchor')
+    updateAlarmPlanDescription()
+}
+
+// The host's JSON island of open-time facts (hasAlarm, multi, dues). Absent/parse failure -> single-select defaults.
+function readAlarmInitData(){
+    var node = document.getElementById('alarmInitData')
+    if (!node) return {}
+    try { return JSON.parse(node.textContent || '{}') || {} } catch (error){ return {} }
 }
 
 /** applyAlarmPlatformClass *************************************************************************************************************************

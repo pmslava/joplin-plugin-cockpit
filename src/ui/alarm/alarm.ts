@@ -6,11 +6,15 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { setTodoDueTimestamps } from "../../core/joplin";
+import { getTodoDues, setTodoDuesPerId } from "../../core/joplin";
 import { getDayStartTime } from "../../core/settings";
 import { refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
 import { openPluginDialog } from "../../core/dialog";
 import { isMobile } from "../../core/platform";
+// The multi-select engine and its explanation text live in the shared, unit-tested quick-button module (the same
+// window.AlarmQuick the dialog webview and the mobile overlay call). Webpack bundles this UMD file into the host
+// bundle here so the plugin computes the exact per-to-do values through the identical pure function the tests pin.
+const { applyAlarmPlan } = require("./alarmQuick");
 
 /** Variable Declaration ***************************************************************************************************************************/
 var alarmDialog = null;
@@ -168,6 +172,41 @@ const dialogCss = `
         cursor: pointer;
     }
     #alarmQuick button:hover { background-color: rgba(127, 127, 127, 0.18); }
+    #alarmQuick button.-active {
+        border-color: var(--joplin-url-color, #2D6BDC);
+        background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.28));
+        font-weight: 600;
+    }
+    /* The multi-select explanation line and mode picker are emitted ONLY for a multi-select dialog, but their heights
+     * are RESERVED with a fixed box-sizing height so Joplin's measure-before-draw pass (which runs while the
+     * explanation text is still empty - the webview fills it after) sizes the dialog to exactly the height the filled
+     * rows will occupy. The explanation clips past two lines rather than growing, so the measured and drawn heights
+     * can never diverge; a single-select dialog omits both rows entirely and is unchanged. */
+    #alarmExplain {
+        height: 34px;
+        box-sizing: border-box;
+        overflow: hidden;
+        font-size: 0.9em;
+        line-height: 1.35;
+        opacity: 0.75;
+    }
+    #alarmMode {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 16px;
+        height: 26px;
+        box-sizing: border-box;
+        font-size: 0.9em;
+    }
+    #alarmMode label {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 5px;
+        cursor: pointer;
+    }
+    #alarmMode input { margin: 0; cursor: pointer; }
     /* Every calendar row carries an EXPLICIT box-sizing: border-box height so the drawn grid is a fixed pixel
      * total independent of the font's line-height metrics: nav 30 + its 4 margin + weekday row 22 + six week
      * rows of 28 = 224px. That constant is what #alarmCalendar reserves as its min-height below, so the empty
@@ -266,7 +305,14 @@ export async function openAlarmDialog(todoIDs){
     var initialDate = fields.date
     var initialTime = fields.time
     var hadAlarm = fields.hasAlarm
+    var multi = todoIDs.length > 1
     var count = todoIDs.length === 1 ? "1 to-do" : `${todoIDs.length} to-dos`
+
+    // Every selected to-do's current due, so the webview can describe the plan (which to-dos keep their own time,
+    // which have no alarm) above the calendar. The host re-reads these fresh at OK time; this copy only feeds the
+    // explanation line. Carried in a JSON island (like the panel's search-data island) rather than in each input.
+    var dues = await getTodoDues(todoIDs)
+    var initData = JSON.stringify({ multi: multi, hasAlarm: hadAlarm, dues: dues }).replace(/</g, "\\u003c")
 
     // A hidden marker carried in the markup on mobile only. alarmWebview.js reads it and adds the
     // cockpit-mobile class to the persistent #joplin-plugin-content wrapper, which is what the narrow
@@ -275,25 +321,35 @@ export async function openAlarmDialog(todoIDs){
     var mobile = await isMobile()
     var rootMarker = mobile ? '<div id="cockpitPlatform" hidden></div>' : ''
 
+    // Layout order (owner rework): fields -> quick buttons (moved ABOVE the calendar) -> explanation line (multi
+    // only, fixed reserved height) -> calendar+columns -> mode picker (multi only, fixed reserved height) -> footer
+    // (the native OK / Clear / Cancel buttons). A single-select dialog omits the explanation and mode rows, so its
+    // markup, DOM and measured height are byte-identical to 1.8.3 apart from the quick row moving up.
+    var explainRow = multi ? '<div id="alarmExplain"></div>' : ''
+    // The mode picker is real radio inputs so the chosen mode rides back in formData; RESPECT is the default for a
+    // multi selection. onchange re-describes the plan without losing the pressed button. Omitted for single-select.
+    var modeRow = multi ? `
+            <div id="alarmMode">
+                <label><input type="radio" name="mode" value="respect" checked onchange="onAlarmModeChanged()"> Keep each to-do's own schedule</label>
+                <label><input type="radio" name="mode" value="same" onchange="onAlarmModeChanged()"> Same date &amp; time for all</label>
+            </div>` : ''
+    // The active plan (last quick button pressed, or 'anchor' for a manual pick) rides back to the host in this
+    // hidden field; the webview keeps it current. Single-select never varies the plan, so the field is multi-only.
+    var planField = multi ? '<input type="hidden" name="plan" id="alarmPlan" value="anchor">' : ''
+
     await joplin.views.dialogs.setHtml(alarmDialog, `
         <style>${dialogCss}</style>
         ${rootMarker}
+        <script type="application/json" id="alarmInitData">${initData}</script>
         <form name="alarm" id="alarmForm">
             <strong>Set alarm for ${count}</strong>
+            ${planField}
             <div id="alarmFields">
                 <input name="date" id="alarmDate" placeholder="YYYY-MM-DD" value="${initialDate}" oninput="onAlarmDateEdited()"
                     inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
                 <input name="time" id="alarmTime" placeholder="HH:MM" value="${initialTime}" oninput="onAlarmTimeEdited()"
                     inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
             </div>
-            <div id="alarmBody" class="alarm-stretch-row">
-                <div id="alarmCalendar"></div>
-                <div id="alarmTimePanel">
-                    <div class="alarm-time-col"><div class="alarm-time-scroll" id="alarmHourCol"></div></div>
-                    <div class="alarm-time-col"><div class="alarm-time-scroll" id="alarmMinuteCol"></div></div>
-                </div>
-            </div>
-            ${hadAlarm ? '<div id="alarmHadAlarm" hidden></div>' : ''}
             <div id="alarmQuick">
                 <button type="button" onclick="onAlarmQuickToday()">Today</button>
                 <button type="button" onclick="onAlarmQuickTomorrow()">Tomorrow</button>
@@ -301,6 +357,15 @@ export async function openAlarmDialog(todoIDs){
                 <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
                 <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
             </div>
+            ${explainRow}
+            <div id="alarmBody" class="alarm-stretch-row">
+                <div id="alarmCalendar"></div>
+                <div id="alarmTimePanel">
+                    <div class="alarm-time-col"><div class="alarm-time-scroll" id="alarmHourCol"></div></div>
+                    <div class="alarm-time-col"><div class="alarm-time-scroll" id="alarmMinuteCol"></div></div>
+                </div>
+            </div>
+            ${modeRow}
         </form>
     `)
 
@@ -315,21 +380,47 @@ export async function openAlarmDialog(todoIDs){
         return
     }
 
-    var timestamp = 0
     if (result.id === 'ok'){
         var form = result.formData ? result.formData.alarm : null
-        var parsed = parseAlarmFields(form ? form.date : null, form ? form.time : null)
+        var anchorDate = form ? form.date : null
+        var anchorTime = form ? form.time : null
+        // The anchor still passes the same strict validation (rejecting e.g. Feb 31 with the same message), so a
+        // bad field aborts before any write, exactly as in 1.8.3.
+        var parsed = parseAlarmFields(anchorDate, anchorTime)
         if (!parsed){
             await joplin.views.dialogs.showMessageBox("Cockpit: the alarm was not set. The date must be YYYY-MM-DD and the time HH:MM (24 hour).")
             return
         }
-        timestamp = parsed.getTime()
+        // Single-select has no mode/plan fields -> mode 'same', plan 'anchor', which applies the one anchor datetime
+        // to the one to-do: byte-identical to 1.8.3. A multi dialog carries the chosen mode and last-pressed plan.
+        var mode = form && form.mode === "same" ? "same" : (form && form.mode === "respect" ? "respect" : "same")
+        var plan = form && form.plan ? String(form.plan) : "anchor"
+        await applyAlarmPlanResult(todoIDs, plan, { date: anchorDate, time: anchorTime }, mode)
+        return
     }
 
-    await setTodoDueTimestamps(todoIDs, timestamp)
+    // 'clear': remove every selected to-do's alarm.
+    await setTodoDuesPerId(todoIDs.map(id => ({ id, due: 0 })))
+    await afterAlarmWrite()
+}
+
+/** applyAlarmPlanResult ****************************************************************************************************************************
+ * Turns the picker's plan + mode + anchor into the final per-to-do due timestamps and writes them. The current dues are re-read FRESH here (not      *
+ * taken from the webview) so the plan shifts each to-do from its true present schedule, then the shared pure applyAlarmPlan computes the result and    *
+ * setTodoDuesPerId lands it. Shared by the desktop dialog OK and the mobile overlay's alarmSet.                                                       *
+ ***************************************************************************************************************************************************/
+async function applyAlarmPlanResult(todoIDs, plan, anchor, mode){
+    var todos = await getTodoDues(todoIDs)
+    var results = applyAlarmPlan(todos, plan, anchor, mode, new Date())
+    await setTodoDuesPerId(results)
+    await afterAlarmWrite()
+}
+
+/** afterAlarmWrite *********************************************************************************************************************************
+ * The refresh sequence every alarm write ends with: repaint now, then let the reconcile and overview lanes catch up once the search index settles.   *
+ ***************************************************************************************************************************************************/
+async function afterAlarmWrite(){
     await refreshInterfaces()
-    // The moved to-dos only settle into their new groups once the search index has caught up: the reconcile
-    // lane repaints the panel then, the overview lane rewrites the notes on its own debounce.
     scheduleReconcile()
     scheduleOverview()
 }
@@ -362,30 +453,30 @@ async function computeInitialAlarm(todoIDs){
 }
 
 /** getAlarmInitialFields ***************************************************************************************************************************
- * Round-trip target for the mobile alarm overlay: returns the { date, time } the overlay should prefill with. Empty for an empty selection.          *
+ * Round-trip target for the mobile alarm overlay: returns the { date, time, hasAlarm } the overlay should prefill with, plus whether the selection    *
+ * is multi and each to-do's current due (so the overlay can describe the plan exactly like the desktop dialog's JSON island). Empty for no selection. *
  ***************************************************************************************************************************************************/
 export async function getAlarmInitialFields(todoIDs){
-    if (!Array.isArray(todoIDs) || !todoIDs.length) return { date: "", time: "", hasAlarm: false }
-    return await computeInitialAlarm(todoIDs)
+    if (!Array.isArray(todoIDs) || !todoIDs.length) return { date: "", time: "", hasAlarm: false, multi: false, dues: [] }
+    var initial = await computeInitialAlarm(todoIDs)
+    return { ...initial, multi: todoIDs.length > 1, dues: await getTodoDues(todoIDs) }
 }
 
 /** applyAlarmSet ***********************************************************************************************************************************
- * Applies the mobile alarm overlay's OK result: parses the two field strings (rejecting an impossible date/time with the same message the dialog      *
- * shows) and sets every selected to-do's due time, then refreshes. The host keeps this logic so the overlay only has to post the raw field strings.    *
+ * Applies the mobile alarm overlay's OK result: validates the anchor field strings (rejecting an impossible date/time with the same message the        *
+ * dialog shows), then applies the chosen plan + mode through the shared engine - the same path the desktop dialog OK takes. mode/plan are optional so   *
+ * an older overlay descriptor (no mode/plan) degrades to the 1.8.3 "same datetime for all" behaviour.                                                   *
  ***************************************************************************************************************************************************/
-export async function applyAlarmSet(todoIDs, dateString, timeString){
+export async function applyAlarmSet(todoIDs, dateString, timeString, mode?, plan?){
     if (!Array.isArray(todoIDs) || !todoIDs.length) return
     var parsed = parseAlarmFields(dateString, timeString)
     if (!parsed){
         await joplin.views.dialogs.showMessageBox("Cockpit: the alarm was not set. The date must be YYYY-MM-DD and the time HH:MM (24 hour).")
         return
     }
-    await setTodoDueTimestamps(todoIDs, parsed.getTime())
-    await refreshInterfaces()
-    // The moved to-dos only settle into their new groups once the search index has caught up: the reconcile
-    // lane repaints the panel then, the overview lane rewrites the notes on its own debounce.
-    scheduleReconcile()
-    scheduleOverview()
+    var resolvedMode = mode === "respect" ? "respect" : "same"
+    var resolvedPlan = plan ? String(plan) : "anchor"
+    await applyAlarmPlanResult(todoIDs, resolvedPlan, { date: dateString, time: timeString }, resolvedMode)
 }
 
 /** applyAlarmCleared *******************************************************************************************************************************
@@ -393,10 +484,8 @@ export async function applyAlarmSet(todoIDs, dateString, timeString){
  ***************************************************************************************************************************************************/
 export async function applyAlarmCleared(todoIDs){
     if (!Array.isArray(todoIDs) || !todoIDs.length) return
-    await setTodoDueTimestamps(todoIDs, 0)
-    await refreshInterfaces()
-    scheduleReconcile()
-    scheduleOverview()
+    await setTodoDuesPerId(todoIDs.map(id => ({ id, due: 0 })))
+    await afterAlarmWrite()
 }
 
 /** parseAlarmFields ********************************************************************************************************************************
