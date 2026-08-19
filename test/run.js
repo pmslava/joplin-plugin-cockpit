@@ -1462,15 +1462,154 @@ async function main() {
             'the peek query carries the server-side negation of the excluded title')
     })
 
+    // ============================================================ row-wide click-to-open (dead-zone opens the item)
+    // The bug: a left click on a row's dead zone (its padding, the gap beside a short title, the strip below a
+    // short title) SELECTED the row but opened nothing, because opening was gated on the todo-title zone alone.
+    // The fix broadens the row-level click handlers so ANY non-zone left click opens the item, exactly like the
+    // title, while the checkbox / notebook-pill / modifier guards stay. These checks pin (a) the handlers' new
+    // shape - read from the webview source, since this harness renders the panel markup but never executes the
+    // webview JS - (b) that every row surface carries the row-level open handler on its ROOT element, (c) the peek
+    // gains row-wide open while staying non-selectable and non-draggable, and (d) the zone markup is byte-stable.
+    const webviewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panelWebview.js'), 'utf8')
+    // The body of a top-level webview handler: from its `function name(` to the closing brace at column 0. The
+    // inner blocks all close with an indented `}` (never `\n}`), so the first `\n}` is the function's own end.
+    const handlerBody = (name) => {
+        const start = webviewSource.indexOf('function ' + name + '(')
+        assert.ok(start >= 0, name + ' not found in panelWebview.js')
+        const end = webviewSource.indexOf('\n}', start)
+        assert.ok(end > start, 'could not delimit ' + name)
+        return webviewSource.slice(start, end)
+    }
+
+    // (a) The handler shape. The pre-fix code opened ONLY inside `if (event.target.classList.contains('todo-title'))`,
+    // so the absence of that exact title-zone gate - while the checkbox / pill / modifier guards remain and the open
+    // still fires - is precisely the fix, and pre-fix source would fail this.
+    await test('row click: onTodoRowClicked opens beyond the title, keeping the checkbox/pill/modifier guards', () => {
+        const body = handlerBody('onTodoRowClicked')
+        assert.ok(body.includes("classList.contains('todo-checkbox')"), 'the tick-circle guard must stay (a checkbox click must not open)')
+        assert.ok(body.includes("classList.contains('todo-notebook')"), 'the notebook-pill guard must stay (a pill click filters, not opens)')
+        assert.ok(/event\.(ctrlKey|metaKey|shiftKey)/.test(body), 'the modifier (multi-select) guard must stay')
+        assert.ok(body.includes('onTodoClicked(todoID)'), 'the row must still open the to-do')
+        assert.ok(!body.includes("classList.contains('todo-title')"), 'opening must NOT be gated on the title zone - a dead-zone click must open too')
+    })
+    await test('row click: onNoteRowClicked opens beyond the title (a note row has no checkbox to guard)', () => {
+        const body = handlerBody('onNoteRowClicked')
+        assert.ok(body.includes("classList.contains('todo-notebook')"), 'the notebook-pill guard must stay')
+        assert.ok(body.includes('onTodoClicked(noteID)'), 'the row must still open the note')
+        assert.ok(!body.includes("classList.contains('todo-title')"), 'opening must NOT be gated on the title zone')
+    })
+    await test('row dblclick: onRowDoubleClicked stays title-scoped and desktop-only', () => {
+        // Double-click-to-new-window is a title-only, desktop-only affordance; the dead-zone open fix must not
+        // spread it to the whole row.
+        const body = handlerBody('onRowDoubleClicked')
+        assert.ok(body.includes("classList.contains('todo-title')"), 'dblclick-to-new-window must stay gated on the title zone')
+        assert.ok(body.includes('IS_MOBILE'), 'dblclick-to-new-window must stay desktop-only')
+        assert.ok(body.includes('openInNewWindow'), 'dblclick must still open a new window')
+    })
+
+    // (b) Every row surface carries the row-level open handler on its ROOT element. One interval render supplies
+    // both an interval to-do row and a note row; a second render supplies a week planner card.
+    const rowFolder = 'n'.repeat(32)
+    const rowTodoId = 'a'.repeat(32)
+    const rowNoteId = 'e'.repeat(32)
+    const rowState = await run({
+        dataDir: path.join(tmp, 'rowopen-interval-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [{ id: rowTodoId, title: 'Interval row to-do', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: rowFolder, user_updated_time: 1 }],
+        searchNotes: [{ id: rowNoteId, title: 'A plain note row', is_todo: 0, todo_completed: 0, parent_id: rowFolder, user_updated_time: 2 }],
+        folders: [{ id: rowFolder, title: 'Inbox', parent_id: '', updated_time: 1 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [
+                { ...baseProfile, id: 1, name: 'Rows', searchCriteria: '', showNotes: true, notesPosition: 'after', noteID: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    // The opening tag of the row whose data-*-id matches `marker`: from its `<div` to the first `>` after it.
+    const rootOpenTag = (html, marker) => {
+        const at = html.indexOf(marker)
+        assert.ok(at >= 0, 'row not found for ' + marker)
+        return html.slice(html.lastIndexOf('<div', at), html.indexOf('>', at) + 1)
+    }
+    await test('row markup: an interval to-do row root carries onclick=onTodoRowClicked', () => {
+        const tag = rootOpenTag(rowState.panelHtml['panel-panel'], 'data-todo-id="' + rowTodoId + '"')
+        assert.ok(tag.includes('class="todo"'), 'the interval row root should be a plain .todo')
+        assert.ok(tag.includes(`onclick="onTodoRowClicked(event, '${rowTodoId}')"`), 'the to-do row root must carry the row-level open handler')
+    })
+    await test('row markup: a note row root carries onclick=onNoteRowClicked', () => {
+        const tag = rootOpenTag(rowState.panelHtml['panel-panel'], 'data-note-id="' + rowNoteId + '"')
+        assert.ok(tag.includes('class="todo -note"'), 'the note row root should be a .todo.-note')
+        assert.ok(tag.includes(`onclick="onNoteRowClicked(event, '${rowNoteId}')"`), 'the note row root must carry the row-level open handler')
+    })
+
+    const weekCardState = await run({
+        dataDir: path.join(tmp, 'rowopen-week-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [{ id: rowTodoId, title: 'Week card to-do', todo_completed: 0, todo_due: Date.now(), parent_id: rowFolder, user_updated_time: 1 }],
+        folders: [{ id: rowFolder, title: 'Inbox', parent_id: '', updated_time: 1 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [
+                { ...baseProfile, id: 1, name: 'Wk', displayFormat: 'week', searchCriteria: '', noteID: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    await test('row markup: a week planner card root carries onclick=onTodoRowClicked', () => {
+        const html = weekCardState.panelHtml['panel-panel']
+        assert.ok(html.includes('week-planner'), 'precondition: the week planner rendered')
+        const tag = rootOpenTag(html, 'data-todo-id="' + rowTodoId + '"')
+        assert.ok(tag.includes('class="todo -card'), 'the week card root should be a .todo.-card')
+        assert.ok(tag.includes(`onclick="onTodoRowClicked(event, '${rowTodoId}')"`), 'the week card root must carry the row-level open handler')
+    })
+
+    // (c) The peek rows gain row-wide open on their ROOT while staying non-selectable and non-draggable: the same
+    // row-level onclick handler is present, but the selection onmousedown and the drag attribute/handlers are not.
+    await test('row markup (peek): peek rows carry the row-level open handler but no selection/drag on their root', async () => {
+        const state = await runOutside({ outsideResults: [
+            { id: 'to'.repeat(16), title: 'Peek to-do', is_todo: 1, todo_completed: 0, parent_id: 'nbP', user_updated_time: 3 },
+            { id: 'no'.repeat(16), title: 'Peek note', is_todo: 0, todo_completed: 0, parent_id: 'nbP', user_updated_time: 4 },
+        ] })
+        await state.panelMessageHandler(['searchFilterChanged', 'peek'])
+        const html = state.panelHtml['panel-panel']
+        const todoTag = rootOpenTag(html, 'data-todo-id="' + 'to'.repeat(16) + '"')
+        assert.ok(todoTag.includes('onclick="onTodoRowClicked(event,'), 'the peek to-do row root must carry the row-level open handler')
+        assert.ok(!todoTag.includes('onmousedown'), 'the peek to-do row must not be selectable (no onmousedown on its root)')
+        assert.ok(!todoTag.includes('draggable') && !todoTag.includes('ondragstart'), 'the peek to-do row must not be draggable')
+        const noteTag = rootOpenTag(html, 'data-note-id="' + 'no'.repeat(16) + '"')
+        assert.ok(noteTag.includes('onclick="onNoteRowClicked(event,'), 'the peek note row root must carry the row-level open handler')
+        assert.ok(!noteTag.includes('onmousedown'), 'the peek note row must not be selectable (no onmousedown on its root)')
+    })
+
+    // (d) The zone markup a click distinguishes - the tick circle, the title anchor and the notebook pill - is
+    // byte-stable for a representative row: the fix lives entirely in the row-level click handler, so no zone
+    // gained or lost markup. Targeted fragment checks, not a brittle whole-row snapshot.
+    await test('row markup: the checkbox / title / pill zone markup is unchanged by the fix', () => {
+        const html = rowState.panelHtml['panel-panel']
+        const at = html.indexOf('data-todo-id="' + rowTodoId + '"')
+        const row = html.slice(html.lastIndexOf('<div', at), html.indexOf('</div>', at) + '</div>'.length)
+        // Checkbox zone: still the tickable input wired to onTodoChecked (the tick path is untouched).
+        assert.ok(row.includes('class="todo-checkbox'), 'the checkbox zone markup changed')
+        assert.ok(row.includes(`onchange="onTodoChecked('${rowTodoId}', this.checked)"`), 'the checkbox onchange wiring changed')
+        // Title zone: still a plain .todo-title anchor with no click handler of its own (opening is row-level).
+        assert.ok(row.includes('<a class="todo-title"'), 'the title zone markup changed')
+        assert.ok(!/<a class="todo-title"[^>]*onclick=/.test(row), 'the title anchor must not carry its own onclick (opening is row-level)')
+        // Notebook-pill zone: still the pill carrying its notebook id.
+        assert.ok(row.includes(`class="todo-notebook" data-notebook-id="${rowFolder}"`), 'the notebook-pill zone markup changed')
+    })
+
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.8.0', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.8.1', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.8.0'
+        const expected = '1.8.1'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')

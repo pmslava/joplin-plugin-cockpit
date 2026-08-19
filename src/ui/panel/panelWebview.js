@@ -7,7 +7,7 @@ async function onTodoClicked(todoID){
 
 /** Selection ***************************************************************************************************************************************
  * Which to-dos are selected, so that several can be dragged together. Ctrl+click (or Cmd+click) toggles a to-do, Shift+click selects the range from *
- * the previous click, and a plain click on a title opens the to-do as before. The panel markup is replaced on every refresh, so the selection is    *
+ * the previous click, and a plain click on a row opens the to-do (title too). The panel markup is replaced on every refresh, so the selection is    *
  * kept here and painted back on whenever the document changes.                                                                                     *
  ***************************************************************************************************************************************************/
 var selectedTodoIDs = new Set()
@@ -320,9 +320,12 @@ function onTodoRowClicked(event, todoID){
         applyNotebookFilterFromPill(event.target)
         return
     }
-    if (event.target.classList.contains('todo-title')){
-        void onTodoClicked(todoID)
-    }
+    // Any plain left click that reaches here opens the to-do: the tick circle and the notebook pill
+    // returned above (they do their own thing), and a modifier click returned at the top (selection
+    // only), so what is left is the title OR the row's own dead zones - its padding, the gap beside a
+    // short title, the strip below it. Opening on all of them makes a click that selects a row also show
+    // it in the editor, matching the title. onTodoRowMouseDown has already maintained the selection.
+    void onTodoClicked(todoID)
 }
 
 /** onTodoContextMenu ********************************************************************************************************************************
@@ -368,9 +371,10 @@ function onNoteRowClicked(event, noteID){
         applyNotebookFilterFromPill(event.target)
         return
     }
-    if (event.target.classList.contains('todo-title')){
-        void onTodoClicked(noteID)
-    }
+    // Mirrors onTodoRowClicked: any other left click opens the note - the title, the display-only
+    // progress ring, and the row's dead zones alike. The notebook pill returned above; a note row has no
+    // tickable checkbox, so there is nothing else to guard. onNoteRowMouseDown has already picked the row.
+    void onTodoClicked(noteID)
 }
 
 /** onRowDoubleClicked ******************************************************************************************************************************
