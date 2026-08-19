@@ -15,10 +15,11 @@ var alarmTimeUserSet = false
 
 /** Multi-select plan state. A single-select dialog leaves these at their defaults and never shows a plan/mode; only a
  * multi-select dialog carries the mode picker + explanation line. alarmMode is 'respect' (each to-do keeps its own
- * time; '+' plans shift from its own date) by default or 'same' (one datetime for all, the 1.8.3 behaviour).
- * alarmActivePlan is the last quick button pressed, or 'anchor' for a manual calendar pick / no press. alarmTodoDues
- * is every selected to-do's current { id, due } (from the island), which the shared describeAlarmPlan reads to word
- * the explanation. All reset on every (re)open from the island. */
+ * schedule; the accumulator shifts from its own datetime) by default or 'same' (one datetime for all, the 1.8.3
+ * behaviour). alarmActivePlan is EITHER an absolute string ('today'/'tomorrow'/'weekends'/'nextMonday'/'anchor') or the
+ * row-2 accumulator OBJECT {hours,days,weeks,monthsDay,monthsDate}; an absolute press or manual pick resets it to a
+ * string, discarding the accumulator. alarmTodoDues is every selected to-do's current { id, due } (from the island),
+ * which the shared describeAlarmPlan reads to word the explanation. All reset on every (re)open from the island. */
 var alarmIsMulti = false
 var alarmMode = 'same'
 var alarmActivePlan = 'anchor'
@@ -41,9 +42,11 @@ function alarmParseISO(value){
 }
 
 /** Quick buttons ***********************************************************************************************************************************
- * Today / Tomorrow / +week / +month(day) / +month(date). The date/time math lives in the shared, unit-tested window.AlarmQuick module (alarmQuick.js, *
- * loaded into this dialog before this script); these thin wrappers only read the DOM for the button arguments and write the result back. Both this   *
- * dialog and the mobile overlay wire the identical five buttons to the same functions, so the math is never forked.                                 *
+ * Two rows: row 1 the absolute dates (Today / Tomorrow / Weekends / Next Monday), row 2 the accumulating increments   *
+ * (+hour / +day / +week / +month(day) / +month(date)). The date/time math lives in the shared, unit-tested            *
+ * window.AlarmQuick module (alarmQuick.js, loaded into this dialog before this script); these thin wrappers only read *
+ * the DOM for the button arguments and write the result back. Both this dialog and the mobile overlay wire the        *
+ * identical buttons to the same functions, so the math is never forked.                                               *
  ***************************************************************************************************************************************************/
 
 // The date the +week / +month buttons walk forward from: the date field's value, or today when it is empty/invalid.
@@ -71,21 +74,49 @@ function applyAlarmQuick(result){
     updateAlarmTimeSelection()
 }
 
-// A quick button press. In a multi-select dialog under RESPECT mode the button only chooses the PLAN (each to-do
-// keeps its own time / shifts from its own date), so the anchor fields are left untouched and the explanation is
-// re-worded. In single-select or SAME mode the button writes the anchor fields, exactly like 1.8.3. Either way the
-// active plan is remembered (so switching mode keeps the pressed button) and highlighted.
+// An ABSOLUTE (row-1) button press. It sets the plan to the absolute string, which RESETS any accumulator. In a
+// multi-select dialog under RESPECT mode it only chooses the plan (each to-do keeps its own time, landing on the
+// absolute date), so the anchor fields are left untouched and the explanation is re-worded; in single-select or SAME
+// mode it writes the anchor fields, exactly like 1.8.3. Either way the active plan is remembered and highlighted.
 function runAlarmQuick(plan, quickResult){
     setAlarmActivePlan(plan)
     if (!(alarmIsMulti && alarmMode === 'respect')) applyAlarmQuick(quickResult)
     updateAlarmPlanDescription()
 }
 
+// The single-increment field result for one row-2 press (single-select / SAME): read the current field date+time and
+// apply exactly one increment of `key`, so repeated presses compound naturally through the fields.
+function alarmAccumulatorFieldPress(key){
+    var now = new Date(), base = alarmBaseDate(), preserved = alarmPreservedTime()
+    if (key === 'hours') return AlarmQuick.hour(now, base, preserved)
+    if (key === 'days') return AlarmQuick.day(now, base, preserved)
+    if (key === 'weeks') return AlarmQuick.week(now, base, preserved)
+    if (key === 'monthsDay') return AlarmQuick.monthWeekday(now, base, preserved)
+    return AlarmQuick.monthDate(now, base, preserved)
+}
+
+// A row-2 ACCUMULATOR press. In a multi-select dialog under RESPECT mode it only accumulates the increment (each to-do
+// shifts from its own schedule), leaving the anchor fields untouched; in single-select or SAME mode it also writes the
+// anchor fields (one increment per press, compounding). The accumulator plan is remembered and its buttons highlighted.
+function runAlarmAccumulator(key){
+    setAlarmActivePlan(AlarmQuick.accumulate(alarmActivePlan, key))
+    if (!(alarmIsMulti && alarmMode === 'respect')){
+        applyAlarmQuick(alarmAccumulatorFieldPress(key))
+        if (key === 'hours') alarmTimeUserSet = true    // so the next +hour keeps this time and compounds
+    }
+    updateAlarmPlanDescription()
+}
+
 function onAlarmQuickToday(){ runAlarmQuick('today', AlarmQuick.today(new Date())) }
 function onAlarmQuickTomorrow(){ runAlarmQuick('tomorrow', AlarmQuick.tomorrow(new Date(), alarmPreservedTime())) }
-function onAlarmQuickWeek(){ runAlarmQuick('week', AlarmQuick.week(new Date(), alarmBaseDate(), alarmPreservedTime())) }
-function onAlarmQuickMonthWeekday(){ runAlarmQuick('monthWeekday', AlarmQuick.monthWeekday(new Date(), alarmBaseDate(), alarmPreservedTime())) }
-function onAlarmQuickMonthDate(){ runAlarmQuick('monthDate', AlarmQuick.monthDate(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+function onAlarmQuickWeekends(){ runAlarmQuick('weekends', AlarmQuick.weekends(new Date(), alarmPreservedTime())) }
+function onAlarmQuickNextMonday(){ runAlarmQuick('nextMonday', AlarmQuick.monday(new Date(), alarmPreservedTime())) }
+
+function onAlarmQuickHour(){ runAlarmAccumulator('hours') }
+function onAlarmQuickDay(){ runAlarmAccumulator('days') }
+function onAlarmQuickWeek(){ runAlarmAccumulator('weeks') }
+function onAlarmQuickMonthWeekday(){ runAlarmAccumulator('monthsDay') }
+function onAlarmQuickMonthDate(){ runAlarmAccumulator('monthsDate') }
 
 /** Plan + mode (multi-select) *********************************************************************************************************************/
 
@@ -95,15 +126,36 @@ function alarmAnchor(){
 }
 
 // Record the active plan, mirror it into the hidden #alarmPlan field (so it rides back to the host in formData), and
-// move the -active highlight to the matching quick button. The highlight is a multi-only affordance (single-select
-// has no plan concept and stays visually as 1.8.3), so it is suppressed when not multi.
+// move the -active highlight to the matching quick button(s). The hidden field must carry a string; an accumulator
+// plan rides back as its JSON, which the host and the shared applyAlarmPlan both accept, and an absolute plan as its
+// own string.
 function setAlarmActivePlan(plan){
     alarmActivePlan = plan
     var field = document.getElementById('alarmPlan')
-    if (field) field.value = plan
-    var byPlan = { today: 0, tomorrow: 1, week: 2, monthWeekday: 3, monthDate: 4 }
+    if (field) field.value = (plan && typeof plan === 'object') ? JSON.stringify(plan) : plan
+    setAlarmActiveButtons(plan)
+}
+
+// Move the -active highlight (multi only) to the pressed button(s): an absolute plan lights its single row-1 button;
+// an accumulator plan lights every row-2 button whose counter is non-zero. Single-select has no plan concept, so the
+// highlight is suppressed. Button order in the DOM: [Today, Tomorrow, Weekends, Next Monday, +hour, +day, +week,
+// +month(day), +month(date)].
+function setAlarmActiveButtons(plan){
+    var absIndex = { today: 0, tomorrow: 1, weekends: 2, nextMonday: 3 }
+    var accIndex = { hours: 4, days: 5, weeks: 6, monthsDay: 7, monthsDate: 8 }
+    var isAcc = plan && typeof plan === 'object'
     var buttons = document.querySelectorAll('#alarmQuick button')
-    for (var i = 0; i < buttons.length; i++) buttons[i].classList.toggle('-active', alarmIsMulti && byPlan[plan] === i)
+    for (var i = 0; i < buttons.length; i++){
+        var active = false
+        if (alarmIsMulti){
+            if (isAcc){
+                for (var key in accIndex){ if (accIndex[key] === i && plan[key] > 0){ active = true; break } }
+            } else {
+                active = absIndex[plan] === i
+            }
+        }
+        buttons[i].classList.toggle('-active', active)
+    }
 }
 
 // Re-word the explanation line (multi only) from the shared, unit-tested describeAlarmPlan, using the live dues,

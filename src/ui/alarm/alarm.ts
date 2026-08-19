@@ -155,11 +155,24 @@ const dialogCss = `
         background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.35));
         font-weight: 600;
     }
+    /* The quick buttons are two rows: row 1 the absolute dates (Today / Tomorrow / Weekends / Next Monday),
+     * row 2 the accumulating increments (+hour / +day / +week / +month(day) / +month(date)). Each row carries an
+     * EXPLICIT box-sizing height so Joplin's measure-before-draw pass (the buttons are static markup, present at
+     * measurement) sizes the dialog to exactly the height the two rows occupy; flex-wrap: nowrap keeps each a single
+     * line at the fixed 424px width, so neither row ever stacks into extra lines that would inflate the measurement.
+     * This two-row reservation replaces the old single wrapping quick row. */
     #alarmQuick {
         display: flex;
-        flex-direction: row;
-        flex-wrap: wrap;
+        flex-direction: column;
         gap: 6px;
+    }
+    .alarm-quick-row {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: nowrap;
+        gap: 6px;
+        height: 28px;
+        box-sizing: border-box;
     }
     #alarmQuick button {
         padding: 3px 10px;
@@ -355,11 +368,19 @@ export async function openAlarmDialog(todoIDs){
                     inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
             </div>
             <div id="alarmQuick">
-                <button type="button" onclick="onAlarmQuickToday()">Today</button>
-                <button type="button" onclick="onAlarmQuickTomorrow()">Tomorrow</button>
-                <button type="button" onclick="onAlarmQuickWeek()">+week</button>
-                <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
-                <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
+                <div class="alarm-quick-row">
+                    <button type="button" onclick="onAlarmQuickToday()">Today</button>
+                    <button type="button" onclick="onAlarmQuickTomorrow()">Tomorrow</button>
+                    <button type="button" title="The nearest Saturday (today if today is Saturday)" onclick="onAlarmQuickWeekends()">Weekends</button>
+                    <button type="button" title="The Monday after today" onclick="onAlarmQuickNextMonday()">Next Monday</button>
+                </div>
+                <div class="alarm-quick-row">
+                    <button type="button" title="Add one hour (may cross midnight)" onclick="onAlarmQuickHour()">+hour</button>
+                    <button type="button" title="Add one day" onclick="onAlarmQuickDay()">+day</button>
+                    <button type="button" onclick="onAlarmQuickWeek()">+week</button>
+                    <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
+                    <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
+                </div>
             </div>
             <div id="alarmBody" class="alarm-stretch-row">
                 <div id="alarmCalendar"></div>
@@ -479,7 +500,9 @@ export async function applyAlarmSet(todoIDs, dateString, timeString, mode?, plan
         return
     }
     var resolvedMode = mode === "respect" ? "respect" : "same"
-    var resolvedPlan = plan ? String(plan) : "anchor"
+    // The plan may be an absolute string OR the row-2 accumulator object (posted straight from the overlay); the
+    // shared applyAlarmPlan accepts either, so pass it through untouched rather than stringifying the object.
+    var resolvedPlan = plan != null && plan !== "" ? plan : "anchor"
     await applyAlarmPlanResult(todoIDs, resolvedPlan, { date: dateString, time: timeString }, resolvedMode)
 }
 

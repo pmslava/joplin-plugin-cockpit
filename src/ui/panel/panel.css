@@ -1312,12 +1312,16 @@ table {
     font-weight: 600;
 }
 
-/* A two-column grid so the five unequal-width quick buttons wrap into equal cells (rows of Today/Tomorrow,
- * +week/+month(day), then +month(date) alone in the last row's first cell) instead of content-width flex
- * stranding the widest label on its own line. A fixed 2-column grid is width-independent, keeps every button
- * an equal ~40px-tall tap target on a narrow phone, and cannot affect the desktop dialog (overlays are
- * mobile-only). */
+/* The quick buttons are two stacked rows: row 1 the absolute dates (Today / Tomorrow / Weekends / Next Monday),
+ * row 2 the accumulating increments (+hour / +day / +week / +month(day) / +month(date)). Each row is its own
+ * two-column grid so the unequal-width labels sit in equal ~40px-tall tap targets on a narrow phone (row 1's four
+ * buttons make 2x2; row 2's five make three grid rows) instead of content-width flex stranding the widest label on
+ * its own line. A fixed 2-column grid is width-independent and cannot affect the desktop dialog (overlays are
+ * mobile-only). The overlay sizes itself dynamically, so unlike the desktop dialog these rows need no fixed height. */
 .cockpit-alarm-overlay #alarmQuick {
+    display: flex; flex-direction: column; gap: 6px;
+}
+.cockpit-alarm-overlay .alarm-quick-row {
     display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
 }
 

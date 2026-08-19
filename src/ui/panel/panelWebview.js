@@ -1365,10 +1365,11 @@ var alarmHadExistingAlarm = false
 var alarmTimeUserSet = false
 
 // Multi-select plan state, mirroring alarmWebview.js. A single-select overlay leaves these at their defaults and
-// shows no plan/mode. alarmMode is 'respect' (each to-do keeps its own time; '+' plans shift from its own date) by
-// default for a multi selection, or 'same' (one datetime for all, the 1.8.3 behaviour). alarmActivePlan is the last
-// quick button pressed, or 'anchor' for a manual pick. alarmTodoDues is every selected to-do's { id, due }. All ride
-// along in the overlay descriptor so a mid-overlay reload restores the exact plan + mode + dues.
+// shows no plan/mode. alarmMode is 'respect' (each to-do keeps its own schedule; the accumulator shifts from its own
+// datetime) by default for a multi selection, or 'same' (one datetime for all, the 1.8.3 behaviour). alarmActivePlan is
+// EITHER an absolute string ('today'/'tomorrow'/'weekends'/'nextMonday'/'anchor') or the row-2 accumulator OBJECT
+// {hours,days,weeks,monthsDay,monthsDate}; an absolute press or manual pick resets it to a string. alarmTodoDues is
+// every selected to-do's { id, due }. All ride along in the overlay descriptor so a reload restores plan + mode + dues.
 var alarmIsMulti = false
 var alarmMode = 'same'
 var alarmActivePlan = 'anchor'
@@ -1388,10 +1389,11 @@ function alarmParseISO(value){
     return parsed
 }
 
-// Quick buttons: Today / Tomorrow / +week / +month(day) / +month(date). The date/time math lives in the shared,
-// unit-tested window.AlarmQuick module (alarmQuick.js, loaded into the panel before this script); these wrappers
-// only read the DOM for the arguments, write the result back, and push the overlay state so a reload survives. The
-// desktop dialog wires the identical buttons to the same functions, so the math is never forked across the two.
+// Quick buttons, two rows: row 1 the absolute dates (Today / Tomorrow / Weekends / Next Monday), row 2 the
+// accumulating increments (+hour / +day / +week / +month(day) / +month(date)). The date/time math lives in the
+// shared, unit-tested window.AlarmQuick module (alarmQuick.js, loaded into the panel before this script); these
+// wrappers only read the DOM for the arguments, write the result back, and push the overlay state so a reload
+// survives. The desktop dialog wires the identical buttons to the same functions, so the math is never forked.
 function alarmBaseDate(){
     return alarmParseISO(document.getElementById('alarmDate').value) || new Date()
 }
@@ -1412,10 +1414,11 @@ function applyAlarmQuick(result){
     updateAlarmTimeSelection()
 }
 
-// A quick button press. In a multi-select overlay under RESPECT mode the button only chooses the PLAN (each to-do
-// keeps its own time / shifts from its own date), so the anchor fields are left untouched and the explanation is
-// re-worded; in single-select or SAME mode it writes the anchor fields like 1.8.3. The pressed plan is remembered and
-// highlighted, then the overlay state is pushed so a reload survives.
+// An ABSOLUTE (row-1) button press. It sets the plan to the absolute string, which RESETS any accumulator. In a
+// multi-select overlay under RESPECT mode it only chooses the plan (each to-do keeps its own time, landing on the
+// absolute date), so the anchor fields are left untouched and the explanation is re-worded; in single-select or SAME
+// mode it writes the anchor fields like 1.8.3. The pressed plan is remembered and highlighted, then the overlay state
+// is pushed so a reload survives.
 function runAlarmQuick(plan, quickResult){
     setAlarmActivePlan(plan)
     if (!(alarmIsMulti && alarmMode === 'respect')) applyAlarmQuick(quickResult)
@@ -1423,11 +1426,41 @@ function runAlarmQuick(plan, quickResult){
     pushOverlayState()
 }
 
+// The single-increment field result for one row-2 press (single-select / SAME): read the current field date+time and
+// apply exactly one increment of `key`, so repeated presses compound naturally through the fields.
+function alarmAccumulatorFieldPress(key){
+    var now = new Date(), base = alarmBaseDate(), preserved = alarmPreservedTime()
+    if (key === 'hours') return AlarmQuick.hour(now, base, preserved)
+    if (key === 'days') return AlarmQuick.day(now, base, preserved)
+    if (key === 'weeks') return AlarmQuick.week(now, base, preserved)
+    if (key === 'monthsDay') return AlarmQuick.monthWeekday(now, base, preserved)
+    return AlarmQuick.monthDate(now, base, preserved)
+}
+
+// A row-2 ACCUMULATOR press. In a multi-select overlay under RESPECT mode it only accumulates the increment (each
+// to-do shifts from its own schedule), leaving the anchor fields untouched; in single-select or SAME mode it also
+// writes the anchor fields (one increment per press, compounding). The plan is remembered, its buttons highlighted,
+// and the overlay state pushed so a reload survives.
+function runAlarmAccumulator(key){
+    setAlarmActivePlan(AlarmQuick.accumulate(alarmActivePlan, key))
+    if (!(alarmIsMulti && alarmMode === 'respect')){
+        applyAlarmQuick(alarmAccumulatorFieldPress(key))
+        if (key === 'hours') alarmTimeUserSet = true
+    }
+    updateAlarmPlanDescription()
+    pushOverlayState()
+}
+
 function onAlarmQuickToday(){ runAlarmQuick('today', AlarmQuick.today(new Date())) }
 function onAlarmQuickTomorrow(){ runAlarmQuick('tomorrow', AlarmQuick.tomorrow(new Date(), alarmPreservedTime())) }
-function onAlarmQuickWeek(){ runAlarmQuick('week', AlarmQuick.week(new Date(), alarmBaseDate(), alarmPreservedTime())) }
-function onAlarmQuickMonthWeekday(){ runAlarmQuick('monthWeekday', AlarmQuick.monthWeekday(new Date(), alarmBaseDate(), alarmPreservedTime())) }
-function onAlarmQuickMonthDate(){ runAlarmQuick('monthDate', AlarmQuick.monthDate(new Date(), alarmBaseDate(), alarmPreservedTime())) }
+function onAlarmQuickWeekends(){ runAlarmQuick('weekends', AlarmQuick.weekends(new Date(), alarmPreservedTime())) }
+function onAlarmQuickNextMonday(){ runAlarmQuick('nextMonday', AlarmQuick.monday(new Date(), alarmPreservedTime())) }
+
+function onAlarmQuickHour(){ runAlarmAccumulator('hours') }
+function onAlarmQuickDay(){ runAlarmAccumulator('days') }
+function onAlarmQuickWeek(){ runAlarmAccumulator('weeks') }
+function onAlarmQuickMonthWeekday(){ runAlarmAccumulator('monthsDay') }
+function onAlarmQuickMonthDate(){ runAlarmAccumulator('monthsDate') }
 
 /** Plan + mode (multi-select overlay) *************************************************************************************************************/
 
@@ -1436,13 +1469,28 @@ function alarmAnchor(){
     return { date: document.getElementById('alarmDate').value, time: document.getElementById('alarmTime').value }
 }
 
-// Record the active plan and move the -active highlight to the matching quick button. The highlight is a multi-only
-// affordance (single-select has no plan concept and stays visually as 1.8.3), so it is suppressed when not multi.
+// Record the active plan and move the -active highlight to the matching quick button(s): an absolute plan lights its
+// single row-1 button; an accumulator plan lights every row-2 button whose counter is non-zero. The highlight is a
+// multi-only affordance (single-select has no plan concept and stays visually as 1.8.3), so it is suppressed when not
+// multi. Button order in the DOM: [Today, Tomorrow, Weekends, Next Monday, +hour, +day, +week, +month(day),
+// +month(date)].
 function setAlarmActivePlan(plan){
     alarmActivePlan = plan
-    var byPlan = { today: 0, tomorrow: 1, week: 2, monthWeekday: 3, monthDate: 4 }
+    var absIndex = { today: 0, tomorrow: 1, weekends: 2, nextMonday: 3 }
+    var accIndex = { hours: 4, days: 5, weeks: 6, monthsDay: 7, monthsDate: 8 }
+    var isAcc = plan && typeof plan === 'object'
     var buttons = document.querySelectorAll('#alarmQuick button')
-    for (var i = 0; i < buttons.length; i++) buttons[i].classList.toggle('-active', alarmIsMulti && byPlan[plan] === i)
+    for (var i = 0; i < buttons.length; i++){
+        var active = false
+        if (alarmIsMulti){
+            if (isAcc){
+                for (var key in accIndex){ if (accIndex[key] === i && plan[key] > 0){ active = true; break } }
+            } else {
+                active = absIndex[plan] === i
+            }
+        }
+        buttons[i].classList.toggle('-active', active)
+    }
 }
 
 // Re-word the explanation line (multi only) from the shared, unit-tested describeAlarmPlan. No-op for single-select.
@@ -1644,11 +1692,19 @@ function openAlarmOverlay(ids, restore){
                 inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
         </div>
         <div id="alarmQuick">
-            <button type="button" onclick="onAlarmQuickToday()">Today</button>
-            <button type="button" onclick="onAlarmQuickTomorrow()">Tomorrow</button>
-            <button type="button" onclick="onAlarmQuickWeek()">+week</button>
-            <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
-            <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
+            <div class="alarm-quick-row">
+                <button type="button" onclick="onAlarmQuickToday()">Today</button>
+                <button type="button" onclick="onAlarmQuickTomorrow()">Tomorrow</button>
+                <button type="button" title="The nearest Saturday (today if today is Saturday)" onclick="onAlarmQuickWeekends()">Weekends</button>
+                <button type="button" title="The Monday after today" onclick="onAlarmQuickNextMonday()">Next Monday</button>
+            </div>
+            <div class="alarm-quick-row">
+                <button type="button" title="Add one hour (may cross midnight)" onclick="onAlarmQuickHour()">+hour</button>
+                <button type="button" title="Add one day" onclick="onAlarmQuickDay()">+day</button>
+                <button type="button" onclick="onAlarmQuickWeek()">+week</button>
+                <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
+                <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
+            </div>
         </div>
         <div id="alarmBody">
             <div id="alarmCalendar"></div>
