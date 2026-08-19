@@ -299,6 +299,13 @@ function onTodoRowMouseDown(event, todoID){
     } else if (event.ctrlKey || event.metaKey){
         selectedTodoIDs.has(todoID) ? selectedTodoIDs.delete(todoID) : selectedTodoIDs.add(todoID)
         lastClickedTodoID = todoID
+    } else if (selectedTodoIDs.has(todoID) && selectedTodoIDs.size > 1){
+        // A plain press on a row that is ALREADY part of a multi-selection PRESERVES the whole set, so a
+        // drag that follows sweeps every selected to-do (the file-manager rule). The browser fires this
+        // mousedown BEFORE dragstart, so collapsing to just this row here would strand the rest -
+        // onTodoDragStart would then see a single id and only one to-do would move. The collapse-to-single
+        // instead happens on a plain CLICK with no drag (onTodoRowClicked), which since 1.8.1 opens the row.
+        lastClickedTodoID = todoID
     } else {
         selectedTodoIDs.clear()
         selectedTodoIDs.add(todoID)
@@ -327,6 +334,17 @@ function onTodoRowClicked(event, todoID){
     if (event.target.classList.contains('todo-notebook')){
         applyNotebookFilterFromPill(event.target)
         return
+    }
+    // A plain click reaching here is a press that produced NO drag (a real drag fires no click), so it
+    // collapses the selection to just this row - the single-select half of the file-manager rule whose
+    // drag half onTodoRowMouseDown now defers (it PRESERVES a multi-selection on the press so a drag can
+    // sweep the whole set). A no-op when the row is already the sole selection, so a plain single click
+    // never repaints needlessly.
+    if (!(selectedTodoIDs.size === 1 && selectedTodoIDs.has(todoID))){
+        selectedTodoIDs.clear()
+        selectedTodoIDs.add(todoID)
+        lastClickedTodoID = todoID
+        paintTodoSelection()
     }
     // Any plain left click that reaches here opens the to-do: the tick circle and the notebook pill
     // returned above (they do their own thing), and a modifier click returned at the top (selection
@@ -723,8 +741,10 @@ async function onTodoDropped(event){
  * edge) assigns due datetimes IN BETWEEN the neighbours. This is desktop-only (mobile has no HTML5 drag) and stateless DOM wiring - it reads the        *
  * existing markup (the row's data-todo-id and its group heading's data-drop date) and posts, holding nothing across renders but the transient indicator *
  * class, which is cleared on every dragover, on dragend and on drop. It lives only in the LIST views: an eligible row is a .todo[data-todo-id] that is a *
- * DIRECT child of the .todos container (week cards sit in .week-day, month/notes/peek rows in their own sections, so those are excluded) whose group     *
- * heading carries a real YYYY-MM-DD date (so No-Due / Overdue / Future groups, whose headings are "clear" or dateless, are excluded too).                *
+ * DIRECT child of the .todos container (week cards sit in .week-day, month/notes/peek rows in their own sections, so those are excluded). A DATED group   *
+ * (heading data-drop = YYYY-MM-DD) anchors its edges on that date; a DATELESS group (Overdue/Future, no data-drop) is eligible too - an interior drop     *
+ * needs no group date and its edges are derived host-side from the neighbour's own due. Only the No-Due group (data-drop "clear") is excluded: its rows   *
+ * carry no due, so there is nothing to sit between.                                                                                                       *
  *                                                                                                                                                        *
  * The gap is a thin band at each row boundary: the top BETWEEN_BAND of a row means "insert before it", the bottom band "insert after it", and the middle *
  * keeps today's behaviour (nothing - no indicator, no drop). The insertion line is drawn as an inset box-shadow on the row (.-drop-before/.-drop-after   *
@@ -744,15 +764,20 @@ function betweenGroupHeading(row){
     return null
 }
 
-// The group's date target ('YYYY-MM-DD') if this row is an eligible list-view between-target, else null. Requires the
-// row to be a direct child of .todos (list views only) and its heading to carry a real calendar date in data-drop.
-function betweenGroupDate(row){
+// The between-eligibility of a row and, when eligible, the group's date target. Returns { groupDate } for an eligible
+// row: groupDate is the group's calendar date ('YYYY-MM-DD') for a DATED group, or null for a DATELESS group
+// (Overdue/Future) whose edge day the host derives from the neighbour's own due. Returns null (not eligible) for a row
+// outside the .todos list (list views only), a headingless row, or the No-Due group (data-drop 'clear'): its rows carry
+// no due, so there is nothing to sit BETWEEN. An INTERIOR drop (both neighbours present) needs no group date at all -
+// the neighbours' dues define the interval - which is exactly what lets the dateless groups take between-drops.
+function betweenGroupInfo(row){
     if (!row || !row.parentElement || !row.parentElement.classList.contains('todos')) return null
     var heading = betweenGroupHeading(row)
     if (!heading) return null
     var drop = heading.getAttribute('data-drop')
-    if (!drop || !/^\d{4}-\d{2}-\d{2}$/.test(drop)) return null   // excludes "clear" (No Due), dateless headings (Overdue/Future)
-    return drop
+    if (drop === 'clear') return null                             // No-Due: its rows have no due to be between
+    if (drop && /^\d{4}-\d{2}-\d{2}$/.test(drop)) return { groupDate: drop }   // dated group: its date anchors the edges
+    return { groupDate: null }                                    // dateless group (Overdue/Future): edges from neighbours
 }
 
 // The eligible between-target under the pointer, or null when the pointer is over a row's inert middle or not over an
@@ -760,13 +785,13 @@ function betweenGroupDate(row){
 function betweenTargetFor(event){
     var row = (event.target && event.target.closest) ? event.target.closest('.todo[data-todo-id]') : null
     if (!row) return null
-    var groupDate = betweenGroupDate(row)
-    if (!groupDate) return null
+    var info = betweenGroupInfo(row)
+    if (!info) return null
     var rect = row.getBoundingClientRect()
     if (!rect.height) return null
     var offset = event.clientY - rect.top
-    if (offset <= rect.height * BETWEEN_BAND) return { row: row, before: true, groupDate: groupDate }
-    if (offset >= rect.height * (1 - BETWEEN_BAND)) return { row: row, before: false, groupDate: groupDate }
+    if (offset <= rect.height * BETWEEN_BAND) return { row: row, before: true, groupDate: info.groupDate }
+    if (offset >= rect.height * (1 - BETWEEN_BAND)) return { row: row, before: false, groupDate: info.groupDate }
     return null                                                    // the inert middle: keep today's behaviour (nothing)
 }
 

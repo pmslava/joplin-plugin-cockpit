@@ -8,7 +8,8 @@
  *   sequenceBetween(lo, hi, count, dayStart)   - `count` datetimes for a multi-drag, each computed against the previous result so they strictly        *
  *                                                 increase and keep the dragged order (t1 = betweenDue(lo,hi); t_n = betweenDue(t_{n-1}, hi)).          *
  *   betweenBounds(prevDue, nextDue, date, dm)  - resolves the (lo, hi) the host feeds the two functions above from the FRESH neighbour dues and, at a  *
- *                                                 group edge (a missing neighbour), the group's date. Kept here so the edge rules are pure + unit-tested.*
+ *                                                 group edge (a missing neighbour), an anchoring day: the group's date, or - for a DATELESS group      *
+ *                                                 (Overdue/Future) - the day of the present neighbour's own due. Kept here so the rules are unit-tested. *
  *                                                                                                                                                      *
  * betweenDue rules (owner-specified):                                                                                                                  *
  *   1. If at least one full calendar day lies strictly between dayOf(lo) and dayOf(hi): the MIDPOINT day (floor of the day-range midpoint) at the       *
@@ -110,30 +111,40 @@
 
     /** betweenBounds **********************************************************************************************************************************
      * The (lo, hi) the host feeds betweenDue / sequenceBetween, resolved from the FRESH neighbour dues (prevDue above the gap, nextDue below it; each 0  *
-     * when that neighbour is absent) and, at a group edge, the group's own date (a local 'YYYY-MM-DD'). Returns null when neither a usable interval nor  *
-     * a usable edge date is available (the host then writes nothing).                                                                                    *
-     *   - Interior (both neighbours present) : (prevDue, nextDue).                                                                                        *
-     *   - Bottom edge (no next)              : (prevDue, date@23:59).                                                                                     *
-     *   - Top edge (no prev)                 : (date@day-start, nextDue); if date@day-start >= nextDue, fall through to (date@00:00, nextDue).            *
-     *   - Both absent (no neighbours)        : the whole group day, (date@day-start, date@23:59).                                                         *
+     * when that neighbour is absent) and, at a group edge, the anchoring DAY. The day is the group's own date (a local 'YYYY-MM-DD') for a dated group,  *
+     * or - when the group is DATELESS (Overdue/Future, no date) - the day of the single present neighbour's own due. Returns null only when no interval  *
+     * can be formed at all (an edge with no date AND no neighbour to borrow a day from): the host then writes nothing.                                   *
+     *   - Interior (both neighbours present) : (prevDue, nextDue) - no day needed, so dated AND dateless groups both work.                                *
+     *   - Bottom edge (no next)              : (prevDue, day@23:59), day = group date else day-of(prevDue).                                              *
+     *   - Top edge (no prev)                 : (day@day-start, nextDue), day = group date else day-of(nextDue); if day-start >= nextDue, (day@00:00, ..). *
+     *   - Both absent (no neighbours)        : the whole group day, (day@day-start, day@23:59) - only when a real group date is present, else null.       *
      ***************************************************************************************************************************************************/
     function betweenBounds(prevDue, nextDue, groupDate, dayStartMinutes){
         dayStartMinutes = normMinutes(dayStartMinutes)
         var prev = (prevDue && prevDue > 0) ? prevDue : 0
         var next = (nextDue && nextDue > 0) ? nextDue : 0
+        // Interior (both neighbours present): the pure open interval, no day context needed - so this works in ANY
+        // group, dated or not (Overdue/Future included; that is the whole point of relaxing the eligibility gate).
         if (prev && next) return { lo: prev, hi: next }
+        // An edge needs a DAY to anchor the open end. Prefer the group's own calendar date (dated groups); when the
+        // group is DATELESS (Overdue/Future) derive the day from the single present neighbour's due instead.
         var parts = groupDate ? String(groupDate).split('-').map(Number) : null
-        if (!parts || parts.length !== 3 || !parts.every(Number.isFinite)) return null   // an edge needs the group's date
-        var y = parts[0], mo = parts[1] - 1, d = parts[2]
-        var dayStart = new Date(y, mo, d, Math.floor(dayStartMinutes / 60), dayStartMinutes % 60, 0, 0).getTime()
-        var endOfDay = new Date(y, mo, d, 23, 59, 0, 0).getTime()
-        if (prev) return { lo: prev, hi: endOfDay }                           // bottom edge
-        if (next){                                                            // top edge
-            var lo = dayStart
-            if (lo >= next) lo = new Date(y, mo, d, 0, 0, 0, 0).getTime()     // fall through to (date@00:00, firstDue)
+        var haveDate = !!(parts && parts.length === 3 && parts.every(Number.isFinite))
+        // A day-anchored timestamp: from the group date when there is one, else from the given neighbour timestamp.
+        // Built from calendar parts so a DST transition shifts no clock time.
+        function anchorDay(baseTs){ return haveDate ? new Date(parts[0], parts[1] - 1, parts[2]) : new Date(baseTs) }
+        function dayStartOf(baseTs){ var d = anchorDay(baseTs); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(dayStartMinutes / 60), dayStartMinutes % 60, 0, 0).getTime() }
+        function midnightOf(baseTs){ var d = anchorDay(baseTs); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime() }
+        function endOfDayOf(baseTs){ var d = anchorDay(baseTs); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 0, 0).getTime() }
+        if (prev) return { lo: prev, hi: endOfDayOf(prev) }                   // bottom edge: (lastDue, day-of@23:59)
+        if (next){                                                            // top edge: (day-of@day-start, firstDue)
+            var lo = dayStartOf(next)
+            if (lo >= next) lo = midnightOf(next)                             // fall through to (day-of@00:00, firstDue)
             return { lo: lo, hi: next }
         }
-        return { lo: dayStart, hi: endOfDay }                                 // no neighbours at all: spread across the group day
+        // No neighbours at all: only placeable when the group carries a real date (spread across that whole day).
+        if (haveDate) return { lo: dayStartOf(0), hi: endOfDayOf(0) }
+        return null                                                          // dateless AND no neighbours -> host writes nothing
     }
 
     return {

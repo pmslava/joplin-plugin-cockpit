@@ -1772,6 +1772,33 @@ async function main() {
         assert.ok(body.includes('openInNewWindow'), 'dblclick must still open a new window')
     })
 
+    // ---- MULTI-DRAG: preserve an already-multi selection on the pre-drag mousedown (the 1.9.x regression fix) ----
+    // The bug: pressing a Ctrl-selected row to start a drag fired a PLAIN mousedown first (the browser always fires
+    // mousedown before dragstart); the plain branch collapsed the whole selection to that one row, so onTodoDragStart
+    // saw a single id and only ONE to-do moved. The fix PRESERVES a multi-selection on the plain press so a drag sweeps
+    // the set; the collapse-to-single moves to the plain CLICK (no drag). These pin the shape; pre-fix source fails them.
+    await test('multi-drag: a plain press on an already-multi-selected row PRESERVES the whole set (drag sweeps it)', () => {
+        const body = handlerBody('onTodoRowMouseDown')
+        // The preserve guard: the plain branch keeps the set when the pressed row is already in a multi-selection.
+        assert.ok(/selectedTodoIDs\.has\(todoID\)\s*&&\s*selectedTodoIDs\.size\s*>\s*1/.test(body),
+            'a plain press on an already-multi-selected row must PRESERVE the selection (not collapse it before dragstart)')
+        // The Ctrl and Shift selection semantics stay intact.
+        assert.ok(body.includes('event.shiftKey'), 'Shift range-select must stay')
+        assert.ok(/event\.(ctrlKey|metaKey)/.test(body), 'Ctrl/Cmd toggle-select must stay')
+    })
+    await test('multi-drag: a plain click with no drag collapses the selection to just the clicked row', () => {
+        const body = handlerBody('onTodoRowClicked')
+        // The single-select half now lives on the CLICK: a plain click (no drag) replaces the selection with this row.
+        assert.ok(/selectedTodoIDs\.clear\(\)/.test(body) && /selectedTodoIDs\.add\(todoID\)/.test(body),
+            'a plain click must collapse the selection to the clicked row')
+        assert.ok(body.includes('onTodoClicked(todoID)'), 'the plain click must still open the row')
+    })
+    await test('multi-drag: onTodoDragStart still sends the WHOLE selection as the drag payload', () => {
+        const body = handlerBody('onTodoDragStart')
+        assert.ok(/\[\.\.\.selectedTodoIDs\]/.test(body), 'the drag payload must be built from the whole selection')
+        assert.ok(/setData\('text\/plain', ids\.join\(','\)\)/.test(body), 'every selected id must go into the dataTransfer, comma-joined')
+    })
+
     // (b) Every row surface carries the row-level open handler on its ROOT element. One interval render supplies
     // both an interval to-do row and a note row; a second render supplies a week planner card.
     const rowFolder = 'n'.repeat(32)
@@ -2494,9 +2521,31 @@ async function main() {
             Between.betweenBounds(dueAt(2026, 8, 19, 14, 0), 0, '2026-08-19', DAYSTART),
             { lo: dueAt(2026, 8, 19, 14, 0), hi: dueAt(2026, 8, 19, 23, 59) })
     })
-    await test('betweenBounds: an edge with no usable group date -> null (host writes nothing)', () => {
-        assert.strictEqual(Between.betweenBounds(0, dueAt(2026, 8, 19, 14, 0), null, DAYSTART), null)
-        assert.strictEqual(Between.betweenBounds(0, dueAt(2026, 8, 19, 14, 0), 'not-a-date', DAYSTART), null)
+    // Dateless groups (Overdue/Future): the eligibility gate is relaxed to them (a between-drop needs no group
+    // date - the neighbours define the interval), so betweenBounds must resolve a null groupDate from the neighbours.
+    await test('betweenBounds (dateless, Overdue): interior needs no group date - (prevDue, nextDue)', () => {
+        // Two overdue (past) neighbours, null groupDate: the interior interval is purely their dues.
+        assert.deepStrictEqual(
+            Between.betweenBounds(dueAt(2022, 1, 8, 10, 0), dueAt(2022, 1, 8, 16, 0), null, DAYSTART),
+            { lo: dueAt(2022, 1, 8, 10, 0), hi: dueAt(2022, 1, 8, 16, 0) })
+    })
+    await test('betweenBounds (dateless): top edge derives the day from the next neighbour (@day-start)', () => {
+        assert.deepStrictEqual(
+            Between.betweenBounds(0, dueAt(2022, 1, 8, 14, 0), null, DAYSTART),
+            { lo: dueAt(2022, 1, 8, 9, 0), hi: dueAt(2022, 1, 8, 14, 0) })
+        // Fall-through when day-start >= firstDue: (day-of(firstDue)@00:00, firstDue).
+        assert.deepStrictEqual(
+            Between.betweenBounds(0, dueAt(2022, 1, 8, 7, 0), null, DAYSTART),
+            { lo: dueAt(2022, 1, 8, 0, 0), hi: dueAt(2022, 1, 8, 7, 0) })
+    })
+    await test('betweenBounds (dateless): bottom edge derives the day from the prev neighbour (@23:59)', () => {
+        assert.deepStrictEqual(
+            Between.betweenBounds(dueAt(2022, 1, 8, 14, 0), 0, null, DAYSTART),
+            { lo: dueAt(2022, 1, 8, 14, 0), hi: dueAt(2022, 1, 8, 23, 59) })
+    })
+    await test('betweenBounds: no neighbours AND no usable date -> null (host writes nothing)', () => {
+        assert.strictEqual(Between.betweenBounds(0, 0, null, DAYSTART), null)
+        assert.strictEqual(Between.betweenBounds(0, 0, 'not-a-date', DAYSTART), null)
     })
 
     // ---- HOST GLUE: drive the COMPILED bundle's message paths (the alarm lesson: unit math + real wiring both) ----
@@ -2561,6 +2610,17 @@ async function main() {
         const got = duePutsSince(betweenGlue, before)
         assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 11, 0), 'between the FRESH 10:00 and 12:00 -> 11:00, not a value from the stale render')
     })
+    await test('host glue (todosDroppedBetween, DATELESS group / Overdue): null groupDate, interior between two past dues', async () => {
+        // The Overdue between-drop posts a NULL groupDate (the group has no date); the interior interval comes purely
+        // from the neighbours' (past) dues, so the dragged row lands strictly between them.
+        betweenGlue.notes[cPrev].todo_due = dueAt(2022, 1, 8, 10, 0)   // an overdue neighbour above the gap
+        betweenGlue.notes[cNext].todo_due = dueAt(2022, 1, 8, 16, 0)   // an overdue neighbour below the gap
+        const before = betweenGlue.notePuts.length
+        await betweenGlue.panelMessageHandler(['todosDroppedBetween', [cDrag], cPrev, cNext, null])
+        const got = duePutsSince(betweenGlue, before)
+        assert.strictEqual(got[cDrag], dueAt(2022, 1, 8, 13, 0), 'between 10:00 and 16:00 -> the :00 nearest 13:00, with NO group date')
+        assert.ok(got[cDrag] > dueAt(2022, 1, 8, 10, 0) && got[cDrag] < dueAt(2022, 1, 8, 16, 0), 'strictly between the two past neighbours')
+    })
 
     // ---- HOST GLUE: day-start setting (A) + heading-drop time rules (B), through the real todosDropped path ----
     const abDated = dup('e', '5'), abNoDue = dup('f', '6'), abCustom = dup('g', '7'), abInvalid = dup('h', '8')
@@ -2617,6 +2677,15 @@ async function main() {
         // The indicator classes the CSS styles.
         assert.ok(webviewSource.includes("'-drop-before'") && webviewSource.includes("'-drop-after'"), 'the insertion line uses the -drop-before / -drop-after classes')
     })
+    await test('between-drop eligibility: dateless groups (Overdue/Future) qualify; only No-Due is excluded', () => {
+        // The gate must EXCLUDE only the No-Due group (data-drop 'clear') - its rows carry no due to sit between - and
+        // treat a dateless heading (no data-drop) as eligible with a NULL groupDate (interior interval from the
+        // neighbours; edges derived host-side). A dated heading still yields its YYYY-MM-DD groupDate.
+        assert.ok(/betweenGroupInfo/.test(webviewSource), 'eligibility resolves through betweenGroupInfo')
+        assert.ok(/drop === 'clear'/.test(webviewSource), "the No-Due group ('clear') must be the only excluded group")
+        assert.ok(/return \{ groupDate: null \}/.test(webviewSource), 'a dateless group (Overdue/Future) must be eligible with a null groupDate')
+        assert.ok(/return \{ groupDate: drop \}/.test(webviewSource), 'a dated group must still carry its YYYY-MM-DD date')
+    })
     await test('panel.css between-drop indicator: an inset box-shadow (no layout shift), a --cockpit-* accent, no @media', () => {
         const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
         const ruleBody = (selector) => {
@@ -2637,13 +2706,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.9.0', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.9.1', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.9.0'
+        const expected = '1.9.1'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
