@@ -2251,17 +2251,67 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.8.6', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.8.9', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.8.6'
+        const expected = '1.8.9'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
         assert.strictEqual(lock.packages[''].version, expected, 'package-lock.json root package entry version')
+    })
+
+    // A plain to-do (no checkboxes inside, marked .-plain) must show ONLY the small disc, never the ring: the ring
+    // carries meaning (checkboxes exist), so rendering the full ring structure on a plain to-do makes it look like it
+    // HAS checkboxes. So the plain state strips the box's conic-gradient ring and its ::after hollow (background:none),
+    // and instead gives the standalone disc a DARK rim so it reads on the panel background. The rim must NOT move or
+    // resize the disc: the ::before fill stays 10x10 at inset 4, identical to the disc inside a ring - it is grown to
+    // inset 2 with a 2px border (border-box keeps the content box at inset 4) and background-clip:content-box keeps the
+    // fill clipped there. The rim colour is a NEW dedicated variable (--cockpit-plain-disc-rim), dark on every theme.
+    // Read panel.css as source text, as the other CSS checks do.
+    await test('plain disc: ring stripped, 2px dark rim via --cockpit-plain-disc-rim, geometry untouched', () => {
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        const ruleBody = (selector) => {
+            const at = css.indexOf(selector)
+            assert.ok(at >= 0, `panel.css is missing the ${selector} rule`)
+            const open = css.indexOf('{', at)
+            const close = css.indexOf('}', open)
+            assert.ok(open >= 0 && close > open, `panel.css ${selector} rule is malformed`)
+            return css.slice(open + 1, close)
+        }
+        // The ring-strip is BACK: the .-plain marker sets background:none on the box AND its ::after, so a plain to-do
+        // shows only the disc (no conic-gradient ring, no hollow) and never reads as having checkboxes.
+        assert.ok(/\.todo-checkbox\.-plain\s*,\s*\.todo-checkbox\.-plain::after\s*\{[^}]*background:\s*none/.test(css),
+            'the .-plain marker must strip the ring: background:none on the box and its ::after')
+        // The rim rule exists on the plain disc, using the NEW variable at 2px, with background-clip:content-box so the
+        // fill is not enlarged under the translucent rim.
+        const plainBefore = ruleBody('.todo-checkbox.-plain::before {')
+        assert.ok(/border:\s*2px\s+solid\s+var\(--cockpit-plain-disc-rim\)/.test(plainBefore),
+            'the plain disc must carry a 2px border in var(--cockpit-plain-disc-rim)')
+        assert.ok(/inset:\s*2px/.test(plainBefore),
+            'the plain disc ::before must grow to inset 2px so the rim sits outside the unchanged inset-4 fill')
+        assert.ok(/background-clip:\s*content-box/.test(plainBefore),
+            'the plain disc fill must be clipped to content-box so the rim does not enlarge it')
+        // The new rim variable is defined (so custom CSS can override it) and is a dark literal, not a --joplin-* alias.
+        assert.ok(/--cockpit-plain-disc-rim:\s*rgba\(0,\s*0,\s*0,\s*0\.55\)/.test(css),
+            'the --cockpit-plain-disc-rim variable must be defined as a dark translucent-black literal')
+        // The mobile equivalent applies the same rim, offset by the tap padding.
+        const mobilePlain = ruleBody('.cockpit-mobile .todo-checkbox.-plain::before {')
+        assert.ok(/border:\s*2px\s+solid\s+var\(--cockpit-plain-disc-rim\)/.test(mobilePlain) &&
+                  /inset:\s*calc\(var\(--tap-pad\)\s*\+\s*2px\)/.test(mobilePlain) &&
+                  /background-clip:\s*content-box/.test(mobilePlain),
+            'the mobile plain disc must apply the same 2px rim at inset calc(tap-pad + 2px) with content-box clip')
+        // Ringed rows are untouched: the base .todo-checkbox conic-gradient track and the two fixed insets the
+        // "circles saga" depends on are intact, and the rim rules are gated behind .-plain so a counted row never sees
+        // them. (No .-plain in a counted row's class list.)
+        assert.ok(/background:\s*conic-gradient\([^;]*var\(--cockpit-divider-color/.test(ruleBody('.todo-checkbox {')),
+            'the base .todo-checkbox conic-gradient track (the ringed rows use it) must be intact')
+        assert.ok(/--cockpit-circle-size:\s*18px/.test(css), 'the 18px --cockpit-circle-size default must be intact')
+        assert.ok(/inset:\s*3px/.test(ruleBody('.todo-checkbox::after')), 'the 3px ring inset must be intact')
+        assert.ok(/inset:\s*4px/.test(ruleBody('.todo-checkbox::before')), 'the 4px disc inset must be intact')
     })
 
     await fs.remove(tmp)
