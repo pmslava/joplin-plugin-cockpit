@@ -543,6 +543,19 @@ h2 {
     border-radius: 4px;
 }
 
+/* Drop BETWEEN rows (desktop list views): the insertion line marking the gap the dragged to-dos will land in. It is
+ * drawn as an inset box-shadow on the row's boundary rather than a real border, so it never adds height - the row
+ * geometry, and every row below it, stays put (no layout shift). Same selection-accent family as .-drop-over, in a
+ * crisp solid --cockpit-* accent so a 3px line reads clearly. -drop-before lines the top edge (insert above the row),
+ * -drop-after the bottom edge (insert below it). */
+.todo.-drop-before {
+    box-shadow: inset 0 3px 0 -1px var(--cockpit-url-color, #2D6BDC);
+}
+
+.todo.-drop-after {
+    box-shadow: inset 0 -3px 0 -1px var(--cockpit-url-color, #2D6BDC);
+}
+
 /* The item glyph is read in two layers, so the kinds can be told apart at a glance:
  *  - small filled disc              = a to-do (the disc is its tick target)
  *  - disc inside a thin ring        = a to-do with checkboxes inside; the ring is their progress

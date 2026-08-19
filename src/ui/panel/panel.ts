@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates } from "../../core/joplin";
+import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates, setTodoDuesPerId } from "../../core/joplin";
 import { clearOptimisticItem, clearTodoCompletionOverride, hasPendingItemOverlay, removeOptimisticItem, revalidateOptimisticInserts, setTodoCompletionOverride, upsertOptimisticItem, viewKeyFor } from "../../core/optimistic";
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
 import { logRefresh, snapshot } from "../../core/instrument";
@@ -22,6 +22,9 @@ import { isMobile } from "../../core/platform";
 import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
 import { iconButton, icons } from "../icons";
+// The pure "drop between rows" date math (window.CockpitBetween is unused in this bundle; the require pulls the same UMD
+// file the Node harness unit-tests, so the drop path and the tests share one implementation). Webpack bundles it in.
+const { sequenceBetween, betweenBounds } = require("../../core/between");
 
 /** Variable Declaration ***************************************************************************************************************************/
 var panel = null;
@@ -349,6 +352,23 @@ async function eventHandler(message){
             scheduleReconcile()
             scheduleOverview()
         }
+    } else if (message[0] == 'todosDroppedBetween'){
+        // Desktop list-view "drop between rows": the webview posts the dragged ids plus the ids of the to-do rows
+        // immediately above (prevId) and below (nextId) the insertion gap, and the group's own date (for the edges).
+        // A null neighbour means the gap is at a group edge. The dues are computed here, from the neighbours' dues
+        // re-read FRESH (the alarm lesson: never trust the stale value the webview last rendered), so a due changed
+        // between render and drop is respected.
+        var betweenIDs = Array.isArray(message[1]) ? message[1] : []
+        var prevID = message[2] ? String(message[2]) : null
+        var nextID = message[3] ? String(message[3]) : null
+        var groupDate = message[4] ? String(message[4]) : null
+        if (betweenIDs.length){
+            await applyBetweenDrop(betweenIDs, prevID, nextID, groupDate)
+            await refreshInterfaces()
+            // Same post-write flow as todosDropped: reconcile repaints once the index catches up, overview rewrites.
+            scheduleReconcile()
+            scheduleOverview()
+        }
     } else if (message[0] == 'calendarNavigate'){
         var profile = await getProfile(await getCurrentProfileID())
         calendarViewState.anchor = stepCalendarAnchor(profile, calendarViewState.anchor, Number(message[1]))
@@ -496,6 +516,37 @@ async function eventHandler(message){
         lastRenderedHtml = null
         await refreshInterfaces()
     }
+}
+
+/** readFreshTodoDue ********************************************************************************************************************************
+ * The CURRENT due timestamp of one to-do (0 when it has no alarm, is missing, or the id is null), read fresh at drop time. The between-drop math    *
+ * needs the neighbours' true present dues, not the value the webview last painted, so a due that changed since the render is honoured.               *
+ ***************************************************************************************************************************************************/
+async function readFreshTodoDue(todoID){
+    if (!todoID) return 0
+    try {
+        var note = await joplin.data.get(['notes', todoID], { fields: ['todo_due'] })
+        return note && note.todo_due && note.todo_due > 0 ? note.todo_due : 0
+    } catch (error) {
+        return 0
+    }
+}
+
+/** applyBetweenDrop ********************************************************************************************************************************
+ * Assigns due datetimes to the dragged to-dos so they land IN BETWEEN the temporal neighbours of the insertion gap. The neighbours' dues are read   *
+ * fresh (readFreshTodoDue), the open interval is resolved by the pure betweenBounds (interior, or a group edge when a neighbour is absent), and the  *
+ * per-to-do datetimes come from the pure sequenceBetween (dragged order preserved, strictly increasing). The result is written per id, one PUT each, *
+ * exactly like the multi-select alarm plan lands. A null interval (no neighbours AND no usable group date) writes nothing.                           *
+ ***************************************************************************************************************************************************/
+async function applyBetweenDrop(todoIDs, prevID, nextID, groupDate){
+    var dayStart = await getDayStartTime()
+    var dayStartMinutes = dayStart.hours * 60 + dayStart.minutes
+    var prevDue = await readFreshTodoDue(prevID)
+    var nextDue = await readFreshTodoDue(nextID)
+    var bounds = betweenBounds(prevDue, nextDue, groupDate, dayStartMinutes)
+    if (!bounds) return
+    var dues = sequenceBetween(bounds.lo, bounds.hi, todoIDs.length, dayStartMinutes)
+    await setTodoDuesPerId(todoIDs.map((id, index) => ({ id: id, due: dues[index] })))
 }
 
 /** applyTodoChecked ********************************************************************************************************************************

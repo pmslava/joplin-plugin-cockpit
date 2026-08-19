@@ -620,6 +620,114 @@ async function onTodoDropped(event){
     await webviewApi.postMessage(['todosDropped', ids, target]);
 }
 
+/** Drop BETWEEN rows (desktop, list views) *************************************************************************************************************
+ * A second drop kind, alongside the whole-row date targets above: dropping into the GAP between two stacked to-do rows (or at a group's top/bottom     *
+ * edge) assigns due datetimes IN BETWEEN the neighbours. This is desktop-only (mobile has no HTML5 drag) and stateless DOM wiring - it reads the        *
+ * existing markup (the row's data-todo-id and its group heading's data-drop date) and posts, holding nothing across renders but the transient indicator *
+ * class, which is cleared on every dragover, on dragend and on drop. It lives only in the LIST views: an eligible row is a .todo[data-todo-id] that is a *
+ * DIRECT child of the .todos container (week cards sit in .week-day, month/notes/peek rows in their own sections, so those are excluded) whose group     *
+ * heading carries a real YYYY-MM-DD date (so No-Due / Overdue / Future groups, whose headings are "clear" or dateless, are excluded too).                *
+ *                                                                                                                                                        *
+ * The gap is a thin band at each row boundary: the top BETWEEN_BAND of a row means "insert before it", the bottom band "insert after it", and the middle *
+ * keeps today's behaviour (nothing - no indicator, no drop). The insertion line is drawn as an inset box-shadow on the row (.-drop-before/.-drop-after   *
+ * in panel.css), so it marks the boundary without adding height (no layout shift). On drop the neighbours are the nearest non-dragged to-do rows on      *
+ * either side of the gap within the same group (a heading boundary ends the group -> a null neighbour == a group edge); the host re-reads their dues.    *
+ ***************************************************************************************************************************************************/
+var BETWEEN_BAND = 0.4                 // top 40% / bottom 40% of a row are the between-zones; the middle 20% is inert
+var betweenIndicatorRow = null         // the row currently showing an insertion line, so it can be cleared on the next move
+
+// The nearest preceding <h2> group heading of a row (walking element siblings within .todos).
+function betweenGroupHeading(row){
+    var el = row.previousElementSibling
+    while (el){
+        if (el.tagName === 'H2') return el
+        el = el.previousElementSibling
+    }
+    return null
+}
+
+// The group's date target ('YYYY-MM-DD') if this row is an eligible list-view between-target, else null. Requires the
+// row to be a direct child of .todos (list views only) and its heading to carry a real calendar date in data-drop.
+function betweenGroupDate(row){
+    if (!row || !row.parentElement || !row.parentElement.classList.contains('todos')) return null
+    var heading = betweenGroupHeading(row)
+    if (!heading) return null
+    var drop = heading.getAttribute('data-drop')
+    if (!drop || !/^\d{4}-\d{2}-\d{2}$/.test(drop)) return null   // excludes "clear" (No Due), dateless headings (Overdue/Future)
+    return drop
+}
+
+// The eligible between-target under the pointer, or null when the pointer is over a row's inert middle or not over an
+// eligible row at all. `before` is true in the top band (insert above the row), false in the bottom band (insert below).
+function betweenTargetFor(event){
+    var row = (event.target && event.target.closest) ? event.target.closest('.todo[data-todo-id]') : null
+    if (!row) return null
+    var groupDate = betweenGroupDate(row)
+    if (!groupDate) return null
+    var rect = row.getBoundingClientRect()
+    if (!rect.height) return null
+    var offset = event.clientY - rect.top
+    if (offset <= rect.height * BETWEEN_BAND) return { row: row, before: true, groupDate: groupDate }
+    if (offset >= rect.height * (1 - BETWEEN_BAND)) return { row: row, before: false, groupDate: groupDate }
+    return null                                                    // the inert middle: keep today's behaviour (nothing)
+}
+
+function clearBetweenIndicator(){
+    if (betweenIndicatorRow){
+        betweenIndicatorRow.classList.remove('-drop-before', '-drop-after')
+        betweenIndicatorRow = null
+    }
+}
+
+// The id of the nearest to-do row NOT in the dragged set, walking from `startEl` in `direction` (-1 up, +1 down), or
+// null when a group heading (or the group's end) is reached first - a group edge.
+function betweenNeighbour(startEl, direction, draggedSet){
+    var el = startEl
+    while (el){
+        if (el.tagName === 'H2') return null                       // crossed the group boundary -> edge
+        if (el.classList && el.classList.contains('todo') && el.dataset && el.dataset.todoId && !draggedSet.has(el.dataset.todoId)){
+            return el.dataset.todoId
+        }
+        el = direction < 0 ? el.previousElementSibling : el.nextElementSibling
+    }
+    return null
+}
+
+function onBetweenDragOver(event){
+    if (IS_MOBILE) return
+    var target = betweenTargetFor(event)
+    if (!target){ clearBetweenIndicator(); return }
+    event.preventDefault()                                         // enable the drop on the row (rows have no inline handler)
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    if (betweenIndicatorRow !== target.row) clearBetweenIndicator()
+    betweenIndicatorRow = target.row
+    target.row.classList.remove('-drop-before', '-drop-after')
+    target.row.classList.add(target.before ? '-drop-before' : '-drop-after')
+}
+
+async function onBetweenDrop(event){
+    if (IS_MOBILE) return
+    var target = betweenTargetFor(event)
+    clearBetweenIndicator()
+    if (!target) return                                            // a heading/cell drop bubbles here too; its own handler ran
+    event.preventDefault()
+    var ids = (event.dataTransfer && event.dataTransfer.getData('text/plain') || '').split(',').filter(Boolean)
+    if (!ids.length) return
+    var draggedSet = new Set(ids)
+    var upperStart = target.before ? target.row.previousElementSibling : target.row
+    var lowerStart = target.before ? target.row : target.row.nextElementSibling
+    var prevId = betweenNeighbour(upperStart, -1, draggedSet)
+    var nextId = betweenNeighbour(lowerStart, +1, draggedSet)
+    selectedTodoIDs.clear()
+    await webviewApi.postMessage(['todosDroppedBetween', ids, prevId, nextId, target.groupDate])
+}
+
+// Delegated on the document so a single wiring survives every setHtml re-render (the rows are recreated each time). The
+// indicator is cleared on dragend too, in case the drag ends off any row (a cancel, or a drop outside .todos).
+document.addEventListener('dragover', onBetweenDragOver, false)
+document.addEventListener('drop', onBetweenDrop, false)
+document.addEventListener('dragend', clearBetweenIndicator, false)
+
 /** onTodoChecked ***********************************************************************************************************************************
  * When a to-do's checkbox is ticked, this sends the id AND the state the tick just set to the plugin. The browser has already flipped the checkbox   *
  * in the DOM, so passing that state lets the host write it with a single idempotent PUT (no read-modify-write) and hold it optimistically, instead of *

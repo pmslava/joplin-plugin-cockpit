@@ -2249,15 +2249,222 @@ async function main() {
         assert.strictEqual(minHeight, computed, `the reserved min-height (${minHeight}) must equal nav ${navHeight} + margin ${navMargin} + weekday ${weekdayHeight} + 6*${weekRowHeight} = ${computed}`)
     })
 
+    // ============================================================ drop BETWEEN rows (Feature C) + day-start (A/B)
+    // The between-drop date math is a shared, deterministic core module (src/core/between.js) - the SAME UMD file the
+    // host bundles (require in panel.ts) and the harness unit-tests here - so the owner's acceptance examples are pinned
+    // once and drive the real drop path. dueAt(y, m, d, hh, mm) builds a local ms timestamp (1-based month).
+    const Between = require('../src/core/between.js')
+    const DAYSTART = 9 * 60   // 09:00, the default day-start, as minutes-of-day
+
+    await test('betweenDue rule 1 (owner example): between 2022-01-08 and 2022-01-10 -> 2022-01-09 09:00', () => {
+        assert.strictEqual(Between.betweenDue(dueAt(2022, 1, 8, 9, 0), dueAt(2022, 1, 10, 9, 0), DAYSTART), dueAt(2022, 1, 9, 9, 0))
+    })
+    await test('betweenDue rule 1 (multi free day): between 2022-01-08 and 2022-01-15 -> 2022-01-11 09:00 (floor midpoint day)', () => {
+        assert.strictEqual(Between.betweenDue(dueAt(2022, 1, 8, 9, 0), dueAt(2022, 1, 15, 9, 0), DAYSTART), dueAt(2022, 1, 11, 9, 0))
+        // The exact clock times of the two neighbours do not change the midpoint day or the day-start result.
+        assert.strictEqual(Between.betweenDue(dueAt(2022, 1, 8, 23, 30), dueAt(2022, 1, 15, 1, 15), DAYSTART), dueAt(2022, 1, 11, 9, 0))
+    })
+    await test('betweenDue rule 2 (same day): between 14:20 and 17:40 -> 16:00 (:00 nearest the midpoint)', () => {
+        assert.strictEqual(Between.betweenDue(dueAt(2026, 8, 19, 14, 20), dueAt(2026, 8, 19, 17, 40), DAYSTART), dueAt(2026, 8, 19, 16, 0))
+    })
+    await test('betweenDue rule 2 (no :00 fits): between 14:10 and 14:40 -> 14:25 (minute midpoint)', () => {
+        assert.strictEqual(Between.betweenDue(dueAt(2026, 8, 19, 14, 10), dueAt(2026, 8, 19, 14, 40), DAYSTART), dueAt(2026, 8, 19, 14, 25))
+    })
+    await test('betweenDue rule 2 (midnight-spanning adjacent days): 23:30 -> next 00:30 lands on 00:00', () => {
+        assert.strictEqual(Between.betweenDue(dueAt(2026, 8, 19, 23, 30), dueAt(2026, 8, 20, 0, 30), DAYSTART), dueAt(2026, 8, 20, 0, 0))
+    })
+    await test('betweenDue :00 tie -> the earlier hour', () => {
+        // Midpoint exactly on :30 (15:00..16:00) => 15:00 and 16:00 are equidistant boundaries; the only :00 strictly
+        // inside is none, so this is the minute midpoint 15:30. A true :00 tie needs the midpoint on an exact :30 with
+        // two whole hours inside: 14:30..16:30 -> mid 15:30, hours 15:00/16:00 equidistant -> earlier 15:00.
+        assert.strictEqual(Between.betweenDue(dueAt(2026, 8, 19, 14, 30), dueAt(2026, 8, 19, 16, 30), DAYSTART), dueAt(2026, 8, 19, 15, 0))
+    })
+    await test('betweenDue degenerate interval (equal / inverted) -> lo unchanged (unmoved in time)', () => {
+        const eq = dueAt(2026, 8, 19, 14, 0)
+        assert.strictEqual(Between.betweenDue(eq, eq, DAYSTART), eq)
+        assert.strictEqual(Between.betweenDue(dueAt(2026, 8, 19, 15, 0), dueAt(2026, 8, 19, 14, 0), DAYSTART), dueAt(2026, 8, 19, 15, 0))
+    })
+    await test('sequenceBetween: 3 ids between 14:00 and 18:00 are strictly increasing, order preserved', () => {
+        const seq = Between.sequenceBetween(dueAt(2026, 8, 19, 14, 0), dueAt(2026, 8, 19, 18, 0), 3, DAYSTART)
+        assert.strictEqual(seq.length, 3)
+        assert.ok(seq[0] < seq[1] && seq[1] < seq[2], 'the datetimes must strictly increase')
+        assert.deepStrictEqual(seq, [dueAt(2026, 8, 19, 16, 0), dueAt(2026, 8, 19, 17, 0), dueAt(2026, 8, 19, 17, 30)])
+    })
+    await test('sequenceBetween across free days keeps rule 1 then rule 2, strictly increasing', () => {
+        const seq = Between.sequenceBetween(dueAt(2022, 1, 8, 9, 0), dueAt(2022, 1, 10, 9, 0), 3, DAYSTART)
+        assert.ok(seq[0] < seq[1] && seq[1] < seq[2], 'strictly increasing across the day boundary')
+        assert.strictEqual(seq[0], dueAt(2022, 1, 9, 9, 0))   // rule 1 midpoint day, day-start
+    })
+    await test('betweenBounds: interior returns (prevDue, nextDue) and ignores the group date', () => {
+        assert.deepStrictEqual(
+            Between.betweenBounds(dueAt(2026, 8, 19, 10, 0), dueAt(2026, 8, 19, 16, 0), '2026-08-19', DAYSTART),
+            { lo: dueAt(2026, 8, 19, 10, 0), hi: dueAt(2026, 8, 19, 16, 0) })
+    })
+    await test('betweenBounds: top edge lo = date@day-start, hi = firstDue', () => {
+        assert.deepStrictEqual(
+            Between.betweenBounds(0, dueAt(2026, 8, 19, 14, 0), '2026-08-19', DAYSTART),
+            { lo: dueAt(2026, 8, 19, 9, 0), hi: dueAt(2026, 8, 19, 14, 0) })
+    })
+    await test('betweenBounds: top edge fall-through - day-start >= firstDue -> (date@00:00, firstDue)', () => {
+        assert.deepStrictEqual(
+            Between.betweenBounds(0, dueAt(2026, 8, 19, 7, 0), '2026-08-19', DAYSTART),
+            { lo: dueAt(2026, 8, 19, 0, 0), hi: dueAt(2026, 8, 19, 7, 0) })
+    })
+    await test('betweenBounds: bottom edge lo = lastDue, hi = date@23:59', () => {
+        assert.deepStrictEqual(
+            Between.betweenBounds(dueAt(2026, 8, 19, 14, 0), 0, '2026-08-19', DAYSTART),
+            { lo: dueAt(2026, 8, 19, 14, 0), hi: dueAt(2026, 8, 19, 23, 59) })
+    })
+    await test('betweenBounds: an edge with no usable group date -> null (host writes nothing)', () => {
+        assert.strictEqual(Between.betweenBounds(0, dueAt(2026, 8, 19, 14, 0), null, DAYSTART), null)
+        assert.strictEqual(Between.betweenBounds(0, dueAt(2026, 8, 19, 14, 0), 'not-a-date', DAYSTART), null)
+    })
+
+    // ---- HOST GLUE: drive the COMPILED bundle's message paths (the alarm lesson: unit math + real wiring both) ----
+    const nb = 'nb'.repeat(16)
+    const dup = (a, b) => (a + b).repeat(16)   // a distinct 32-char id from a 2-char seed
+    const cPrev = dup('a', '1'), cNext = dup('b', '2'), cDrag = dup('c', '3'), cDrag2 = dup('d', '4')
+    const betweenNotes = {
+        [cPrev]:  { id: cPrev,  title: 'prev',  todo_completed: 0, todo_due: dueAt(2026, 8, 19, 10, 0), parent_id: nb },
+        [cNext]:  { id: cNext,  title: 'next',  todo_completed: 0, todo_due: dueAt(2026, 8, 19, 16, 0), parent_id: nb },
+        [cDrag]:  { id: cDrag,  title: 'drag',  todo_completed: 0, todo_due: dueAt(2026, 8, 19, 20, 0), parent_id: nb },
+        [cDrag2]: { id: cDrag2, title: 'drag2', todo_completed: 0, todo_due: dueAt(2026, 8, 19, 21, 0), parent_id: nb },
+    }
+    const betweenGlue = await run({
+        dataDir: path.join(tmp, 'between-glue-data'),
+        installationDir: path.join(tmp, 'between-glue-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: Object.values(betweenNotes),
+        notes: betweenNotes,
+    })
+    const duePutsSince = (glue, before) => {
+        const map = {}
+        for (const put of glue.notePuts.slice(before).filter(p => p.fields && Object.prototype.hasOwnProperty.call(p.fields, 'todo_due'))) map[put.id] = put.fields.todo_due
+        return map
+    }
+    await test('host glue (todosDroppedBetween interior): one id between 10:00 and 16:00 -> 13:00, one PUT', () => {
+        // async handler; the harness returns the promise. Drive it and read the PUTs it produced.
+        return betweenGlue.panelMessageHandler(['todosDroppedBetween', [cDrag], cPrev, cNext, '2026-08-19']).then(() => {
+            const got = duePutsSince(betweenGlue, 0)
+            assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 13, 0), 'the dragged id lands at the :00 nearest the midpoint of its neighbours')
+        })
+    })
+    await test('host glue (todosDroppedBetween multi): two ids between 14:00 and 18:00 -> 16:00, 17:00 (order preserved)', async () => {
+        betweenGlue.notes[cPrev].todo_due = dueAt(2026, 8, 19, 14, 0)
+        betweenGlue.notes[cNext].todo_due = dueAt(2026, 8, 19, 18, 0)
+        const before = betweenGlue.notePuts.length
+        await betweenGlue.panelMessageHandler(['todosDroppedBetween', [cDrag, cDrag2], cPrev, cNext, '2026-08-19'])
+        const got = duePutsSince(betweenGlue, before)
+        assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 16, 0), 'first dragged id')
+        assert.strictEqual(got[cDrag2], dueAt(2026, 8, 19, 17, 0), 'second dragged id, strictly later')
+    })
+    await test('host glue (todosDroppedBetween top edge, no prev): uses date@day-start -> 11:00', async () => {
+        betweenGlue.notes[cNext].todo_due = dueAt(2026, 8, 19, 14, 0)
+        const before = betweenGlue.notePuts.length
+        await betweenGlue.panelMessageHandler(['todosDroppedBetween', [cDrag], null, cNext, '2026-08-19'])
+        const got = duePutsSince(betweenGlue, before)
+        assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 11, 0), 'between day-start 09:00 and the first row 14:00, the :00 nearest 11:30 is 11:00')
+    })
+    await test('host glue (todosDroppedBetween bottom edge, no next): uses date@23:59 -> 19:00', async () => {
+        betweenGlue.notes[cPrev].todo_due = dueAt(2026, 8, 19, 14, 0)
+        const before = betweenGlue.notePuts.length
+        await betweenGlue.panelMessageHandler(['todosDroppedBetween', [cDrag], cPrev, null, '2026-08-19'])
+        const got = duePutsSince(betweenGlue, before)
+        assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 19, 0), 'between the last row 14:00 and 23:59, the :00 nearest ~18:59 is 19:00')
+    })
+    await test('host glue (todosDroppedBetween re-reads dues FRESH): a neighbour changed since render is honoured', async () => {
+        // The neighbour's due is mutated AFTER the panel would have rendered; the host must read it fresh at drop time.
+        betweenGlue.notes[cPrev].todo_due = dueAt(2026, 8, 19, 10, 0)
+        betweenGlue.notes[cNext].todo_due = dueAt(2026, 8, 19, 12, 0)   // moved earlier than the stale 16:00/18:00 above
+        const before = betweenGlue.notePuts.length
+        await betweenGlue.panelMessageHandler(['todosDroppedBetween', [cDrag], cPrev, cNext, '2026-08-19'])
+        const got = duePutsSince(betweenGlue, before)
+        assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 11, 0), 'between the FRESH 10:00 and 12:00 -> 11:00, not a value from the stale render')
+    })
+
+    // ---- HOST GLUE: day-start setting (A) + heading-drop time rules (B), through the real todosDropped path ----
+    const abDated = dup('e', '5'), abNoDue = dup('f', '6'), abCustom = dup('g', '7'), abInvalid = dup('h', '8')
+    const abNotes = {
+        [abDated]:   { id: abDated,   title: 'dated',   todo_completed: 0, todo_due: dueAt(2026, 8, 19, 14, 30), parent_id: nb },
+        [abNoDue]:   { id: abNoDue,   title: 'no due',  todo_completed: 0, todo_due: 0, parent_id: nb },
+        [abCustom]:  { id: abCustom,  title: 'custom',  todo_completed: 0, todo_due: 0, parent_id: nb },
+        [abInvalid]: { id: abInvalid, title: 'invalid', todo_completed: 0, todo_due: 0, parent_id: nb },
+    }
+    const abGlue = await run({
+        dataDir: path.join(tmp, 'ab-glue-data'),
+        installationDir: path.join(tmp, 'ab-glue-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: Object.values(abNotes),
+        notes: abNotes,
+    })
+    await test('host glue (todosDropped, Feature B): a dated to-do keeps its own time; a no-due one gets date@day-start (default 09:00)', async () => {
+        const before = abGlue.notePuts.length
+        await abGlue.panelMessageHandler(['todosDropped', [abDated, abNoDue], '2026-12-25'])
+        const got = duePutsSince(abGlue, before)
+        assert.strictEqual(got[abDated], dueAt(2026, 12, 25, 14, 30), 'the dated to-do keeps 14:30, only its date moves')
+        assert.strictEqual(got[abNoDue], dueAt(2026, 12, 25, 9, 0), 'the no-due to-do gets the target date at the default day-start 09:00')
+    })
+    await test('host glue (Feature A, custom day-start): a no-due drop uses the configured HH:MM (06:15)', async () => {
+        await abGlue.setSetting('dayStartTime', '06:15')
+        const before = abGlue.notePuts.length
+        await abGlue.panelMessageHandler(['todosDropped', [abCustom], '2026-12-25'])
+        const got = duePutsSince(abGlue, before)
+        assert.strictEqual(got[abCustom], dueAt(2026, 12, 25, 6, 15), 'getDayStartTime must read the custom setting')
+    })
+    await test('host glue (Feature A, invalid day-start): a malformed setting falls back to 09:00', async () => {
+        await abGlue.setSetting('dayStartTime', 'not-a-time')
+        const before = abGlue.notePuts.length
+        await abGlue.panelMessageHandler(['todosDropped', [abInvalid], '2026-12-25'])
+        const got = duePutsSince(abGlue, before)
+        assert.strictEqual(got[abInvalid], dueAt(2026, 12, 25, 9, 0), 'a malformed HH:MM falls back to 09:00, not NaN')
+    })
+
+    // ---- WEBVIEW SOURCE SHAPE: the harness cannot execute the webview JS, so pin the between-zone wiring as source ----
+    await test('webview between-drop wiring: exists, desktop-gated, reuses the markup, cleaned up on dragend/drop', () => {
+        // The gesture posts its own message shape and reads the existing markup (the row id + its heading's data-drop date).
+        assert.ok(webviewSource.includes("['todosDroppedBetween', ids, prevId, nextId, target.groupDate]"), 'the between drop must post todosDroppedBetween with prev/next/groupDate')
+        assert.ok(/getAttribute\('data-drop'\)/.test(webviewSource) && /\/\^\\d\{4\}-\\d\{2\}-\\d\{2\}\$\//.test(webviewSource), 'the group date must be read from the existing heading data-drop (a YYYY-MM-DD)')
+        assert.ok(/parentElement\.classList\.contains\('todos'\)/.test(webviewSource), 'eligibility must be limited to rows that are direct children of .todos (list views only)')
+        // Desktop-gated: both drag handlers bail immediately on mobile (drag does not exist there anyway).
+        assert.ok(/function onBetweenDragOver\(event\)\{\s*if \(IS_MOBILE\) return/.test(webviewSource), 'onBetweenDragOver must be desktop-gated (IS_MOBILE)')
+        assert.ok(/async function onBetweenDrop\(event\)\{\s*if \(IS_MOBILE\) return/.test(webviewSource), 'onBetweenDrop must be desktop-gated (IS_MOBILE)')
+        // Stateless delegated wiring that survives every setHtml, and a clean-up on both drop and dragend.
+        assert.ok(webviewSource.includes("document.addEventListener('dragover', onBetweenDragOver"), 'the dragover listener must be delegated on the document')
+        assert.ok(webviewSource.includes("document.addEventListener('drop', onBetweenDrop"), 'the drop listener must be delegated on the document')
+        assert.ok(webviewSource.includes("document.addEventListener('dragend', clearBetweenIndicator"), 'the indicator must be cleaned up on dragend')
+        assert.ok(/function onBetweenDrop[\s\S]*clearBetweenIndicator\(\)/.test(webviewSource), 'the indicator must be cleaned up on drop too')
+        // The indicator classes the CSS styles.
+        assert.ok(webviewSource.includes("'-drop-before'") && webviewSource.includes("'-drop-after'"), 'the insertion line uses the -drop-before / -drop-after classes')
+    })
+    await test('panel.css between-drop indicator: an inset box-shadow (no layout shift), a --cockpit-* accent, no @media', () => {
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        const ruleBody = (selector) => {
+            const at = css.indexOf(selector)
+            assert.ok(at >= 0, `panel.css is missing the ${selector} rule`)
+            const open = css.indexOf('{', at), close = css.indexOf('}', open)
+            return css.slice(open + 1, close)
+        }
+        for (const selector of ['.todo.-drop-before {', '.todo.-drop-after {']) {
+            const body = ruleBody(selector)
+            assert.ok(/box-shadow:\s*inset/.test(body), `${selector} must draw the line as an inset box-shadow`)
+            assert.ok(/var\(--cockpit-/.test(body), `${selector} must colour the line from a --cockpit-* variable`)
+            // No layout-shifting properties: the line must not add height/border/margin that would move rows.
+            assert.ok(!/(^|;|\s)(height|border|margin|padding):/.test(body), `${selector} must not change box geometry (no layout shift)`)
+            assert.ok(!/@media/.test(body), `${selector} must not use @media`)
+        }
+    })
+
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.8.9', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.9.0', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.8.9'
+        const expected = '1.9.0'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
