@@ -83,28 +83,47 @@ export async function refreshInterfaces(){
  ***************************************************************************************************************************************************/
 const reconcileOffsetsMs = [1000, 3000, 7000, 15000, 30000]
 var reconcileTimers = []
+// Whether the lane may STOP EARLY once the optimistic layer has cleared. It may only when EVERY mutation that
+// armed the current burst was optimistic - each left a host-held entry that retires the instant a search
+// agrees, so "the layer is empty" means "the index has caught up with all of them". If ANY arming mutation
+// was non-optimistic (a due-date move, an alarm, a tag edit: they leave no entry to retire), the burst loses
+// that signal and must run its bounded offsets to the end - otherwise an unrelated optimistic override
+// retiring would cut the non-optimistic change's confirmation short. So this is the STRONGEST expectation of
+// the burst, weakened (never re-strengthened) by a non-optimistic arm, and reset when the burst ends.
 var reconcileExpectRetire = false
+// True while a burst's offsets are still live, so a re-arm can tell it is EXTENDING the same burst (and must
+// keep the burst's expectation) from starting a fresh one (which resets the expectation).
+var reconcileActive = false
 // A generation stamp bumped on every (re)arm. A poll captures the generation it belongs to and, when it
 // resumes from its await, refuses to touch the lane if a newer burst has since taken it over - otherwise a
 // slow in-flight poll from an old burst could cancel the fresh burst's timers.
 var reconcileGeneration = 0
 
-export function scheduleReconcile(){
+export function scheduleReconcile(wasOptimistic?){
     for (var pending of reconcileTimers) clearTimeout(pending)
     var generation = ++reconcileGeneration
-    // Whether we are waiting on the optimistic layer to be confirmed by the index. Captured now, at (re)arm
-    // time, so a burst that adds a new optimistic entry re-enables the early stop.
-    reconcileExpectRetire = hasPendingOptimistic()
+    // An arm is "optimistic" only when the caller performed an optimistic mutation AND that layer is actually
+    // pending now. A fresh burst takes this arm's expectation; a further arm in the same live burst can only
+    // WEAKEN it - a single non-optimistic arm disables the early stop for the whole burst.
+    var optimisticArm = !!wasOptimistic && hasPendingOptimistic()
+    if (!reconcileActive){
+        reconcileExpectRetire = optimisticArm
+    } else if (!optimisticArm){
+        reconcileExpectRetire = false
+    }
+    reconcileActive = true
     // The callback returns the poll's promise so the work is awaitable (harnessable); setTimeout ignores it.
-    reconcileTimers = reconcileOffsetsMs.map(delay => setTimeout(() => reconcilePoll(generation), delay))
+    var lastIndex = reconcileOffsetsMs.length - 1
+    reconcileTimers = reconcileOffsetsMs.map((delay, index) => setTimeout(() => reconcilePoll(generation, index === lastIndex), delay))
 }
 
 function cancelReconcile(){
     for (var pending of reconcileTimers) clearTimeout(pending)
     reconcileTimers = []
+    reconcileActive = false
 }
 
-async function reconcilePoll(generation){
+async function reconcilePoll(generation, isLast){
     // A real, search-based refresh (not the cache/fast path): it lets the index catch up, retires any
     // optimistic entry the search now agrees with, fetches only the bodies of genuinely-changed notes, and
     // repaints only when the result actually changed (refreshPanelData's equality guard). A poll that finds
@@ -113,8 +132,15 @@ async function reconcilePoll(generation){
     // A newer burst has taken over the lane while this poll was awaiting: it owns the timers now, so leave
     // them be (this poll's own timers were already cleared when that burst re-armed).
     if (generation !== reconcileGeneration) return
-    // Nothing left to confirm: cancel the remaining offsets.
-    if (reconcileExpectRetire && !hasPendingOptimistic()) cancelReconcile()
+    // Nothing left to confirm: cancel the remaining offsets. Only bursts that were armed purely by optimistic
+    // mutations get here (reconcileExpectRetire); a burst carrying a non-optimistic change runs to the end.
+    if (reconcileExpectRetire && !hasPendingOptimistic()){
+        cancelReconcile()
+    } else if (isLast){
+        // The bounded schedule is exhausted: the burst is over, so the next mutation starts a fresh one.
+        reconcileActive = false
+        reconcileTimers = []
+    }
 }
 
 /** Overview lane ***********************************************************************************************************************************
@@ -175,12 +201,15 @@ export async function setupWorkspaceEvents(){
         // Targeted optimistic reconcile for a single external change, so a note created / moved / trashed
         // elsewhere shows or disappears without waiting for the periodic timer. Skipped while a sync runs -
         // sync changes hundreds of notes, which would be hundreds of per-note GETs, and the post-sync
-        // reconcile lane covers that set instead.
-        if (event && event.id && !getSyncStatus().syncing) await reconcileExternalNoteChange(event.id)
+        // reconcile lane covers that set instead. It reports whether it left a host-held optimistic entry, so
+        // the reconcile lane knows this arm is optimistic (may early-stop) rather than a blind change (must run
+        // its offsets out); a change reconciled during a sync, or one that touched nothing, counts as neither.
+        var touchedOptimistic = false
+        if (event && event.id && !getSyncStatus().syncing) touchedOptimistic = await reconcileExternalNoteChange(event.id)
         // The panel catches the index up through the bounded reconcile job; the overview notes follow on
         // their own slower debounce. Neither regenerates the whole world, and a burst collapses into one of
         // each rather than the old 1/5/15/30s cascade of full rebuilds.
-        scheduleReconcile()
+        scheduleReconcile(touchedOptimistic)
         scheduleOverview()
     })
     // onSyncStart carries no payload (its withErrors is only known at the end), so the button state
@@ -197,10 +226,15 @@ export async function setupWorkspaceEvents(){
         markSyncComplete(event && event.withErrors)
         // Re-render at once so the button stops spinning immediately (fast: no body fetches just for the
         // button), then arm ONE reconcile job to let the index catch up with whatever the sync pulled in -
-        // not an unconditional full cascade. The overview notes are covered by the per-note-change lane armed
-        // during the sync (and by the periodic backstop), so nothing extra is scheduled here.
+        // not an unconditional full cascade.
         await refreshPanelData({ fast: true })
         scheduleReconcile()
+        // Arm ONE overview pass too. The per-note-change lane armed DURING the sync is not enough on its own:
+        // if the sync's last onNoteChange settled more than the overview debounce (10s) before completion, that
+        // debounce already fired mid-sync on a stale snapshot and nothing re-armed it, so the overview notes
+        // would stay stale until the periodic backstop. A single scheduleOverview here collapses with any still
+        // -pending per-change debounce (it does not stack) and rewrites the notes once the index has settled.
+        scheduleOverview()
     })
     await registerEvent("onNoteAlarmTrigger", () => { scheduleReconcile(); scheduleOverview() })
 }

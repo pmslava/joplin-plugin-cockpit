@@ -685,7 +685,7 @@ async function main() {
             currentProfileID: 1,
         },
     })
-    await test('switch cache: returning to a viewed profile paints from cache with zero searches', async () => {
+    await test('switch cache: returning to a viewed profile paints from cache, then one background truth refresh', async () => {
         // View both profiles once so each result set is cached, then switch away.
         await cacheDesktop.panelMessageHandler(['profilesDropdownChanged', 2])
         await cacheDesktop.panelMessageHandler(['profilesDropdownChanged', 1])
@@ -693,7 +693,10 @@ async function main() {
         const before = countSearches(cacheDesktop)
         const paintsBefore = cacheDesktop.setHtmlCalls
         await cacheDesktop.panelMessageHandler(['profilesDropdownChanged', 1])   // switch BACK to the cached profile
-        assert.strictEqual(countSearches(cacheDesktop) - before, 0, 'a switch back to a cached profile must not search')
+        // The instant paint (fast + fill) is served entirely from the cached result set - zero searches - so the
+        // ONLY search is the single trailing background truth refresh, which catches external edits made while
+        // this profile was not current. That is exactly one search: not a per-paint search, not a cascade.
+        assert.strictEqual(countSearches(cacheDesktop) - before, 1, 'a switch back paints from cache, then does exactly one background truth refresh')
         assert.ok(cacheDesktop.setHtmlCalls > paintsBefore, 'it still repaints for the switched-to profile')
         assert.ok(cacheDesktop.panelHtml['panel-panel'].includes('Alpha'), 'the cached rows are painted')
     })
@@ -862,7 +865,7 @@ async function main() {
         },
         notes: { ovd: { id: 'ovd', title: 'Ov', body: 'stale' } },
     })
-    await test('budget d / sync: start and complete each do one fast render; complete arms one reconcile job, no overview lane', async () => {
+    await test('budget d / sync: start and complete each do one fast render; complete arms one reconcile job and one overview pass', async () => {
         const bodiesBefore = countBodyFetches(laneSync), ovBefore = criteriaSearches(laneSync, 'tag:ovd')
         const startMark = laneSync.timeouts.length
         await laneSync.syncStartHandler()
@@ -875,11 +878,14 @@ async function main() {
         assert.strictEqual(countBodyFetches(laneSync) - bodiesBeforeDone, 0, 'sync complete fetches no checkbox bodies (fast render only)')
         const armed = armedSince(laneSync, completeMark)
         assert.strictEqual(armed.filter(t => RECONCILE_OFFSETS.includes(t.ms)).length, 5, 'sync complete arms one reconcile job')
-        assert.strictEqual(armed.filter(t => t.ms === OVERVIEW_DEBOUNCE).length, 0, 'sync complete arms no overview lane (the per-change lane covers it)')
+        // A single overview pass is armed too: if the sync's last onNoteChange settled more than the overview
+        // debounce before completion, that debounce already fired mid-sync on a stale snapshot and nothing
+        // re-armed it, so the overview notes would stay stale until the periodic backstop without this.
+        assert.strictEqual(armed.filter(t => t.ms === OVERVIEW_DEBOUNCE).length, 1, 'sync complete arms exactly one overview pass')
         const ovMark = criteriaSearches(laneSync, 'tag:ovd')
         for (const t of armed) await laneSync.fireTimeout(t)
-        // The pre-branch onSyncComplete armed scheduleRefresh, whose cascade regenerated every overview note.
-        assert.strictEqual(criteriaSearches(laneSync, 'tag:ovd') - ovMark, 0, 'the post-sync reconcile regenerates no overview note')
+        // The reconcile polls only search the panel; the ONE overview lane regenerates the overview note once.
+        assert.strictEqual(criteriaSearches(laneSync, 'tag:ovd') - ovMark, 1, 'the post-sync overview lane regenerates the overview note exactly once')
     })
 
     // (e) Excluded notebooks: hidden everywhere, id-tracked (rename-safe), and a same-titled namesake is spared.
@@ -978,6 +984,220 @@ async function main() {
         // Still excluded from the rows after the rename.
         await ex.panelMessageHandler(['sortDirectionClicked'])
         assert.ok(!ex.panelHtml['panel-panel'].includes('ArchivedC'), 'the renamed notebook\'s to-do stays excluded')
+    })
+
+    // ============================================================ Findings 1-5: overlay scoping + lane fixes
+    // These reproduce the cross-profile item-overlay leaks (Finding 1) and the lane refinements (Findings 2-5).
+    // Each is written to FAIL on HEAD 32a9a88d - where a single GLOBAL item overlay is merged into every query,
+    // the folder-poll signature includes updated_time, sync complete arms no overview lane, a cached switch does
+    // no truth refresh, and the reconcile early-cancel is recomputed per-arm from hasPendingOptimistic() - and to
+    // pass once each overlay entry is scoped to the view it was computed for and the lanes are refined.
+    const overlayFolder = 'n'.repeat(32)
+    const hideCompleted = { ...baseProfile, showCompletedPast: false, showCompletedToday: false, showCompletedFuture: false, showCompletedNoDue: false, showNoDue: true }
+    const showEveryCompleted = { ...baseProfile, showNoDue: true }   // baseProfile already shows every completed bucket
+
+    // (1a) REMOVE leak via an EXTERNAL completion. On a hide-completed profile the index still lags (its
+    // iscompleted:0 search still returns the to-do), so the suppress the reconcile computes stays live; switching
+    // to a show-completed profile whose search returns the same id must STILL show it - the suppress was the
+    // other view's. On HEAD the one global suppress splices it out of the show-completed profile too.
+    const removeLeakId = 'a'.repeat(32)
+    const removeExtOptions = {
+        dataDir: path.join(tmp, 'f1-remove-ext-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        // The lagging index returns the to-do as still-incomplete to BOTH profiles' searches.
+        todos: [{ id: removeLeakId, title: 'ExtDone', todo_completed: 0, todo_due: Date.now() + 86400000, parent_id: overlayFolder, user_updated_time: 2 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...hideCompleted, id: 1, name: 'Active', searchCriteria: '', sortOrder: 0, noteID: '' },
+                { ...showEveryCompleted, id: 2, name: 'Done', searchCriteria: '', sortOrder: 1, noteID: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+        // The REAL note is already completed, so the reconcile judges it out of the hide-completed view.
+        notes: { [removeLeakId]: { id: removeLeakId, title: 'ExtDone', parent_id: overlayFolder, is_todo: 1, todo_completed: Date.now(), todo_due: Date.now() + 86400000, deleted_time: 0, user_updated_time: 2 } },
+    }
+    const removeExt = await run(removeExtOptions)
+    await test('F1 remove-leak (external): a completion on a hide-completed profile does not hide it on a show-completed one', async () => {
+        await removeExt.noteChangeHandler({ id: removeLeakId })                     // external completion -> suppress in the hide-completed view
+        await removeExt.panelMessageHandler(['profilesDropdownChanged', 2])         // switch to the show-completed profile
+        assert.ok(removeExt.panelHtml['panel-panel'].includes('data-todo-id="' + removeLeakId + '"'),
+            'the completed to-do must be shown on the show-completed profile (the other view\'s suppress must not apply)')
+    })
+
+    // (1b) REMOVE leak via the user's OWN tick. Ticking sets a completion override (global, id-keyed, kept) AND -
+    // when Joplin echoes the change back as onNoteChange - a suppress in the hide-completed view. The show-completed
+    // profile must still show it (override corrects it to completed); on HEAD the global suppress hides it instead.
+    const removeOwnOptions = {
+        dataDir: path.join(tmp, 'f1-remove-own-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [{ id: removeLeakId, title: 'OwnDone', todo_completed: 0, todo_due: Date.now() + 86400000, parent_id: overlayFolder, user_updated_time: 2 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...hideCompleted, id: 1, name: 'Active', searchCriteria: '', sortOrder: 0, noteID: '' },
+                { ...showEveryCompleted, id: 2, name: 'Done', searchCriteria: '', sortOrder: 1, noteID: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+        notes: { [removeLeakId]: { id: removeLeakId, title: 'OwnDone', parent_id: overlayFolder, is_todo: 1, todo_completed: Date.now(), todo_due: Date.now() + 86400000, deleted_time: 0, user_updated_time: 2 } },
+    }
+    const removeOwn = await run(removeOwnOptions)
+    await test('F1 remove-leak (own tick): ticking on a hide-completed profile does not hide it on a show-completed one', async () => {
+        await removeOwn.panelMessageHandler(['todoChecked', removeLeakId, true])    // user tick: completion override
+        await removeOwn.noteChangeHandler({ id: removeLeakId })                     // Joplin echoes it back: suppress in the hide-completed view
+        await removeOwn.panelMessageHandler(['profilesDropdownChanged', 2])         // switch to the show-completed profile
+        assert.ok(removeOwn.panelHtml['panel-panel'].includes('data-todo-id="' + removeLeakId + '"'),
+            'the ticked to-do must be shown on the show-completed profile')
+    })
+
+    // (2) INSERT leak. A no-due to-do created on a show-no-due profile must NOT surface on a hide-no-due profile's
+    // panel, and a full overview regeneration must write it ONLY into the creating profile's note. On HEAD the one
+    // global insert is appended to every query (panel and every profile's overview markdown).
+    let insertIndexed = false
+    const insertItem = { id: 'created-1', title: 'FreshTodo', todo_completed: 0, todo_due: 0, parent_id: overlayFolder, user_updated_time: 1 }
+    const insertOptions = {
+        dataDir: path.join(tmp, 'f1-insert-data'),
+        installationDir: path.join(tmp, 'mobile-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        // A hides no-due to-dos with due:19700201 (never has it); A shows them and gets it once the index catches up.
+        todos: (q) => q.includes('due:19700201') ? [] : (insertIndexed ? [insertItem] : []),
+        folders: [{ id: overlayFolder, title: 'Inbox', parent_id: '', updated_time: 1 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...baseProfile, id: 1, name: 'Undated', searchCriteria: '', showNoDue: true, notebook: overlayFolder, sortOrder: 0, noteID: 'ovUndated' },
+                { ...baseProfile, id: 2, name: 'Dated', searchCriteria: '', showNoDue: false, notebook: overlayFolder, sortOrder: 1, noteID: 'ovDated' },
+            ] }),
+            currentProfileID: 1,
+        },
+        notes: { ovUndated: { id: 'ovUndated', title: 'U', body: 'stale' }, ovDated: { id: 'ovDated', title: 'D', body: 'stale' } },
+    }
+    const insert = await run(insertOptions)
+    await test('F1 insert-leak: a to-do created on one profile stays out of another profile\'s panel and overview', async () => {
+        await insert.panelMessageHandler(['newTodoClicked'])                        // create a no-due to-do on the show-no-due profile
+        insertIndexed = true                                                        // the index now returns it to that profile's own search
+        assert.ok(insert.panelHtml['panel-panel'].includes('data-todo-id="created-1"'), 'the creating profile shows it optimistically')
+        await insert.panelMessageHandler(['profilesDropdownChanged', 2])            // switch to the hide-no-due profile
+        assert.ok(!insert.panelHtml['panel-panel'].includes('data-todo-id="created-1"'),
+            'the created no-due to-do must NOT leak into the hide-no-due profile\'s panel')
+        // A full overview regeneration (the debounced lane armed by the create) must write it ONLY into the
+        // creating profile's overview note - never the other's.
+        const overviewTimer = insert.pendingTimeouts(OVERVIEW_DEBOUNCE).pop()
+        assert.ok(overviewTimer, 'the create armed an overview pass')
+        await insert.fireTimeout(overviewTimer)
+        assert.ok(insert.notePuts.some(p => p.id === 'ovUndated' && p.body.includes('FreshTodo')), 'the creating profile\'s overview note lists it')
+        assert.ok(!insert.notePuts.some(p => p.id === 'ovDated' && p.body.includes('FreshTodo')), 'the other profile\'s overview note must NOT list it')
+    })
+
+    // (3) Flicker guarantee on the TICKING profile is unchanged: the completion override (global, id-keyed) still
+    // makes a search-based render show the ticked state before the index agrees. Pinned by the existing
+    // 'toggle: a search-based render before the index agrees still shows the ticked state' check; re-asserted here
+    // against the scoped overlay so a regression in that direction is caught alongside these.
+    const flickerId = 'a'.repeat(32)
+    const flicker = await run({
+        dataDir: path.join(tmp, 'f1-flicker-data'),
+        installationDir: path.join(tmp, 'flicker-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: [{ id: flickerId, title: 'Tick me', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: overlayFolder }],
+    })
+    await test('F1 flicker guarantee: the ticking profile still shows the ticked state before the index agrees', async () => {
+        await flicker.panelMessageHandler(['todoChecked', flickerId, true])
+        await flicker.panelMessageHandler(['sortDirectionClicked'])                 // a real, non-optimistic render
+        const html = flicker.panelHtml['panel-panel']
+        const at = html.indexOf('data-todo-id="' + flickerId + '"')
+        assert.ok(at >= 0, 'the toggled to-do is present')
+        assert.ok(html.slice(html.lastIndexOf('<div', at), at).includes('-completed'), 'the override renders it completed despite the stale search')
+    })
+
+    // (4) Folder poll: an updated_time-only change must trigger NO invalidation/render computation (no refresh
+    // search), while a rename still does. On HEAD the signature includes updated_time, so the bump churns.
+    const utFolderId = 'f'.repeat(32)
+    const utOptions = {
+        dataDir: path.join(tmp, 'f2-poll-data'),
+        installationDir: path.join(tmp, 'f2-poll-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: [],
+        folders: [{ id: utFolderId, title: 'Inbox', parent_id: '', updated_time: 1000 }],
+    }
+    const ut = await run(utOptions)
+    await test('F2 folder poll: an updated_time-only change causes no refresh; a rename still does', async () => {
+        const entry = ut.intervals.find(i => i.ms === 3000)
+        assert.ok(entry, 'the folder poll is armed')
+        await entry.fn()                                                            // baseline signature
+        // Pure updated_time bump: same id/title/parent -> no invalidation, no refresh search.
+        utOptions.folders = [{ id: utFolderId, title: 'Inbox', parent_id: '', updated_time: 9999 }]
+        const searchesBefore = countSearches(ut)
+        await entry.fn()
+        assert.strictEqual(countSearches(ut) - searchesBefore, 0, 'an updated_time-only change must not trigger a refresh computation')
+        // A rename (title change) still re-renders.
+        utOptions.folders = [{ id: utFolderId, title: 'Inbox renamed', parent_id: '', updated_time: 10000 }]
+        const htmlBefore = ut.setHtmlCalls
+        await entry.fn()
+        assert.ok(ut.setHtmlCalls > htmlBefore, 'a rename still triggers a re-render')
+    })
+
+    // (6) A cached profile switch schedules exactly ONE background truth refresh and no lane cascade. On HEAD the
+    // switch-back paints from cache with zero searches and never refetches the truth until the periodic backstop.
+    const truthSwitch = await run({
+        dataDir: path.join(tmp, 'f4-truth-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...baseProfile, id: 1, name: 'One', searchCriteria: 'tag:one', sortOrder: 0, noteID: '' },
+                { ...baseProfile, id: 2, name: 'Two', searchCriteria: 'tag:two', sortOrder: 1, noteID: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    await test('F4 cached switch: a switch back does exactly one background truth refresh and no lane cascade', async () => {
+        await truthSwitch.panelMessageHandler(['profilesDropdownChanged', 2])       // warm both caches
+        await truthSwitch.panelMessageHandler(['profilesDropdownChanged', 1])
+        await truthSwitch.panelMessageHandler(['profilesDropdownChanged', 2])
+        const searchesBefore = countSearches(truthSwitch)
+        const timeoutMark = truthSwitch.timeouts.length
+        await truthSwitch.panelMessageHandler(['profilesDropdownChanged', 1])       // switch BACK to the cached profile
+        assert.strictEqual(countSearches(truthSwitch) - searchesBefore, 1, 'exactly one background truth refresh search')
+        const armed = armedSince(truthSwitch, timeoutMark)
+        assert.strictEqual(armed.filter(t => RECONCILE_OFFSETS.includes(t.ms) || t.ms === OVERVIEW_DEBOUNCE).length, 0,
+            'the truth refresh arms no reconcile or overview lane (no cascade)')
+    })
+
+    // (7) Mixed burst: a non-optimistic mutation joining a burst that already holds an optimistic override must run
+    // its reconcile offsets to the end - the override retiring must NOT cut it short. On HEAD the early-cancel is
+    // recomputed from hasPendingOptimistic() at re-arm, so it cancels the moment the override retires.
+    const mixedId = 'a'.repeat(32)
+    const mixedOptions = {
+        dataDir: path.join(tmp, 'f5-mixed-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [{ id: mixedId, title: 'Mix', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: overlayFolder, user_updated_time: 1 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Solo', searchCriteria: '', noteID: '' }] }),
+            currentProfileID: 1,
+        },
+        notes: { [mixedId]: { id: mixedId, title: 'Mix', parent_id: overlayFolder, is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, deleted_time: 0, user_updated_time: 1 } },
+    }
+    const mixed = await run(mixedOptions)
+    await test('F5 mixed burst: a non-optimistic mutation keeps reconciling after the optimistic override retires', async () => {
+        await mixed.panelMessageHandler(['todoChecked', mixedId, true])            // optimistic tick: override pending
+        const mark = mixed.timeouts.length
+        await mixed.panelMessageHandler(['todosDropped', [mixedId], '2027-01-01'])  // non-optimistic move joins the burst
+        const rec = armedSince(mixed, mark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        assert.strictEqual(rec.length, 5, 'the due-date move re-arms the reconcile job (five offsets)')
+        await mixed.fireTimeout(rec[0])                                             // index lagging: override still pending
+        mixedOptions.todos = [{ id: mixedId, title: 'Mix', todo_completed: Date.now(), todo_due: Date.now() + 3600000, parent_id: overlayFolder, user_updated_time: 2 }]
+        await mixed.fireTimeout(rec[1])                                             // index catches up: override retires
+        assert.ok(!rec[2].cleared && !rec[3].cleared && !rec[4].cleared,
+            'the non-optimistic move keeps its later offsets armed despite the override retiring')
     })
 
     await fs.remove(tmp)

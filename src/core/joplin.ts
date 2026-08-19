@@ -124,8 +124,11 @@ function cacheResult(cache, query, items){
         cacheResult(todosResultCache, query, allTodos)
     }
     // Fold in the host-held optimistic layer: created/newly-matching to-dos the index has not returned
-    // yet, then the completion overrides (applied last so they also correct an overlay record).
-    mergeOptimisticTodos(allTodos)
+    // yet, then the completion overrides (applied last so they also correct an overlay record). The item
+    // overlay is view-scoped: opts.viewKey identifies the consuming view so only ITS own entries apply
+    // (the overview-note path passes none, so it folds in no inserts/removes). The completion overrides
+    // stay global - they are id-keyed user intent and correct a to-do's state in every view.
+    mergeOptimisticTodos(allTodos, opts && opts.viewKey)
     applyTodoCompletionOverrides(allTodos)
     // Re-apply the id filter after the merge so an optimistic overlay entry can never surface an excluded
     // notebook's note. The id set is the authority; the server clauses above are only an optimisation on top.
@@ -238,8 +241,9 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
         cacheResult(notesResultCache, query, allNotes)
     }
     // A created regular note (is_todo 0) shows here before the index returns it; the overlay filters to
-    // the notes list, so a created to-do never leaks into this section.
-    mergeOptimisticNotes(allNotes)
+    // the notes list, so a created to-do never leaks into this section. View-scoped by opts.viewKey, so a
+    // note created in one profile's view never surfaces in another's (the overview-note path passes none).
+    mergeOptimisticNotes(allNotes, opts && opts.viewKey)
     allNotes = filterExcluded(allNotes, excluded.set)
     return allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
 }

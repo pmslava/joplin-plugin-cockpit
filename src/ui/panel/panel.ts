@@ -6,7 +6,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates } from "../../core/joplin";
-import { clearOptimisticItem, clearTodoCompletionOverride, removeOptimisticItem, setTodoCompletionOverride, upsertOptimisticItem } from "../../core/optimistic";
+import { clearOptimisticItem, clearTodoCompletionOverride, removeOptimisticItem, setTodoCompletionOverride, upsertOptimisticItem, viewKeyFor } from "../../core/optimistic";
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
 import { logRefresh, snapshot } from "../../core/instrument";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
@@ -174,7 +174,18 @@ async function pollFoldersOnce(){
             page: 1,
             limit: 20,
         })
-        var signature = JSON.stringify(response.items || [])
+        // The page is ordered by updated_time so a renamed/moved/created folder (its updated_time bumped)
+        // is guaranteed to surface on it. The SIGNATURE, however, is taken over the stable identity fields
+        // only (id/title/parent_id) and sorted by id, so a pure updated_time bump - which merely reorders
+        // this page, as happens for every folder a sync touches - does not change it. A rename (title), a
+        // move (parent_id), a create (new id) or a delete (id gone from the page) still does. This stops a
+        // sync's folder churn from invalidating the notebook map + reconciling the excluded text + running a
+        // full refresh computation every 3s for no visible change.
+        var signature = JSON.stringify(
+            (response.items || [])
+                .map(folder => [folder.id, folder.title, folder.parent_id])
+                .sort((first, second) => String(first[0]).localeCompare(String(second[0])))
+        )
         if (lastFolderSignature === null){
             // The first poll only records the baseline; there is nothing to compare against yet.
             lastFolderSignature = signature
@@ -297,14 +308,19 @@ async function eventHandler(message){
         resetCalendarViewState()
         // The profile carries its own header state: notebook filter, search and sorting.
         applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
-        // Paint the switched-to view immediately, then fill the rings from note bodies in the background, and
-        // STOP. A profile switch changes no note data - only which stored view is shown - so it arms no
-        // reconcile job and no overview regen; there is nothing for the index to catch up to. optimistic
-        // reuses the switched-to profile's cached result set, so a previously viewed profile paints with ZERO
-        // searches (with the host-held override map still layered on); a first visit does one search and no
-        // body fetches. Either way the whole list is on screen before any body GET, and the switch ends there -
-        // the multi-lane cascade a mutation would arm is exactly the background work a switch must not do.
+        // Paint the switched-to view immediately, then fill the rings from note bodies in the background.
+        // optimistic reuses the switched-to profile's cached result set, so a previously viewed profile paints
+        // with ZERO searches (with the host-held override map still layered on); a first visit does one search
+        // and no body fetches. Either way the whole list is on screen before any body GET.
         await refreshPanelFastThenFill({ optimistic: true })
+        // Then ONE background truth refresh: a single search-based refreshPanelData so external edits made
+        // while this profile was not current (and which its cached result set therefore predates) show now,
+        // instead of staying invisible until the periodic backstop. It is a lone refresh - no overview regen,
+        // no reconcile job - so it does not reintroduce the multi-lane cascade a mutation arms (a switch still
+        // mutates no note). refreshPanelData's generation guard discards it if a newer refresh supersedes it,
+        // and its equality guard makes it a no-op paint when the cached view was already the truth. This also
+        // narrows the window in which a stale cross-view optimistic entry could be observed after a switch.
+        await refreshPanelData()
     } else if (message[0] == 'notebookFilterChanged'){
         notebookFilter = String(message[1] || "")
         lastScrollTop = 0
@@ -494,7 +510,9 @@ async function applyTodoChecked(todoID, checked){
         return
     }
     await refreshPanelData({ optimistic: true })
-    scheduleReconcile()
+    // An optimistic arm: the completion override retires the instant a search agrees, so the reconcile lane
+    // may stop early once it does (unless a non-optimistic mutation joins the burst).
+    scheduleReconcile(true)
     scheduleOverview()
 }
 
@@ -553,9 +571,13 @@ function noteMatchesView(record, profile, notebooks, excludedSet?){
  * is inserted only when the active view is locally evaluable AND the fresh item satisfies it; otherwise the reconcile lane reconciles it via a search. *
  ***************************************************************************************************************************************************/
 async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
+    // Returns whether it inserted an overlay entry, so the caller can tell the reconcile lane this arm is
+    // optimistic; a create that could not be evaluated locally (or did not match the view) returns false and
+    // the lane runs its offsets out until the search finds the created item.
     try {
-        var profile = await getProfile(await getCurrentProfileID())
-        if (!profile || !isLocallyEvaluableView(profile)) return
+        var profileID = await getCurrentProfileID()
+        var profile = await getProfile(profileID)
+        if (!profile || !isLocallyEvaluableView(profile)) return false
         var record = {
             id: newItem.id,
             title: String(newItem.title || ""),
@@ -567,11 +589,15 @@ async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
             user_created_time: Date.now(),
         }
         var notebooks = await getNotebookMap()
-        if (!noteMatchesView(record, profile, notebooks, await getExcludedNotebookIdSet())) return
-        upsertOptimisticItem(record)
+        if (!noteMatchesView(record, profile, notebooks, await getExcludedNotebookIdSet())) return false
+        // Scope the entry to the view it was evaluated against, so it shows in THIS profile/notebook view
+        // only and never leaks into another profile's panel or overview note.
+        upsertOptimisticItem(record, viewKeyFor(profileID, notebookFilter))
         await refreshPanelData({ optimistic: true })
+        return true
     } catch (error) {
         console.warn("Cockpit: could not optimistically insert the new item", error)
+        return false
     }
 }
 
@@ -580,37 +606,46 @@ async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
  * view under the same locally-evaluable rule, so an externally created / moved / trashed note shows or disappears without waiting for the periodic     *
  * timer. Search stays the eventual authority - the overlay entry retires as soon as a real search agrees. The single GET is the caller's cost; the     *
  * caller (timer.ts) skips it entirely while a sync is running, where hundreds of notes change and the post-sync reconciliation covers them instead.    *
+ * Returns whether it left a host-held optimistic entry (an insert or a suppress), so the caller can tell the reconcile lane this arm is optimistic (it  *
+ * may stop early once the index agrees) rather than a blind change that must run its offsets out; a cleared / no-op / errored reconcile returns false.  *
  ***************************************************************************************************************************************************/
 export async function reconcileExternalNoteChange(noteID){
-    if (!noteID) return
+    if (!noteID) return false
+    // Captured before the GET so the scope is known even on the Not-Found path in the catch below. Every
+    // overlay entry this function writes is scoped to the CURRENT view, so an external change judged against
+    // this profile never suppresses or inserts the note in another profile's panel or overview note.
+    var profileID = await getCurrentProfileID()
+    var viewKey = viewKeyFor(profileID, notebookFilter)
     try {
-        var profile = await getProfile(await getCurrentProfileID())
-        if (!profile) return
+        var profile = await getProfile(profileID)
+        if (!profile) return false
         if (!isLocallyEvaluableView(profile)){
             // The view needs a search to decide membership; drop any stale overlay entry and let search rule.
             clearOptimisticItem(noteID)
-            return
+            return false
         }
         var note = await joplin.data.get(['notes', noteID], {
             fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'],
         })
-        if (!note){ removeOptimisticItem(noteID); return }
+        if (!note){ removeOptimisticItem(noteID, undefined, viewKey); return true }
         var trashed = note.deleted_time && note.deleted_time > 0
         var notebooks = await getNotebookMap()
         if (trashed || !noteMatchesView(note, profile, notebooks, await getExcludedNotebookIdSet())){
-            removeOptimisticItem(noteID, !!note.is_todo)
+            removeOptimisticItem(noteID, !!note.is_todo, viewKey)
         } else {
-            upsertOptimisticItem(note)
+            upsertOptimisticItem(note, viewKey)
         }
         // An optimistic repaint (no search) so a newly appearing / disappearing item shows at once; the
         // equality guard suppresses it when nothing visible changed, so a mere content edit does not churn.
         await refreshPanelData({ optimistic: true })
+        return true
     } catch (error) {
         if (error && error.message === "Not Found"){
-            removeOptimisticItem(noteID)
-        } else {
-            console.warn("Cockpit: could not reconcile the changed note", error)
+            removeOptimisticItem(noteID, undefined, viewKey)
+            return true
         }
+        console.warn("Cockpit: could not reconcile the changed note", error)
+        return false
     }
 }
 
@@ -973,9 +1008,10 @@ async function createItemInFolder(isTodo, folderID){
     await focusNewItemEditor(isTodo)
     // Show the new row at once from the POST response (the record is already in hand) when the active view
     // can be evaluated locally; otherwise the reconcile lane reconciles it via a search once the index has it,
-    // and the overview lane rewrites the notes.
-    await insertCreatedItemOptimistically(newItem, isTodo, folderID)
-    scheduleReconcile()
+    // and the overview lane rewrites the notes. The insert result tells the lane whether this arm is
+    // optimistic (early-stoppable) or a blind create it must poll the search for.
+    var insertedOptimistically = await insertCreatedItemOptimistically(newItem, isTodo, folderID)
+    scheduleReconcile(insertedOptimistically)
     scheduleOverview()
 }
 

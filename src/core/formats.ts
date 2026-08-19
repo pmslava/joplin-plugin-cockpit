@@ -6,6 +6,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { getTodos, getNotes, getNotebookMap, notebookWithDescendants } from "./joplin";
+import { viewKeyFor } from "./optimistic";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
     CalendarViewState,
@@ -132,7 +133,11 @@ abstract class BaseFormat {
         // first-visible row, so the on-screen rings fill before the off-screen ones.
         var fillCounts = this.viewState ? !!(this.viewState as any).fillCounts : false
         var priorityStart = this.viewState ? ((this.viewState as any).priorityStart || 0) : 0
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart })
+        // View scope for the item overlay: the panel consumes only its own view's optimistic inserts/removes,
+        // keyed by the current profile and notebook filter. The overview-note markdown consumes NONE (null),
+        // so an insert/remove computed for one profile's panel never leaks into another profile's note.
+        var viewKey = isMarkdown ? null : viewKeyFor(this.profile.id, notebookFilter)
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey })
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -707,9 +712,13 @@ export async function renderNotesSection(profile, viewState){
     var fast = viewState ? !!viewState.fastCheckboxCounts : false
     var useCache = viewState ? !!viewState.optimistic : false
     var fillCounts = viewState ? !!viewState.fillCounts : false
+    // The notes section is panel-only (the overview markdown never renders it), so it always carries the
+    // current view's key: a note created in this profile/notebook view shows here, but never leaks into
+    // another view's notes section.
+    var notesViewKey = viewKeyFor(profile.id, viewState ? viewState.notebookFilter : null)
     // The notes section renders after the to-dos, so it inherits no separate viewport estimate; its bodies
     // are fetched in list order (0), while the to-dos above it get the viewport-first ordering.
-    var notes = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0 })
+    var notes = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey })
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
         note.notebookTitle = notebook ? notebook.title : ""
