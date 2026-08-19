@@ -9,6 +9,8 @@ import joplin from "api"
 import { SettingItemType } from "api/types"
 import { getAllProfiles, getProfile, profileDataSettingKey } from "./database"
 import { refreshInterfaces, setupTimer } from "./timer"
+import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, resolveNamesToIds } from "./exclusion"
+import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches } from "./joplin"
 
 /** Variable Setup *********************************************************************************************************************************/
 export const customCssSettingKey = "customCss"
@@ -101,6 +103,23 @@ export async function setupSettings(){
 			value: "09:00",
 			type: SettingItemType.String,
 			public: true,
+			section: 'section',
+		},
+		[EXCLUDED_NOTEBOOKS_KEY]: {
+			label: "Excluded notebooks",
+			description: "Comma-separated notebook names to hide from Cockpit everywhere: search results, panel rows, checkbox counts, the overview notes and the notebook filter/picker. Sub-notebooks of an excluded notebook are hidden too. To pick one of several notebooks that share a name, give a Parent/Sub path. Entries are resolved to the notebooks themselves and tracked internally by id, so renaming a notebook later keeps the exclusion working. Leave empty to turn the feature off.",
+			value: "",
+			type: SettingItemType.String,
+			public: true,
+			section: 'section',
+		},
+		[EXCLUDED_NOTEBOOK_IDS_KEY]: {
+			// The single source of truth for every exclusion decision: the resolved folder ids, comma
+			// separated. Managed by Cockpit from the visible names field above; not shown to the user.
+			label: "The resolved ids of the excluded notebooks (managed by Cockpit)",
+			value: "",
+			type: SettingItemType.String,
+			public: false,
 			section: 'section',
 		},
 		[themeModeSettingKey]: {
@@ -215,7 +234,44 @@ export async function setupSettings(){
 		// A theme setting change needs the panel redrawn. buildThemeCss is rebuilt inside
 		// refreshPanelData, so the new colours reach the markup and get past its equality guard.
 		if (keys.some(key => themeSettingKeys.includes(key))) await refreshInterfaces()
+		// The user edited the visible "Excluded notebooks" names field: resolve the names to ids (the source
+		// of truth), rewrite the field to the canonical resolved titles, and re-render everything so the
+		// exclusion takes effect at once.
+		if (keys.includes(EXCLUDED_NOTEBOOKS_KEY)) await resolveExcludedNotebooks()
 	})
+}
+
+/** resolveExcludedNotebooks ************************************************************************************************************************
+ * Turns the visible, human-typed names field into the hidden id list that every exclusion decision reads, and canonicalises the visible field in       *
+ * return. Each entry is resolved case-insensitively against the current notebook map (a bare title, or a Parent/Sub path to disambiguate duplicate     *
+ * titles; a bare title matching several notebooks resolves to all of them). Unresolvable entries are kept verbatim so a typo stays visible. Both        *
+ * writes are guarded by a value comparison so the setValue that re-enters this handler settles immediately instead of looping, and the caches are       *
+ * cleared and the interfaces re-rendered only when something actually changed.                                                                         *
+ ***************************************************************************************************************************************************/
+async function resolveExcludedNotebooks(){
+	var raw = String(await joplin.settings.value(EXCLUDED_NOTEBOOKS_KEY) || "")
+	var map = await getNotebookMap()
+	var resolved = resolveNamesToIds(map, raw)
+	var idsCsv = resolved.ids.join(",")
+	var changed = false
+	// The hidden id list keys off the visible field only, so writing it does not re-enter this handler.
+	if (idsCsv !== String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")){
+		await joplin.settings.setValue(EXCLUDED_NOTEBOOK_IDS_KEY, idsCsv)
+		changed = true
+	}
+	// Writing the canonical text re-enters this handler, but on that pass raw already equals canonicalText and
+	// the ids already match, so nothing is written and the recursion stops (the loop guard).
+	if (resolved.canonicalText !== raw){
+		await joplin.settings.setValue(EXCLUDED_NOTEBOOKS_KEY, resolved.canonicalText)
+		changed = true
+	}
+	if (changed){
+		// The cached result sets were computed without this exclusion (or with a previous one), so they must
+		// not be reused; the notebook map is dropped too so the filter/picker rebuild.
+		invalidateResultCaches()
+		invalidateNotebookMap()
+		await refreshInterfaces()
+	}
 }
 
 /** setCurrentProfileID *****************************************************************************************************************************

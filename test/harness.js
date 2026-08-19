@@ -40,11 +40,52 @@ function makeJoplin(options) {
         // setInterval callbacks captured during startup (the periodic timer + the folder poll) so the suite
         // can drive them by hand rather than on a real clock. Each is { fn, ms, cleared }.
         intervals: [],
+        // setTimeout callbacks armed by the refresh LANES (reconcile / overview) while a wrapped handler runs,
+        // captured instead of scheduled on a real clock so a test can drive them by hand and assert on the
+        // lane structure. Each is { cb, ms, id, cleared, fired }. clearTimeout marks cleared; fireTimeout runs
+        // one (with capture active, so a re-arm during the poll is captured too).
+        timeouts: [],
         // Set to a DialogResult to make the next dialogs.open() return it instead of a cancel.
         dialogResult: null,
     }
 
     const notes = options.notes || {}
+
+    // Wraps a plugin-supplied handler so that any setTimeout it arms (the reconcile and overview lanes) is
+    // captured into state.timeouts rather than scheduled on a real clock, for the duration of the awaited
+    // call. Real setTimeout/clearTimeout are restored afterwards, so the suite's own timing and Node's
+    // internals are untouched. The lane callbacks return their promise, so firing one is awaitable.
+    function withTimerCapture(fn) {
+        return async function (...args) {
+            const realSetTimeout = global.setTimeout
+            const realClearTimeout = global.clearTimeout
+            global.setTimeout = (cb, ms) => {
+                const entry = { cb, ms, id: state.timeouts.length, cleared: false, fired: false }
+                state.timeouts.push(entry)
+                return entry
+            }
+            global.clearTimeout = (handle) => {
+                if (handle && typeof handle === 'object' && typeof handle.id === 'number' && state.timeouts[handle.id]) {
+                    state.timeouts[handle.id].cleared = true
+                }
+            }
+            try {
+                return await fn.apply(null, args)
+            } finally {
+                global.setTimeout = realSetTimeout
+                global.clearTimeout = realClearTimeout
+            }
+        }
+    }
+    // Runs one captured timeout by hand, with capture active so a poll that re-arms the lane is captured too.
+    // A cleared or already-fired entry is a no-op. Returns the callback's promise so a test can await it.
+    state.fireTimeout = (entry) => {
+        if (!entry || entry.cleared || entry.fired) return undefined
+        entry.fired = true
+        return withTimerCapture(entry.cb)()
+    }
+    // Convenience: the captured lane timeouts of a given delay that are still live (neither cleared nor fired).
+    state.pendingTimeouts = (ms) => state.timeouts.filter(t => t.ms === ms && !t.cleared && !t.fired)
 
     const joplin = {
         plugins: {
@@ -80,7 +121,7 @@ function makeJoplin(options) {
             panels: {
                 create: async (id) => { state.panels.push(id); return `panel-${id}` },
                 addScript: async (handle, script) => { state.panelScripts.push(script) },
-                onMessage: async (handle, handler) => { state.panelMessageHandler = handler },
+                onMessage: async (handle, handler) => { state.panelMessageHandler = withTimerCapture(handler) },
                 setHtml: async (handle, html) => { state.setHtmlCalls++; state.callLog.push('setHtml'); state.panelHtml[handle] = html },
                 show: async () => {},
                 visible: async () => true,
@@ -101,10 +142,10 @@ function makeJoplin(options) {
             },
         },
         workspace: {
-            onNoteChange: async (h) => { state.workspaceEvents.push('onNoteChange'); state.noteChangeHandler = h },
-            onSyncStart: async () => { state.workspaceEvents.push('onSyncStart') },
-            onSyncComplete: async () => { state.workspaceEvents.push('onSyncComplete') },
-            onNoteAlarmTrigger: async () => { state.workspaceEvents.push('onNoteAlarmTrigger') },
+            onNoteChange: async (h) => { state.workspaceEvents.push('onNoteChange'); state.noteChangeHandler = withTimerCapture(h) },
+            onSyncStart: async (h) => { state.workspaceEvents.push('onSyncStart'); state.syncStartHandler = withTimerCapture(h) },
+            onSyncComplete: async (h) => { state.workspaceEvents.push('onSyncComplete'); state.syncCompleteHandler = withTimerCapture(h) },
+            onNoteAlarmTrigger: async (h) => { state.workspaceEvents.push('onNoteAlarmTrigger'); state.noteAlarmHandler = withTimerCapture(h) },
         },
         data: {
             get: async (pathParts, query) => {
@@ -172,6 +213,9 @@ function makeJoplin(options) {
 
     state.settingHandlers = []
     state.notes = notes
+    // Lets a test change a public setting exactly as the app would, firing the plugin's onChange handlers (so
+    // e.g. editing the visible "Excluded notebooks" field runs its resolver).
+    state.setSetting = (key, value) => joplin.settings.setValue(key, value)
     return { joplin, state }
 }
 

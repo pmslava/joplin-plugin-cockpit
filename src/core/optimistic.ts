@@ -34,6 +34,18 @@ var completionOverrides = new Map()
  ***************************************************************************************************************************************************/
 var itemOverlay = new Map()
 
+/** hasPendingOptimistic ****************************************************************************************************************************
+ * Whether any optimistic entry (a completion override or an item-overlay insert/suppress) is still being held. The reconciliation lane uses this as    *
+ * its early-stop signal: when a mutation left something optimistic and a later search has since retired every such entry (the index caught up with the  *
+ * user's own action), there is nothing left to poll for, so the remaining reconciliation offsets are cancelled. Expired entries are swept first so a    *
+ * leaked entry past its TTL does not keep the lane alive.                                                                                               *
+ ***************************************************************************************************************************************************/
+export function hasPendingOptimistic(){
+    sweepExpired(completionOverrides)
+    sweepExpired(itemOverlay)
+    return completionOverrides.size > 0 || itemOverlay.size > 0
+}
+
 /** sweepExpired ************************************************************************************************************************************/
 function sweepExpired(map){
     var now = Date.now()

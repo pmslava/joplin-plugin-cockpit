@@ -5,10 +5,12 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { focusNewItemEditor, getAllTags, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates } from "../../core/joplin";
+import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates } from "../../core/joplin";
 import { clearOptimisticItem, clearTodoCompletionOverride, removeOptimisticItem, setTodoCompletionOverride, upsertOptimisticItem } from "../../core/optimistic";
+import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
+import { logRefresh, snapshot } from "../../core/instrument";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
-import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
+import { refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
@@ -184,12 +186,40 @@ async function pollFoldersOnce(){
         // own guards handle a hidden desktop panel or an open mobile overlay, and its equality guard suppresses
         // the render when nothing visible actually changed (e.g. only an updated_time bumped).
         invalidateNotebookMap()
+        // Rename-safety for the "Excluded notebooks" feature: exclusion is tracked by id, so a rename/move of
+        // an excluded notebook does not change WHAT is excluded, but the visible names field must be refreshed
+        // to the new title, and a deleted excluded notebook must drop out of the id list.
+        await reconcileExcludedNotebookText()
         await refreshPanelData()
     } catch (error) {
         console.warn("Cockpit: folder poll failed", error)
     } finally {
         folderPollInFlight = false
     }
+}
+
+/** reconcileExcludedNotebookText *******************************************************************************************************************
+ * Keeps the visible "Excluded notebooks" names field in step with the notebooks it points at, using the stored ids (the source of truth). Called from  *
+ * the folder poll when a notebook changed: an excluded notebook that was renamed or moved keeps its id (so it stays excluded), and its shown title is   *
+ * refreshed; an excluded notebook that was deleted drops out of the id list and the text. A no-op when nothing is excluded. Writing the visible field   *
+ * re-enters the settings resolver, which recomputes the same ids and canonical text and stops there - the resolver's own before-write comparison is the *
+ * loop guard, so this never oscillates.                                                                                                                 *
+ ***************************************************************************************************************************************************/
+async function reconcileExcludedNotebookText(){
+    var idsCsv = String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")
+    var ids = parseExcludedIds(idsCsv)
+    if (!ids.length) return
+    var map = await getNotebookMap()
+    // Drop ids whose notebook no longer exists (deleted). Writing the hidden id list does not re-enter the
+    // resolver (it keys off the visible field only), so this is safe to do first.
+    var liveIds = ids.filter(id => map.has(id))
+    var liveCsv = liveIds.join(",")
+    if (liveCsv !== idsCsv) await joplin.settings.setValue(EXCLUDED_NOTEBOOK_IDS_KEY, liveCsv)
+    // Refresh the visible names from the live ids (new titles after a rename/move). Only write when it
+    // actually changed, so an unrelated notebook change does not churn the setting.
+    var newText = canonicalTextFromIds(map, liveIds)
+    var currentText = String(await joplin.settings.value(EXCLUDED_NOTEBOOKS_KEY) || "")
+    if (newText !== currentText) await joplin.settings.setValue(EXCLUDED_NOTEBOOKS_KEY, newText)
 }
 
 /** applyProfileHeaderState *************************************************************************************************************************
@@ -245,14 +275,16 @@ async function eventHandler(message){
         invalidateNotebookMap()
         lastRenderedHtml = null
         await refreshInterfaces()
-        scheduleRefresh()
+        scheduleReconcile()
+        scheduleOverview()
     } else if (message[0] == 'moveToNotebookClicked'){
         var moveIDs = Array.isArray(message[1]) ? message[1] : [message[1]]
         // Desktop runs the native moveToFolder command; mobile (where it is absent) falls back to the
         // notebook picker + a parent_id PUT per note.
         await tryAppCommandWithFallback('moveToFolder', moveIDs, () => moveNotesFallback(moveIDs))
         await refreshInterfaces()
-        scheduleRefresh()
+        scheduleReconcile()
+        scheduleOverview()
     } else if (message[0] == 'noteMenuAction'){
         await runNoteMenuAction(String(message[1] || ""), String(message[2] || ""))
     } else if (message[0] == 'todoChecked'){
@@ -265,14 +297,14 @@ async function eventHandler(message){
         resetCalendarViewState()
         // The profile carries its own header state: notebook filter, search and sorting.
         applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
-        // Paint the switched-to view immediately, then fill the rings from note bodies in the background.
-        // optimistic reuses the switched-to profile's cached result set, so a previously viewed profile paints
-        // with ZERO searches (with the host-held override map still layered on); a first visit does one search
-        // and no body fetches. Either way the whole list is on screen before any body GET - the fix for the
-        // multi-minute switch stall. The all-profiles overview-note rewrite, which the switch does not change
-        // and the user is not waiting for, is left to the background scheduleRefresh.
+        // Paint the switched-to view immediately, then fill the rings from note bodies in the background, and
+        // STOP. A profile switch changes no note data - only which stored view is shown - so it arms no
+        // reconcile job and no overview regen; there is nothing for the index to catch up to. optimistic
+        // reuses the switched-to profile's cached result set, so a previously viewed profile paints with ZERO
+        // searches (with the host-held override map still layered on); a first visit does one search and no
+        // body fetches. Either way the whole list is on screen before any body GET, and the switch ends there -
+        // the multi-lane cascade a mutation would arm is exactly the background work a switch must not do.
         await refreshPanelFastThenFill({ optimistic: true })
-        scheduleRefresh()
     } else if (message[0] == 'notebookFilterChanged'){
         notebookFilter = String(message[1] || "")
         lastScrollTop = 0
@@ -293,8 +325,10 @@ async function eventHandler(message){
         if (todoIDs.length && dropTarget){
             await setTodoDueDates(todoIDs, dropTarget === "clear" ? null : dropTarget, await getDayStartTime())
             await refreshInterfaces()
-            // The moved to-dos only settle into their new groups once the search index has caught up.
-            scheduleRefresh()
+            // The moved to-dos only settle into their new groups once the search index has caught up: the
+            // reconcile lane repaints the panel then, the overview lane rewrites the notes on its own debounce.
+            scheduleReconcile()
+            scheduleOverview()
         }
     } else if (message[0] == 'calendarNavigate'){
         var profile = await getProfile(await getCurrentProfileID())
@@ -312,19 +346,23 @@ async function eventHandler(message){
     } else if (message[0] == 'createProfileClicked'){
         // Desktop only: on mobile the create-profile button opens the in-panel editor overlay (which posts
         // profileSaved) rather than this native-dialog flow. Fast off-screen paint so the panel holds fresh
-        // content immediately, then the background fill fetches the rings and scheduleRefresh reconciles the
-        // new profile's overview note.
+        // content immediately, then the background fill fetches the rings and the overview lane writes the new
+        // profile's overview note. No reconcile: creating a profile mutates no note, so there is no index to
+        // catch up to.
         await openEditor()
         lastRenderedHtml = null
         await refreshPanelFastThenFill()
-        scheduleRefresh()
+        scheduleOverview()
     } else if (message[0] == 'editProfileClicked'){
         var id = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
         await openEditor(id)
         // Editing the current profile may change its header state, so re-apply it
         if (id == await getCurrentProfileID()) applyProfileHeaderState(await getProfile(id))
         lastRenderedHtml = null
-        await refreshInterfaces()
+        // A profile edit changes no note data, only which to-dos this profile shows, so paint (fast) and
+        // regenerate only THIS profile's overview note - not every profile's - on the overview lane.
+        await refreshPanelFastThenFill()
+        scheduleOverview([id])
     } else if (message[0] == 'deleteProfileClicked'){
         var deleteID = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
         await openDeleteDialog(deleteID)
@@ -391,7 +429,8 @@ async function eventHandler(message){
         // logic is exactly the desktop fallback's.
         await setNoteTagsFromCsv(String(message[1] || ""), String(message[2] || ""))
         await refreshInterfaces()
-        scheduleRefresh()
+        scheduleReconcile()
+        scheduleOverview()
     } else if (message[0] == 'getAlarmInitial'){
         // Round-trip: the alarm overlay awaits this to prefill its date/time fields (first to-do's due
         // time, or the day start today). The desktop alarm dialog computes the same starting values.
@@ -417,13 +456,13 @@ async function eventHandler(message){
         if (savedID == await getCurrentProfileID()) applyProfileHeaderState(await getProfile(savedID))
         lastRenderedHtml = null
         // Mobile-only path (the editor overlay is never opened on desktop, so this never runs there). Paint
-        // fast and defer the all-profiles overview-note rewrite to the background, mirroring the switch/create
-        // handlers, instead of the heavy inline refreshInterfaces the round meant to remove from the
-        // interactive create/save path. Editing may change which to-dos show, so a full (fast) paint is still
-        // issued - the search runs; only the ring body-fetches are deferred to the fill - and scheduleRefresh
-        // then reconciles the overview notes.
+        // fast and defer just THIS profile's overview-note rewrite to the overview lane, mirroring the
+        // switch/create handlers, instead of the heavy inline refreshInterfaces the round meant to remove from
+        // the interactive create/save path. Editing may change which to-dos show, so a full (fast) paint is
+        // still issued - the search runs; only the ring body-fetches are deferred to the fill. No reconcile:
+        // saving a profile mutates no note. The overview scope is the saved profile alone.
         await refreshPanelFastThenFill()
-        scheduleRefresh()
+        scheduleOverview([savedID])
     } else if (message[0] == 'profileDeleteRequested'){
         // Result of the in-panel profile editor overlay's Delete. openDeleteDialog keeps its native confirm
         // message box (which shows correctly above the panel on mobile) and the ">1 profile must exist"
@@ -438,8 +477,9 @@ async function eventHandler(message){
 /** applyTodoChecked ********************************************************************************************************************************
  * Applies a checkbox tick: one idempotent PUT of the completion state the user set (a ms timestamp, or 0), held optimistically on the plugin side so  *
  * every render shows it until the search index agrees. There is deliberately NO immediate search-based refresh - that was the old flicker (a search   *
- * run before the index caught up repainted the tick away). Instead an optimistic repaint shows the new state at once from cache, and scheduleRefresh  *
- * runs the follow-ups that let the index catch up and retire the override. A failed write rolls the optimistic state back and repaints the truth.     *
+ * run before the index caught up repainted the tick away). Instead an optimistic repaint shows the new state at once from cache; the reconcile lane    *
+ * then lets the index catch up (and retires the override the moment it does, stopping early), and the overview lane rewrites the notes on its own       *
+ * debounce. A failed write rolls the optimistic state back and repaints the truth.                                                                     *
  ***************************************************************************************************************************************************/
 async function applyTodoChecked(todoID, checked){
     if (!todoID) return
@@ -450,11 +490,12 @@ async function applyTodoChecked(todoID, checked){
     } catch (error) {
         clearTodoCompletionOverride(todoID)
         console.error("Cockpit: could not update the to-do's completion", error)
-        await refreshInterfaces()
+        await refreshPanelFastThenFill()
         return
     }
     await refreshPanelData({ optimistic: true })
-    scheduleRefresh()
+    scheduleReconcile()
+    scheduleOverview()
 }
 
 /** completedBucketOf *******************************************************************************************************************************
@@ -484,7 +525,10 @@ function isLocallyEvaluableView(profile){
  * notebooks), whether the profile lists notes, the no-due switch, and the completed-period switches. The caller must have confirmed the view is        *
  * locally evaluable (no search text) first.                                                                                                          *
  ***************************************************************************************************************************************************/
-function noteMatchesView(record, profile, notebooks){
+function noteMatchesView(record, profile, notebooks, excludedSet?){
+    // An excluded notebook's notes must never surface, not even optimistically, so a create/change inside one
+    // is treated as not belonging to the view (which suppresses it, matching the search-side filtering).
+    if (excludedSet && excludedSet.has(record.parent_id)) return false
     if (notebookFilter){
         var allowed = notebookWithDescendants(notebooks, notebookFilter)
         if (!allowed.has(record.parent_id)) return false
@@ -506,7 +550,7 @@ function noteMatchesView(record, profile, notebooks){
 
 /** insertCreatedItemOptimistically *****************************************************************************************************************
  * After Cockpit creates a note/to-do, put it into the current view at once from the POST response, so the user does not wait for the search index. It  *
- * is inserted only when the active view is locally evaluable AND the fresh item satisfies it; otherwise the deferred scheduleRefresh reconciles it.    *
+ * is inserted only when the active view is locally evaluable AND the fresh item satisfies it; otherwise the reconcile lane reconciles it via a search. *
  ***************************************************************************************************************************************************/
 async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
     try {
@@ -523,7 +567,7 @@ async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
             user_created_time: Date.now(),
         }
         var notebooks = await getNotebookMap()
-        if (!noteMatchesView(record, profile, notebooks)) return
+        if (!noteMatchesView(record, profile, notebooks, await getExcludedNotebookIdSet())) return
         upsertOptimisticItem(record)
         await refreshPanelData({ optimistic: true })
     } catch (error) {
@@ -553,7 +597,7 @@ export async function reconcileExternalNoteChange(noteID){
         if (!note){ removeOptimisticItem(noteID); return }
         var trashed = note.deleted_time && note.deleted_time > 0
         var notebooks = await getNotebookMap()
-        if (trashed || !noteMatchesView(note, profile, notebooks)){
+        if (trashed || !noteMatchesView(note, profile, notebooks, await getExcludedNotebookIdSet())){
             removeOptimisticItem(noteID, !!note.is_todo)
         } else {
             upsertOptimisticItem(note)
@@ -589,6 +633,12 @@ export async function togglePanelVisibility() {
  ***************************************************************************************************************************************************/
  export async function refreshPanelData(options?){
     if (!panel) return
+    // Instrumentation: bracket this refresh so the API calls it makes (search / GET / PUT / bodies) and its
+    // wall time can be logged, gated behind instrument.ts's DEBUG (a no-op when off). The snapshot is taken
+    // before any data work; the delta is logged just before the paint, so guarded no-paint returns cost
+    // nothing but a snapshot read.
+    var instrumentStart = Date.now()
+    var instrumentBefore = snapshot()
     var mobile = await isMobile()
     // Fast first-paint (both platforms): render the checkbox rings from whatever is already cached WITHOUT
     // fetching note bodies, so a profile switch / startup / full refresh paints the whole row list after one
@@ -700,6 +750,7 @@ export async function togglePanelVisibility() {
         .replace("<<SCROLL_TOP>>", () => String(lastScrollTop))
         .replace("<<RENDER_NONCE>>", () => String(renderNonce))
     await joplin.views.panels.setHtml(panel, htmlString);
+    logRefresh(fast ? "fast" : fillCounts ? "fill" : optimistic ? "optimistic" : "full", instrumentBefore, instrumentStart)
 }
 
 /** refreshPanelFastThenFill ***********************************************************************************************************************
@@ -741,8 +792,12 @@ function syncButtonTooltip(sync){
 async function getControlsHTML(currentProfileID){
     // The notebook filter offers every notebook, not only the ones the current to-dos live in, so a
     // notebook can be picked even when the active profile's filter hides its to-dos. getNotebookMap
-    // is TTL-cached, so this is cheap.
-    var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
+    // is TTL-cached, so this is cheap. Excluded notebooks (and their descendants) are dropped, so the
+    // feature hides them from the filter dropdown and the mobile picker too, not only from the results.
+    var excludedSet = await getExcludedNotebookIdSet()
+    var notebooks = [...(await getNotebookMap()).values()]
+        .filter(notebook => !excludedSet.has(notebook.id))
+        .sort((first, second) => String(first.path).localeCompare(String(second.path)))
     var mobile = await isMobile()
     var sync = getSyncStatus()
     // The create buttons are labelled on desktop; on mobile they become icon-only (the icon and the title
@@ -917,9 +972,11 @@ async function createItemInFolder(isTodo, folderID){
     // also covers the mobile notebook-overlay create path (applyNotebookPicked -> createItemInFolder) safely.
     await focusNewItemEditor(isTodo)
     // Show the new row at once from the POST response (the record is already in hand) when the active view
-    // can be evaluated locally; otherwise the deferred scheduleRefresh reconciles it via a search.
+    // can be evaluated locally; otherwise the reconcile lane reconciles it via a search once the index has it,
+    // and the overview lane rewrites the notes.
     await insertCreatedItemOptimistically(newItem, isTodo, folderID)
-    scheduleRefresh()
+    scheduleReconcile()
+    scheduleOverview()
 }
 
 /** applyNotebookPicked *****************************************************************************************************************************
@@ -932,7 +989,8 @@ async function applyNotebookPicked(purpose, folderId, extra){
         var moveIDs = Array.isArray(extra) ? extra : []
         for (var id of moveIDs) await joplin.data.put(['notes', id], null, { parent_id: folderId })
         await refreshInterfaces()
-        scheduleRefresh()
+        scheduleReconcile()
+        scheduleOverview()
     } else if (purpose === 'moveNotebookUnder'){
         var sourceID = String(extra || "")
         if (!sourceID) return
@@ -945,7 +1003,8 @@ async function applyNotebookPicked(purpose, folderId, extra){
             await joplin.views.dialogs.showMessageBox(`Cockpit: the notebook could not be moved (${error.message}).`)
         }
         await refreshInterfaces()
-        scheduleRefresh()
+        scheduleReconcile()
+        scheduleOverview()
     } else if (purpose === 'createNote' || purpose === 'createTodo'){
         await createItemInFolder(purpose === 'createTodo', folderId)
     }
@@ -980,7 +1039,8 @@ async function runNotebookAction(action, folderID){
         }
     }
     await refreshInterfaces()
-    scheduleRefresh()
+    scheduleReconcile()
+    scheduleOverview()
 }
 
 /** pickNotebook ************************************************************************************************************************************
@@ -988,7 +1048,10 @@ async function runNotebookAction(action, folderID){
  * empty string.                                                                                                                                    *
  ***************************************************************************************************************************************************/
 async function pickNotebook(promptTitle, includeRoot = false){
-    var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
+    var excludedSet = await getExcludedNotebookIdSet()
+    var notebooks = [...(await getNotebookMap()).values()]
+        .filter(notebook => !excludedSet.has(notebook.id))
+        .sort((first, second) => String(first.path).localeCompare(String(second.path)))
     var options = notebooks.map(notebook => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.path)}</option>`).join("")
     if (includeRoot) options = `<option value="__root">(top level)</option>` + options
     await joplin.views.dialogs.setHtml(notebookPickerDialog, `
@@ -1204,7 +1267,8 @@ async function runNoteMenuAction(action, noteID){
         return
     }
     await refreshInterfaces()
-    scheduleRefresh()
+    scheduleReconcile()
+    scheduleOverview()
 }
 
 /** sanitizeCss *************************************************************************************************************************************

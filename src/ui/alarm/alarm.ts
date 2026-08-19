@@ -8,7 +8,7 @@
 import joplin from "api";
 import { setTodoDueTimestamps } from "../../core/joplin";
 import { getDayStartTime } from "../../core/settings";
-import { refreshInterfaces, scheduleRefresh } from "../../core/timer";
+import { refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
 import { openPluginDialog } from "../../core/dialog";
 import { isMobile } from "../../core/platform";
 
@@ -270,7 +270,7 @@ export async function openAlarmDialog(todoIDs){
     var result = await openPluginDialog(alarmDialog)
     if (!result || result.id === 'cancel'){
         // Nothing changed, but on mobile the dialog guard in refreshPanelData drops every refresh that
-        // came due while this dialog was open (e.g. a scheduleRefresh follow-up from a to-do just
+        // came due while this dialog was open (e.g. a reconcile-lane poll from a to-do just
         // checked, or the periodic day-boundary tick). Cancelling clears the guard but arms no new
         // refresh, so the panel could stay stale until the next tick. Repaint once here to pick up
         // whatever was skipped. Desktop never skips refreshes, so it keeps its no-op cancel untouched.
@@ -291,8 +291,10 @@ export async function openAlarmDialog(todoIDs){
 
     await setTodoDueTimestamps(todoIDs, timestamp)
     await refreshInterfaces()
-    // The moved to-dos only settle into their new groups once the search index has caught up.
-    scheduleRefresh()
+    // The moved to-dos only settle into their new groups once the search index has caught up: the reconcile
+    // lane repaints the panel then, the overview lane rewrites the notes on its own debounce.
+    scheduleReconcile()
+    scheduleOverview()
 }
 
 /** computeInitialAlarm *****************************************************************************************************************************
@@ -336,8 +338,10 @@ export async function applyAlarmSet(todoIDs, dateString, timeString){
     }
     await setTodoDueTimestamps(todoIDs, parsed.getTime())
     await refreshInterfaces()
-    // The moved to-dos only settle into their new groups once the search index has caught up.
-    scheduleRefresh()
+    // The moved to-dos only settle into their new groups once the search index has caught up: the reconcile
+    // lane repaints the panel then, the overview lane rewrites the notes on its own debounce.
+    scheduleReconcile()
+    scheduleOverview()
 }
 
 /** applyAlarmCleared *******************************************************************************************************************************
@@ -347,7 +351,8 @@ export async function applyAlarmCleared(todoIDs){
     if (!Array.isArray(todoIDs) || !todoIDs.length) return
     await setTodoDueTimestamps(todoIDs, 0)
     await refreshInterfaces()
-    scheduleRefresh()
+    scheduleReconcile()
+    scheduleOverview()
 }
 
 /** parseAlarmFields ********************************************************************************************************************************

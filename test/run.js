@@ -729,6 +729,257 @@ async function main() {
         assert.strictEqual(tokenDesktop.panelHtml['panel-panel'], htmlAfterNewer, 'the stale older refresh must not overwrite the newer paint')
     })
 
+    // ============================================================ B2: refresh-lane budgets + excluded notebooks
+    // These are the empirical before/after of the lane split. They are written to FAIL on the pre-branch
+    // architecture, where one scheduleRefresh armed a 1/5/15/30s cascade of FULL refreshInterfaces (panel +
+    // every overview note + fill), a profile switch armed that cascade too, and sync complete armed it as well.
+    // The lanes replace it with: a switch that arms nothing, a bounded reconcile job (panel only, early-stop),
+    // and a single debounced overview pass. The reconcile/overview timers are captured by the harness so the
+    // suite can fire them by hand and count the work they do.
+    const RECONCILE_OFFSETS = [1000, 3000, 7000, 15000, 30000]
+    const OVERVIEW_DEBOUNCE = 10000
+    const criteriaSearches = (state, needle) => state.gets.filter(g =>
+        g.path[0] === 'search' && g.query && String(g.query.query || '').includes(needle)).length
+    const targetedNoteGets = (state) => state.gets.filter(g =>
+        g.path[0] === 'notes' && g.path.length === 2 && g.query && Array.isArray(g.query.fields) && g.query.fields.length > 1).length
+    const armedSince = (state, mark) => state.timeouts.slice(mark)
+
+    // (a) A profile switch arms NO lane: no reconcile job, no overview regen, and still paints before any body.
+    const laneSwitch = await run({
+        dataDir: path.join(tmp, 'b2-switch-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: (q) => q.includes('tag:two') ? b1TodosTwo : b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 4, profiles: [
+                { ...baseProfile, id: 1, name: 'One', searchCriteria: 'tag:one', sortOrder: 0, noteID: '' },
+                { ...baseProfile, id: 2, name: 'Two', searchCriteria: 'tag:two', sortOrder: 1, noteID: '' },
+                { ...baseProfile, id: 3, name: 'Ov', searchCriteria: 'tag:ovonly', sortOrder: 2, noteID: 'ovnote' },
+            ] }),
+            currentProfileID: 1,
+        },
+        notes: { ovnote: { id: 'ovnote', title: 'Ov', body: 'stale' } },
+    })
+    await test('budget a / switch: a profile switch arms no reconcile job, no overview regen, and paints before any body', async () => {
+        const timeoutMark = laneSwitch.timeouts.length
+        const ovBefore = criteriaSearches(laneSwitch, 'tag:ovonly')
+        const logMark = laneSwitch.callLog.length
+        await laneSwitch.panelMessageHandler(['profilesDropdownChanged', 2])
+        const armed = armedSince(laneSwitch, timeoutMark)
+        // The pre-branch switch armed scheduleRefresh's 1s debounce + 5/15/30s follow-ups here.
+        assert.strictEqual(
+            armed.filter(t => RECONCILE_OFFSETS.includes(t.ms) || t.ms === OVERVIEW_DEBOUNCE).length, 0,
+            'a switch must arm no reconcile or overview lane timer')
+        for (const t of armed) await laneSwitch.fireTimeout(t)
+        assert.strictEqual(criteriaSearches(laneSwitch, 'tag:ovonly') - ovBefore, 0, 'a switch must regenerate no overview note')
+        const seq = laneSwitch.callLog.slice(logMark)
+        const firstPaint = seq.indexOf('setHtml'), firstBody = seq.indexOf('bodyFetch')
+        assert.ok(firstPaint >= 0, 'the switch paints')
+        assert.ok(firstBody < 0 || firstPaint < firstBody, 'the fast paint precedes any checkbox-body fetch')
+    })
+
+    // (b) A single external note change: ONE targeted GET, ONE debounced overview pass (not 4), bounded reconcile.
+    const laneChange = await run({
+        dataDir: path.join(tmp, 'b2-change-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...baseProfile, id: 1, name: 'Active', searchCriteria: '', noteID: '' },
+                { ...baseProfile, id: 2, name: 'Ov', searchCriteria: 'tag:ovb', noteID: 'ovb' },
+            ] }),
+            currentProfileID: 1,
+        },
+        notes: {
+            ovb: { id: 'ovb', title: 'Ov', body: 'stale' },
+            ['x'.repeat(32)]: { id: 'x'.repeat(32), title: 'Changed', parent_id: 'n'.repeat(32), is_todo: 1, todo_completed: 0, todo_due: 0, deleted_time: 0, user_updated_time: 5 },
+        },
+    })
+    await test('budget b / note change: one targeted GET, one debounced overview pass, bounded reconcile — not a 4x cascade', async () => {
+        const getBefore = targetedNoteGets(laneChange)
+        const ovBefore = criteriaSearches(laneChange, 'tag:ovb')
+        const panelBefore = countSearches(laneChange) - ovBefore
+        const timeoutMark = laneChange.timeouts.length
+        await laneChange.noteChangeHandler({ id: 'x'.repeat(32) })
+        // A single external change costs exactly one targeted note GET (the reconcile fetch), never a sweep.
+        assert.strictEqual(targetedNoteGets(laneChange) - getBefore, 1, 'a single external change costs one targeted GET')
+        const armed = armedSince(laneChange, timeoutMark)
+        assert.strictEqual(armed.filter(t => RECONCILE_OFFSETS.includes(t.ms)).length, 5, 'one reconcile job of five offsets')
+        assert.strictEqual(armed.filter(t => t.ms === OVERVIEW_DEBOUNCE).length, 1, 'exactly one overview debounce')
+        for (const t of armed) await laneChange.fireTimeout(t)
+        // The overview note is regenerated ONCE. On the pre-branch cascade it was regenerated four times.
+        assert.strictEqual(criteriaSearches(laneChange, 'tag:ovb') - ovBefore, 1, 'the overview note is regenerated once, not 4x')
+        // The panel reconcile is bounded to its five offsets' searches - not an unbounded/stacked set.
+        const panelAfter = countSearches(laneChange) - criteriaSearches(laneChange, 'tag:ovb')
+        assert.ok(panelAfter - panelBefore <= 5, 'the reconcile lane issues at most its five bounded searches')
+    })
+
+    // (c) The reconcile job stops EARLY once the search reflects the ticked state (its optimistic entry retires).
+    const laneEarlyOptions = {
+        dataDir: path.join(tmp, 'b2-early-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [{ id: 'a'.repeat(32), title: 'Tick', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: 'n'.repeat(32), user_updated_time: 1 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Solo', searchCriteria: '', noteID: '' }] }),
+            currentProfileID: 1,
+        },
+    }
+    const laneEarly = await run(laneEarlyOptions)
+    await test('budget c / reconcile: the job stops early once the search agrees with the tick', async () => {
+        const id = 'a'.repeat(32)
+        const timeoutMark = laneEarly.timeouts.length
+        await laneEarly.panelMessageHandler(['todoChecked', id, true])
+        const recTimers = armedSince(laneEarly, timeoutMark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        assert.strictEqual(recTimers.length, 5, 'the tick arms one reconcile job of five offsets')
+        // First poll: the index has not caught up (the search still returns the to-do incomplete), so the
+        // completion override stays pending and the later offsets remain armed.
+        await laneEarly.fireTimeout(recTimers[0])
+        assert.ok(!recTimers[1].cleared && !recTimers[4].cleared, 'while the index lags, the later offsets stay armed')
+        // The index catches up: the search now returns the to-do completed.
+        laneEarlyOptions.todos = [{ id, title: 'Tick', todo_completed: Date.now(), todo_due: Date.now() + 3600000, parent_id: 'n'.repeat(32), user_updated_time: 2 }]
+        await laneEarly.fireTimeout(recTimers[1])
+        assert.ok(recTimers[2].cleared && recTimers[3].cleared && recTimers[4].cleared, 'the reconcile job cancels its remaining offsets once the search agrees')
+    })
+
+    // (d) Sync start + complete each do one fast render; complete arms ONE reconcile job and no overview lane.
+    const laneSync = await run({
+        dataDir: path.join(tmp, 'b2-sync-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: b1Todos,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...baseProfile, id: 1, name: 'Active', searchCriteria: '', noteID: '' },
+                { ...baseProfile, id: 2, name: 'Ov', searchCriteria: 'tag:ovd', noteID: 'ovd' },
+            ] }),
+            currentProfileID: 1,
+        },
+        notes: { ovd: { id: 'ovd', title: 'Ov', body: 'stale' } },
+    })
+    await test('budget d / sync: start and complete each do one fast render; complete arms one reconcile job, no overview lane', async () => {
+        const bodiesBefore = countBodyFetches(laneSync), ovBefore = criteriaSearches(laneSync, 'tag:ovd')
+        const startMark = laneSync.timeouts.length
+        await laneSync.syncStartHandler()
+        assert.strictEqual(countBodyFetches(laneSync) - bodiesBefore, 0, 'sync start fetches no checkbox bodies (fast render only)')
+        assert.strictEqual(criteriaSearches(laneSync, 'tag:ovd') - ovBefore, 0, 'sync start regenerates no overview note')
+        assert.strictEqual(armedSince(laneSync, startMark).length, 0, 'sync start arms no lane timer')
+        const completeMark = laneSync.timeouts.length
+        const bodiesBeforeDone = countBodyFetches(laneSync)
+        await laneSync.syncCompleteHandler({ withErrors: false })
+        assert.strictEqual(countBodyFetches(laneSync) - bodiesBeforeDone, 0, 'sync complete fetches no checkbox bodies (fast render only)')
+        const armed = armedSince(laneSync, completeMark)
+        assert.strictEqual(armed.filter(t => RECONCILE_OFFSETS.includes(t.ms)).length, 5, 'sync complete arms one reconcile job')
+        assert.strictEqual(armed.filter(t => t.ms === OVERVIEW_DEBOUNCE).length, 0, 'sync complete arms no overview lane (the per-change lane covers it)')
+        const ovMark = criteriaSearches(laneSync, 'tag:ovd')
+        for (const t of armed) await laneSync.fireTimeout(t)
+        // The pre-branch onSyncComplete armed scheduleRefresh, whose cascade regenerated every overview note.
+        assert.strictEqual(criteriaSearches(laneSync, 'tag:ovd') - ovMark, 0, 'the post-sync reconcile regenerates no overview note')
+    })
+
+    // (e) Excluded notebooks: hidden everywhere, id-tracked (rename-safe), and a same-titled namesake is spared.
+    const K = 'c'.repeat(32), P = 'p'.repeat(32), AC = 'a'.repeat(32), AP = 'b'.repeat(32), T = 't'.repeat(32), S = 's'.repeat(32)
+    const exFolders = [
+        { id: K, title: 'Client', parent_id: '', updated_time: 10 },
+        { id: P, title: 'Personal', parent_id: '', updated_time: 11 },
+        { id: AC, title: 'Archive', parent_id: K, updated_time: 12 },   // excluded (via the Client/Archive path)
+        { id: AP, title: 'Archive', parent_id: P, updated_time: 13 },   // NAMESAKE - shares the title, NOT excluded
+        { id: T, title: 'Trash', parent_id: '', updated_time: 14 },     // excluded (unique title -> a server clause)
+        { id: S, title: 'Sub', parent_id: T, updated_time: 15 },        // descendant of Trash -> excluded too
+    ]
+    const exOptions = {
+        dataDir: path.join(tmp, 'b2-exclude-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [
+            { id: '1'.repeat(32), title: 'KeepMe', todo_completed: 0, todo_due: 0, parent_id: K, user_updated_time: 1 },
+            { id: '2'.repeat(32), title: 'ArchivedC', todo_completed: 0, todo_due: 0, parent_id: AC, user_updated_time: 1 },
+            { id: '3'.repeat(32), title: 'NamesakeP', todo_completed: 0, todo_due: 0, parent_id: AP, user_updated_time: 1 },
+            { id: '4'.repeat(32), title: 'TrashedItem', todo_completed: 0, todo_due: 0, parent_id: T, user_updated_time: 1 },
+            { id: '5'.repeat(32), title: 'SubItem', todo_completed: 0, todo_due: 0, parent_id: S, user_updated_time: 1 },
+        ],
+        folders: exFolders,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [
+                { ...baseProfile, id: 1, name: 'All', searchCriteria: '', noteID: 'ov', showNotes: false },
+            ] }),
+            currentProfileID: 1,
+        },
+        notes: { ov: { id: 'ov', title: 'Overview', body: 'stale' } },
+    }
+    const ex = await run(exOptions)
+    // Apply the exclusion by NAME, exactly as the user would. 'Client/Archive' (a path) disambiguates the
+    // excluded Archive from its namesake; 'Trash' is a bare unique title.
+    await ex.setSetting('excludedNotebooks', 'Client/Archive, Trash')
+
+    await test('budget e / exclude: excluded notebooks (and descendants) vanish from rows; the namesake stays', () => {
+        const html = ex.panelHtml['panel-panel']
+        assert.ok(html.includes('KeepMe'), 'a kept notebook\'s to-do is shown')
+        assert.ok(html.includes('NamesakeP'), 'a non-excluded notebook sharing the excluded title is NOT excluded')
+        assert.ok(!html.includes('ArchivedC'), 'the excluded notebook\'s to-do is hidden')
+        assert.ok(!html.includes('TrashedItem'), 'the other excluded notebook\'s to-do is hidden')
+        assert.ok(!html.includes('SubItem'), 'a descendant of an excluded notebook is hidden too')
+    })
+    await test('budget e / exclude: resolution stores ids and canonicalises the visible text', () => {
+        assert.strictEqual(ex.settings.excludedNotebookIds, `${AC},${T}`, 'the resolved ids are stored (source of truth)')
+        assert.strictEqual(ex.settings.excludedNotebooks, 'Client / Archive, Trash', 'the visible text is rewritten to canonical labels (path form where the title is ambiguous)')
+    })
+    await test('budget e / exclude: no checkbox body is fetched for an excluded to-do (even when every body is stale)', async () => {
+        // Make every to-do's body stale so a fresh render must refetch the KEPT ones - proving the excluded
+        // ones are dropped BEFORE the body fetch rather than merely served from a warm cache. (Measuring across
+        // the whole run would also see the pre-exclusion startup fetch, so this measures one fresh render.)
+        exOptions.todos = exOptions.todos.map(t => ({ ...t, user_updated_time: t.user_updated_time + 100 }))
+        const mark = ex.gets.length
+        await ex.panelMessageHandler(['sortDirectionClicked'])
+        const fetched = ex.gets.slice(mark).filter(g =>
+            g.path[0] === 'notes' && g.path.length === 2 && g.query && Array.isArray(g.query.fields) &&
+            g.query.fields.length === 1 && g.query.fields[0] === 'body').map(g => g.path[1])
+        assert.ok(fetched.includes('1'.repeat(32)) && fetched.includes('3'.repeat(32)), 'a kept to-do\'s stale body is refetched')
+        assert.ok(!fetched.includes('2'.repeat(32)) && !fetched.includes('4'.repeat(32)) && !fetched.includes('5'.repeat(32)), 'excluded to-dos are dropped before the body fetch')
+    })
+    await test('budget e / exclude: the overview note excludes the same to-dos', () => {
+        const ovPuts = ex.notePuts.filter(p => p.id === 'ov')
+        const body = ovPuts[ovPuts.length - 1].body
+        assert.ok(body.includes('KeepMe') && body.includes('NamesakeP'), 'the overview lists the kept to-dos')
+        assert.ok(!body.includes('ArchivedC') && !body.includes('TrashedItem') && !body.includes('SubItem'), 'the overview omits the excluded to-dos')
+    })
+    await test('budget e / exclude: the notebook filter/picker omits excluded notebooks (and descendants)', () => {
+        const html = ex.panelHtml['panel-panel']
+        assert.ok(html.includes('Personal / Archive'), 'the namesake notebook is still offered')
+        assert.ok(!html.includes('Client / Archive'), 'the excluded notebook is not offered')
+        assert.ok(!html.includes('>Trash<'), 'the excluded notebook is not offered')
+        assert.ok(!html.includes('>Sub<'), 'a descendant of an excluded notebook is not offered')
+    })
+    await test('budget e / exclude: the server query negates only the unambiguous excluded title', () => {
+        const searches = ex.gets.filter(g => g.path[0] === 'search' && g.query && String(g.query.query || '').includes('type:todo'))
+        const query = String(searches[searches.length - 1].query.query)
+        assert.ok(query.includes('-notebook:"Trash"'), 'a uniquely-titled excluded notebook gets a server-side negation')
+        assert.ok(!query.includes('-notebook:"Archive"'), 'an excluded title shared with a kept notebook is NOT negated server-side (client id-filter handles it)')
+    })
+    await test('budget e / exclude: renaming an excluded notebook keeps it excluded (id-tracked) and refreshes the text, no loop', async () => {
+        const pollEntry = ex.intervals.find(i => i.ms === 3000)
+        assert.ok(pollEntry, 'the folder poll is armed')
+        await pollEntry.fn()                                   // baseline signature
+        // Rename the excluded Archive-under-Client to a now-unique title (same id).
+        exOptions.folders = exFolders.map(f => f.id === AC ? { ...f, title: 'ArchivedFolder', updated_time: 999 } : f)
+        await pollEntry.fn()                                   // detects the change -> reconciles the excluded text
+        assert.strictEqual(ex.settings.excludedNotebookIds, `${AC},${T}`, 'the id list is unchanged - exclusion survives the rename')
+        assert.strictEqual(ex.settings.excludedNotebooks, 'ArchivedFolder, Trash', 'the visible text is refreshed to the new (now unique) title')
+        // No onChange loop: another poll with the same folders changes nothing further.
+        const textBefore = ex.settings.excludedNotebooks
+        await pollEntry.fn()
+        assert.strictEqual(ex.settings.excludedNotebooks, textBefore, 'the reconcile settles - no oscillation')
+        // Still excluded from the rows after the rename.
+        await ex.panelMessageHandler(['sortDirectionClicked'])
+        assert.ok(!ex.panelHtml['panel-panel'].includes('ArchivedC'), 'the renamed notebook\'s to-do stays excluded')
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

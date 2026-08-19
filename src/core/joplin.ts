@@ -5,6 +5,40 @@
 /* Imports *****************************************************************************************************************************************/
 import joplin from 'api';
 import { applyTodoCompletionOverrides, mergeOptimisticNotes, mergeOptimisticTodos } from './optimistic';
+import { EXCLUDED_NOTEBOOK_IDS_KEY, buildExclusionClauses, excludedDescendantIdSet, parseExcludedIds } from './exclusion';
+import { countData } from './instrument';
+
+/** Excluded notebooks *****************************************************************************************************************************
+ * The "Excluded notebooks" feature evaluates exclusion by notebook ID (the hidden excludedNotebookIds setting is the single source of truth). Two      *
+ * things are derived from it at query time, both from the CURRENT notebook map so a later rename/move or a newly created sub-notebook is honoured:      *
+ *  - a set of every excluded id AND its descendants, used to filter results client-side (the authority);                                               *
+ *  - "-notebook:\"Title\"" clauses appended to the search query as a server-side optimisation, omitting any title shared with a kept notebook.          *
+ * When nothing is excluded the whole thing short-circuits to a no-op with no extra work (empty = feature off).                                          *
+ ***************************************************************************************************************************************************/
+async function excludedContext(){
+    var ids = parseExcludedIds(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY))
+    if (!ids.length) return { set: null, clauses: "" }
+    var map = await getNotebookMap()
+    return { set: excludedDescendantIdSet(map, ids), clauses: buildExclusionClauses(map, ids) }
+}
+
+/** getExcludedNotebookIdSet ************************************************************************************************************************
+ * The set of every excluded notebook id and its descendants, from the current map, for callers outside the search paths - the notebook picker/filter   *
+ * (which must not offer an excluded notebook) and the optimistic-insert guards (which must not surface a note that lives in one). Empty when the        *
+ * feature is off.                                                                                                                                       *
+ ***************************************************************************************************************************************************/
+export async function getExcludedNotebookIdSet(){
+    var ids = parseExcludedIds(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY))
+    if (!ids.length) return new Set()
+    return excludedDescendantIdSet(await getNotebookMap(), ids)
+}
+
+/** filterExcluded *********************************************************************************************************************************
+ * Drops every item that lives in an excluded notebook (or one of its descendants). A no-op when the feature is off (set is null).                      *
+ ***************************************************************************************************************************************************/
+function filterExcluded(items, set){
+    return set ? items.filter(item => !set.has(item.parent_id)) : items
+}
 
 /** Result-set cache ********************************************************************************************************************************
  * The last search result for each distinct query, so an optimistic re-render (a tick, a Cockpit create, an external note change) can repaint from    *
@@ -16,6 +50,16 @@ import { applyTodoCompletionOverrides, mergeOptimisticNotes, mergeOptimisticTodo
 const resultCacheCap = 24
 var todosResultCache = new Map()
 var notesResultCache = new Map()
+
+/** invalidateResultCaches **************************************************************************************************************************
+ * Drops every cached search result. Called when a change makes the cached sets wrong for a reason other than a fresh search of their own query - the    *
+ * "Excluded notebooks" setting changing is the case: the excluded id set and the query clauses both shift, so any previously cached (pre-exclusion)     *
+ * result must not be reused by an optimistic repaint.                                                                                                   *
+ ***************************************************************************************************************************************************/
+export function invalidateResultCaches(){
+    todosResultCache = new Map()
+    notesResultCache = new Map()
+}
 
 function cloneItems(items){
     return items.map(item => ({ ...item }))
@@ -34,7 +78,13 @@ function cacheResult(cache, query, items){
  export async function getTodos(showCompleted, showNoDue, searchCritera, fast?, useCache?, opts?){
     const completed = showCompleted ? "" : "iscompleted:0"
     const noDue = showNoDue ? "" : "due:19700201"
-    var query = `type:todo ${completed} ${noDue} ${searchCritera}`
+    // Excluded notebooks: append the server-side "-notebook:" clauses (an optimisation) and keep the id set
+    // for the authoritative client-side filter below. Both derive from the current map, so a rename/move or a
+    // newly created sub-notebook is honoured at once. The clauses are part of the query, hence part of the
+    // cache key, so a cached set is never reused across an exclusion change (the setting change also clears
+    // the caches outright).
+    var excluded = await excludedContext()
+    var query = `type:todo ${completed} ${noDue} ${searchCritera}${excluded.clauses ? " " + excluded.clauses : ""}`
     // fillCounts is the background pass of the fast-first-paint flow: reuse the search the fast paint
     // already cached (no new round-trip) but this time DO fetch the note bodies so the checkbox rings
     // fill in. priorityStart is the estimated first-visible row, so the bodies nearest the viewport are
@@ -57,6 +107,7 @@ function cacheResult(cache, query, items){
         allTodos = [];
         let pageNum = 1;
         do {
+            countData('search')
             var response = await joplin.data.get(['search'], {
                 query: query,
                 fields: ['id', 'title', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time'],
@@ -66,6 +117,9 @@ function cacheResult(cache, query, items){
             })
             allTodos = allTodos.concat(response.items)
         } while (response.has_more)
+        // Excluded rows are dropped BEFORE the checkbox-body fetch, so an excluded note never costs a body
+        // GET, and BEFORE the cache is written, so the cache holds only kept rows.
+        allTodos = filterExcluded(allTodos, excluded.set)
         await attachCheckboxCounts(allTodos, fast, priorityStart)
         cacheResult(todosResultCache, query, allTodos)
     }
@@ -73,6 +127,9 @@ function cacheResult(cache, query, items){
     // yet, then the completion overrides (applied last so they also correct an overlay record).
     mergeOptimisticTodos(allTodos)
     applyTodoCompletionOverrides(allTodos)
+    // Re-apply the id filter after the merge so an optimistic overlay entry can never surface an excluded
+    // notebook's note. The id set is the authority; the server clauses above are only an optimisation on top.
+    allTodos = filterExcluded(allTodos, excluded.set)
     // The search only orders by due date, which leaves to-dos sharing a due date - and the whole
     // "No Due Date" group - in arbitrary order. Ties are broken by title, so that a naming scheme
     // gives a deliberate order. The comparison is case insensitive and number aware ("2" < "10").
@@ -152,7 +209,8 @@ export async function searchTitleSuggestions(partial){
  * shows notes alongside the to-dos.                                                                                                                *
  ***************************************************************************************************************************************************/
 export async function getNotes(searchCriteria, fast?, useCache?, opts?){
-    var query = `type:note ${searchCriteria}`
+    var excluded = await excludedContext()
+    var query = `type:note ${searchCriteria}${excluded.clauses ? " " + excluded.clauses : ""}`
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
     var allNotes;
@@ -166,6 +224,7 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
         allNotes = [];
         let pageNum = 1;
         do {
+            countData('search')
             var response = await joplin.data.get(['search'], {
                 query: query,
                 fields: ['id', 'title', 'parent_id', 'user_updated_time', 'user_created_time'],
@@ -174,12 +233,14 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
             })
             allNotes = allNotes.concat(response.items)
         } while (response.has_more)
+        allNotes = filterExcluded(allNotes, excluded.set)
         await attachCheckboxCounts(allNotes, fast, priorityStart)
         cacheResult(notesResultCache, query, allNotes)
     }
     // A created regular note (is_todo 0) shows here before the index returns it; the overlay filters to
     // the notes list, so a created to-do never leaks into this section.
     mergeOptimisticNotes(allNotes)
+    allNotes = filterExcluded(allNotes, excluded.set)
     return allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
 }
 
@@ -227,6 +288,7 @@ async function attachCheckboxCounts(items, fast?, priorityStart?){
         for (var index = 0; index < stale.length; index += bodyFetchChunk){
             await Promise.all(stale.slice(index, index + bodyFetchChunk).map(async item => {
                 try {
+                    countData('bodies')
                     var note = await joplin.data.get(['notes', item.id], { fields: ['body'] })
                     var counts = countCheckboxes(note.body)
                     checkboxCounts.set(item.id, { stamp: item.user_updated_time, done: counts.done, total: counts.total })
@@ -351,6 +413,7 @@ export function notebookWithDescendants(notebooks, folderID){
  ***************************************************************************************************************************************************/
 export async function setTodoDueTimestamps(todoIDs, timestamp){
     for (var todoID of todoIDs){
+        countData('put')
         await joplin.data.put(['notes', todoID], null, { todo_due: timestamp })
     }
 }
@@ -365,6 +428,7 @@ export async function setTodoDueDates(todoIDs, dateISO, dayStart){
         var dueTimestamp = 0
         if (parts && parts.length === 3 && parts.every(part => Number.isFinite(part))){
             var target = new Date(parts[0], parts[1] - 1, parts[2])
+            countData('get')
             var note = await joplin.data.get(['notes', todoID], { fields: ['todo_due'] })
             if (note.todo_due && note.todo_due > 0){
                 var previous = new Date(note.todo_due)
@@ -374,6 +438,7 @@ export async function setTodoDueDates(todoIDs, dateISO, dayStart){
             }
             dueTimestamp = target.getTime()
         }
+        countData('put')
         await joplin.data.put(['notes', todoID], null, { todo_due: dueTimestamp })
     }
 }
@@ -420,6 +485,7 @@ export async function focusNewItemEditor(isTodo){
  * Gets the body of the note with the given noteID                                                                                                  *
  ***************************************************************************************************************************************************/
 export async function getNoteContent(noteID){
+    countData('get')
     return await joplin.data.get(['notes', noteID], { fields: ['id', 'title', 'body']})
 }
 
@@ -427,6 +493,7 @@ export async function getNoteContent(noteID){
  * Sets the body of the note with the given noteID to the given note body                                                                           *
  ***************************************************************************************************************************************************/
 export async function setNoteContent(noteID, noteBody){
+    countData('put')
     await joplin.data.put(['notes', noteID], null, { body: noteBody})
 }
 
@@ -436,5 +503,6 @@ export async function setNoteContent(noteID, noteBody){
  * a round-trip on every tick and wrote a boolean where a timestamp belongs. Being idempotent, a rapid double-tick is safe: the last call wins.        *
  ***************************************************************************************************************************************************/
 export async function setTodoCompleted(todoID, completed){
+    countData('put')
     await joplin.data.put(['notes', todoID], null, { todo_completed: completed });
 }
