@@ -197,6 +197,14 @@ function reconcile(){
     // The inline theme marker can change when Cockpit settings re-render the panel. Host Joplin
     // stylesheet changes are covered separately by startThemeAppearanceObserver().
     scheduleEffectiveThemeClass()
+    // Safety net for the cross-frame selection drag (see beginForeignSelectionDrag): if an earlier
+    // passthrough was ever orphaned - our iframe left pointer-events:none while no drag is active - a
+    // re-render repairs it, so the panel can never stay dead to input. Guarded on the drag NOT being
+    // active, so an in-progress passthrough (whose own end-of-drag restore is pending) is never disturbed.
+    if (!foreignSelectionDragActive){
+        var reconcileFrame = cockpitPanelIframe()
+        if (reconcileFrame && reconcileFrame.style.pointerEvents === 'none') reconcileFrame.style.pointerEvents = ''
+    }
     var el = document.querySelector('.todos')
     if (el && el !== currentTodosEl){
         currentTodosEl = el
@@ -577,6 +585,96 @@ function showToast(text){
     if (toastTimer) clearTimeout(toastTimer)
     toastTimer = setTimeout(function(){ toast.classList.remove('-show') }, 3000)
 }
+
+/** Cross-frame selection drag (desktop) ********************************************************************************************************
+ * Selecting text in Joplin's note editor with the mouse and dragging PAST the note's edge is how you extend the selection to the end. When that  *
+ * drag crosses into this panel it stops extending, because the panel is a separate (same-origin) iframe: it swallows the drag's pointer events, so *
+ * the editor - whose CodeMirror selection is driven by listeners on the MAIN-window document - stops receiving them and the selection freezes at   *
+ * the panel edge. The cure is to make THIS panel's own <iframe> element pointer-events:none for the duration of such a foreign drag, so the drag    *
+ * falls back through to the main document and the selection keeps extending; the iframe is restored the instant the drag ends. It only ever engages *
+ * for a primary-button MOUSE drag that did NOT begin inside the panel, so every normal panel interaction is untouched: clicks, an internal row      *
+ * selection drag, dragging rows out (native drag-and-drop, which fires no pointermove), context menus and wheel scroll all start with a press       *
+ * inside the panel (panelPointerIsDown), and a foreign drag never does. Desktop only - gated on IS_MOBILE and a mouse pointer - and it needs        *
+ * same-origin access to window.parent / window.frameElement, which Joplin's panel iframe provides (a cross-origin host disables it harmlessly).     *
+ ***************************************************************************************************************************************************/
+// True once we have set our iframe pointer-events:none for an in-progress foreign drag; false otherwise.
+var foreignSelectionDragActive = false
+// True while a press that BEGAN inside the panel is still held. Such a drag is the panel's own (a click, a
+// row selection drag, the start of dragging a row out), never a foreign selection drag to pass through.
+var panelPointerIsDown = false
+
+// Our own <iframe> element as seen in the parent (main-window) document. Joplin's plugin panels are
+// same-origin, so window.frameElement resolves; guarded so a (hypothetical) cross-origin host disables
+// the whole affordance rather than throwing.
+function cockpitPanelIframe(){
+    try {
+        var frame = window.frameElement
+        if (frame && frame.style) return frame
+    } catch (error){}
+    return null
+}
+
+// Restore the panel iframe to normal. ALWAYS safe to call, and the single restore path every end-of-drag
+// route funnels through; it also clears the press flag, so a drag that ended anywhere (including outside
+// the panel) leaves a clean slate for the next one.
+function endForeignSelectionDrag(){
+    panelPointerIsDown = false
+    if (!foreignSelectionDragActive) return
+    foreignSelectionDragActive = false
+    var frame = cockpitPanelIframe()
+    if (frame) frame.style.pointerEvents = ''
+}
+
+// Make our iframe transparent to pointer events so the foreign drag falls through to the main document.
+function beginForeignSelectionDrag(){
+    if (foreignSelectionDragActive) return
+    var frame = cockpitPanelIframe()
+    if (!frame) return
+    foreignSelectionDragActive = true
+    frame.style.pointerEvents = 'none'
+}
+
+// Runs for each mouse pointer event the panel receives. A primary-button drag the panel did not start is a
+// selection drag that has crossed in from the editor: hand it back to the main document.
+function onPanelSelectionDragProbe(event){
+    if (IS_MOBILE) return                          // desktop only (touch selection has no iframe-boundary issue)
+    if (event.pointerType !== 'mouse') return      // mouse only
+    if (!(event.buttons & 1)){                     // primary button not held: not a drag...
+        if (foreignSelectionDragActive) endForeignSelectionDrag()   // ...and a safety restore if we somehow stayed on
+        return
+    }
+    if (panelPointerIsDown) return                 // the drag began inside the panel: it is the panel's own
+    beginForeignSelectionDrag()
+}
+
+document.addEventListener('pointerdown', function(event){
+    if (event.pointerType === 'mouse') panelPointerIsDown = true
+}, true)
+// Only a genuine button RELEASE (pointerup) clears the "press began inside" flag - not pointercancel.
+// Starting to drag a row OUT of the panel makes the browser fire pointercancel while the button is still
+// held (a native drag has taken over the pointer); clearing the flag there would make the drag's own later
+// moves look foreign and wrongly punch a hole in the panel. The passthrough is only ever restored via the
+// paths in endForeignSelectionDrag (pointerup here, the buttons-released probe branch below, and the parent
+// window's end-of-drag events), so dropping pointercancel loses no restore path.
+document.addEventListener('pointerup', endForeignSelectionDrag, true)
+document.addEventListener('pointerover', onPanelSelectionDragProbe, true)
+document.addEventListener('pointermove', onPanelSelectionDragProbe, true)
+
+// While the passthrough is engaged the panel iframe gets no more events (they fall through to the main
+// window), so the drag's END fires in the PARENT document, not here. Listen there too and ALWAYS restore:
+// on the button release (mouseup / pointerup), on a native drag ending (dragend), and on the window losing
+// focus mid-drag (blur - e.g. Alt+Tab). Wired once at load; every handler is a no-op unless a passthrough is
+// actually active, so leaving them attached is harmless. Guarded so a cross-origin parent just skips it.
+;(function wireParentSelectionDragRestore(){
+    try {
+        var parentWindow = window.parent
+        if (!parentWindow || parentWindow === window) return
+        parentWindow.addEventListener('mouseup', endForeignSelectionDrag, true)
+        parentWindow.addEventListener('pointerup', endForeignSelectionDrag, true)
+        parentWindow.addEventListener('dragend', endForeignSelectionDrag, true)
+        parentWindow.addEventListener('blur', endForeignSelectionDrag, true)
+    } catch (error){}
+})()
 
 /** Drag and drop ***********************************************************************************************************************************
  * Dragging a selected to-do takes the whole selection with it; dragging an unselected one drags just that one. The drop targets - group headings,   *
