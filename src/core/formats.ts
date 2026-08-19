@@ -6,6 +6,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { getTodos, getNotes, getNotebookMap, notebookWithDescendants } from "./joplin";
+import { viewKeyFor } from "./optimistic";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
     CalendarViewState,
@@ -119,8 +120,24 @@ abstract class BaseFormat {
             searchCriteria = `${searchCriteria} notebook:"${filterNotebook.title}"`
         }
         var showAnyCompleted = this.profile.showCompletedPast || this.profile.showCompletedToday || this.profile.showCompletedFuture || this.profile.showCompletedNoDue
-        var fast = this.viewState ? (this.viewState as any).fastCheckboxCounts : false
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast)
+        // The overview-note markdown never renders checkbox rings (getTodoString emits a plain "- [ ] [title]"
+        // list), so generating it must NOT fetch a single note body. Forcing fast here cuts that dependency:
+        // the whole refreshNoteData pass - one search per profile with a noteID - fetches zero bodies. On the
+        // panel (html) fast is driven by the view state instead, so the first paint skips the bodies too.
+        var isMarkdown = (this as any).outputFormat === 'markdown'
+        var fast = isMarkdown ? true : (this.viewState ? !!(this.viewState as any).fastCheckboxCounts : false)
+        // Optimistic re-render: reuse the last search for this query and layer the host-held overlay on top,
+        // so a just-ticked / just-created item shows without another round-trip. Off for ordinary refreshes.
+        var useCache = this.viewState ? !!(this.viewState as any).optimistic : false
+        // fillCounts: the background body-fetch pass after a fast first paint. priorityStart: the estimated
+        // first-visible row, so the on-screen rings fill before the off-screen ones.
+        var fillCounts = this.viewState ? !!(this.viewState as any).fillCounts : false
+        var priorityStart = this.viewState ? ((this.viewState as any).priorityStart || 0) : 0
+        // View scope for the item overlay: the panel consumes only its own view's optimistic inserts/removes,
+        // keyed by the current profile and notebook filter. The overview-note markdown consumes NONE (null),
+        // so an insert/remove computed for one profile's panel never leaks into another profile's note.
+        var viewKey = isMarkdown ? null : viewKeyFor(this.profile.id, notebookFilter)
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey })
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -179,7 +196,7 @@ abstract class BaseFormat {
                     ondragstart="onTodoDragStart(event, '${todo.id}')"
                     ondragend="onTodoDragEnd(event)">
                     <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
-                        onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                        onchange="onTodoChecked('${todo.id}', this.checked)" ${checkedString}>
                     <a class="todo-title"${titleHint}>${escapeHtml(label)}</a>
                     ${notebookString}
                 </div>
@@ -649,7 +666,7 @@ class WeekFormat extends DateFormat {
                     ondragend="onTodoDragEnd(event)">
                     <div class="week-card-head">
                         <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
-                            onchange="onTodoChecked('${todo.id}')" ${checkedString}>
+                            onchange="onTodoChecked('${todo.id}', this.checked)" ${checkedString}>
                         ${timeString}
                         ${notebookString}
                     </div>
@@ -692,8 +709,16 @@ export async function renderNotesSection(profile, viewState){
     if (sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"')){
         searchCriteria = `${searchCriteria} notebook:"${sectionFilterNotebook.title}"`
     }
-    var fast = viewState ? viewState.fastCheckboxCounts : false
-    var notes = await getNotes(searchCriteria, fast)
+    var fast = viewState ? !!viewState.fastCheckboxCounts : false
+    var useCache = viewState ? !!viewState.optimistic : false
+    var fillCounts = viewState ? !!viewState.fillCounts : false
+    // The notes section is panel-only (the overview markdown never renders it), so it always carries the
+    // current view's key: a note created in this profile/notebook view shows here, but never leaks into
+    // another view's notes section.
+    var notesViewKey = viewKeyFor(profile.id, viewState ? viewState.notebookFilter : null)
+    // The notes section renders after the to-dos, so it inherits no separate viewport estimate; its bodies
+    // are fetched in list order (0), while the to-dos above it get the viewport-first ordering.
+    var notes = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey })
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
         note.notebookTitle = notebook ? notebook.title : ""
