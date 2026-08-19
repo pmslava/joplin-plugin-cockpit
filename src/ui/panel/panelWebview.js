@@ -1628,8 +1628,8 @@ function openAlarmOverlay(ids, restore){
         { label: 'Cancel', onClick: function(){ closeOverlay() } },
     ])
     body.classList.add('cockpit-alarm-overlay')
-    // Layout mirrors the desktop dialog: fields -> quick buttons (above the calendar) -> explanation (multi only) ->
-    // calendar+columns -> mode picker (multi only). Single-select omits the explanation and mode rows.
+    // Layout mirrors the desktop dialog: fields -> quick buttons (above the calendar) -> calendar+columns -> mode
+    // picker (multi only) -> explanation (multi only, moved below the mode picker). Single-select omits both rows.
     var explainRow = isMulti ? '<div id="alarmExplain"></div>' : ''
     var modeRow = isMulti ? `
         <div id="alarmMode">
@@ -1650,7 +1650,6 @@ function openAlarmOverlay(ids, restore){
             <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
             <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
         </div>
-        ${explainRow}
         <div id="alarmBody">
             <div id="alarmCalendar"></div>
             <div id="alarmTimePanel">
@@ -1659,6 +1658,7 @@ function openAlarmOverlay(ids, restore){
             </div>
         </div>
         ${modeRow}
+        ${explainRow}
     `
 
     if (restore){

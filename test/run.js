@@ -1814,15 +1814,24 @@ async function main() {
         assert.ok(respectAt >= 0, 'the respect mode radio must be the default (checked)')
         assert.ok(sameAt > respectAt, 'the respect radio must precede the same radio')
         // Both multi-only rows carry a FIXED box-sizing height in the dialog CSS so the measure-before-draw pass sizes
-        // the dialog to the height the filled rows will occupy (the explanation is JS-filled AFTER measurement).
-        assert.ok(/#alarmExplain\s*{[^}]*height:\s*\d+px/.test(alarmTsSrc) && /#alarmExplain\s*{[^}]*box-sizing:\s*border-box/.test(alarmTsSrc), 'the explanation row must reserve a fixed box-sizing height')
-        assert.ok(/#alarmMode\s*{[^}]*height:\s*\d+px/.test(alarmTsSrc) && /#alarmMode\s*{[^}]*box-sizing:\s*border-box/.test(alarmTsSrc), 'the mode picker row must reserve a fixed box-sizing height')
-        // Layout order: fields -> quick -> explanation -> calendar -> mode picker.
+        // the dialog to the height the filled rows will occupy (the explanation is JS-filled AFTER measurement). The
+        // explanation now holds two lines at the larger (quick-button) font, so its reservation is 38px; the mode row
+        // stays a single line at 26px.
+        assert.ok(/#alarmExplain\s*{[^}]*height:\s*38px/.test(alarmTsSrc) && /#alarmExplain\s*{[^}]*box-sizing:\s*border-box/.test(alarmTsSrc), 'the explanation row must reserve a fixed 38px box-sizing height (two lines at the quick-button font size)')
+        assert.ok(/#alarmMode\s*{[^}]*height:\s*26px/.test(alarmTsSrc) && /#alarmMode\s*{[^}]*box-sizing:\s*border-box/.test(alarmTsSrc), 'the mode picker row must reserve a fixed 26px box-sizing height')
+        // Font size: the explanation and the mode-picker labels reuse the quick buttons' font-size (inherit) rather
+        // than a smaller literal, so all three render at one size. The quick buttons declare font-size: inherit; so
+        // must these two rows (the mode labels inherit from #alarmMode).
+        assert.ok(/#alarmQuick button\s*{[^}]*font-size:\s*inherit/.test(alarmTsSrc), 'precondition: the quick buttons inherit their font-size')
+        assert.ok(/#alarmExplain\s*{[^}]*font-size:\s*inherit/.test(alarmTsSrc), "the explanation must reuse the quick buttons' font-size (inherit), not a smaller literal")
+        assert.ok(/#alarmMode\s*{[^}]*font-size:\s*inherit/.test(alarmTsSrc), "the mode picker must reuse the quick buttons' font-size (inherit), not a smaller literal")
+        // Layout order (owner rework): fields -> quick -> calendar -> mode picker -> explanation (moved below the mode
+        // picker, above the footer).
         const iQuick = alarmTsSrc.indexOf('id="alarmQuick"')
-        const iExplain = alarmTsSrc.indexOf('${explainRow}')
         const iBody = alarmTsSrc.indexOf('id="alarmBody"')
         const iMode = alarmTsSrc.indexOf('${modeRow}')
-        assert.ok(iQuick >= 0 && iExplain > iQuick && iBody > iExplain && iMode > iBody, 'order must be quick -> explanation -> calendar -> mode picker')
+        const iExplain = alarmTsSrc.indexOf('${explainRow}')
+        assert.ok(iQuick >= 0 && iBody > iQuick && iMode > iBody && iExplain > iMode, 'order must be quick -> calendar -> mode picker -> explanation')
     })
 
     // The mobile overlay builder mirrors the same structure (quick above the calendar; explanation + mode rows gated on
@@ -1834,12 +1843,12 @@ async function main() {
         assert.ok(/var isMulti = restore \?/.test(oBody), 'the overlay must know single-vs-multi at build time')
         assert.ok(/var explainRow = isMulti \?/.test(oBody) && /var modeRow = isMulti \?/.test(oBody), 'the explanation + mode rows must be multi-only')
         assert.ok(oBody.includes('value="respect" checked'), 'respect must be the overlay default mode')
-        // Order in the overlay innerHTML: quick -> explanation -> calendar -> mode.
+        // Order in the overlay innerHTML: quick -> calendar -> mode -> explanation (explanation moved below the mode).
         const iQuick = oBody.indexOf('id="alarmQuick"')
-        const iExplain = oBody.indexOf('${explainRow}')
         const iBody = oBody.indexOf('id="alarmBody"')
         const iMode = oBody.indexOf('${modeRow}')
-        assert.ok(iQuick >= 0 && iExplain > iQuick && iBody > iExplain && iMode > iBody, 'overlay order must be quick -> explanation -> calendar -> mode picker')
+        const iExplain = oBody.indexOf('${explainRow}')
+        assert.ok(iQuick >= 0 && iBody > iQuick && iMode > iBody && iExplain > iMode, 'overlay order must be quick -> calendar -> mode picker -> explanation')
         assert.ok(webviewSource.includes('AlarmQuick.describeAlarmPlan('), 'the overlay must render the explanation from the shared describeAlarmPlan')
     })
 
@@ -1880,13 +1889,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.8.4', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.8.5', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.8.4'
+        const expected = '1.8.5'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')

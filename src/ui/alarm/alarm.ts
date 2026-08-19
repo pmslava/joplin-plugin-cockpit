@@ -181,12 +181,16 @@ const dialogCss = `
      * are RESERVED with a fixed box-sizing height so Joplin's measure-before-draw pass (which runs while the
      * explanation text is still empty - the webview fills it after) sizes the dialog to exactly the height the filled
      * rows will occupy. The explanation clips past two lines rather than growing, so the measured and drawn heights
-     * can never diverge; a single-select dialog omits both rows entirely and is unchanged. */
+     * can never diverge; a single-select dialog omits both rows entirely and is unchanged. Both rows reuse the quick
+     * buttons' font-size (inherit, i.e. #alarmForm's var(--joplin-font-size, 13px)) rather than a smaller literal, so
+     * the explanation, the mode labels and the quick buttons all render at one size. That larger text makes two
+     * explanation lines 13*1.35*2 = 35.1px, so the reservation is 38px (was 34px at the old 0.9em); the mode picker
+     * stays a single line well within its 26px. */
     #alarmExplain {
-        height: 34px;
+        height: 38px;
         box-sizing: border-box;
         overflow: hidden;
-        font-size: 0.9em;
+        font-size: inherit;
         line-height: 1.35;
         opacity: 0.75;
     }
@@ -197,7 +201,7 @@ const dialogCss = `
         gap: 16px;
         height: 26px;
         box-sizing: border-box;
-        font-size: 0.9em;
+        font-size: inherit;
     }
     #alarmMode label {
         display: flex;
@@ -321,10 +325,10 @@ export async function openAlarmDialog(todoIDs){
     var mobile = await isMobile()
     var rootMarker = mobile ? '<div id="cockpitPlatform" hidden></div>' : ''
 
-    // Layout order (owner rework): fields -> quick buttons (moved ABOVE the calendar) -> explanation line (multi
-    // only, fixed reserved height) -> calendar+columns -> mode picker (multi only, fixed reserved height) -> footer
-    // (the native OK / Clear / Cancel buttons). A single-select dialog omits the explanation and mode rows, so its
-    // markup, DOM and measured height are byte-identical to 1.8.3 apart from the quick row moving up.
+    // Layout order (owner rework): fields -> quick buttons (above the calendar) -> calendar+columns -> mode picker
+    // (multi only, fixed reserved height) -> explanation line (multi only, fixed reserved height, moved below the mode
+    // picker) -> footer (the native OK / Clear / Cancel buttons). A single-select dialog omits the explanation and mode
+    // rows, so its markup, DOM and measured height are byte-identical to 1.8.3 apart from the quick row moving up.
     var explainRow = multi ? '<div id="alarmExplain"></div>' : ''
     // The mode picker is real radio inputs so the chosen mode rides back in formData; RESPECT is the default for a
     // multi selection. onchange re-describes the plan without losing the pressed button. Omitted for single-select.
@@ -357,7 +361,6 @@ export async function openAlarmDialog(todoIDs){
                 <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
                 <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
             </div>
-            ${explainRow}
             <div id="alarmBody" class="alarm-stretch-row">
                 <div id="alarmCalendar"></div>
                 <div id="alarmTimePanel">
@@ -366,6 +369,7 @@ export async function openAlarmDialog(todoIDs){
                 </div>
             </div>
             ${modeRow}
+            ${explainRow}
         </form>
     `)
 
