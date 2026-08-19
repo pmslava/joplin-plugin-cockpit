@@ -890,8 +890,10 @@ function hideSearchSuggestions(){
 }
 
 /** applySearchSuggestion **************************************************************************************************************************
- * Inserts the chosen value in place of the partial token, quoting it when it contains spaces and adding a trailing space, then keeps focus and the   *
- * caret after the insertion. The search is not committed.                                                                                           *
+ * Inserts the chosen value in place of the partial token, quoting it when it contains spaces and adding a trailing space, then commits the search    *
+ * so picking a suggestion shows its results at once (pick -> see results), which is what the user expects. The field keeps focus for continued        *
+ * typing: on desktop restoreSearchDraft refocuses the freshly rendered input (caret at end) after the commit's re-render; on mobile the commit's       *
+ * paint is held until blur, exactly as the existing search-focus hold already does.                                                                   *
  ***************************************************************************************************************************************************/
 function applySearchSuggestion(input, suggestion){
     if (!input || !searchSuggestion) return
@@ -909,10 +911,26 @@ function applySearchSuggestion(input, suggestion){
     input.setSelectionRange(caret, caret)
     updateSearchDraft(input)
     hideSearchSuggestions()
+    // Commit the picked value. onSearchFilterChanged clears the (now moot) draft and posts the search; the
+    // caret settles at the end of the committed text after the re-render's refocus.
+    onSearchFilterChanged(input.value)
 }
 
 function onSearchKeyDown(event){
-    if (!searchSuggestion) return
+    if (!searchSuggestion){
+        // No suggestion menu is open, so Enter commits the search. Joplin's Electron webview does not fire
+        // the field's change/search events on Enter (only on blur or the clear button), so the commit is
+        // issued explicitly here; onchange/onsearch stay wired as fallbacks and any resulting double-commit
+        // is collapsed by the host's equality guard (identical value -> identical markup -> no re-render).
+        // The field keeps focus: restoreSearchDraft refocuses the freshly rendered input (caret at end) after
+        // the desktop re-render, while on mobile the paint stays held until blur exactly as before.
+        if (event.key === 'Enter'){
+            event.preventDefault()
+            var searchInput = getSearchInput()
+            if (searchInput) onSearchFilterChanged(searchInput.value)
+        }
+        return
+    }
     if (event.key === 'ArrowDown'){
         event.preventDefault()
         searchSuggestion.activeIndex = (searchSuggestion.activeIndex + 1) % searchSuggestion.items.length
@@ -922,7 +940,7 @@ function onSearchKeyDown(event){
         searchSuggestion.activeIndex = (searchSuggestion.activeIndex - 1 + searchSuggestion.items.length) % searchSuggestion.items.length
         paintSearchSuggestionActive()
     } else if (event.key === 'Enter'){
-        // Select the highlighted suggestion rather than committing the search on this press
+        // Pick the highlighted suggestion; applySearchSuggestion inserts it AND commits (pick -> see results).
         event.preventDefault()
         applySearchSuggestion(getSearchInput(), searchSuggestion.items[searchSuggestion.activeIndex])
     } else if (event.key === 'Escape'){
@@ -963,17 +981,29 @@ function onSearchBlur(event){
 }
 
 /** restoreSearchDraft *****************************************************************************************************************************
- * After a refresh replaced the panel while the user was typing an uncommitted search, this puts the draft text, caret and focus back. onSearchBlur   *
- * ignores the blur fired when the focused field is removed, so searchFocused still reflects that the user was in the field.                          *
+ * After a refresh replaced the panel while the user was in the search field, this puts focus (and, when present, the uncommitted draft text/caret)   *
+ * back. onSearchBlur ignores the blur fired when the focused field is removed, so searchFocused still reflects that the user was in the field, and a  *
+ * genuine blur clears searchFocused so no focus is stolen back after the user has left. Two cases:                                                    *
+ *  - an uncommitted draft survived the refresh: restore its text and caret;                                                                           *
+ *  - the refresh was triggered by a commit-with-focus (Enter, or a picked suggestion, or the clear button): no draft survives a commit, but the user  *
+ *    is still in the field, so refocus the freshly rendered input on its server-rendered (committed) value with the caret at the end, so continued    *
+ *    typing works. This adds no new webview state - it reuses the existing searchFocused flag - so the mobile reload path is unaffected (there the     *
+ *    module state is zeroed by the reload and the host-held search-focus hold drives the refresh instead).                                            *
  ***************************************************************************************************************************************************/
 function restoreSearchDraft(){
-    if (!searchDraft || !searchFocused) return
+    if (!searchFocused) return
     var input = getSearchInput()
     if (!input) return
-    input.value = searchDraft.value
+    if (searchDraft){
+        input.value = searchDraft.value
+        input.focus()
+        var caret = Math.min(searchDraft.caret, input.value.length)
+        input.setSelectionRange(caret, caret)
+        return
+    }
     input.focus()
-    var caret = Math.min(searchDraft.caret, input.value.length)
-    input.setSelectionRange(caret, caret)
+    var end = input.value.length
+    input.setSelectionRange(end, end)
 }
 
 /** onCreateProfileClicked **************************************************************************************************************************

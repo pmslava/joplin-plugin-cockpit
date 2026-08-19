@@ -277,13 +277,22 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
  * primary (committed) search always issues the request and refreshes the entry, so the cache never serves stale data on its own.                         *
  ***************************************************************************************************************************************************/
 export async function searchOutsideFilters(searchText, fast?, useCache?, opts?){
-    var query = String(searchText || "")
+    // Excluded notebooks are a HARDER boundary than the profile filters this peek deliberately lifts: an
+    // excluded notebook's notes must never surface, not even here. So the same exclusion the list paths apply
+    // is wired in - the server-side "-notebook:" clauses appended to the query (an optimisation, part of the
+    // cache key), and the recursive id set as the authority the client filter enforces below. Both derive from
+    // the current map, so a rename/move or a newly created sub-notebook is honoured at once, and the setting
+    // change clears the peek cache (invalidateResultCaches), so a pre-exclusion result is never reused.
+    var excluded = await excludedContext()
+    var query = String(searchText || "") + (excluded.clauses ? " " + excluded.clauses : "")
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
     var items
     var hasMore
     if ((useCache || fillCounts) && peekResultCache.has(query)){
-        // Optimistic / fill re-render: reuse the unfiltered search already run for this text this refresh.
+        // Optimistic / fill re-render: reuse the unfiltered search already run for this text this refresh. The
+        // cached entry already holds only kept rows (the primary search below filtered before caching), and no
+        // optimistic overlay runs here to reintroduce one, so no re-filter is needed on this lane.
         var cached = peekResultCache.get(query)
         items = cloneItems(cached.items)
         hasMore = cached.hasMore
@@ -303,6 +312,11 @@ export async function searchOutsideFilters(searchText, fast?, useCache?, opts?){
         })
         items = response.items || []
         hasMore = !!response.has_more
+        // Drop excluded rows BEFORE the checkbox-body fetch (so an excluded note never costs a body GET) and
+        // BEFORE the cache write (so the cache holds only kept rows). This is the authority - the server clauses
+        // above are only an optimisation - and because both the rendered rows and the peek's header/footer
+        // counts are computed from this returned set, every count reflects the filtered result too.
+        items = filterExcluded(items, excluded.set)
         await attachCheckboxCounts(items, fast, priorityStart)
         cachePeek(query, items, hasMore)
     }

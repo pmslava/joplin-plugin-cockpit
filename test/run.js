@@ -1422,6 +1422,61 @@ async function main() {
         assert.ok(noteRow.includes('onNoteRowClicked('), 'the peek note should still be openable')
     })
 
+    // The peek lifts the profile filters, but an EXCLUDED notebook is a harder boundary: its content must
+    // never surface here either. The harness serves outsideResults verbatim (it does not itself honour the
+    // -notebook: clause), so an excluded row is dropped only by the client-side recursive id filter -- the
+    // authority searchOutsideFilters applies before the body fetch and the cache -- and, because both the
+    // rendered rows and the header/footer counts derive from that returned set, every count shrinks with it.
+    await test('outside results: an excluded notebook\'s content never surfaces in the peek (rows + header/footer counts)', async () => {
+        const nbKept = 'k'.repeat(32), nbExcluded = 'x'.repeat(32)
+        const peekFolders = [
+            { id: nbKept, title: 'Shopping', parent_id: '', updated_time: 1 },
+            { id: nbExcluded, title: 'Secret', parent_id: '', updated_time: 2 },
+        ]
+        // 16 kept + 2 excluded = 18 fetched; after exclusion 16 remain, so 15 show and 1 spills to the footer.
+        // Un-filtered it would be 18 -> "and 3 more" under a "(18)" heading, so the counts alone prove the drop.
+        const peekItems = []
+        for (let i = 0; i < 16; i++) {
+            peekItems.push({ id: String(i).padStart(32, 'k'), title: 'KeepItem' + i, is_todo: 1, todo_completed: 0, parent_id: nbKept, user_updated_time: i })
+        }
+        peekItems.push({ id: 'e'.repeat(31) + '1', title: 'ExcludedAlpha', is_todo: 1, todo_completed: 0, parent_id: nbExcluded, user_updated_time: 90 })
+        peekItems.push({ id: 'e'.repeat(31) + '2', title: 'ExcludedBravo', is_todo: 0, todo_completed: 0, parent_id: nbExcluded, user_updated_time: 91 })
+        const state = await runOutside({ outsideResults: peekItems, folders: peekFolders })
+        await state.setSetting('excludedNotebooks', 'Secret')
+        await state.panelMessageHandler(['searchFilterChanged', 'keep'])
+        const html = state.panelHtml['panel-panel']
+        assert.ok(html.includes('class="outside-results"'), 'precondition: the peek should be shown')
+        // Rows: a kept-notebook match appears; neither excluded-notebook item does (the to-do or the note).
+        assert.ok(html.includes('KeepItem0'), 'a kept-notebook match still appears in the peek')
+        assert.ok(!html.includes('ExcludedAlpha'), 'an excluded-notebook to-do must not appear in the peek')
+        assert.ok(!html.includes('ExcludedBravo'), 'an excluded-notebook note must not appear in the peek')
+        // Counts: the header is the FILTERED total (16, not 18) and the footer spills the filtered remainder (1, not 3).
+        assert.ok(html.includes('Results outside current filters (16)'), 'the header count reflects the filtered set (excluded rows dropped)')
+        assert.ok(html.includes('and 1 more matches'), 'the footer count reflects the filtered set')
+        assert.strictEqual((html.match(/data-todo-id=/g) || []).length, 15, 'exactly 15 kept rows are shown (excluded rows never entered the set)')
+        // The server-side optimisation is wired too: the peek query negates the unambiguously-titled excluded notebook.
+        const peekSearches = state.gets.filter(g => g.path[0] === 'search' && g.query &&
+            !String(g.query.query || '').includes('type:todo') && !String(g.query.query || '').includes('type:note'))
+        assert.ok(peekSearches.length > 0, 'the peek issued its unfiltered search')
+        assert.ok(String(peekSearches[peekSearches.length - 1].query.query).includes('-notebook:"Secret"'),
+            'the peek query carries the server-side negation of the excluded title')
+    })
+
+    // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
+    // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
+    await test('version: package.json, manifest, and both package-lock fields are all 1.8.0', () => {
+        const root = path.join(__dirname, '..')
+        const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
+        const pkg = readJSON('package.json')
+        const manifest = readJSON('src', 'manifest.json')
+        const lock = readJSON('package-lock.json')
+        const expected = '1.8.0'
+        assert.strictEqual(pkg.version, expected, 'package.json version')
+        assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
+        assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
+        assert.strictEqual(lock.packages[''].version, expected, 'package-lock.json root package entry version')
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)
