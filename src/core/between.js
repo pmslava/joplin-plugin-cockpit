@@ -5,8 +5,8 @@
  *                                                                                                                                                      *
  * Two layers, both pure (every input explicit, never Date.now(), all arithmetic LOCAL-calendar based so a DST transition shifts no clock time):        *
  *   betweenDue(lo, hi, dayStartMinutes)        - ONE datetime strictly inside the open interval (lo, hi), by the owner's rules below.                  *
- *   sequenceBetween(lo, hi, count, dayStart)   - `count` datetimes for a multi-drag, each computed against the previous result so they strictly        *
- *                                                 increase and keep the dragged order (t1 = betweenDue(lo,hi); t_n = betweenDue(t_{n-1}, hi)).          *
+ *   sequenceBetween(lo, hi, count, dayStart)   - `count` datetimes for a multi-drag by EQUAL DIVISION of (lo, hi): N notes split the interval into      *
+ *                                                 N+1 equal parts, note k at lo + k*(hi-lo)/(N+1), keeping the dragged order and strictly increasing.   *
  *   betweenBounds(prevDue, nextDue, date, dm)  - resolves the (lo, hi) the host feeds the two functions above from the FRESH neighbour dues and, at a  *
  *                                                 group edge (a missing neighbour), an anchoring day: the group's date, or - for a DATELESS group      *
  *                                                 (Overdue/Future) - the day of the present neighbour's own due. Kept here so the rules are unit-tested. *
@@ -94,19 +94,70 @@
         return Math.round(((lo + hi) / 2) / MINUTE_MS) * MINUTE_MS
     }
 
+    /** snapToWholeHour ********************************************************************************************************************************
+     * The whole LOCAL hour (:00) nearest a timestamp; the half-hour rounds up. Built from calendar parts so a DST transition shifts no clock time.      *
+     ***************************************************************************************************************************************************/
+    function snapToWholeHour(ts){
+        var d = new Date(ts)
+        var snapped = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), 0, 0, 0)
+        if (d.getMinutes() >= 30) snapped.setHours(snapped.getHours() + 1)    // >= :30 rounds up to the next hour
+        return snapped.getTime()
+    }
+
     /** sequenceBetween ********************************************************************************************************************************
-     * `count` datetimes for a multi-drag, in dragged order: each is computed against the PREVIOUS result as the new lower bound, so they strictly       *
-     * increase and never collide (t1 = betweenDue(lo, hi); t_n = betweenDue(t_{n-1}, hi)).                                                              *
+     * `count` datetimes for a multi-drag, in dragged order (note k follows the dragged sequence), by EQUAL DIVISION of the open interval (lo, hi).      *
+     *   - count <= 1 : the approved single-drop, betweenDue(lo, hi) verbatim (free-day midpoint / :00-preference / minute midpoint). N=1 is the          *
+     *                  midpoint anyway, so equal division agrees; the :00-snapping and free-day rules stay exactly as shipped.                          *
+     *   - DAY-SCALE (D = free calendar days strictly between day(lo) and day(hi), when D >= N): place the N notes on N DISTINCT free days at the         *
+     *                  day-start time, evenly spread - free-day index_k = floor(k*(D+1)/(N+1)) into the ordered list day(lo)+1 .. day(lo)+D (1-based).   *
+     *                  DISTINCT for D>=N: the real step (D+1)/(N+1) >= 1, and floor(x+s) >= floor(x+1) = floor(x)+1 for s>=1, so the indices strictly     *
+     *                  increase; index_1 = floor((D+1)/(N+1)) >= 1 and index_N = floor(N(D+1)/(N+1)) <= D (N<=D => N(D+1) <= D(N+1)), so every index      *
+     *                  lands in [1, D] and every chosen day is strictly between day(lo) and day(hi) - hence strictly inside (lo, hi) at any time on it.   *
+     *   - TIME-SCALE (same/adjacent day, or 0 <= D < N): equal division - note k at lo + k*(hi-lo)/(N+1), rounded to whole minutes and clamped monotone  *
+     *                  non-decreasing into [lo, hi] (a genuinely narrow interval that cannot fit N distinct minutes ties, and never inverts). NICETY: if  *
+     *                  snapping every point to its nearest whole hour (:00) keeps the set strictly increasing, strictly inside (lo, hi) and all          *
+     *                  distinct, the snapped set is used; otherwise the plain minute-rounded points stand.                                              *
+     * A degenerate interval (hi <= lo) leaves every note at lo (unmoved, ties), consistent with betweenDue.                                             *
      ***************************************************************************************************************************************************/
     function sequenceBetween(lo, hi, count, dayStartMinutes){
-        var out = []
-        var currentLo = lo
-        for (var i = 0; i < count; i++){
-            var t = betweenDue(currentLo, hi, dayStartMinutes)
-            out.push(t)
-            currentLo = t
+        dayStartMinutes = normMinutes(dayStartMinutes)
+        var n = Math.floor(Number(count))
+        if (!Number.isFinite(n) || n <= 0) return []
+        if (n === 1) return [betweenDue(lo, hi, dayStartMinutes)]              // N=1: the approved single-drop, unchanged
+        if (!(hi > lo)){                                                       // degenerate: every note sits at lo (ties, unmoved)
+            var flat = []
+            for (var f = 0; f < n; f++) flat.push(lo)
+            return flat
         }
-        return out
+        // DAY-SCALE: at least N free calendar days lie strictly between day(lo) and day(hi) -> one note per distinct free day.
+        var freeDays = dayDiff(lo, hi) - 1
+        if (freeDays >= n){
+            var days = []
+            for (var k = 1; k <= n; k++){
+                var idx = Math.floor(k * (freeDays + 1) / (n + 1))            // 1-based free-day position, provably in [1, D] & distinct
+                days.push(dayAtMinutes(lo, idx, dayStartMinutes))
+            }
+            return days
+        }
+        // TIME-SCALE: equal division into N+1 parts, minute-rounded and clamped monotone non-decreasing into [lo, hi].
+        var minute = []
+        var prevPoint = lo
+        for (var j = 1; j <= n; j++){
+            var r = Math.round((lo + j * (hi - lo) / (n + 1)) / MINUTE_MS) * MINUTE_MS
+            if (r < lo) r = lo
+            if (r > hi) r = hi
+            if (r < prevPoint) r = prevPoint                                  // defensive: rounding is already monotone
+            minute.push(r)
+            prevPoint = r
+        }
+        // NICETY: prefer the whole-hour-snapped set when it stays strictly increasing, strictly inside (lo, hi), and distinct.
+        var snapped = minute.map(snapToWholeHour)
+        var usable = true
+        for (var s = 0; s < snapped.length; s++){
+            if (!(snapped[s] > lo && snapped[s] < hi)){ usable = false; break }
+            if (s > 0 && !(snapped[s] > snapped[s - 1])){ usable = false; break }
+        }
+        return usable ? snapped : minute
     }
 
     /** betweenBounds **********************************************************************************************************************************

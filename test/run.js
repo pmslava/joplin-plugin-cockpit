@@ -2490,16 +2490,56 @@ async function main() {
         assert.strictEqual(Between.betweenDue(eq, eq, DAYSTART), eq)
         assert.strictEqual(Between.betweenDue(dueAt(2026, 8, 19, 15, 0), dueAt(2026, 8, 19, 14, 0), DAYSTART), dueAt(2026, 8, 19, 15, 0))
     })
-    await test('sequenceBetween: 3 ids between 14:00 and 18:00 are strictly increasing, order preserved', () => {
+    // EQUAL DIVISION (1.9.2): N dropped notes split the open interval into N+1 equal parts, note k at
+    // lo + k*(hi-lo)/(N+1). Owner acceptance case: (14:00, 18:00, N=3) -> exactly [15:00, 16:00, 17:00].
+    await test('sequenceBetween equal division (owner case): 3 ids between 14:00 and 18:00 -> [15:00, 16:00, 17:00]', () => {
         const seq = Between.sequenceBetween(dueAt(2026, 8, 19, 14, 0), dueAt(2026, 8, 19, 18, 0), 3, DAYSTART)
         assert.strictEqual(seq.length, 3)
         assert.ok(seq[0] < seq[1] && seq[1] < seq[2], 'the datetimes must strictly increase')
-        assert.deepStrictEqual(seq, [dueAt(2026, 8, 19, 16, 0), dueAt(2026, 8, 19, 17, 0), dueAt(2026, 8, 19, 17, 30)])
+        // 4h / 4 parts = 1h steps; the points are already whole hours, so the :00-snap keeps them.
+        assert.deepStrictEqual(seq, [dueAt(2026, 8, 19, 15, 0), dueAt(2026, 8, 19, 16, 0), dueAt(2026, 8, 19, 17, 0)])
     })
-    await test('sequenceBetween across free days keeps rule 1 then rule 2, strictly increasing', () => {
+    await test('sequenceBetween equal division: 2 ids between 14:00 and 17:00 -> [15:00, 16:00]', () => {
+        const seq = Between.sequenceBetween(dueAt(2026, 8, 19, 14, 0), dueAt(2026, 8, 19, 17, 0), 2, DAYSTART)
+        assert.deepStrictEqual(seq, [dueAt(2026, 8, 19, 15, 0), dueAt(2026, 8, 19, 16, 0)])   // 3h / 3 parts = 1h steps
+    })
+    await test('sequenceBetween equal division: :00-snap would collide -> plain minute-rounded points', () => {
+        // (14:00, 16:00, N=3): 2h / 4 parts = 30-min steps -> 14:30, 15:00, 15:30. Snapping to :00 (half up) would
+        // give 15:00, 15:00, 16:00 - a collision (two 15:00) and 16:00 = hi is not strictly inside - so the snap is
+        // rejected and the plain minute-rounded equal points stand.
+        const seq = Between.sequenceBetween(dueAt(2026, 8, 19, 14, 0), dueAt(2026, 8, 19, 16, 0), 3, DAYSTART)
+        assert.deepStrictEqual(seq, [dueAt(2026, 8, 19, 14, 30), dueAt(2026, 8, 19, 15, 0), dueAt(2026, 8, 19, 15, 30)])
+    })
+    await test('sequenceBetween day-scale: 3 ids across Jan 8 -> Jan 15 (D=6 free days) -> [Jan 9, Jan 11, Jan 13] @09:00', () => {
+        // D = dayDiff - 1 = 6 free days (Jan 9..14). index_k = floor(k*(D+1)/(N+1)) = floor(k*7/4): 1, 3, 5
+        // -> the 1st, 3rd, 5th free days = Jan 9, Jan 11, Jan 13, each at the 09:00 day-start. Distinct by D>=N.
+        const seq = Between.sequenceBetween(dueAt(2022, 1, 8, 9, 0), dueAt(2022, 1, 15, 9, 0), 3, DAYSTART)
+        assert.ok(seq[0] < seq[1] && seq[1] < seq[2], 'three distinct days, strictly increasing')
+        assert.deepStrictEqual(seq, [dueAt(2022, 1, 9, 9, 0), dueAt(2022, 1, 11, 9, 0), dueAt(2022, 1, 13, 9, 0)])
+    })
+    await test('sequenceBetween day-scale fallback: D=1 with N=3 uses rule-2 equal division over the raw interval', () => {
+        // Jan 8 09:00 .. Jan 10 09:00 has only D=1 free day (Jan 9) < N=3, so it falls back to time-scale equal
+        // division of the 48h interval: 48h / 4 parts = 12h steps -> Jan 8 21:00, Jan 9 09:00, Jan 9 21:00 (all :00).
         const seq = Between.sequenceBetween(dueAt(2022, 1, 8, 9, 0), dueAt(2022, 1, 10, 9, 0), 3, DAYSTART)
         assert.ok(seq[0] < seq[1] && seq[1] < seq[2], 'strictly increasing across the day boundary')
-        assert.strictEqual(seq[0], dueAt(2022, 1, 9, 9, 0))   // rule 1 midpoint day, day-start
+        assert.deepStrictEqual(seq, [dueAt(2022, 1, 8, 21, 0), dueAt(2022, 1, 9, 9, 0), dueAt(2022, 1, 9, 21, 0)])
+    })
+    await test('sequenceBetween narrow interval: ties allowed, monotone non-decreasing, never inverts', () => {
+        // (14:00, 14:02, N=3): 2 minutes / 4 parts = 30s steps -> 14:00:30, 14:01:00, 14:01:30. Minute-rounding
+        // (half up) gives 14:01, 14:01, 14:02 (14:02 clamps to hi). The interval genuinely cannot fit 3 distinct
+        // whole minutes, so a tie is allowed; the :00-snap (all -> 14:00 = lo) is rejected as not strictly inside.
+        const seq = Between.sequenceBetween(dueAt(2026, 8, 19, 14, 0), dueAt(2026, 8, 19, 14, 2), 3, DAYSTART)
+        assert.deepStrictEqual(seq, [dueAt(2026, 8, 19, 14, 1), dueAt(2026, 8, 19, 14, 1), dueAt(2026, 8, 19, 14, 2)])
+        for (let i = 1; i < seq.length; i++) assert.ok(seq[i] >= seq[i - 1], 'monotone non-decreasing, never inverts')
+    })
+    await test('sequenceBetween N=1 is betweenDue verbatim (single-drop unchanged)', () => {
+        // count 1 must equal the approved single-drop: (14:20, 17:40) -> 16:00, the :00 nearest the midpoint.
+        assert.deepStrictEqual(
+            Between.sequenceBetween(dueAt(2026, 8, 19, 14, 20), dueAt(2026, 8, 19, 17, 40), 1, DAYSTART),
+            [Between.betweenDue(dueAt(2026, 8, 19, 14, 20), dueAt(2026, 8, 19, 17, 40), DAYSTART)])
+        assert.deepStrictEqual(
+            Between.sequenceBetween(dueAt(2026, 8, 19, 14, 20), dueAt(2026, 8, 19, 17, 40), 1, DAYSTART),
+            [dueAt(2026, 8, 19, 16, 0)])
     })
     await test('betweenBounds: interior returns (prevDue, nextDue) and ignores the group date', () => {
         assert.deepStrictEqual(
@@ -2578,14 +2618,15 @@ async function main() {
             assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 13, 0), 'the dragged id lands at the :00 nearest the midpoint of its neighbours')
         })
     })
-    await test('host glue (todosDroppedBetween multi): two ids between 14:00 and 18:00 -> 16:00, 17:00 (order preserved)', async () => {
+    await test('host glue (todosDroppedBetween multi): two ids between 14:00 and 17:00 -> 15:00, 16:00 (equal division, order preserved)', async () => {
         betweenGlue.notes[cPrev].todo_due = dueAt(2026, 8, 19, 14, 0)
-        betweenGlue.notes[cNext].todo_due = dueAt(2026, 8, 19, 18, 0)
+        betweenGlue.notes[cNext].todo_due = dueAt(2026, 8, 19, 17, 0)
         const before = betweenGlue.notePuts.length
         await betweenGlue.panelMessageHandler(['todosDroppedBetween', [cDrag, cDrag2], cPrev, cNext, '2026-08-19'])
         const got = duePutsSince(betweenGlue, before)
-        assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 16, 0), 'first dragged id')
-        assert.strictEqual(got[cDrag2], dueAt(2026, 8, 19, 17, 0), 'second dragged id, strictly later')
+        // 3h split into 3 equal parts -> 1h steps; the dragged order maps to the strictly-increasing sequence.
+        assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 15, 0), 'first dragged id')
+        assert.strictEqual(got[cDrag2], dueAt(2026, 8, 19, 16, 0), 'second dragged id, strictly later')
     })
     await test('host glue (todosDroppedBetween top edge, no prev): uses date@day-start -> 11:00', async () => {
         betweenGlue.notes[cNext].todo_due = dueAt(2026, 8, 19, 14, 0)
@@ -2706,13 +2747,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.9.1', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.9.2', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.9.1'
+        const expected = '1.9.2'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')

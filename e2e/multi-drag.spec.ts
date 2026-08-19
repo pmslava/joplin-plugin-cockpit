@@ -206,6 +206,15 @@ test.describe('Multi-drag and Overdue between-drop', () => {
     expect(tA!).toBeGreaterThan(8 * 60);
     expect(tB!).toBeLessThan(20 * 60);
     expect(tA!).toBeLessThan(tB!); // dragged order preserved, strictly increasing
+    // EQUAL DIVISION (1.9.2): the two dropped to-dos split the (08:00, 20:00) gap into three equal parts, so the
+    // four points lo=08:00, tA, tB, hi=20:00 are evenly spaced (12h / 3 = 4h steps: expected 12:00 and 16:00).
+    // Assert equal steps within a small minute-rounding tolerance rather than pinning exact clock values.
+    const lo = 8 * 60, hi = 20 * 60;
+    const step = (hi - lo) / 3; // 240 minutes
+    const tol = 2; // minutes of rounding tolerance
+    expect(Math.abs((tA! - lo) - step), 'gap lo->A is one equal step').toBeLessThanOrEqual(tol);
+    expect(Math.abs((tB! - tA!) - step), 'gap A->B is one equal step').toBeLessThanOrEqual(tol);
+    expect(Math.abs((hi - tB!) - step), 'gap B->hi is one equal step').toBeLessThanOrEqual(tol);
   });
 
   test('multi-drag to a heading moves the WHOLE selection (reproduction: both move, not one)', async () => {
