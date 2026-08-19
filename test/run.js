@@ -1291,6 +1291,148 @@ async function main() {
             'the non-optimistic move keeps its later offsets armed despite the override retiring')
     })
 
+    // ============================================================ Edit-staleness: overlay re-validation on visibility change
+    // The CI-caught regression (e2e/panel-todos.spec.ts:62 and :90). An item-overlay INSERT is scoped by a viewKey
+    // of profileID + notebookFilter ONLY - NOT the profile's visibility switches. So an item inserted while a
+    // switch permitted it (an undated to-do while showNoDue was on, a completed to-do while its bucket was on)
+    // keeps matching the unchanged viewKey after the SAME profile is EDITED to turn that switch off, and the
+    // server search can never retire it (its own due:19700201 / iscompleted:0 filter excludes the item), so it
+    // leaks into the edited view until the 60s TTL. The existing F1 insert-leak only covers a profile SWITCH
+    // (a DIFFERENT viewKey, already isolated); these cover the EDIT of the same profile. E1/E2/E4/E5 are written
+    // to FAIL on unfixed fbc4eab; E3/E6/E7 are guards that must pass on both (no over-fix, refuse-path intact).
+    const stFolder = overlayFolder // 'n'.repeat(32)
+    const stInbox = [{ id: stFolder, title: 'Inbox', parent_id: '', updated_time: 1 }]
+    // A fully-shaped profile pinned to the one folder, so notebookFilter (hence viewKey) is fixed across an edit.
+    const undatedProfile = (showNoDue) => ({ ...baseProfile, id: 1, name: 'Edit', searchCriteria: '', showNoDue, showNotes: false, notebook: stFolder, sortOrder: 0, noteID: '' })
+    const completedProfile = (on) => ({ ...baseProfile, id: 1, name: 'Edit', searchCriteria: '', showNoDue: true, showNotes: false, notebook: stFolder, sortOrder: 0, noteID: '',
+        showCompletedPast: on, showCompletedToday: on, showCompletedFuture: on, showCompletedNoDue: on })
+    const criteriaProfile = (searchCriteria) => ({ ...baseProfile, id: 1, name: 'Edit', searchCriteria, showNoDue: true, showNotes: false, notebook: stFolder, sortOrder: 0, noteID: '' })
+    const undatedNote = (id) => ({ id, title: 'SomedayTask', parent_id: stFolder, is_todo: 1, todo_completed: 0, todo_due: 0, deleted_time: 0, user_updated_time: 1 })
+    const datedNote = (id) => ({ id, title: 'DatedTask', parent_id: stFolder, is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, deleted_time: 0, user_updated_time: 1 })
+    const completedNote = (id) => ({ id, title: 'DoneTask', parent_id: stFolder, is_todo: 1, todo_completed: Date.now(), todo_due: Date.now() + 86400000, deleted_time: 0, user_updated_time: 2 })
+    const stRun = (extra) => run(Object.assign({
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        // The index never returns the item to EITHER the show- or the hide- query, so the overlay is the ONLY
+        // thing that can put it on screen: its presence proves an overlay insert, its absence proves none.
+        todos: [],
+        folders: stInbox,
+    }, extra))
+
+    // (E1) The exact CI failure. An undated to-do created externally while the profile SHOWS undated is upserted
+    // and rendered; editing the SAME profile to hide undated must retire it. On unfixed fbc4eab it leaks.
+    const e1Id = 'a'.repeat(32)
+    const e1 = await stRun({
+        dataDir: path.join(tmp, 'st-e1-data'),
+        initialSettings: { profileData: JSON.stringify({ nextID: 2, profiles: [undatedProfile(true)] }), currentProfileID: 1 },
+        notes: { [e1Id]: undatedNote(e1Id) },
+    })
+    await test('edit-staleness E1 (undated, external): an undated to-do shown under show-undated vanishes when the SAME profile is edited to hide undated', async () => {
+        await e1.noteChangeHandler({ id: e1Id })
+        assert.ok(e1.panelHtml['panel-panel'].includes('data-todo-id="' + e1Id + '"'), 'precondition: a show-undated profile shows the externally-created undated to-do')
+        assert.ok(e1.panelHtml['panel-panel'].includes('No Due Date'), 'precondition: the No Due Date heading is present while undated to-dos are shown')
+        await e1.panelMessageHandler(['profileSaved', 1, undatedProfile(false)])   // edit the SAME profile to hide undated (viewKey unchanged)
+        const html = e1.panelHtml['panel-panel']
+        assert.ok(!html.includes('data-todo-id="' + e1Id + '"'), 'the undated to-do must NOT leak into the hide-undated view after the edit')
+        assert.ok(!html.includes('No Due Date'), 'no No Due Date heading remains after hiding undated')
+    })
+
+    // (E2) The same leak via a Cockpit-created undated to-do. Creation itself is untouched: the note is still
+    // POSTed and opened (createItemInFolder posts + openTodo before the optimistic insert); only the stale
+    // overlay entry must be retired by the edit.
+    const e2 = await stRun({
+        dataDir: path.join(tmp, 'st-e2-data'),
+        installationDir: path.join(tmp, 'mobile-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        initialSettings: { profileData: JSON.stringify({ nextID: 2, profiles: [undatedProfile(true)] }), currentProfileID: 1 },
+    })
+    await test('edit-staleness E2 (undated, Cockpit-created): a created undated to-do vanishes when the SAME profile is edited to hide undated (creation still posts+opens)', async () => {
+        await e2.panelMessageHandler(['newTodoClicked'])
+        assert.ok(e2.dataPosts.some(p => p.path[0] === 'notes' && p.path.length === 1), 'the note is still created (POSTed) - creation is unaffected by the fix')
+        assert.ok(e2.panelHtml['panel-panel'].includes('data-todo-id="created-1"'), 'precondition: the show-undated profile shows the created undated to-do')
+        await e2.panelMessageHandler(['profileSaved', 1, undatedProfile(false)])
+        assert.ok(!e2.panelHtml['panel-panel'].includes('data-todo-id="created-1"'), 'the created undated to-do must NOT leak into the hide-undated view after the edit')
+    })
+
+    // (E3) Over-fix guard: on a profile that STILL shows undated, an externally-created undated to-do appears and
+    // KEEPS showing across an unrelated re-render - re-validation must keep a still-matching entry. Passes on both.
+    const e3Id = 'b'.repeat(32)
+    const e3 = await stRun({
+        dataDir: path.join(tmp, 'st-e3-data'),
+        initialSettings: { profileData: JSON.stringify({ nextID: 2, profiles: [undatedProfile(true)] }), currentProfileID: 1 },
+        notes: { [e3Id]: undatedNote(e3Id) },
+    })
+    await test('edit-staleness E3 (over-fix guard): a show-undated profile shows an external undated to-do and keeps it across an unrelated re-render', async () => {
+        await e3.noteChangeHandler({ id: e3Id })
+        assert.ok(e3.panelHtml['panel-panel'].includes('data-todo-id="' + e3Id + '"'), 'a show-undated profile shows the externally-created undated to-do promptly')
+        await e3.panelMessageHandler(['sortDirectionClicked'])                      // a benign, non-edit re-render
+        assert.ok(e3.panelHtml['panel-panel'].includes('data-todo-id="' + e3Id + '"'), 'the still-matching undated to-do keeps showing (the fix must not drop a valid entry)')
+    })
+
+    // (E4) The completed-bucket analogue. A completed to-do shown under a show-completed profile must vanish when
+    // the SAME profile is edited to hide completed. fetchTodos only bucket-filters when showAnyCompleted, so a
+    // hide-completed view relies on iscompleted:0 server-side - which an overlay insert bypasses. Fails pre-fix.
+    const e4Id = 'a'.repeat(32)
+    const e4 = await stRun({
+        dataDir: path.join(tmp, 'st-e4-data'),
+        initialSettings: { profileData: JSON.stringify({ nextID: 2, profiles: [completedProfile(true)] }), currentProfileID: 1 },
+        notes: { [e4Id]: completedNote(e4Id) },
+    })
+    await test('edit-staleness E4 (completed, external): a completed to-do shown under show-completed vanishes when the SAME profile is edited to hide completed', async () => {
+        await e4.noteChangeHandler({ id: e4Id })
+        assert.ok(e4.panelHtml['panel-panel'].includes('data-todo-id="' + e4Id + '"'), 'precondition: a show-completed profile shows the externally-completed to-do')
+        await e4.panelMessageHandler(['profileSaved', 1, completedProfile(false)])
+        assert.ok(!e4.panelHtml['panel-panel'].includes('data-todo-id="' + e4Id + '"'), 'the completed to-do must NOT leak into the hide-completed view after the edit')
+    })
+
+    // (E5) When an edit makes the view no longer locally evaluable (the profile GAINS searchCriteria), a carried
+    // insert can no longer be judged locally, so it must be dropped and the search made the sole authority. On
+    // unfixed fbc4eab the insert keeps matching the unchanged viewKey and leaks into the search-filtered view.
+    const e5Id = 'a'.repeat(32)
+    const e5 = await stRun({
+        dataDir: path.join(tmp, 'st-e5-data'),
+        initialSettings: { profileData: JSON.stringify({ nextID: 2, profiles: [criteriaProfile('')] }), currentProfileID: 1 },
+        notes: { [e5Id]: datedNote(e5Id) },
+    })
+    await test('edit-staleness E5 (gains searchCriteria): a carried insert is dropped when the profile gains searchCriteria (search becomes the sole authority)', async () => {
+        await e5.noteChangeHandler({ id: e5Id })
+        assert.ok(e5.panelHtml['panel-panel'].includes('data-todo-id="' + e5Id + '"'), 'precondition: the locally-evaluable profile shows the externally-created to-do')
+        await e5.panelMessageHandler(['profileSaved', 1, criteriaProfile('tag:work')])   // no longer locally evaluable
+        assert.ok(!e5.panelHtml['panel-panel'].includes('data-todo-id="' + e5Id + '"'), 'the carried insert must be dropped once only the search can decide membership')
+    })
+
+    // (E6) Refuse-path guard: an external change on a profile that ALREADY has searchCriteria must take the
+    // reconcile (search) path and make NO direct optimistic insert. With a stale index (search returns nothing)
+    // the item's absence after a forced optimistic repaint proves no insert was carried. Passes on both.
+    const e6Id = 'a'.repeat(32)
+    const e6 = await stRun({
+        dataDir: path.join(tmp, 'st-e6-data'),
+        initialSettings: { profileData: JSON.stringify({ nextID: 2, profiles: [criteriaProfile('tag:work')] }), currentProfileID: 1 },
+        notes: { [e6Id]: datedNote(e6Id) },
+    })
+    await test('edit-staleness E6 (searchCriteria refuse guard): an external change on a searchCriteria profile makes no direct optimistic insert', async () => {
+        await e6.noteChangeHandler({ id: e6Id })
+        await e6.panelMessageHandler(['sortDirectionClicked'])                      // force a repaint that would surface any overlay insert
+        assert.ok(!e6.panelHtml['panel-panel'].includes('data-todo-id="' + e6Id + '"'), 'a not-locally-evaluable view carries no optimistic insert (the reconcile/search path owns it)')
+    })
+
+    // (E7) Direct-path guard: a profile that hides undated THROUGHOUT never surfaces an externally-created undated
+    // to-do, because the reconcile already judges it out via noteMatchesView. Passes on both (documents that the
+    // reconcile-time gate is - and stays - correct; the E1 leak is purely the post-insert visibility EDIT).
+    const e7Id = 'a'.repeat(32)
+    const e7 = await stRun({
+        dataDir: path.join(tmp, 'st-e7-data'),
+        initialSettings: { profileData: JSON.stringify({ nextID: 2, profiles: [undatedProfile(false)] }), currentProfileID: 1 },
+        notes: { [e7Id]: undatedNote(e7Id) },
+    })
+    await test('edit-staleness E7 (direct hide-undated guard): a profile that hides undated never surfaces an externally-created undated to-do', async () => {
+        await e7.noteChangeHandler({ id: e7Id })
+        assert.ok(!e7.panelHtml['panel-panel'].includes('data-todo-id="' + e7Id + '"'), 'the reconcile judges an undated to-do out of a hide-undated view (no insert made)')
+        assert.ok(!e7.panelHtml['panel-panel'].includes('No Due Date'), 'no No Due Date heading in a hide-undated view')
+    })
+
     // ------------------------------------------------ results outside current filters
     // The read-only peek shown when the search box has text but the fully-filtered view is empty. The
     // harness serves options.todos to the "type:todo ..." list query and options.outsideResults to the

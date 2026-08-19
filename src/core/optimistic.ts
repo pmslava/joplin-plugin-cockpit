@@ -62,6 +62,16 @@ export function hasPendingOptimistic(){
     return completionOverrides.size > 0 || itemOverlay.size > 0
 }
 
+/** hasPendingItemOverlay ****************************************************************************************************************************
+ * Whether any item-overlay entry (an insert or a suppress) is currently held. The panel render path uses it as a cheap gate before re-validating the *
+ * inserts against the current view (revalidateOptimisticInserts): a render with nothing overlaid - the overwhelming majority - pays only this size    *
+ * check and does no extra work. Distinct from hasPendingOptimistic: it neither sweeps nor considers the completion overrides, it is purely "is there  *
+ * an item overlay a render must re-check".                                                                                                            *
+ ***************************************************************************************************************************************************/
+export function hasPendingItemOverlay(){
+    return itemOverlay.size > 0
+}
+
 /** sweepExpired ************************************************************************************************************************************/
 function sweepExpired(map){
     var now = Date.now()
@@ -132,6 +142,29 @@ export function removeOptimisticItem(noteID, isTodo?, viewKey?){
  ***************************************************************************************************************************************************/
 export function clearOptimisticItem(noteID){
     itemOverlay.delete(noteID)
+}
+
+/** revalidateOptimisticInserts *********************************************************************************************************************
+ * Drops any INSERT overlay entry for the given view whose stored record no longer belongs to it, judged by the caller's predicate (noteMatchesView   *
+ * bound to the CURRENT profile). An entry is scoped by viewKey (profileID + notebookFilter) - which does NOT capture the profile's visibility        *
+ * switches - so EDITING a switch (turning off showNoDue, a completed bucket, showNotes) leaves the viewKey unchanged and a now-hidden item's insert   *
+ * still matching it, while the item no longer belongs. The item's own search can never retire that entry (the server filter it was hidden by -        *
+ * due:19700201 / iscompleted:0 - keeps excluding it), so without this it would survive on the TTL alone and leak into the edited view (the CI-caught  *
+ * "undated to-do in a hide-undated profile" regression). Re-running the predicate here, at consumption time, retires exactly those stale inserts,     *
+ * while a still-matching entry is kept so a profile that still shows the item goes on showing it promptly (no over-fix). A predicate of () => false    *
+ * (passed when the view is no longer locally evaluable - the profile gained searchCriteria, or the user typed search text) drops every insert, making *
+ * the search the sole authority. Suppress entries carry only an id, not a full record, so they cannot be re-judged and are left untouched (they retire *
+ * against their own view's search or the TTL as before). Only entries of the given view are considered, so one view's re-validation never disturbs     *
+ * another's overlay.                                                                                                                                   *
+ ***************************************************************************************************************************************************/
+export function revalidateOptimisticInserts(viewKey, matches){
+    if (!itemOverlay.size) return
+    for (var pair of itemOverlay){
+        var entry = pair[1]
+        if (entry.removed) continue                 // a suppress carries no record to re-judge
+        if (entry.viewKey !== viewKey) continue      // only this view's inserts
+        if (!matches(entry.record)) itemOverlay.delete(pair[0])
+    }
 }
 
 /** mergeOverlay ************************************************************************************************************************************

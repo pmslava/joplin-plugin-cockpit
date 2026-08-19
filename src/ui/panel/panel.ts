@@ -6,7 +6,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates } from "../../core/joplin";
-import { clearOptimisticItem, clearTodoCompletionOverride, removeOptimisticItem, setTodoCompletionOverride, upsertOptimisticItem, viewKeyFor } from "../../core/optimistic";
+import { clearOptimisticItem, clearTodoCompletionOverride, hasPendingItemOverlay, removeOptimisticItem, revalidateOptimisticInserts, setTodoCompletionOverride, upsertOptimisticItem, viewKeyFor } from "../../core/optimistic";
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
 import { logRefresh, snapshot } from "../../core/instrument";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
@@ -729,6 +729,27 @@ export async function togglePanelVisibility() {
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile) return
+    // Re-validate the optimistic INSERT overlay against the CURRENT view before it is folded into this render.
+    // An overlay entry is scoped by viewKey (profileID + notebookFilter), which does NOT capture the profile's
+    // visibility switches - so editing e.g. showNoDue or a completed-bucket switch after an item was inserted
+    // leaves the viewKey unchanged and a now-hidden item's insert still matching it. The item's own search can
+    // never retire that entry (the server filter it was hidden by - due:19700201 / iscompleted:0 - keeps excluding
+    // it), so it would otherwise leak into the edited view until the TTL: the CI-caught "undated to-do in a
+    // hide-undated profile" regression. Re-running noteMatchesView here drops exactly those stale inserts; a
+    // still-matching entry is kept so a profile that still shows the item goes on showing it promptly (no
+    // over-fix). When the view can no longer be decided locally (the profile gained searchCriteria, or the user
+    // typed search text) no insert may be carried at all, so they are all dropped and the search rules. Gated on a
+    // pending overlay, so an ordinary render (nothing overlaid) pays only a size check.
+    if (hasPendingItemOverlay()){
+        var revalidationKey = viewKeyFor(profileID, notebookFilter)
+        if (isLocallyEvaluableView(profile)){
+            var revalidationNotebooks = await getNotebookMap()
+            var revalidationExcluded = await getExcludedNotebookIdSet()
+            revalidateOptimisticInserts(revalidationKey, record => noteMatchesView(record, profile, revalidationNotebooks, revalidationExcluded))
+        } else {
+            revalidateOptimisticInserts(revalidationKey, () => false)
+        }
+    }
     // isMobile is carried into the view state so the row HTML generators (renderTodoRow / renderNotesSection)
     // can omit the desktop-only action tooltips on mobile, where hover does not exist and the row already has
     // its long-press flows. Every other platform branch in those generators keys off the same flag.
