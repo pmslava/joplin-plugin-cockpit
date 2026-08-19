@@ -2266,10 +2266,10 @@ async function main() {
 
     // The plain to-do disc (a to-do with no checkbox ring, and the count-pending fast-paint row that shares the
     // same .-plain class) gets a border so it reads clearly on the panel background. The border must derive from
-    // the SAME --cockpit-* variable the progress ring's stroke uses - never a new colour literal - and it must NOT
-    // disturb the circle geometry (the 18px --cockpit-circle-size box, the 3px ring inset, the 4px disc inset).
-    // Read panel.css as source text, the same way the other markup/CSS checks read their files.
-    await test('plain disc: bordered from the ring stroke variable, circle geometry untouched', () => {
+    // the --cockpit-color-faded muted-foreground variable (with its established fallback) - never a new colour
+    // literal - and it must NOT disturb the circle geometry (the 18px --cockpit-circle-size box, the 3px ring
+    // inset, the 4px disc inset). Read panel.css as source text, the same way the other markup/CSS checks do.
+    await test('plain disc: bordered in the muted foreground variable, circle geometry untouched', () => {
         const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
         const ruleBody = (selector) => {
             const at = css.indexOf(selector)
@@ -2279,18 +2279,16 @@ async function main() {
             assert.ok(open >= 0 && close > open, `panel.css ${selector} rule is malformed`)
             return css.slice(open + 1, close)
         }
-        // The ring's stroke: the .todo-checkbox conic-gradient track that is always drawn (the unfilled part) is
-        // --cockpit-divider-color. This is the variable the plain-disc border must reuse.
-        assert.ok(
-            /background:\s*conic-gradient\([^;]*var\(--cockpit-divider-color/.test(ruleBody('.todo-checkbox {')),
-            "precondition: the progress ring's stroke (its conic-gradient track) is drawn in --cockpit-divider-color"
-        )
-        // The plain disc carries a border in that SAME variable - no new colour literal, so it tracks every theme.
+        // The plain disc carries a border in --cockpit-color-faded, the muted foreground the panel already uses
+        // for headings and faded text. Unlike --cockpit-divider-color (which equals the disc fill, and on
+        // aritimDark equals the panel background), this contrasts against both fill and background, so the disc
+        // reads as a defined circle in every theme. It uses that variable's established #999999 fallback - the
+        // same fallback used elsewhere in panel.css - so no NEW colour literal is introduced.
         const plainBefore = ruleBody('.todo-checkbox.-plain::before')
-        assert.ok(/border:\s*[^;]*var\(--cockpit-divider-color/.test(plainBefore),
-            'the .-plain disc must get a border derived from the ring stroke variable --cockpit-divider-color')
-        assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(plainBefore),
-            'the plain-disc border must not introduce a new hex colour literal')
+        assert.ok(/border:\s*[^;]*var\(--cockpit-color-faded,\s*#999999\)/.test(plainBefore),
+            'the .-plain disc must get a border in --cockpit-color-faded with its established #999999 fallback')
+        assert.ok(!/#(?!999999\b)[0-9a-fA-F]{3,8}\b/.test(plainBefore),
+            'the plain-disc border must not introduce a new hex colour literal beyond the established #999999 fallback')
         // Geometry is untouched: the circle-size default and the two fixed insets that the "circles saga" depends
         // on are all still exactly what they were, and the plain-disc border rule did not touch any of them.
         assert.ok(/--cockpit-circle-size:\s*18px/.test(css), 'the 18px --cockpit-circle-size default must be intact')
