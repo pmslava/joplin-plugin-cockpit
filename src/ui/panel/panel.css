@@ -605,31 +605,16 @@ h2 {
     background-size: 90% 90%;
 }
 
-/* A to-do with no checkboxes inside: just the small disc, no ring */
-.todo-checkbox.-plain,
-.todo-checkbox.-plain::after {
-    background: none;
-}
-
-/* Without a surrounding ring to define it, the plain disc's bare fill reads faintly on the panel
- * background. Give it a fine 1px border so the small disc reads as a defined circle in every theme.
- * The colour is --cockpit-color-faded (with that variable's established #999999 fallback), the muted
- * foreground the panel already uses for headings and faded text: it contrasts against both the disc
- * fill and the panel background, so unlike --cockpit-divider-color (which equals the disc fill, and on
- * aritimDark equals the panel background too) it stays visible in every theme. It tracks presets,
- * Match Joplin light/dark and custom colours identically. This also covers the count-pending
- * fast-paint row, which renders with the same .-plain class.
- *
- * Geometry is untouched. The disc is the absolutely-positioned ::before with all four insets pinned
- * (4px desktop, tap-pad + 4px mobile), so its border-BOX outer edge is fixed by those insets: the
- * 1px border grows INWARD (content 10px -> 8px at the 18px default) while the outer edge stays exactly
- * at inset 4px. The 18px --cockpit-circle-size box, the 3px ring inset, the 4px disc inset and the
- * row's optical vertical centring are all unchanged - not one pixel of the outer box or its position
- * moves. box-sizing is irrelevant here because auto width/height under four pinned insets already
- * constrains the border-box to the inset rectangle. */
-.todo-checkbox.-plain::before {
-    border: 1px solid var(--cockpit-color-faded, #999999);
-}
+/* A to-do with no checkboxes inside is marked .-plain, but its circle is deliberately given NO styling
+ * of its own: it renders through the very same base rules above (the box's conic-gradient ring, the 3px
+ * ::after hollow, the 4px ::before disc) as a counted to-do sitting at 0 of N done. Both emit --percent:0,
+ * so the shared conic-gradient resolves to a pure --cockpit-divider-color track, and a plain row's circle
+ * is pixel-identical to a 0/N ringed row's - there is one set of rules, so the two states cannot drift.
+ * (1.8.7 briefly gave the plain disc a bespoke 1px border to make it read on the panel background; that
+ * made the small disc look different alone vs inside a ring, so both border attempts are reverted and
+ * there is intentionally no per-plain override here - the small circle is the same element everywhere.
+ * The different case - a NOTE with no checkboxes, which shows no circle at all - keeps its own .-empty
+ * rule below.) */
 
 /* A note with no checkboxes inside shows no circle at all; the invisible spacer keeps the titles
  * of the notes group aligned */

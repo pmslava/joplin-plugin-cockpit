@@ -2251,25 +2251,26 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.8.7', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.8.8', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.8.7'
+        const expected = '1.8.8'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
         assert.strictEqual(lock.packages[''].version, expected, 'package-lock.json root package entry version')
     })
 
-    // The plain to-do disc (a to-do with no checkbox ring, and the count-pending fast-paint row that shares the
-    // same .-plain class) gets a border so it reads clearly on the panel background. The border must derive from
-    // the --cockpit-color-faded muted-foreground variable (with its established fallback) - never a new colour
-    // literal - and it must NOT disturb the circle geometry (the 18px --cockpit-circle-size box, the 3px ring
-    // inset, the 4px disc inset). Read panel.css as source text, the same way the other markup/CSS checks do.
-    await test('plain disc: bordered in the muted foreground variable, circle geometry untouched', () => {
+    // A plain to-do (no checkboxes inside, marked .-plain - and the count-pending fast-paint row that shares that
+    // marker) must render the SAME circle as a counted to-do sitting at 0 of N done: the same ::before disc PLUS
+    // the same conic-gradient track ring. This is achieved by SHARING the base .todo-checkbox rules - the .-plain
+    // marker deliberately adds no circle styling of its own - so the plain and 0/N ringed states are one source of
+    // truth and cannot drift. Two earlier 1.8.7 attempts gave .-plain a bespoke disc (a ring-stripping background:
+    // none plus a 1px ::before border); both are reverted. Read panel.css as source text, as the other CSS checks do.
+    await test('plain disc: shares the ringed track styling, no bespoke border, circle geometry untouched', () => {
         const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
         const ruleBody = (selector) => {
             const at = css.indexOf(selector)
@@ -2279,23 +2280,27 @@ async function main() {
             assert.ok(open >= 0 && close > open, `panel.css ${selector} rule is malformed`)
             return css.slice(open + 1, close)
         }
-        // The plain disc carries a border in --cockpit-color-faded, the muted foreground the panel already uses
-        // for headings and faded text. Unlike --cockpit-divider-color (which equals the disc fill, and on
-        // aritimDark equals the panel background), this contrasts against both fill and background, so the disc
-        // reads as a defined circle in every theme. It uses that variable's established #999999 fallback - the
-        // same fallback used elsewhere in panel.css - so no NEW colour literal is introduced.
-        const plainBefore = ruleBody('.todo-checkbox.-plain::before')
-        assert.ok(/border:\s*[^;]*var\(--cockpit-color-faded,\s*#999999\)/.test(plainBefore),
-            'the .-plain disc must get a border in --cockpit-color-faded with its established #999999 fallback')
-        assert.ok(!/#(?!999999\b)[0-9a-fA-F]{3,8}\b/.test(plainBefore),
-            'the plain-disc border must not introduce a new hex colour literal beyond the established #999999 fallback')
-        // Geometry is untouched: the circle-size default and the two fixed insets that the "circles saga" depends
-        // on are all still exactly what they were, and the plain-disc border rule did not touch any of them.
+        // The ONE ring source both states share: the base .todo-checkbox draws its conic-gradient track (the
+        // always-present unfilled part) in --cockpit-divider-color, computed from --percent. At --percent:0 - what a
+        // plain to-do and a 0/N ringed to-do both emit - this is a pure track, so both show the identical ring.
+        assert.ok(
+            /background:\s*conic-gradient\([^;]*var\(--cockpit-divider-color/.test(ruleBody('.todo-checkbox {')),
+            'the shared ring: base .todo-checkbox draws its conic-gradient track in --cockpit-divider-color'
+        )
+        // The plain marker must NOT override that shared ring away: no .-plain rule may set background:none on the
+        // box or its ::after (the old "just a disc, no ring" behaviour that made plain look unlike a 0/N ringed row).
+        assert.ok(!/\.todo-checkbox\.-plain\b[^{]*\{[^}]*background:\s*none/.test(css),
+            'the .-plain marker must not strip the shared ring (no background:none override) - plain reuses the base ring')
+        // And no bespoke disc: no .todo-checkbox.-plain::before rule may remain at all. Both reverted 1.8.7 attempts
+        // lived on exactly this selector (a 1px border in --cockpit-divider-color, then in --cockpit-color-faded), so
+        // its absence proves both are gone - without false-flagging the many legitimate --cockpit-divider-color
+        // borders (panels, cards, dividers) elsewhere in the file.
+        assert.ok(!/\.todo-checkbox\.-plain::before\s*\{/.test(css),
+            'the .-plain disc must carry no bespoke ::before rule (both 1.8.7 border attempts reverted)')
+        // Geometry is untouched: the circle-size default and the two fixed insets the "circles saga" depends on.
         assert.ok(/--cockpit-circle-size:\s*18px/.test(css), 'the 18px --cockpit-circle-size default must be intact')
         assert.ok(/inset:\s*3px/.test(ruleBody('.todo-checkbox::after')), 'the 3px ring inset must be intact')
         assert.ok(/inset:\s*4px/.test(ruleBody('.todo-checkbox::before')), 'the 4px disc inset must be intact')
-        assert.ok(!/inset|width|height|margin/.test(plainBefore),
-            'the plain-disc border rule must add only a border - never an inset/size/margin that would move the outer box')
     })
 
     await fs.remove(tmp)
