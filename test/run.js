@@ -1743,15 +1743,521 @@ async function main() {
         assert.ok(row.includes(`class="todo-notebook" data-notebook-id="${rowFolder}"`), 'the notebook-pill zone markup changed')
     })
 
+    // ============================================================ alarm quick buttons (shared pure math)
+    // The five quick buttons (Today, Tomorrow, +week, +month(day), +month(date)) compute their date/time entirely
+    // in this shared, deterministic module - the SAME one both the desktop dialog (alarmWebview.js) and the mobile
+    // overlay (panelWebview.js) call from their button wiring - so the owner's acceptance examples are pinned here
+    // once for both. now/baseDate are explicit Dates and preservedTime is {hours,minutes}|null (never Date.now()).
+    // atDate takes a 1-based month for readability (new Date's own month arg is 0-based).
+    const AlarmQuick = require('../src/ui/alarm/alarmQuick.js')
+    const atDate = (y, m, d, hh, mm, ss, ms) => new Date(y, m - 1, d, hh || 0, mm || 0, ss || 0, ms || 0)
+
+    await test('quick Today: ceilHour(now)+1h always (:xx rounds up, exact :00 keeps, then +1h)', () => {
+        assert.deepStrictEqual(AlarmQuick.today(atDate(2022, 1, 9, 14, 25)), { date: '2022-01-09', time: '16:00' })
+        assert.deepStrictEqual(AlarmQuick.today(atDate(2022, 1, 9, 14, 55)), { date: '2022-01-09', time: '16:00' })
+        assert.deepStrictEqual(AlarmQuick.today(atDate(2022, 1, 9, 15, 1)),  { date: '2022-01-09', time: '17:00' })
+        assert.deepStrictEqual(AlarmQuick.today(atDate(2022, 1, 9, 15, 0, 0, 0)), { date: '2022-01-09', time: '16:00' })
+    })
+    await test('quick Today: an exact hour carrying stray seconds still rounds up', () => {
+        // 15:00:30 is past the hour, so ceilHour -> 16:00 then +1h -> 17:00 (exercises ceilHour's seconds branch).
+        assert.deepStrictEqual(AlarmQuick.today(atDate(2022, 1, 9, 15, 0, 30)), { date: '2022-01-09', time: '17:00' })
+    })
+    await test('quick Today: crossing midnight keeps the arithmetic result (rolls to the next day)', () => {
+        assert.deepStrictEqual(AlarmQuick.today(atDate(2022, 1, 9, 23, 30)), { date: '2022-01-10', time: '01:00' })
+    })
+    await test('quick Tomorrow: today+1 day; a fresh time is ceilHour(now)', () => {
+        assert.deepStrictEqual(AlarmQuick.tomorrow(atDate(2022, 1, 9, 14, 36), null), { date: '2022-01-10', time: '15:00' })
+    })
+    await test('quick +week: baseDate+7 days; fresh uses ceilHour(now), preserved keeps the clock time', () => {
+        assert.deepStrictEqual(AlarmQuick.week(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), null), { date: '2022-01-16', time: '15:00' })
+        assert.deepStrictEqual(AlarmQuick.week(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), { hours: 16, minutes: 30 }), { date: '2022-01-16', time: '16:30' })
+    })
+    await test('quick +month(day): same weekday-ordinal next month, 5th->last, Dec->Jan rollover', () => {
+        // 2022-01-09 is the 2nd Sunday of January -> 2022-02-13, the 2nd Sunday of February.
+        assert.strictEqual(AlarmQuick.monthWeekday(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), null).date, '2022-02-13')
+        // 2022-01-29 is the 5th Saturday of January; February has only four -> its LAST Saturday, 2022-02-26.
+        assert.strictEqual(AlarmQuick.monthWeekday(atDate(2022, 1, 29, 14, 36), atDate(2022, 1, 29), null).date, '2022-02-26')
+        // 2022-12-11 is the 2nd Sunday of December -> 2023-01-08, the 2nd Sunday of January (year rolls over).
+        assert.strictEqual(AlarmQuick.monthWeekday(atDate(2022, 12, 11, 14, 36), atDate(2022, 12, 11), null).date, '2023-01-08')
+    })
+    await test('quick +month(date): same day-of-month next month, Jan-31 clamps (non-leap + leap), Dec->Jan rollover', () => {
+        assert.strictEqual(AlarmQuick.monthDate(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), null).date, '2022-02-09')
+        // Jan 31 -> February clamps to the last day: 2022 is not a leap year (Feb 28), 2024 is (Feb 29).
+        assert.strictEqual(AlarmQuick.monthDate(atDate(2022, 1, 31, 14, 36), atDate(2022, 1, 31), null).date, '2022-02-28')
+        assert.strictEqual(AlarmQuick.monthDate(atDate(2024, 1, 31, 14, 36), atDate(2024, 1, 31), null).date, '2024-02-29')
+        // Dec 31 -> Jan 31 of the next year (the day exists, so no clamp; year rolls over).
+        assert.strictEqual(AlarmQuick.monthDate(atDate(2022, 12, 31, 14, 36), atDate(2022, 12, 31), null).date, '2023-01-31')
+    })
+    await test('quick +month(date): preservedTime is kept while the date advances', () => {
+        assert.deepStrictEqual(AlarmQuick.monthDate(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), { hours: 16, minutes: 30 }), { date: '2022-02-09', time: '16:30' })
+    })
+
+    // ---------------------------------------------- row-1 absolute helpers (nextSaturday / nextMonday) across a week
+    // nextSaturday = the nearest Saturday >= today (today when today is Saturday); nextMonday = the Monday strictly
+    // AFTER today (+7 when today is Monday). Walk a full week starting Fri 2022-01-07 so every weekday is exercised.
+    await test('nextSaturday: nearest Saturday >= today across a full week (Saturday -> today, Sunday -> +6)', () => {
+        const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+        // 2022-01-07 Fri, 08 Sat, 09 Sun, 10 Mon, 11 Tue, 12 Wed, 13 Thu.
+        assert.strictEqual(iso(AlarmQuick.nextSaturday(atDate(2022, 1, 7, 13, 0))), '2022-01-08')   // Fri -> next day
+        assert.strictEqual(iso(AlarmQuick.nextSaturday(atDate(2022, 1, 8, 13, 0))), '2022-01-08')   // Sat -> today
+        assert.strictEqual(iso(AlarmQuick.nextSaturday(atDate(2022, 1, 9, 13, 0))), '2022-01-15')   // Sun -> +6
+        assert.strictEqual(iso(AlarmQuick.nextSaturday(atDate(2022, 1, 10, 13, 0))), '2022-01-15')  // Mon
+        assert.strictEqual(iso(AlarmQuick.nextSaturday(atDate(2022, 1, 11, 13, 0))), '2022-01-15')  // Tue
+        assert.strictEqual(iso(AlarmQuick.nextSaturday(atDate(2022, 1, 12, 13, 0))), '2022-01-15')  // Wed
+        assert.strictEqual(iso(AlarmQuick.nextSaturday(atDate(2022, 1, 13, 13, 0))), '2022-01-15')  // Thu
+    })
+    await test('nextMonday: the Monday strictly AFTER today across a full week (Monday -> +7, Sunday -> +1)', () => {
+        const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+        assert.strictEqual(iso(AlarmQuick.nextMonday(atDate(2022, 1, 7, 13, 0))), '2022-01-10')   // Fri -> next Mon
+        assert.strictEqual(iso(AlarmQuick.nextMonday(atDate(2022, 1, 8, 13, 0))), '2022-01-10')   // Sat
+        assert.strictEqual(iso(AlarmQuick.nextMonday(atDate(2022, 1, 9, 13, 0))), '2022-01-10')   // Sun -> +1
+        assert.strictEqual(iso(AlarmQuick.nextMonday(atDate(2022, 1, 10, 13, 0))), '2022-01-17')  // Mon -> +7 (strictly after)
+        assert.strictEqual(iso(AlarmQuick.nextMonday(atDate(2022, 1, 11, 13, 0))), '2022-01-17')  // Tue
+        assert.strictEqual(iso(AlarmQuick.nextMonday(atDate(2022, 1, 13, 13, 0))), '2022-01-17')  // Thu
+    })
+    await test('quick Weekends / Next Monday: absolute date, time = preserved else ceilHour(now)', () => {
+        // 2022-01-11 is a Tuesday; nearest Saturday = 2022-01-15, next Monday = 2022-01-17.
+        assert.deepStrictEqual(AlarmQuick.weekends(atDate(2022, 1, 11, 14, 36), null), { date: '2022-01-15', time: '15:00' })
+        assert.deepStrictEqual(AlarmQuick.weekends(atDate(2022, 1, 11, 14, 36), { hours: 8, minutes: 5 }), { date: '2022-01-15', time: '08:05' })
+        assert.deepStrictEqual(AlarmQuick.monday(atDate(2022, 1, 11, 14, 36), null), { date: '2022-01-17', time: '15:00' })
+    })
+
+    // ---------------------------------------------- row-2 field-writing math (single-select / SAME: one press = one increment)
+    await test('quick +hour: baseDate at (preserved else ceilHour(now)) + 1 hour; rolls the date across midnight', () => {
+        assert.deepStrictEqual(AlarmQuick.hour(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), null), { date: '2022-01-09', time: '16:00' })         // ceilHour 15:00 +1h
+        assert.deepStrictEqual(AlarmQuick.hour(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), { hours: 16, minutes: 30 }), { date: '2022-01-09', time: '17:30' })
+        assert.deepStrictEqual(AlarmQuick.hour(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), { hours: 23, minutes: 30 }), { date: '2022-01-10', time: '00:30' }) // rolls midnight
+    })
+    await test('quick +day: baseDate + 1 day; time = preserved else ceilHour(now); month rollover', () => {
+        assert.deepStrictEqual(AlarmQuick.day(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 9), null), { date: '2022-01-10', time: '15:00' })
+        assert.deepStrictEqual(AlarmQuick.day(atDate(2022, 1, 9, 14, 36), atDate(2022, 1, 31), { hours: 16, minutes: 30 }), { date: '2022-02-01', time: '16:30' })
+    })
+    // The accumulate() primitive: one row-2 press increments the plan's counter on a COPY; an absolute string / anchor
+    // starts a FRESH accumulator (that is the reset an absolute press or calendar pick installs).
+    await test('accumulate: increments on a copy; resets from an absolute string; never mutates its input', () => {
+        assert.deepStrictEqual(AlarmQuick.accumulate('anchor', 'hours'), { hours: 1, days: 0, weeks: 0, monthsDay: 0, monthsDate: 0 })
+        assert.deepStrictEqual(AlarmQuick.accumulate('today', 'days'), { hours: 0, days: 1, weeks: 0, monthsDay: 0, monthsDate: 0 })   // absolute press reset -> fresh +1
+        const acc = { hours: 0, days: 1, weeks: 0, monthsDay: 0, monthsDate: 0 }
+        assert.deepStrictEqual(AlarmQuick.accumulate(acc, 'hours'), { hours: 1, days: 1, weeks: 0, monthsDay: 0, monthsDate: 0 })      // +day then +hour
+        assert.deepStrictEqual(acc, { hours: 0, days: 1, weeks: 0, monthsDay: 0, monthsDate: 0 })                                      // input untouched
+        assert.deepStrictEqual(AlarmQuick.accumulate({ hours: 2 }, 'hours'), { hours: 3, days: 0, weeks: 0, monthsDay: 0, monthsDate: 0 }) // +hour x3
+    })
+
+    // ============================================================ multi-select PLAN + MODE engine (applyAlarmPlan)
+    // The multi-select rework: applyAlarmPlan(todos, plan, anchor, mode, now) -> [{id, due}] is the single pure
+    // function the host computes every selected to-do's final due through (the webview posts only the plan descriptor
+    // - mode + last-pressed plan + the anchor fields - and the host re-reads the fresh dues and applies it). Pinned
+    // here for both webviews at once, exactly like the quick-button math above. dueAt/fmt keep the cases readable.
+    const dueAt = (y, m, d, hh, mm) => atDate(y, m, d, hh, mm).getTime()
+    const fmtDue = ts => { const d = new Date(ts); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}` }
+    const planMap = (todos, plan, anchor, mode, now) => AlarmQuick.applyAlarmPlan(todos, plan, anchor, mode, now).map(r => r.id + '=' + fmtDue(r.due)).join('  ')
+
+    await test('applyAlarmPlan - OWNER ACCEPTANCE: two to-dos at 22:00 and 23:00, Tomorrow (respect) -> tomorrow 22:00 and 23:00', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 't1', due: dueAt(2026, 8, 19, 22, 0) }, { id: 't2', due: dueAt(2026, 8, 19, 23, 0) }]
+        const anchor = { date: '2026-08-19', time: '22:00' }   // anchor = first to-do (its time is 22:00)
+        assert.strictEqual(planMap(todos, 'tomorrow', anchor, 'respect', now), 't1=2026-08-20 22:00  t2=2026-08-20 23:00')
+    })
+    await test('applyAlarmPlan - Today (respect): every DATE becomes today, each to-do keeps its OWN time', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 't1', due: dueAt(2026, 8, 10, 22, 0) }, { id: 't2', due: dueAt(2026, 8, 12, 23, 0) }]
+        const anchor = { date: '2026-08-19', time: '09:00' }
+        assert.strictEqual(planMap(todos, 'today', anchor, 'respect', now), 't1=2026-08-19 22:00  t2=2026-08-19 23:00')
+    })
+    await test('applyAlarmPlan - Today (respect): a no-alarm to-do takes today + the ANCHOR time', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 'due', due: dueAt(2026, 8, 10, 22, 0) }, { id: 'none', due: 0 }]
+        const anchor = { date: '2026-08-19', time: '09:30' }
+        assert.strictEqual(planMap(todos, 'today', anchor, 'respect', now), 'due=2026-08-19 22:00  none=2026-08-19 09:30')
+    })
+    // Each row-2 "+" increment in RESPECT mode over a MIXED set: the two dated to-dos shift from their OWN dates
+    // keeping their OWN times; the no-due one accumulates from today at ceilHour(now)'s time (NOT the anchor - that is
+    // the accumulator's no-due rule). The legacy single-shift strings 'week'/'monthWeekday'/'monthDate' normalise to
+    // single-count accumulators, so they exercise the same path. Jan 9 2022 = a Sunday (2nd); Jan 20 = a Thursday (3rd);
+    // mixedNow = 08:00 exactly, so ceilHour(now) = 08:00 and the no-due base is 2022-01-15 08:00.
+    const MIXED = [{ id: 'a', due: dueAt(2022, 1, 9, 16, 30) }, { id: 'b', due: dueAt(2022, 1, 20, 9, 15) }, { id: 'c', due: 0 }]
+    const MIXED_ANCHOR = { date: '2022-01-15', time: '15:00' }
+    const mixedNow = atDate(2022, 1, 15, 8, 0)
+    await test('applyAlarmPlan - +week (respect, mixed): each dated to-do +7 days from its own date, no-due from ceilHour(now)', () => {
+        assert.strictEqual(planMap(MIXED, 'week', MIXED_ANCHOR, 'respect', mixedNow), 'a=2022-01-16 16:30  b=2022-01-27 09:15  c=2022-01-22 08:00')
+    })
+    await test('applyAlarmPlan - +month(day) (respect, mixed): same weekday-ordinal next month from own date, no-due from ceilHour(now)', () => {
+        // a: 2nd Sunday Jan -> 2nd Sunday Feb = Feb 13; b: 3rd Thursday Jan -> 3rd Thursday Feb = Feb 17; c: 3rd Saturday
+        // Jan (the 15th) -> 3rd Saturday Feb = Feb 19, at the 08:00 no-due base time.
+        assert.strictEqual(planMap(MIXED, 'monthWeekday', MIXED_ANCHOR, 'respect', mixedNow), 'a=2022-02-13 16:30  b=2022-02-17 09:15  c=2022-02-19 08:00')
+    })
+    await test('applyAlarmPlan - +month(date) (respect, mixed): same day-of-month next month from own date, no-due from ceilHour(now)', () => {
+        assert.strictEqual(planMap(MIXED, 'monthDate', MIXED_ANCHOR, 'respect', mixedNow), 'a=2022-02-09 16:30  b=2022-02-20 09:15  c=2022-02-15 08:00')
+    })
+    await test('applyAlarmPlan - SAME FOR ALL reproduces 1.8.3 for EVERY button: all to-dos get the one anchor datetime', () => {
+        // In 1.8.3 a quick button wrote the fields and OK set every to-do to that one datetime. Here the anchor IS the
+        // button's computed result (single-select math), and mode "same" must set every to-do to exactly it.
+        const now = atDate(2022, 1, 9, 14, 36)
+        const base = atDate(2022, 1, 9)
+        const cases = [
+            AlarmQuick.today(now),
+            AlarmQuick.tomorrow(now, null),
+            AlarmQuick.week(now, base, null),
+            AlarmQuick.monthWeekday(now, base, null),
+            AlarmQuick.monthDate(now, base, null),
+        ]
+        const plans = ['today', 'tomorrow', 'week', 'monthWeekday', 'monthDate']
+        for (let i = 0; i < cases.length; i++) {
+            const anchor = cases[i]
+            const expectTs = atDate(Number(anchor.date.slice(0, 4)), Number(anchor.date.slice(5, 7)), Number(anchor.date.slice(8, 10)), Number(anchor.time.slice(0, 2)), Number(anchor.time.slice(3, 5))).getTime()
+            const r = AlarmQuick.applyAlarmPlan(MIXED, plans[i], anchor, 'same', now)
+            assert.strictEqual(r.length, 3, 'same mode returns one entry per to-do')
+            for (const entry of r) assert.strictEqual(entry.due, expectTs, `same mode must set every to-do to the anchor for plan ${plans[i]}`)
+        }
+    })
+    await test('applyAlarmPlan - single-select is a one-element same-mode selection: byte-identical to 1.8.3', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const anchor = { date: '2026-08-25', time: '07:45' }
+        const r = AlarmQuick.applyAlarmPlan([{ id: 'solo', due: dueAt(2026, 8, 1, 12, 0) }], 'anchor', anchor, 'same', now)
+        assert.deepStrictEqual(r, [{ id: 'solo', due: atDate(2026, 8, 25, 7, 45).getTime() }])
+    })
+    await test('applyAlarmPlan - manual pick (plan "anchor", respect): sets the anchor DATE for all, each keeps its own time', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 10, 22, 0) }, { id: 'b', due: dueAt(2026, 8, 12, 8, 5) }, { id: 'c', due: 0 }]
+        const anchor = { date: '2026-08-30', time: '09:00' }
+        assert.strictEqual(planMap(todos, 'anchor', anchor, 'respect', now), 'a=2026-08-30 22:00  b=2026-08-30 08:05  c=2026-08-30 09:00')
+    })
+
+    // describeAlarmPlan: the one-line explanation shown above the calendar (multi only). Pinned to the owner's example
+    // wording so both webviews render the identical text and the date format matches the fields (YYYY-MM-DD / HH:MM).
+    await test('describeAlarmPlan - respect date-for-all, all dated: "All N to-dos -> DATE, keeping their own times."', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 1, 9, 0) }, { id: 'b', due: dueAt(2026, 8, 2, 9, 0) }]
+        assert.strictEqual(AlarmQuick.describeAlarmPlan(todos, 'anchor', { date: '2026-08-20', time: '15:00' }, 'respect', now), 'All 2 to-dos -> 2026-08-20, keeping their own times.')
+    })
+    await test('describeAlarmPlan - respect accumulator with a no-due: "N to-dos shift ... from their own schedules; 1 -> ceilHour(now)+shift."', () => {
+        const now = atDate(2026, 8, 19, 10, 0)   // ceilHour(now) = 10:00, so the no-due base is 2026-08-19 10:00
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 1, 9, 0) }, { id: 'b', due: dueAt(2026, 8, 2, 9, 0) }, { id: 'c', due: dueAt(2026, 8, 3, 9, 0) }, { id: 'd', due: 0 }]
+        assert.strictEqual(AlarmQuick.describeAlarmPlan(todos, 'week', { date: '2026-08-26', time: '15:00' }, 'respect', now), '3 to-dos shift +1 week from their own schedules; 1 without a due date -> 2026-08-26 10:00.')
+    })
+    await test('describeAlarmPlan - same mode: "All to-dos -> <anchor datetime>."', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 1, 9, 0) }, { id: 'b', due: 0 }]
+        assert.strictEqual(AlarmQuick.describeAlarmPlan(todos, 'week', { date: '2026-08-20', time: '15:00' }, 'same', now), 'All to-dos -> 2026-08-20 15:00.')
+    })
+
+    // ============================================================ accumulator plan engine (applyAlarmPlan / describe)
+    // The row-2 accumulator plan is an object {hours,days,weeks,monthsDay,monthsDate} passed straight to the pure
+    // engine. Under RESPECT a dated to-do shifts from its OWN datetime (order: months, then weeks/days, then hours,
+    // keeping its own clock except as +hour moves it); a no-due to-do accumulates from today at ceilHour(now)'s time.
+    await test('accumulator (respect): +hour x3 on [22:00, no-due] -> own time +3h (rolls a day), no-due = ceilHour(now)+3h', () => {
+        const now = atDate(2026, 8, 19, 10, 0)   // ceilHour(now) = 10:00
+        const todos = [{ id: 't1', due: dueAt(2026, 8, 19, 22, 0) }, { id: 'none', due: 0 }]
+        const anchor = { date: '2026-08-19', time: '09:00' }
+        // t1: 22:00 + 3h = next day 01:00; none: 2026-08-19 10:00 + 3h = 13:00.
+        assert.strictEqual(planMap(todos, { hours: 3 }, anchor, 'respect', now), 't1=2026-08-20 01:00  none=2026-08-19 13:00')
+    })
+    await test('accumulator (respect): +day then +hour composes on a dated to-do (date +1, then time +1h)', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 19, 10, 0) }]
+        // {days:1, hours:1}: 2026-08-19 10:00 -> +1 day = 08-20 10:00 -> +1h = 08-20 11:00.
+        assert.strictEqual(planMap(todos, { days: 1, hours: 1 }, { date: '2026-08-19', time: '09:00' }, 'respect', now), 'a=2026-08-20 11:00')
+    })
+    await test('accumulator (respect): +hour alone crossing midnight keeps the arithmetic result', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 19, 23, 30) }]
+        assert.strictEqual(planMap(todos, { hours: 1 }, { date: '2026-08-19', time: '09:00' }, 'respect', now), 'a=2026-08-20 00:30')
+    })
+    await test('accumulator (respect): +month(date) x2 clamps SEQUENTIALLY (Jan 31 -> Feb 28 -> Mar 28, not Mar 31)', () => {
+        const now = atDate(2022, 1, 15, 8, 0)
+        const todos = [{ id: 'a', due: dueAt(2022, 1, 31, 12, 0) }]
+        assert.strictEqual(planMap(todos, { monthsDate: 2 }, { date: '2022-01-15', time: '09:00' }, 'respect', now), 'a=2022-03-28 12:00')
+    })
+    await test('accumulator (respect): a JSON-string plan (the desktop hidden-field round-trip) normalises identically', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 19, 10, 0) }]
+        const asObject = planMap(todos, { days: 2, hours: 1 }, { date: '2026-08-19', time: '09:00' }, 'respect', now)
+        const asJSON = planMap(todos, JSON.stringify({ days: 2, hours: 1 }), { date: '2026-08-19', time: '09:00' }, 'respect', now)
+        assert.strictEqual(asJSON, asObject)
+        assert.strictEqual(asObject, 'a=2026-08-21 11:00')   // +2 days then +1h
+    })
+    await test('accumulator (SAME / single-select): the plan is ignored - every to-do gets the one anchor datetime', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const anchor = { date: '2026-08-25', time: '07:45' }
+        const anchorTs = atDate(2026, 8, 25, 7, 45).getTime()
+        // Multi SAME: the +hour/+day presses already wrote the anchor fields, so every to-do lands on that one anchor.
+        const multi = AlarmQuick.applyAlarmPlan([{ id: 'a', due: dueAt(2026, 8, 1, 9, 0) }, { id: 'b', due: 0 }], { hours: 1, days: 1 }, anchor, 'same', now)
+        for (const entry of multi) assert.strictEqual(entry.due, anchorTs)
+        // Single-select is a one-element same-mode selection with an accumulator plan -> still just the anchor.
+        const single = AlarmQuick.applyAlarmPlan([{ id: 'solo', due: dueAt(2026, 8, 1, 12, 0) }], { hours: 1 }, anchor, 'same', now)
+        assert.deepStrictEqual(single, [{ id: 'solo', due: anchorTs }])
+    })
+    await test('accumulator: mode round-trip respect -> same -> respect is stateless and never mutates the plan', () => {
+        const now = atDate(2026, 8, 19, 10, 0)
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 19, 10, 0) }, { id: 'b', due: 0 }]
+        const anchor = { date: '2026-08-19', time: '09:00' }
+        const acc = { hours: 1, days: 2, weeks: 0, monthsDay: 0, monthsDate: 0 }
+        const before = JSON.parse(JSON.stringify(acc))
+        const respect1 = planMap(todos, acc, anchor, 'respect', now)
+        planMap(todos, acc, anchor, 'same', now)
+        const respect2 = planMap(todos, acc, anchor, 'respect', now)
+        assert.strictEqual(respect1, respect2, 'the respect result must be identical before and after visiting same')
+        assert.deepStrictEqual(acc, before, 'apply must never mutate the accumulator (mode round-trip is stateless)')
+    })
+    await test('describeAlarmPlan (accumulator): narrates "+2 days +1 hour from their own schedules" + the no-due datetime', () => {
+        const now = atDate(2026, 8, 24, 14, 0)   // ceilHour(now) = 14:00, no-due base 2026-08-24 14:00
+        const todos = [{ id: 'a', due: dueAt(2026, 8, 1, 9, 0) }, { id: 'b', due: dueAt(2026, 8, 2, 9, 0) }, { id: 'c', due: 0 }]
+        // {days:2, hours:1}: no-due = 2026-08-24 14:00 + 2 days + 1h = 2026-08-26 15:00.
+        assert.strictEqual(AlarmQuick.describeAlarmPlan(todos, { days: 2, hours: 1 }, { date: '2026-08-26', time: '09:00' }, 'respect', now),
+            '2 to-dos shift +2 days +1 hour from their own schedules; 1 without a due date -> 2026-08-26 15:00.')
+    })
+    await test('describeAlarmPlan (accumulator): all dated -> "...from their own schedules."; all no-due -> the one datetime', () => {
+        const now = atDate(2026, 8, 24, 14, 0)
+        const allDated = [{ id: 'a', due: dueAt(2026, 8, 1, 9, 0) }, { id: 'b', due: dueAt(2026, 8, 2, 9, 0) }]
+        assert.strictEqual(AlarmQuick.describeAlarmPlan(allDated, { weeks: 1, days: 2 }, { date: '2026-08-26', time: '09:00' }, 'respect', now),
+            'All 2 to-dos shift +1 week +2 days from their own schedules.')
+        const allNoDue = [{ id: 'a', due: 0 }, { id: 'b', due: 0 }]
+        // no-due base 2026-08-24 14:00 + 1h = 2026-08-24 15:00.
+        assert.strictEqual(AlarmQuick.describeAlarmPlan(allNoDue, { hours: 1 }, { date: '2026-08-26', time: '09:00' }, 'respect', now),
+            'All 2 to-dos -> 2026-08-24 15:00.')
+    })
+    await test('describeAlarmPlan: the new absolute plans (Weekends / Next Monday) keep the date-for-all wording', () => {
+        const now = atDate(2022, 1, 11, 10, 0)   // Tuesday; weekends -> 2022-01-15, next Monday -> 2022-01-17
+        const todos = [{ id: 'a', due: dueAt(2022, 1, 1, 9, 0) }, { id: 'b', due: dueAt(2022, 1, 2, 9, 0) }]
+        assert.strictEqual(AlarmQuick.describeAlarmPlan(todos, 'weekends', { date: '2022-01-20', time: '15:00' }, 'respect', now), 'All 2 to-dos -> 2022-01-15, keeping their own times.')
+        assert.strictEqual(AlarmQuick.describeAlarmPlan(todos, 'nextMonday', { date: '2022-01-20', time: '15:00' }, 'respect', now), 'All 2 to-dos -> 2022-01-17, keeping their own times.')
+    })
+    await test('applyAlarmPlan: the new absolute plans (Weekends / Next Monday) land every to-do on that date, own time kept', () => {
+        const now = atDate(2022, 1, 11, 10, 0)
+        const todos = [{ id: 'a', due: dueAt(2022, 1, 1, 16, 30) }, { id: 'b', due: 0 }]
+        const anchor = { date: '2022-01-20', time: '08:15' }
+        assert.strictEqual(planMap(todos, 'weekends', anchor, 'respect', now), 'a=2022-01-15 16:30  b=2022-01-15 08:15')
+        assert.strictEqual(planMap(todos, 'nextMonday', anchor, 'respect', now), 'a=2022-01-17 16:30  b=2022-01-17 08:15')
+    })
+
+    // ============================================================ HOST GLUE: the mobile alarm overlay's alarmSet message
+    // Unlike the pure-function checks above, this drives the COMPILED bundle end to end. The overlay posts the row-2
+    // accumulator plan as a raw OBJECT (webviewApi.postMessage(['alarmSet', ids, date, time, mode, plan]) in
+    // panelWebview.js). The host's onMessage handler (panel.ts) must forward that object to applyAlarmSet untouched:
+    // String()-coercing it yields "[object Object]", which normalizePlan can only read as the {str:'anchor'} fallback,
+    // so under multi + respect every dated to-do is DRAGGED onto the anchor date instead of shifted from its own base.
+    const glueId1 = 'e'.repeat(32)
+    const glueId2 = 'f'.repeat(32)
+    const alarmGlueNotes = {
+        [glueId1]: { id: glueId1, title: 'Jan 9', todo_completed: 0, todo_due: dueAt(2022, 1, 9, 16, 30), parent_id: 'n'.repeat(32) },
+        [glueId2]: { id: glueId2, title: 'Jan 20', todo_completed: 0, todo_due: dueAt(2022, 1, 20, 8, 0), parent_id: 'n'.repeat(32) },
+    }
+    const alarmGlue = await run({
+        dataDir: path.join(tmp, 'alarm-glue-data'),
+        installationDir: path.join(tmp, 'alarm-glue-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: Object.values(alarmGlueNotes),
+        notes: alarmGlueNotes,
+    })
+    await test('host glue (mobile alarmSet): an OBJECT accumulator plan shifts each to-do from its OWN base, not onto the anchor date', async () => {
+        const putsBefore = alarmGlue.notePuts.length
+        // A +day press makes the overlay's live plan the accumulator {days:1}; the anchor fields read 2022-01-09 10:00.
+        // multi-select + respect: each DATED to-do must shift +1 day from its own datetime, NEVER be dragged onto Jan 9.
+        await alarmGlue.panelMessageHandler(['alarmSet', [glueId1, glueId2], '2022-01-09', '10:00', 'respect',
+            { hours: 0, days: 1, weeks: 0, monthsDay: 0, monthsDate: 0 }])
+        const duePuts = alarmGlue.notePuts.slice(putsBefore).filter(p => p.fields && Object.prototype.hasOwnProperty.call(p.fields, 'todo_due'))
+        const got = {}
+        for (const put of duePuts) got[put.id] = put.fields.todo_due
+        assert.strictEqual(got[glueId1], dueAt(2022, 1, 10, 16, 30), 'Jan 9 16:30 must shift to Jan 10 16:30 (own base +1 day), not stay on the anchor date')
+        assert.strictEqual(got[glueId2], dueAt(2022, 1, 21, 8, 0), 'Jan 20 08:00 must shift to Jan 21 08:00 (own base +1 day), not drag onto the anchor date')
+    })
+
+    // Markup: the five labelled buttons + their handlers render in BOTH implementations - the desktop dialog HTML
+    // template in alarm.ts and the mobile overlay builder in panelWebview.js - and the retired handlers are gone.
+    // Read as source text: this harness renders the panel markup but never a native dialog or the overlay iframe,
+    // and the version check below reads files the same way. webviewSource is the panelWebview.js text read above.
+    const QUICK_LABELS = ['>Today<', '>Tomorrow<', '>Weekends<', '>Next Monday<', '>+hour<', '>+day<', '>+week<', '>+month(day)<', '>+month(date)<']
+    const QUICK_HANDLERS = ['onAlarmQuickToday()', 'onAlarmQuickTomorrow()', 'onAlarmQuickWeekends()', 'onAlarmQuickNextMonday()', 'onAlarmQuickHour()', 'onAlarmQuickDay()', 'onAlarmQuickWeek()', 'onAlarmQuickMonthWeekday()', 'onAlarmQuickMonthDate()']
+    await test('quick markup (desktop dialog): the nine two-row labelled buttons render in alarm.ts, old handlers gone', () => {
+        const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'alarm', 'alarm.ts'), 'utf8')
+        for (const label of QUICK_LABELS) assert.ok(src.includes(label), 'desktop dialog missing quick label ' + label)
+        for (const handler of QUICK_HANDLERS) assert.ok(src.includes(handler), 'desktop dialog missing quick handler ' + handler)
+        assert.ok(!src.includes('setAlarmDateOffset') && !src.includes('setAlarmDateNextMonth'), 'the old quick-button handlers must be gone from the desktop dialog')
+    })
+    // Two-row structure (both platforms): row 1 the four absolute dates in the pinned order, row 2 the five
+    // accumulating increments in the pinned order, each a .alarm-quick-row. On the desktop dialog each row also carries
+    // an EXPLICIT fixed height (a static-markup reservation so Joplin's measure-before-draw sizes the dialog to the two
+    // rows), replacing the old single wrapping quick row. The mobile overlay mirrors the two rows (no fixed height - it
+    // sizes dynamically). Read as source text.
+    const ROW1 = ['>Today<', '>Tomorrow<', '>Weekends<', '>Next Monday<']
+    const ROW2 = ['>+hour<', '>+day<', '>+week<', '>+month(day)<', '>+month(date)<']
+    const assertTwoRows = (src, where) => {
+        const quickOpen = src.indexOf('id="alarmQuick"')
+        assert.ok(quickOpen >= 0, where + ': #alarmQuick is missing')
+        // Two .alarm-quick-row containers within #alarmQuick, in order.
+        const r1 = src.indexOf('alarm-quick-row', quickOpen)
+        const r2 = src.indexOf('alarm-quick-row', r1 + 1)
+        assert.ok(r1 > quickOpen && r2 > r1, where + ': #alarmQuick must contain two .alarm-quick-row containers')
+        // Row 1's four absolute labels all sit in the first row (before row 2 opens); row 2's five in the second.
+        for (const label of ROW1) { const at = src.indexOf(label, quickOpen); assert.ok(at > r1 && at < r2, where + ': ' + label + ' must be in row 1'); }
+        for (const label of ROW2) { const at = src.indexOf(label, quickOpen); assert.ok(at > r2, where + ': ' + label + ' must be in row 2'); }
+        // Pinned order within each row.
+        for (let i = 1; i < ROW1.length; i++) assert.ok(src.indexOf(ROW1[i], quickOpen) > src.indexOf(ROW1[i - 1], quickOpen), where + ': row 1 order broken at ' + ROW1[i])
+        for (let i = 1; i < ROW2.length; i++) assert.ok(src.indexOf(ROW2[i], quickOpen) > src.indexOf(ROW2[i - 1], quickOpen), where + ': row 2 order broken at ' + ROW2[i])
+    }
+    await test('two-row quick markup: desktop dialog + mobile overlay both pin the absolute row then the accumulator row', () => {
+        const desktop = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'alarm', 'alarm.ts'), 'utf8')
+        assertTwoRows(desktop, 'desktop dialog')
+        assertTwoRows(webviewSource, 'mobile overlay')
+        // Desktop reserves an explicit fixed height on each row (replaces the old single wrapping quick row).
+        assert.ok(/\.alarm-quick-row\s*{[^}]*height:\s*\d+px/.test(desktop), 'the desktop .alarm-quick-row must reserve an explicit fixed height')
+        assert.ok(/\.alarm-quick-row\s*{[^}]*box-sizing:\s*border-box/.test(desktop), 'the desktop .alarm-quick-row height must be a border-box reservation')
+        assert.ok(/\.alarm-quick-row\s*{[^}]*flex-wrap:\s*nowrap/.test(desktop), 'the desktop rows must never wrap (a single line at the fixed width keeps the measurement stable)')
+        assert.ok(!/#alarmQuick\s*{[^}]*flex-wrap:\s*wrap/.test(desktop), 'the old single wrapping quick row must be gone')
+    })
+    // Layout structure (owner UI polish, desktop dialog): pin the NEW markup+CSS shape so the two fixes can't
+    // silently regress. Layout correctness itself (columns end at the calendar's bottom, buttons fill the row)
+    // is verified visually by the owner; here we only assert the mechanism is present, reading alarm.ts as text.
+    await test('alarm dialog layout: columns stretch to the calendar and the quick row is a full-width sibling', () => {
+        const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'alarm', 'alarm.ts'), 'utf8')
+        // Fix 1 - the calendar+columns row is an explicit non-wrapping stretch container...
+        assert.ok(src.includes('class="alarm-stretch-row"'), 'the calendar+columns row is missing its stretch-container class')
+        assert.ok(/#alarmBody\s*{[^}]*flex-wrap:\s*nowrap/.test(src), 'the row must never wrap: calendar left, time columns right, side by side under any width')
+        assert.ok(/#alarmBody\s*{[^}]*align-items:\s*stretch/.test(src), 'the row must stretch its children to the calendar height')
+        // ...the calendar reserves EXACTLY its deterministic drawn height (nav 30 + 4 margin + weekday row 22 +
+        // six week rows of 28 = 224px) as min-height, so Joplin's measure-before-draw pass sizes the empty dialog
+        // to the same height the grid will later draw - no clip at measurement, no overshoot once populated...
+        assert.ok(/#alarmCalendar\s*{[^}]*min-height:\s*224px/.test(src), 'the calendar must reserve its exact 224px drawn height as min-height so the measured (empty) dialog is as tall as the populated grid')
+        // ...and each column is a relative height-constraint wrapper around an absolutely-positioned scroller.
+        assert.ok(/\.alarm-time-col\s*{[^}]*position:\s*relative/.test(src), 'the time column must be the relative height-constraint wrapper')
+        assert.ok(!/\.alarm-time-col\s*{[^}]*height:/.test(src.replace(/\.cockpit-mobile[^}]*}/g, '')), 'the desktop time column must not carry a fixed pixel height')
+        assert.ok(/\.alarm-time-scroll\s*{[^}]*position:\s*absolute/.test(src) && /\.alarm-time-scroll\s*{[^}]*overflow-y:\s*auto/.test(src), 'the scroller must be an absolutely-positioned overflow area filling the column')
+        assert.ok(src.includes('class="alarm-time-scroll" id="alarmHourCol"') && src.includes('class="alarm-time-scroll" id="alarmMinuteCol"'), 'the hour/minute scrollers must keep their ids so the webview still populates and scrolls them')
+        // Owner rework - the quick-button row now PRECEDES the calendar+columns row (moved above the calendar), and is
+        // still a sibling of it, not nested inside it.
+        const quick = src.indexOf('id="alarmQuick"')
+        const bodyOpen = src.indexOf('id="alarmBody"')
+        assert.ok(quick >= 0 && bodyOpen >= 0 && src.indexOf('id="alarmTimePanel"') > bodyOpen, 'precondition: both the quick row and the calendar+columns row are present')
+        assert.ok(quick < bodyOpen, 'the quick-button row must come BEFORE the calendar+columns row (moved above the calendar)')
+        // Walk div depth from the alarmQuick tag to its matching close; the calendar row must begin after it (siblings).
+        let depth = 1, quickEnd = -1
+        const tagRe = /<\/?div\b/g
+        tagRe.lastIndex = src.indexOf('>', quick) + 1
+        for (let m; (m = tagRe.exec(src)); ) {
+            depth += m[0] === '</div' ? -1 : 1
+            if (depth === 0) { quickEnd = m.index; break }
+        }
+        assert.ok(quickEnd >= 0 && bodyOpen > quickEnd, 'the quick-button row must be a sibling of, not nested inside, the calendar+columns row')
+    })
+    await test('quick markup (mobile overlay): the nine two-row labelled buttons render in panelWebview.js, old handlers gone', () => {
+        for (const label of QUICK_LABELS) assert.ok(webviewSource.includes(label), 'mobile overlay missing quick label ' + label)
+        for (const handler of QUICK_HANDLERS) assert.ok(webviewSource.includes(handler), 'mobile overlay missing quick handler ' + handler)
+        assert.ok(!webviewSource.includes('setAlarmDateOffset') && !webviewSource.includes('setAlarmDateNextMonth'), 'the old quick-button handlers must be gone from the mobile overlay')
+    })
+
+    // ============================================================ multi-select plan markup + measurement reservation
+    const alarmTsSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'alarm', 'alarm.ts'), 'utf8')
+
+    // The multi-select rows (explanation + mode picker) are emitted ONLY for a multi selection, and RESPECT is the
+    // default mode. Both webviews build them from the same multi flag, so the desktop dialog and mobile overlay agree.
+    await test('plan markup (desktop dialog): multi reserves the explanation + mode rows; single omits them; default mode is respect', () => {
+        // The explanation line and mode picker are gated on `multi` (built from todoIDs.length > 1).
+        assert.ok(/var multi = todoIDs\.length > 1/.test(alarmTsSrc), 'the dialog must know single-vs-multi when building the markup')
+        assert.ok(/var explainRow = multi \?/.test(alarmTsSrc), 'the explanation line must be emitted for multi only')
+        assert.ok(/var modeRow = multi \?/.test(alarmTsSrc), 'the mode picker must be emitted for multi only')
+        assert.ok(/var planField = multi \?/.test(alarmTsSrc), 'the hidden plan field must be emitted for multi only')
+        assert.ok(alarmTsSrc.includes('id="alarmExplain"') && alarmTsSrc.includes('id="alarmMode"'), 'the explanation and mode picker ids must be present')
+        // RESPECT is the default: its radio carries `checked`, and it appears before the `same` radio.
+        const respectAt = alarmTsSrc.indexOf('value="respect" checked')
+        const sameAt = alarmTsSrc.indexOf('value="same"')
+        assert.ok(respectAt >= 0, 'the respect mode radio must be the default (checked)')
+        assert.ok(sameAt > respectAt, 'the respect radio must precede the same radio')
+        // Both multi-only rows carry a FIXED box-sizing height in the dialog CSS so the measure-before-draw pass sizes
+        // the dialog to the height the filled rows will occupy (the explanation is JS-filled AFTER measurement). The
+        // explanation now holds two lines at the larger (quick-button) font, so its reservation is 38px; the mode row
+        // stays a single line at 26px.
+        assert.ok(/#alarmExplain\s*{[^}]*height:\s*38px/.test(alarmTsSrc) && /#alarmExplain\s*{[^}]*box-sizing:\s*border-box/.test(alarmTsSrc), 'the explanation row must reserve a fixed 38px box-sizing height (two lines at the quick-button font size)')
+        assert.ok(/#alarmMode\s*{[^}]*height:\s*26px/.test(alarmTsSrc) && /#alarmMode\s*{[^}]*box-sizing:\s*border-box/.test(alarmTsSrc), 'the mode picker row must reserve a fixed 26px box-sizing height')
+        // Font size: the explanation and the mode-picker labels reuse the quick buttons' font-size (inherit) rather
+        // than a smaller literal, so all three render at one size. The quick buttons declare font-size: inherit; so
+        // must these two rows (the mode labels inherit from #alarmMode).
+        assert.ok(/#alarmQuick button\s*{[^}]*font-size:\s*inherit/.test(alarmTsSrc), 'precondition: the quick buttons inherit their font-size')
+        assert.ok(/#alarmExplain\s*{[^}]*font-size:\s*inherit/.test(alarmTsSrc), "the explanation must reuse the quick buttons' font-size (inherit), not a smaller literal")
+        assert.ok(/#alarmMode\s*{[^}]*font-size:\s*inherit/.test(alarmTsSrc), "the mode picker must reuse the quick buttons' font-size (inherit), not a smaller literal")
+        // Layout order (owner rework): fields -> quick -> calendar -> mode picker -> explanation (moved below the mode
+        // picker, above the footer).
+        const iQuick = alarmTsSrc.indexOf('id="alarmQuick"')
+        const iBody = alarmTsSrc.indexOf('id="alarmBody"')
+        const iMode = alarmTsSrc.indexOf('${modeRow}')
+        const iExplain = alarmTsSrc.indexOf('${explainRow}')
+        assert.ok(iQuick >= 0 && iBody > iQuick && iMode > iBody && iExplain > iMode, 'order must be quick -> calendar -> mode picker -> explanation')
+    })
+
+    // The mobile overlay builder mirrors the same structure (quick above the calendar; explanation + mode rows gated on
+    // multi) and calls the shared describeAlarmPlan; only the DOM glue and (dynamic-height) styling differ.
+    await test('plan markup (mobile overlay): mirrors the desktop structure, multi-gated rows, shared describeAlarmPlan', () => {
+        const oOpen = webviewSource.indexOf('function openAlarmOverlay(')
+        assert.ok(oOpen >= 0, 'openAlarmOverlay must exist')
+        const oBody = webviewSource.slice(oOpen, webviewSource.indexOf('\n}', oOpen))
+        assert.ok(/var isMulti = restore \?/.test(oBody), 'the overlay must know single-vs-multi at build time')
+        assert.ok(/var explainRow = isMulti \?/.test(oBody) && /var modeRow = isMulti \?/.test(oBody), 'the explanation + mode rows must be multi-only')
+        assert.ok(oBody.includes('value="respect" checked'), 'respect must be the overlay default mode')
+        // Order in the overlay innerHTML: quick -> calendar -> mode -> explanation (explanation moved below the mode).
+        const iQuick = oBody.indexOf('id="alarmQuick"')
+        const iBody = oBody.indexOf('id="alarmBody"')
+        const iMode = oBody.indexOf('${modeRow}')
+        const iExplain = oBody.indexOf('${explainRow}')
+        assert.ok(iQuick >= 0 && iBody > iQuick && iMode > iBody && iExplain > iMode, 'overlay order must be quick -> calendar -> mode picker -> explanation')
+        assert.ok(webviewSource.includes('AlarmQuick.describeAlarmPlan('), 'the overlay must render the explanation from the shared describeAlarmPlan')
+    })
+
+    // The overlay descriptor (openOverlayState) must carry the full plan model so a host-initiated reload reconstructs
+    // it. Round-trip it through the same reopen path the webview uses: build a descriptor, JSON it, parse it, and check
+    // mode + plan + dues + multi survive.
+    await test('overlay descriptor round-trips mode + plan + dues (reload survival)', () => {
+        // The descriptor builder writes multi/mode/plan/dues for the alarm kind.
+        assert.ok(/multi: alarmIsMulti, mode: alarmMode, plan: alarmActivePlan, dues: alarmTodoDues/.test(webviewSource), 'currentOverlayDescriptor must serialise the full plan model for the alarm overlay')
+        // The reopen path restores mode/plan/dues/multi from the descriptor.
+        assert.ok(/var isMulti = restore \? !!restore\.multi/.test(webviewSource), 'openAlarmOverlay must restore multi from the descriptor')
+        assert.ok(/alarmMode = restore\.mode === 'same'/.test(webviewSource), 'openAlarmOverlay must restore the mode from the descriptor')
+        assert.ok(/alarmTodoDues = Array\.isArray\(restore\.dues\)/.test(webviewSource), 'openAlarmOverlay must restore the dues from the descriptor')
+        assert.ok(/setAlarmActivePlan\(restore\.plan/.test(webviewSource), 'openAlarmOverlay must restore the active plan from the descriptor')
+        // A concrete JSON round-trip of a representative descriptor.
+        const descriptor = { kind: 'alarm', ids: ['x'], date: '2026-08-20', time: '15:00', hasAlarm: true, timeUserSet: false, multi: true, mode: 'respect', plan: 'weekends', dues: [{ id: 'x', due: 123 }, { id: 'y', due: 0 }] }
+        const round = JSON.parse(JSON.stringify(descriptor))
+        assert.strictEqual(round.mode, 'respect')
+        assert.strictEqual(round.plan, 'weekends')
+        assert.strictEqual(round.multi, true)
+        assert.deepStrictEqual(round.dues, [{ id: 'x', due: 123 }, { id: 'y', due: 0 }])
+    })
+    // The accumulator plan is an OBJECT, and the descriptor's `plan: alarmActivePlan` must round-trip it (and the
+    // restore's setAlarmActivePlan(restore.plan) reconstructs the exact accumulator) so a mid-overlay reload keeps the
+    // pressed increments. Verify a JSON round-trip preserves the object AND that the shared engine treats the survivor
+    // identically to the original.
+    await test('overlay descriptor round-trips the ACCUMULATOR object (reload keeps the pressed increments)', () => {
+        const descriptor = { kind: 'alarm', ids: ['x', 'y'], date: '2026-08-19', time: '09:00', hasAlarm: true, timeUserSet: true, multi: true, mode: 'respect', plan: { hours: 1, days: 2, weeks: 0, monthsDay: 0, monthsDate: 0 }, dues: [{ id: 'x', due: dueAt(2026, 8, 19, 10, 0) }, { id: 'y', due: 0 }] }
+        const round = JSON.parse(JSON.stringify(descriptor))
+        assert.deepStrictEqual(round.plan, { hours: 1, days: 2, weeks: 0, monthsDay: 0, monthsDate: 0 }, 'the accumulator object must survive the JSON round-trip')
+        const now = atDate(2026, 8, 19, 10, 0)
+        const anchor = { date: descriptor.date, time: descriptor.time }
+        assert.strictEqual(planMap(descriptor.dues, descriptor.plan, anchor, 'respect', now), planMap(round.dues, round.plan, anchor, 'respect', now), 'the survivor must apply identically to the original')
+    })
+
+    // Measurement invariant, asserted ALGEBRAICALLY: parse the four heights out of the dialog CSS and check the
+    // calendar's reserved min-height equals nav height + nav bottom-margin + weekday-header height + 6 * week-row
+    // height, all read from the SAME CSS. This makes the 224px reservation and the row heights unable to drift apart
+    // silently - change any row height without updating the reservation and this fails.
+    await test('measurement invariant (algebraic): #alarmCalendar min-height == nav + margin + weekday + 6*week-row', () => {
+        const num = (re, label) => { const m = alarmTsSrc.match(re); assert.ok(m, 'could not read ' + label + ' from the dialog CSS'); return Number(m[1]) }
+        const minHeight = num(/#alarmCalendar\s*{[^}]*min-height:\s*(\d+)px/, '#alarmCalendar min-height')
+        const navHeight = num(/\.alarm-cal-nav\s*{[^}]*height:\s*(\d+)px/, '.alarm-cal-nav height')
+        const navMargin = num(/\.alarm-cal-nav\s*{[^}]*margin-bottom:\s*(\d+)px/, '.alarm-cal-nav margin-bottom')
+        const weekdayHeight = num(/\.alarm-cal-grid th\s*{[^}]*height:\s*(\d+)px/, '.alarm-cal-grid th height')
+        const weekRowHeight = num(/\.alarm-cal-grid td\s*{[^}]*height:\s*(\d+)px/, '.alarm-cal-grid td height')
+        const computed = navHeight + navMargin + weekdayHeight + 6 * weekRowHeight
+        assert.strictEqual(minHeight, computed, `the reserved min-height (${minHeight}) must equal nav ${navHeight} + margin ${navMargin} + weekday ${weekdayHeight} + 6*${weekRowHeight} = ${computed}`)
+    })
+
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.8.1', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.8.6', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.8.1'
+        const expected = '1.8.6'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')

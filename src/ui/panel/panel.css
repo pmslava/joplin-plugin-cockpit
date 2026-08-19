@@ -1312,13 +1312,16 @@ table {
     font-weight: 600;
 }
 
-/* A two-column grid so the four unequal-width quick buttons always wrap EVENLY (2x2) instead of
- * breaking 3+1 with "+month" stranded full-width on its own line. flex:1 1 auto (tried first) keys the
- * wrap off each button's content width, so three narrow-enough buttons pack onto line 1 and the widest
- * ("Tomorrow"/"+month") drops alone - exactly the DEFECT-2 look it was meant to remove. A fixed 2-column
- * grid is width-independent and gives every button an equal cell. This block is mobile-only (overlays
- * never open on desktop), so it cannot affect the desktop dialog. */
+/* The quick buttons are two stacked rows: row 1 the absolute dates (Today / Tomorrow / Weekends / Next Monday),
+ * row 2 the accumulating increments (+hour / +day / +week / +month(day) / +month(date)). Each row is its own
+ * two-column grid so the unequal-width labels sit in equal ~40px-tall tap targets on a narrow phone (row 1's four
+ * buttons make 2x2; row 2's five make three grid rows) instead of content-width flex stranding the widest label on
+ * its own line. A fixed 2-column grid is width-independent and cannot affect the desktop dialog (overlays are
+ * mobile-only). The overlay sizes itself dynamically, so unlike the desktop dialog these rows need no fixed height. */
 .cockpit-alarm-overlay #alarmQuick {
+    display: flex; flex-direction: column; gap: 6px;
+}
+.cockpit-alarm-overlay .alarm-quick-row {
     display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
 }
 
@@ -1331,6 +1334,28 @@ table {
 }
 
 .cockpit-alarm-overlay #alarmQuick button:hover { background-color: rgba(127, 127, 127, 0.18); }
+.cockpit-alarm-overlay #alarmQuick button.-active {
+    border-color: var(--cockpit-url-color, #2D6BDC);
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.28));
+    font-weight: 600;
+}
+
+/* The multi-select explanation line and mode picker (mobile overlay). Unlike the desktop dialog these need no fixed
+ * height reservation - the overlay sizes itself dynamically, there is no measure-before-draw pass - so they flow
+ * naturally. Both are emitted only for a multi selection, and both reuse the quick buttons' font-size (inherit, i.e.
+ * .cockpit-alarm-overlay's var(--cockpit-font-size, inherit)) rather than a smaller literal, so the explanation, the
+ * mode labels and the quick buttons all render at one size. The explanation is drawn below the mode picker. */
+.cockpit-alarm-overlay #alarmExplain {
+    font-size: inherit; line-height: 1.35; opacity: 0.75;
+}
+.cockpit-alarm-overlay #alarmMode {
+    display: flex; flex-direction: column; gap: 8px; font-size: inherit;
+}
+.cockpit-alarm-overlay #alarmMode label {
+    display: flex; flex-direction: row; align-items: center; gap: 8px;
+    min-height: 32px; cursor: pointer;
+}
+.cockpit-alarm-overlay #alarmMode input { margin: 0; cursor: pointer; }
 
 .cockpit-alarm-overlay .alarm-cal-nav {
     display: flex; flex-direction: row; align-items: center; justify-content: space-between;

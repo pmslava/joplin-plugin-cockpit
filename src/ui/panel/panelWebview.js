@@ -1099,7 +1099,12 @@ function currentOverlayDescriptor(){
     if (overlayContext.kind === 'alarm'){
         var dateEl = document.getElementById('alarmDate')
         var timeEl = document.getElementById('alarmTime')
-        return { kind: 'alarm', ids: overlayContext.ids, date: dateEl ? dateEl.value : '', time: timeEl ? timeEl.value : '' }
+        // hasAlarm/timeUserSet ride along so a mid-overlay reload reconstructs the quick-button preservedTime state
+        // (whether the shown time is kept or replaced by ceilHour); multi/mode/plan/dues carry the full plan model so
+        // the mode picker, highlighted button and explanation line all come back exactly as they were.
+        return { kind: 'alarm', ids: overlayContext.ids, date: dateEl ? dateEl.value : '', time: timeEl ? timeEl.value : '',
+            hasAlarm: alarmHadExistingAlarm, timeUserSet: alarmTimeUserSet,
+            multi: alarmIsMulti, mode: alarmMode, plan: alarmActivePlan, dues: alarmTodoDues }
     }
     if (overlayContext.kind === 'editor'){
         // The serialized form IS the descriptor's payload, so a reload rebuilds every field (incl. in-progress
@@ -1344,12 +1349,31 @@ function openTagOverlay(noteID, restore){
  * are ported from alarmWebview.js unchanged - they read and write their own #alarm* elements by id, so they work the same inside the overlay body -    *
  * minus that file's dialog-only bootstrap (its MutationObserver / init / platform-class helper): openAlarmOverlay draws them directly instead. The     *
  * fields start at the first to-do's due time (or the day start today), fetched with the getAlarmInitial round-trip. OK posts ['alarmSet', ids, date,  *
- * time], Clear posts ['alarmCleared', ids], and the host keeps parseAlarmFields + setTodoDueTimestamps. The ported names are all alarm*-prefixed and   *
- * collide with nothing else in this file.                                                                                                            *
+ * time, mode, plan], Clear posts ['alarmCleared', ids], and the host applies the plan through the shared applyAlarmPlan. The ported names are all      *
+ * alarm*-prefixed and collide with nothing else in this file.                                                                                         *
  ***************************************************************************************************************************************************/
 
 // The first day of the month the calendar is showing. Reset from the date field every time the overlay opens.
 var alarmCalendarAnchor = null
+
+// Whether the selected to-do(s) already had an alarm when the overlay opened (from the getAlarmInitial round-trip),
+// and whether the user has set the time this session (typed it or picked an hour/minute). Together they drive
+// preservedTime: a quick button keeps the shown clock time when EITHER is true, and substitutes ceilHour(now) only
+// when BOTH are false. Both reset on open and are carried in the overlay descriptor so a mid-overlay reload restores
+// them. Mirrors the desktop dialog's alarmWebview.js state, and calls the same shared window.AlarmQuick math.
+var alarmHadExistingAlarm = false
+var alarmTimeUserSet = false
+
+// Multi-select plan state, mirroring alarmWebview.js. A single-select overlay leaves these at their defaults and
+// shows no plan/mode. alarmMode is 'respect' (each to-do keeps its own schedule; the accumulator shifts from its own
+// datetime) by default for a multi selection, or 'same' (one datetime for all, the 1.8.3 behaviour). alarmActivePlan is
+// EITHER an absolute string ('today'/'tomorrow'/'weekends'/'nextMonday'/'anchor') or the row-2 accumulator OBJECT
+// {hours,days,weeks,monthsDay,monthsDate}; an absolute press or manual pick resets it to a string. alarmTodoDues is
+// every selected to-do's { id, due }. All ride along in the overlay descriptor so a reload restores plan + mode + dues.
+var alarmIsMulti = false
+var alarmMode = 'same'
+var alarmActivePlan = 'anchor'
+var alarmTodoDues = []
 
 function alarmPad(value){ return String(value).padStart(2, '0') }
 
@@ -1365,27 +1389,122 @@ function alarmParseISO(value){
     return parsed
 }
 
-function setAlarmDateOffset(days){
-    var date = new Date()
-    date.setDate(date.getDate() + days)
-    document.getElementById('alarmDate').value = alarmDateToISO(date)
-    alarmCalendarAnchor = new Date(date.getFullYear(), date.getMonth(), 1)
+// Quick buttons, two rows: row 1 the absolute dates (Today / Tomorrow / Weekends / Next Monday), row 2 the
+// accumulating increments (+hour / +day / +week / +month(day) / +month(date)). The date/time math lives in the
+// shared, unit-tested window.AlarmQuick module (alarmQuick.js, loaded into the panel before this script); these
+// wrappers only read the DOM for the arguments, write the result back, and push the overlay state so a reload
+// survives. The desktop dialog wires the identical buttons to the same functions, so the math is never forked.
+function alarmBaseDate(){
+    return alarmParseISO(document.getElementById('alarmDate').value) || new Date()
+}
+
+function alarmPreservedTime(){
+    if (!alarmHadExistingAlarm && !alarmTimeUserSet) return null
+    var time = currentAlarmTime()
+    if (time.hours === null || time.minutes === null) return null
+    return { hours: time.hours, minutes: time.minutes }
+}
+
+function applyAlarmQuick(result){
+    document.getElementById('alarmDate').value = result.date
+    document.getElementById('alarmTime').value = result.time
+    var parsed = alarmParseISO(result.date)
+    if (parsed) alarmCalendarAnchor = new Date(parsed.getFullYear(), parsed.getMonth(), 1)
     renderAlarmCalendar()
+    updateAlarmTimeSelection()
+}
+
+// An ABSOLUTE (row-1) button press. It sets the plan to the absolute string, which RESETS any accumulator. In a
+// multi-select overlay under RESPECT mode it only chooses the plan (each to-do keeps its own time, landing on the
+// absolute date), so the anchor fields are left untouched and the explanation is re-worded; in single-select or SAME
+// mode it writes the anchor fields like 1.8.3. The pressed plan is remembered and highlighted, then the overlay state
+// is pushed so a reload survives.
+function runAlarmQuick(plan, quickResult){
+    setAlarmActivePlan(plan)
+    if (!(alarmIsMulti && alarmMode === 'respect')) applyAlarmQuick(quickResult)
+    updateAlarmPlanDescription()
     pushOverlayState()
 }
 
-function setAlarmDateNextMonth(){
-    var current = alarmParseISO(document.getElementById('alarmDate').value) || new Date()
-    var weekday = current.getDay()
-    var ordinal = Math.floor((current.getDate() - 1) / 7)
-    var firstOfNext = new Date(current.getFullYear(), current.getMonth() + 1, 1)
-    var day = 1 + ((weekday - firstOfNext.getDay() + 7) % 7) + ordinal * 7
-    var daysInNext = new Date(firstOfNext.getFullYear(), firstOfNext.getMonth() + 1, 0).getDate()
-    while (day > daysInNext) day -= 7
-    var target = new Date(firstOfNext.getFullYear(), firstOfNext.getMonth(), day)
-    document.getElementById('alarmDate').value = alarmDateToISO(target)
-    alarmCalendarAnchor = new Date(target.getFullYear(), target.getMonth(), 1)
-    renderAlarmCalendar()
+// The single-increment field result for one row-2 press (single-select / SAME): read the current field date+time and
+// apply exactly one increment of `key`, so repeated presses compound naturally through the fields.
+function alarmAccumulatorFieldPress(key){
+    var now = new Date(), base = alarmBaseDate(), preserved = alarmPreservedTime()
+    if (key === 'hours') return AlarmQuick.hour(now, base, preserved)
+    if (key === 'days') return AlarmQuick.day(now, base, preserved)
+    if (key === 'weeks') return AlarmQuick.week(now, base, preserved)
+    if (key === 'monthsDay') return AlarmQuick.monthWeekday(now, base, preserved)
+    return AlarmQuick.monthDate(now, base, preserved)
+}
+
+// A row-2 ACCUMULATOR press. In a multi-select overlay under RESPECT mode it only accumulates the increment (each
+// to-do shifts from its own schedule), leaving the anchor fields untouched; in single-select or SAME mode it also
+// writes the anchor fields (one increment per press, compounding). The plan is remembered, its buttons highlighted,
+// and the overlay state pushed so a reload survives.
+function runAlarmAccumulator(key){
+    setAlarmActivePlan(AlarmQuick.accumulate(alarmActivePlan, key))
+    if (!(alarmIsMulti && alarmMode === 'respect')){
+        applyAlarmQuick(alarmAccumulatorFieldPress(key))
+        if (key === 'hours') alarmTimeUserSet = true
+    }
+    updateAlarmPlanDescription()
+    pushOverlayState()
+}
+
+function onAlarmQuickToday(){ runAlarmQuick('today', AlarmQuick.today(new Date())) }
+function onAlarmQuickTomorrow(){ runAlarmQuick('tomorrow', AlarmQuick.tomorrow(new Date(), alarmPreservedTime())) }
+function onAlarmQuickWeekends(){ runAlarmQuick('weekends', AlarmQuick.weekends(new Date(), alarmPreservedTime())) }
+function onAlarmQuickNextMonday(){ runAlarmQuick('nextMonday', AlarmQuick.monday(new Date(), alarmPreservedTime())) }
+
+function onAlarmQuickHour(){ runAlarmAccumulator('hours') }
+function onAlarmQuickDay(){ runAlarmAccumulator('days') }
+function onAlarmQuickWeek(){ runAlarmAccumulator('weeks') }
+function onAlarmQuickMonthWeekday(){ runAlarmAccumulator('monthsDay') }
+function onAlarmQuickMonthDate(){ runAlarmAccumulator('monthsDate') }
+
+/** Plan + mode (multi-select overlay) *************************************************************************************************************/
+
+// The current anchor the plan is described/applied against: the two field values.
+function alarmAnchor(){
+    return { date: document.getElementById('alarmDate').value, time: document.getElementById('alarmTime').value }
+}
+
+// Record the active plan and move the -active highlight to the matching quick button(s): an absolute plan lights its
+// single row-1 button; an accumulator plan lights every row-2 button whose counter is non-zero. The highlight is a
+// multi-only affordance (single-select has no plan concept and stays visually as 1.8.3), so it is suppressed when not
+// multi. Button order in the DOM: [Today, Tomorrow, Weekends, Next Monday, +hour, +day, +week, +month(day),
+// +month(date)].
+function setAlarmActivePlan(plan){
+    alarmActivePlan = plan
+    var absIndex = { today: 0, tomorrow: 1, weekends: 2, nextMonday: 3 }
+    var accIndex = { hours: 4, days: 5, weeks: 6, monthsDay: 7, monthsDate: 8 }
+    var isAcc = plan && typeof plan === 'object'
+    var buttons = document.querySelectorAll('#alarmQuick button')
+    for (var i = 0; i < buttons.length; i++){
+        var active = false
+        if (alarmIsMulti){
+            if (isAcc){
+                for (var key in accIndex){ if (accIndex[key] === i && plan[key] > 0){ active = true; break } }
+            } else {
+                active = absIndex[plan] === i
+            }
+        }
+        buttons[i].classList.toggle('-active', active)
+    }
+}
+
+// Re-word the explanation line (multi only) from the shared, unit-tested describeAlarmPlan. No-op for single-select.
+function updateAlarmPlanDescription(){
+    var line = document.getElementById('alarmExplain')
+    if (!line) return
+    line.textContent = AlarmQuick.describeAlarmPlan(alarmTodoDues, alarmActivePlan, alarmAnchor(), alarmMode, new Date())
+}
+
+// The mode radio changed: adopt it, re-describe the plan (keeping the pressed button), and push the overlay state.
+function onAlarmModeChanged(){
+    var checked = document.querySelector('#alarmMode input[name="mode"]:checked')
+    alarmMode = checked && checked.value === 'same' ? 'same' : 'respect'
+    updateAlarmPlanDescription()
     pushOverlayState()
 }
 
@@ -1394,16 +1513,22 @@ function onAlarmCalendarNavigate(delta){
     renderAlarmCalendar()
 }
 
+// A manual calendar pick sets the anchor date; under a multi RESPECT plan that means "set this date for all, keeping
+// each to-do's own time", so the plan reverts to 'anchor'.
 function pickAlarmDay(isoDate){
     document.getElementById('alarmDate').value = isoDate
+    setAlarmActivePlan('anchor')
     renderAlarmCalendar()
+    updateAlarmPlanDescription()
     pushOverlayState()
 }
 
 function onAlarmDateEdited(){
     var parsed = alarmParseISO(document.getElementById('alarmDate').value)
     if (parsed) alarmCalendarAnchor = new Date(parsed.getFullYear(), parsed.getMonth(), 1)
+    setAlarmActivePlan('anchor')
     renderAlarmCalendar()
+    updateAlarmPlanDescription()
     queueOverlayState()
 }
 
@@ -1460,21 +1585,27 @@ function currentAlarmTime(){
     return { hours: hours <= 23 ? hours : null, minutes: minutes <= 59 ? minutes : null }
 }
 
+// A manual time pick/edit updates the anchor time only (the plan is kept); under a RESPECT plan it affects just the
+// no-alarm to-dos, so re-describe without changing the pressed button.
 function pickAlarmHour(hours){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(hours)}:${alarmPad(time.minutes === null ? 0 : time.minutes)}`
+    alarmTimeUserSet = true
     updateAlarmTimeSelection()
+    updateAlarmPlanDescription()
     pushOverlayState()
 }
 
 function pickAlarmMinute(minutes){
     var time = currentAlarmTime()
     document.getElementById('alarmTime').value = `${alarmPad(time.hours === null ? 9 : time.hours)}:${alarmPad(minutes)}`
+    alarmTimeUserSet = true
     updateAlarmTimeSelection()
+    updateAlarmPlanDescription()
     pushOverlayState()
 }
 
-function onAlarmTimeEdited(){ updateAlarmTimeSelection(); queueOverlayState() }
+function onAlarmTimeEdited(){ alarmTimeUserSet = true; updateAlarmTimeSelection(); updateAlarmPlanDescription(); queueOverlayState() }
 
 function updateAlarmTimeSelection(){
     var time = currentAlarmTime()
@@ -1516,6 +1647,16 @@ function openAlarmOverlay(ids, restore){
     ids = ids || []
     if (!ids.length) return
     overlayContext = { kind: 'alarm', ids: ids }
+    // Multi-vs-single is known synchronously from the selection size; the dues (for the explanation) arrive from the
+    // round-trip or the restore descriptor. RESPECT is the default mode for a multi selection, SAME for single.
+    var isMulti = restore ? !!restore.multi : ids.length > 1
+    alarmIsMulti = isMulti
+    alarmMode = isMulti ? 'respect' : 'same'
+    alarmActivePlan = 'anchor'
+    alarmTodoDues = []
+    // Fresh open defaults; the restore branch and the prefill round-trip below set the real values.
+    alarmHadExistingAlarm = false
+    alarmTimeUserSet = false
     var count = ids.length === 1 ? '1 to-do' : ids.length + ' to-dos'
     // Footer order mirrors the desktop dialog (setButtons [ok, clear, cancel], alarm.ts): OK first
     // (primary emphasis), Clear alarm (destructive) middle, Cancel last. The footer right-aligns them.
@@ -1523,7 +1664,9 @@ function openAlarmOverlay(ids, restore){
         { label: 'OK', kind: 'primary', onClick: function(){
             var date = document.getElementById('alarmDate').value
             var time = document.getElementById('alarmTime').value
-            void webviewApi.postMessage(['alarmSet', ids, date, time]);
+            // The host applies the plan through the shared applyAlarmPlan; mode + plan ride along so a multi
+            // selection lands per-to-do, a single one lands the one datetime (mode 'same').
+            void webviewApi.postMessage(['alarmSet', ids, date, time, alarmMode, alarmActivePlan]);
             closeOverlay()
         } },
         { label: 'Clear alarm', kind: 'danger', onClick: function(){
@@ -1533,12 +1676,35 @@ function openAlarmOverlay(ids, restore){
         { label: 'Cancel', onClick: function(){ closeOverlay() } },
     ])
     body.classList.add('cockpit-alarm-overlay')
+    // Layout mirrors the desktop dialog: fields -> quick buttons (above the calendar) -> calendar+columns -> mode
+    // picker (multi only) -> explanation (multi only, moved below the mode picker). Single-select omits both rows.
+    var explainRow = isMulti ? '<div id="alarmExplain"></div>' : ''
+    var modeRow = isMulti ? `
+        <div id="alarmMode">
+            <label><input type="radio" name="mode" value="respect" checked onchange="onAlarmModeChanged()"> Keep each to-do's own schedule</label>
+            <label><input type="radio" name="mode" value="same" onchange="onAlarmModeChanged()"> Same date &amp; time for all</label>
+        </div>` : ''
     body.innerHTML = `
         <div id="alarmFields">
             <input id="alarmDate" placeholder="YYYY-MM-DD" oninput="onAlarmDateEdited()"
                 inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
             <input id="alarmTime" placeholder="HH:MM" oninput="onAlarmTimeEdited()"
                 inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+        <div id="alarmQuick">
+            <div class="alarm-quick-row">
+                <button type="button" onclick="onAlarmQuickToday()">Today</button>
+                <button type="button" onclick="onAlarmQuickTomorrow()">Tomorrow</button>
+                <button type="button" title="The nearest Saturday (today if today is Saturday)" onclick="onAlarmQuickWeekends()">Weekends</button>
+                <button type="button" title="The Monday after today" onclick="onAlarmQuickNextMonday()">Next Monday</button>
+            </div>
+            <div class="alarm-quick-row">
+                <button type="button" title="Add one hour (may cross midnight)" onclick="onAlarmQuickHour()">+hour</button>
+                <button type="button" title="Add one day" onclick="onAlarmQuickDay()">+day</button>
+                <button type="button" onclick="onAlarmQuickWeek()">+week</button>
+                <button type="button" title="Same weekday next month: the 2nd Sunday stays the 2nd Sunday" onclick="onAlarmQuickMonthWeekday()">+month(day)</button>
+                <button type="button" title="Same day-of-month next month: Jan 9 stays the 9th (Jan 31 clamps to the last day)" onclick="onAlarmQuickMonthDate()">+month(date)</button>
+            </div>
         </div>
         <div id="alarmBody">
             <div id="alarmCalendar"></div>
@@ -1547,21 +1713,25 @@ function openAlarmOverlay(ids, restore){
                 <div class="alarm-time-col" id="alarmMinuteCol"></div>
             </div>
         </div>
-        <div id="alarmQuick">
-            <button type="button" onclick="setAlarmDateOffset(0)">Today</button>
-            <button type="button" onclick="setAlarmDateOffset(1)">Tomorrow</button>
-            <button type="button" onclick="setAlarmDateOffset(7)">+1 week</button>
-            <button type="button" title="Same weekday next month: the 2nd Saturday stays the 2nd Saturday" onclick="setAlarmDateNextMonth()">+month</button>
-        </div>
+        ${modeRow}
+        ${explainRow}
     `
 
     if (restore){
-        // Reconstruct: restore the date/time the user had before the reload; skip the round-trip.
+        // Reconstruct: restore the date/time the user had before the reload, the preservedTime state (whether the
+        // shown time is kept or replaced by ceilHour on the next quick press), and the full plan model (mode, active
+        // plan, per-to-do dues) so the explanation and highlighted button come back exactly as they were.
         document.getElementById('alarmDate').value = String(restore.date || '')
         document.getElementById('alarmTime').value = String(restore.time || '')
+        alarmHadExistingAlarm = !!restore.hasAlarm
+        alarmTimeUserSet = !!restore.timeUserSet
+        alarmMode = restore.mode === 'same' ? 'same' : (restore.mode === 'respect' ? 'respect' : alarmMode)
+        alarmTodoDues = Array.isArray(restore.dues) ? restore.dues : []
         alarmCalendarAnchor = null
         renderAlarmCalendar()
         renderAlarmTimeColumns()
+        setAlarmActivePlan(restore.plan || 'anchor')
+        updateAlarmPlanDescription()
         pushOverlayState()
         return
     }
@@ -1572,6 +1742,8 @@ function openAlarmOverlay(ids, restore){
     alarmCalendarAnchor = null
     renderAlarmCalendar()
     renderAlarmTimeColumns()
+    setAlarmActivePlan('anchor')
+    updateAlarmPlanDescription()
 
     // Post the descriptor ONLY after the prefill resolves (below), not from the empty fields here: a reload
     // landing inside the sub-second prefill window would otherwise leave the host holding an empty-date/time
@@ -1586,9 +1758,13 @@ function openAlarmOverlay(ids, restore){
         if (!dateEl || !timeEl) return
         dateEl.value = String(init.date || '')
         timeEl.value = String(init.time || '')
+        // The first selected to-do already had an alarm -> keep its shown time on a quick press (preservedTime).
+        alarmHadExistingAlarm = !!init.hasAlarm
+        alarmTodoDues = Array.isArray(init.dues) ? init.dues : []
         alarmCalendarAnchor = null
         renderAlarmCalendar()
         renderAlarmTimeColumns()
+        updateAlarmPlanDescription()
         pushOverlayState()
     }).catch(function(){})
 }

@@ -486,14 +486,28 @@ export function notebookWithDescendants(notebooks, folderID){
     return ids
 }
 
-/** setTodoDueTimestamps ****************************************************************************************************************************
- * Sets the due date of each given to-do to the given timestamp, or removes it when the timestamp is 0. Used by the set alarm dialog, where the      *
- * user picks the exact moment.                                                                                                                     *
+/** getTodoDues *************************************************************************************************************************************
+ * The current due timestamp of each given to-do as { id, due } (due 0 when it has no alarm). The multi-select alarm plan needs every selected      *
+ * to-do's own current due, fetched fresh at OK time, to shift each from its own schedule.                                                          *
  ***************************************************************************************************************************************************/
-export async function setTodoDueTimestamps(todoIDs, timestamp){
+export async function getTodoDues(todoIDs){
+    var result = []
     for (var todoID of todoIDs){
+        countData('get')
+        var note = await joplin.data.get(['notes', todoID], { fields: ['todo_due'] })
+        result.push({ id: todoID, due: note.todo_due && note.todo_due > 0 ? note.todo_due : 0 })
+    }
+    return result
+}
+
+/** setTodoDuesPerId ********************************************************************************************************************************
+ * Writes a computed per-to-do due timestamp: applies [{ id, due }] entries, one PUT each (due 0 clears the alarm). This is how the multi-select     *
+ * alarm plan lands its result, where different to-dos receive different due times.                                                                 *
+ ***************************************************************************************************************************************************/
+export async function setTodoDuesPerId(entries){
+    for (var entry of entries){
         countData('put')
-        await joplin.data.put(['notes', todoID], null, { todo_due: timestamp })
+        await joplin.data.put(['notes', entry.id], null, { todo_due: entry.due })
     }
 }
 
