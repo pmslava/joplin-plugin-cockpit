@@ -456,9 +456,13 @@ async function eventHandler(message){
         return await getAlarmInitialFields(Array.isArray(message[1]) ? message[1] : [])
     } else if (message[0] == 'alarmSet'){
         // Result of the in-panel alarm overlay's OK: the anchor YYYY-MM-DD / HH:MM strings plus the chosen mode and
-        // active plan. The host validates the anchor and applies the plan through the shared applyAlarmPlan.
+        // active plan. The host validates the anchor and applies the plan through the shared applyAlarmPlan. The plan
+        // rides across as the row-2 accumulator OBJECT (or an absolute string); applyAlarmSet's engine accepts either,
+        // so forward it untouched - String()-coercing an object here would produce "[object Object]", which the plan
+        // normaliser can only read as the {str:'anchor'} fallback (dragging every dated to-do onto the anchor date).
         await applyAlarmSet(Array.isArray(message[1]) ? message[1] : [], String(message[2] || ""), String(message[3] || ""),
-            message[4] != null ? String(message[4]) : undefined, message[5] != null ? String(message[5]) : undefined)
+            message[4] != null ? String(message[4]) : undefined,
+            (message[5] != null && (typeof message[5] === "object" || typeof message[5] === "string")) ? message[5] : undefined)
     } else if (message[0] == 'alarmCleared'){
         // Result of the in-panel alarm overlay's "Clear alarm".
         await applyAlarmCleared(Array.isArray(message[1]) ? message[1] : [])

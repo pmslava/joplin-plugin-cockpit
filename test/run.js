@@ -1888,6 +1888,39 @@ async function main() {
         assert.strictEqual(planMap(todos, 'nextMonday', anchor, 'respect', now), 'a=2022-01-17 16:30  b=2022-01-17 08:15')
     })
 
+    // ============================================================ HOST GLUE: the mobile alarm overlay's alarmSet message
+    // Unlike the pure-function checks above, this drives the COMPILED bundle end to end. The overlay posts the row-2
+    // accumulator plan as a raw OBJECT (webviewApi.postMessage(['alarmSet', ids, date, time, mode, plan]) in
+    // panelWebview.js). The host's onMessage handler (panel.ts) must forward that object to applyAlarmSet untouched:
+    // String()-coercing it yields "[object Object]", which normalizePlan can only read as the {str:'anchor'} fallback,
+    // so under multi + respect every dated to-do is DRAGGED onto the anchor date instead of shifted from its own base.
+    const glueId1 = 'e'.repeat(32)
+    const glueId2 = 'f'.repeat(32)
+    const alarmGlueNotes = {
+        [glueId1]: { id: glueId1, title: 'Jan 9', todo_completed: 0, todo_due: dueAt(2022, 1, 9, 16, 30), parent_id: 'n'.repeat(32) },
+        [glueId2]: { id: glueId2, title: 'Jan 20', todo_completed: 0, todo_due: dueAt(2022, 1, 20, 8, 0), parent_id: 'n'.repeat(32) },
+    }
+    const alarmGlue = await run({
+        dataDir: path.join(tmp, 'alarm-glue-data'),
+        installationDir: path.join(tmp, 'alarm-glue-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: Object.values(alarmGlueNotes),
+        notes: alarmGlueNotes,
+    })
+    await test('host glue (mobile alarmSet): an OBJECT accumulator plan shifts each to-do from its OWN base, not onto the anchor date', async () => {
+        const putsBefore = alarmGlue.notePuts.length
+        // A +day press makes the overlay's live plan the accumulator {days:1}; the anchor fields read 2022-01-09 10:00.
+        // multi-select + respect: each DATED to-do must shift +1 day from its own datetime, NEVER be dragged onto Jan 9.
+        await alarmGlue.panelMessageHandler(['alarmSet', [glueId1, glueId2], '2022-01-09', '10:00', 'respect',
+            { hours: 0, days: 1, weeks: 0, monthsDay: 0, monthsDate: 0 }])
+        const duePuts = alarmGlue.notePuts.slice(putsBefore).filter(p => p.fields && Object.prototype.hasOwnProperty.call(p.fields, 'todo_due'))
+        const got = {}
+        for (const put of duePuts) got[put.id] = put.fields.todo_due
+        assert.strictEqual(got[glueId1], dueAt(2022, 1, 10, 16, 30), 'Jan 9 16:30 must shift to Jan 10 16:30 (own base +1 day), not stay on the anchor date')
+        assert.strictEqual(got[glueId2], dueAt(2022, 1, 21, 8, 0), 'Jan 20 08:00 must shift to Jan 21 08:00 (own base +1 day), not drag onto the anchor date')
+    })
+
     // Markup: the five labelled buttons + their handlers render in BOTH implementations - the desktop dialog HTML
     // template in alarm.ts and the mobile overlay builder in panelWebview.js - and the retired handlers are gone.
     // Read as source text: this harness renders the panel markup but never a native dialog or the overlay iframe,
