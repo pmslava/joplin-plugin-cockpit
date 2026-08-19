@@ -1743,6 +1743,62 @@ async function main() {
         assert.ok(row.includes(`class="todo-notebook" data-notebook-id="${rowFolder}"`), 'the notebook-pill zone markup changed')
     })
 
+    // ============================================================ cross-frame selection drag (desktop passthrough)
+    // The bug: drag-selecting text in Joplin's editor and dragging PAST the note edge INTO this panel froze the
+    // selection, because the panel is a separate same-origin iframe that swallows the drag's pointer events - so the
+    // editor (whose CodeMirror selection is driven by MAIN-window document listeners) stopped receiving them. The fix
+    // makes the panel's OWN iframe pointer-events:none for the duration of such a foreign MOUSE drag, so the drag
+    // falls back through to the main document and the selection keeps extending; the iframe is restored the instant
+    // the drag ends. The e2e spec proves the live behaviour in real Joplin; these checks pin the webview wiring -
+    // especially every ALWAYS-restore path - since this harness renders panel markup but never executes the webview JS.
+    await test('selection drag: begin/end passthrough toggles the panel iframe pointer-events (the restore invariant)', () => {
+        const begin = handlerBody('beginForeignSelectionDrag')
+        assert.ok(begin.includes("frame.style.pointerEvents = 'none'"), 'begin must make the iframe transparent to pointer events')
+        assert.ok(begin.includes('cockpitPanelIframe()'), 'begin must act on our own iframe')
+        const end = handlerBody('endForeignSelectionDrag')
+        assert.ok(/panelPointerIsDown = false/.test(end), 'end must clear the press-began-inside flag')
+        assert.ok(end.includes("frame.style.pointerEvents = ''"), 'end must RESTORE the iframe pointer-events (the always-restore invariant)')
+    })
+    await test('selection drag: our own iframe is reached via the same-origin parent (window.frameElement), guarded', () => {
+        const body = handlerBody('cockpitPanelIframe')
+        assert.ok(body.includes('window.frameElement'), 'the iframe must be found via window.frameElement (same-origin parent access)')
+        assert.ok(/catch/.test(body), 'parent access must be guarded so a cross-origin host disables the affordance rather than throwing')
+    })
+    await test('selection drag: the probe is desktop + mouse + primary-button, and skips a press that began inside', () => {
+        const body = handlerBody('onPanelSelectionDragProbe')
+        assert.ok(body.includes('IS_MOBILE'), 'the probe must be desktop-only (gated on IS_MOBILE)')
+        assert.ok(body.includes("pointerType !== 'mouse'"), 'the probe must be mouse-only (gated on the pointer type)')
+        assert.ok(/event\.buttons & 1/.test(body), 'the probe must require the primary button to be held')
+        assert.ok(body.includes('panelPointerIsDown'), 'a drag that began inside the panel must be left alone')
+        assert.ok(body.includes('beginForeignSelectionDrag()'), 'a foreign primary-button drag must engage the passthrough')
+        assert.ok(body.includes('endForeignSelectionDrag()'), 'a probe with the button released must safety-restore')
+    })
+    await test('selection drag: pointerdown records a press begun inside; pointercancel does NOT clear it', () => {
+        assert.ok(webviewSource.includes("if (event.pointerType === 'mouse') panelPointerIsDown = true"),
+            'a mouse pointerdown inside the panel must record the press origin')
+        assert.ok(webviewSource.includes("document.addEventListener('pointerup', endForeignSelectionDrag, true)"),
+            'a real button release must restore the iframe and clear the flag')
+        assert.ok(!/addEventListener\('pointercancel', endForeignSelectionDrag/.test(webviewSource),
+            'pointercancel must NOT clear the origin flag - the button is still held when a native row drag takes over')
+        assert.ok(webviewSource.includes("document.addEventListener('pointerover', onPanelSelectionDragProbe, true)") &&
+                  webviewSource.includes("document.addEventListener('pointermove', onPanelSelectionDragProbe, true)"),
+            'the probe must run on pointerover and pointermove')
+    })
+    await test('selection drag: the parent window ALWAYS restores on every end-of-drag route', () => {
+        // The passthrough hands the live drag to the parent document, so its END fires there - restore from all of them.
+        assert.ok(/window\.parent/.test(webviewSource), 'the restore must be wired on the parent window')
+        for (const evt of ['mouseup', 'pointerup', 'dragend', 'blur']){
+            assert.ok(webviewSource.includes(`parentWindow.addEventListener('${evt}', endForeignSelectionDrag, true)`),
+                `the parent-window always-restore must cover ${evt}`)
+        }
+    })
+    await test('selection drag: a re-render repairs an orphaned passthrough but never disturbs an active one', () => {
+        const body = handlerBody('reconcile')
+        assert.ok(body.includes('!foreignSelectionDragActive'), 'the re-render repair must be guarded on the drag NOT being active')
+        assert.ok(/reconcileFrame\.style\.pointerEvents === 'none'/.test(body) && /reconcileFrame\.style\.pointerEvents = ''/.test(body),
+            'a re-render must clear a stuck pointer-events:none so the panel can never stay dead to input')
+    })
+
     // ============================================================ alarm quick buttons (shared pure math)
     // The five quick buttons (Today, Tomorrow, +week, +month(day), +month(date)) compute their date/time entirely
     // in this shared, deterministic module - the SAME one both the desktop dialog (alarmWebview.js) and the mobile
