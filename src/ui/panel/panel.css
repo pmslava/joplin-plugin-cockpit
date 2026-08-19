@@ -963,6 +963,15 @@ table {
     font-size: 0.9em;
 }
 
+/* The deep last-resort tier's heading ("Results in excluded notebooks"). It reuses the sticky group
+ * <h2> like the ordinary peek heading, then tones itself down with the same faded colour and a lighter
+ * weight the muted message lines already use, so it reads as an intentional, softer deeper tier rather
+ * than a peer of the primary "outside current filters" heading. Theme variables only, no @media. */
+.outside-results-heading.-excluded {
+    color: var(--cockpit-color-faded, #999999);
+    font-weight: normal;
+}
+
 /* The planner becomes a multi column board when the panel is wide enough, with no media queries */
 .week-planner {
     display: grid;

@@ -1604,6 +1604,129 @@ async function main() {
             'the peek query carries the server-side negation of the excluded title')
     })
 
+    // ------------------------------------------------ deep last-resort tier: results in excluded notebooks
+    // The user's problem: a note lives in an EXCLUDED notebook, so the ordinary peek (which respects the
+    // exclusion) finds nothing, and the panel used to declare "No matches ... anywhere." - a lie, since the note
+    // was merely hidden by the exclusion. The deep tier runs ONE more verbatim search that ignores the exclusion,
+    // so explicit name-hunting can still reach the note, under a muted "Results in excluded notebooks" heading. It
+    // appears ONLY when the ordinary peek is empty, so the exclusion stays meaningful everywhere else.
+    const countTypeless = (s) => s.gets.filter(g => g.path[0] === 'search' && g.query &&
+        !String(g.query.query || '').includes('type:todo') && !String(g.query.query || '').includes('type:note')).length
+    const archiveNb = 'ar'.repeat(16), keptNb = 'kp'.repeat(16)
+    const deepFolders = [
+        { id: archiveNb, title: 'Archive', parent_id: '', updated_time: 1 },   // excluded (unique title -> a server clause)
+        { id: keptNb, title: 'Projects', parent_id: '', updated_time: 2 },       // a kept notebook, offered as a filter
+    ]
+    // The harness serves this same array to BOTH type-less searches: the ordinary peek drops it via the client
+    // id-filter (its parent is the excluded Archive) and so comes out empty, while the deep tier keeps it - exactly
+    // the real split between the two searches. Tags Map is a REGULAR note (is_todo:0), so it must render as a note row.
+    const tmId = 'tm'.repeat(16)
+    const tagsMapNote = [{ id: tmId, title: 'Tags Map', is_todo: 0, todo_completed: 0, parent_id: archiveNb, user_updated_time: 5 }]
+    const assertDeepTier = (html, where) => {
+        // Zero regular-peek rows: the ordinary "outside current filters" section never appears.
+        assert.ok(!html.includes('Results outside current filters'), 'the ordinary peek section must be absent (' + where + ')')
+        // The deep tier is present, counted, and carries the note.
+        assert.ok(html.includes('Results in excluded notebooks (1)'), 'the excluded-notebooks tier is missing (' + where + ')')
+        assert.ok(html.includes('Tags Map'), 'the excluded note is not rendered in the tier (' + where + ')')
+        // Rendered as a note row (a regular note, not a to-do), openable, its pill naming the excluded notebook.
+        assert.ok(html.includes('data-note-id="' + tmId + '"'), 'the excluded note should render as a note row (' + where + ')')
+        assert.ok(!html.includes('data-todo-id="' + tmId + '"'), 'the excluded note must not be given a to-do row (' + where + ')')
+        assert.ok(html.includes('onNoteRowClicked('), 'the tier row must carry the open handler - opening it is the point (' + where + ')')
+        assert.ok(/class="todo-notebook"[^>]*>Archive</.test(html), 'the tier row pill must name the excluded notebook (' + where + ')')
+        // Read-only: with todos:[] the tier's note is the only row, so no drag/select handler may appear at all.
+        assert.ok(!html.includes('draggable="true"'), 'the tier row must not be draggable (' + where + ')')
+        assert.ok(!html.includes('onNoteRowMouseDown('), 'the tier row must not be selectable (' + where + ')')
+        // The message is truthful now: the false "anywhere" line is gone, replaced by the in-filters line.
+        assert.ok(!html.includes('anywhere'), 'the false "anywhere" line must be gone once the tier has hits (' + where + ')')
+        assert.ok(html.includes('Nothing in current filters matches "title:&quot;Tags Map&quot;".'), 'the in-filters line should head the tier (' + where + ')')
+    }
+
+    await test('deep tier: an excluded note is found by an explicit quoted-phrase search (All notebooks)', async () => {
+        const state = await runOutside({ outsideResults: tagsMapNote, folders: deepFolders })
+        await state.setSetting('excludedNotebooks', 'Archive')
+        const before = countTypeless(state)
+        await state.panelMessageHandler(['searchFilterChanged', 'title:"Tags Map"'])
+        const html = state.panelHtml['panel-panel']
+        // Zero regular results: with todos:[] the filtered view is empty (the tier's note is a note row, not a to-do row).
+        assert.strictEqual((html.match(/data-todo-id=/g) || []).length, 0, 'the filtered to-do view is empty')
+        assertDeepTier(html, 'All notebooks')
+        // The quoted phrase reached the deep search verbatim - quotes intact, no exclusion clause bolted on - which
+        // also proves a quoted phrase traverses the whole peek pipeline unmangled.
+        const newSearches = state.gets.filter(g => g.path[0] === 'search' && g.query &&
+            !String(g.query.query || '').includes('type:todo') && !String(g.query.query || '').includes('type:note')).slice(before)
+        const deepOnes = newSearches.filter(g => !String(g.query.query).includes('-notebook:'))
+        assert.strictEqual(deepOnes.length, 1, 'exactly one deep-tier search ran (verbatim, no exclusion clause)')
+        assert.strictEqual(String(deepOnes[0].query.query), 'title:"Tags Map"', 'the deep tier searched the verbatim quoted phrase')
+    })
+
+    await test('deep tier: the same excluded note is found under a different notebook filter too', async () => {
+        const state = await runOutside({ outsideResults: tagsMapNote, folders: deepFolders })
+        await state.setSetting('excludedNotebooks', 'Archive')
+        await state.panelMessageHandler(['notebookFilterChanged', keptNb])   // narrow to a kept notebook
+        await state.panelMessageHandler(['searchFilterChanged', 'title:"Tags Map"'])
+        assertDeepTier(state.panelHtml['panel-panel'], 'notebook filter = Projects')
+    })
+
+    await test('deep tier: absent when the ordinary peek already has results (no second search)', async () => {
+        // outsideResults live in a kept notebook and no exclusion is set, so the ordinary peek is non-empty.
+        const state = await runOutside({ outsideResults })
+        const before = countTypeless(state)
+        await state.panelMessageHandler(['searchFilterChanged', 'milk'])
+        const html = state.panelHtml['panel-panel']
+        assert.ok(html.includes('Results outside current filters'), 'the ordinary peek should show its results')
+        assert.ok(!html.includes('Results in excluded notebooks'), 'the deep tier must not appear when the peek has rows')
+        assert.strictEqual(countTypeless(state) - before, 1, 'no second (deep) search runs when the peek already had results')
+    })
+
+    await test('deep tier: absent when the search box is empty', async () => {
+        const state = await runOutside({ outsideResults: tagsMapNote, folders: deepFolders })
+        await state.setSetting('excludedNotebooks', 'Archive')
+        // No searchFilterChanged: the box is empty, so neither the peek nor the deep tier runs.
+        const html = state.panelHtml['panel-panel']
+        assert.ok(!html.includes('Results in excluded notebooks'), 'the deep tier must not appear without search text')
+        assert.ok(!html.includes('outside-results'), 'no peek/tier section at all without search text')
+    })
+
+    await test('deep tier: both searches empty shows the truthful "anywhere" line and no tier section', async () => {
+        // An exclusion IS set, so the deep tier genuinely runs its extra search; it just finds nothing either.
+        const state = await runOutside({ outsideResults: [], folders: deepFolders })
+        await state.setSetting('excludedNotebooks', 'Archive')
+        const before = countTypeless(state)
+        await state.panelMessageHandler(['searchFilterChanged', 'ghostnote'])
+        const html = state.panelHtml['panel-panel']
+        assert.ok(html.includes('No matches for "ghostnote" anywhere.'), 'the truthful anywhere line should show when both tiers are empty')
+        assert.ok(!html.includes('Results in excluded notebooks'), 'no excluded-tier section when the deep search is also empty')
+        assert.ok(!html.includes('Results outside current filters'), 'no ordinary peek section when it is empty')
+        assert.strictEqual(countTypeless(state) - before, 2, 'the empty peek is followed by exactly one deep search before the anywhere line')
+    })
+
+    await test('deep tier: exactly one extra search, and a cache-hit re-render adds none', async () => {
+        const exNb = 'ex'.repeat(16), keepNb = 'ke'.repeat(16)
+        const folders = [
+            { id: exNb, title: 'Archive', parent_id: '', updated_time: 1 },
+            { id: keepNb, title: 'Projects', parent_id: '', updated_time: 2 },
+        ]
+        // A to-do (not a note) in the excluded notebook, so it can be ticked to drive an optimistic repaint.
+        const hiddenId = 'hd'.repeat(16)
+        const hidden = [{ id: hiddenId, title: 'Hidden Task', is_todo: 1, todo_completed: 0, parent_id: exNb, user_updated_time: 3 }]
+        const state = await runOutside({ outsideResults: hidden, folders })
+        await state.setSetting('excludedNotebooks', 'Archive')
+        const before = countTypeless(state)
+        await state.panelMessageHandler(['searchFilterChanged', 'hidden'])
+        const newSearches = state.gets.filter(g => g.path[0] === 'search' && g.query &&
+            !String(g.query.query || '').includes('type:todo') && !String(g.query.query || '').includes('type:note')).slice(before)
+        // Two type-less searches: the peek (carrying the -notebook: exclusion clause) and exactly ONE deep tier
+        // search (verbatim, no clause).
+        assert.strictEqual(newSearches.length, 2, 'the committed search runs the peek plus exactly one deep search')
+        assert.strictEqual(newSearches.filter(g => !String(g.query.query).includes('-notebook:')).length, 1, 'exactly one of them is the deep tier (no exclusion clause)')
+        assert.ok(state.panelHtml['panel-panel'].includes('Results in excluded notebooks (1)'), 'precondition: the tier is shown')
+        // A cache-hit re-render: ticking the tier to-do drives an optimistic repaint that must reuse BOTH the peek
+        // and the deep-tier caches, adding zero searches.
+        const mark = countTypeless(state)
+        await state.panelMessageHandler(['todoChecked', hiddenId, true])
+        assert.strictEqual(countTypeless(state), mark, 'the optimistic repaint re-renders the peek+tier from cache, issuing no search')
+    })
+
     // ============================================================ row-wide click-to-open (dead-zone opens the item)
     // The bug: a left click on a row's dead zone (its padding, the gap beside a short title, the strip below a
     // short title) SELECTED the row but opened nothing, because opening was gated on the todo-title zone alone.

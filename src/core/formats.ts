@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getTodos, getNotes, getNotebookMap, notebookWithDescendants, searchOutsideFilters } from "./joplin";
+import { getTodos, getNotes, getNotebookMap, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks } from "./joplin";
 import { viewKeyFor } from "./optimistic";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
@@ -818,52 +818,21 @@ export async function renderNotesSection(profile, viewState){
     `
 }
 
-/** renderOutsideResultsSection *********************************************************************************************************************
- * The read-only "results outside current filters" peek, composed server side in the panel render path. It is only ever called when the search box has *
- * text AND the fully-filtered view came out empty (the caller decides that; see refreshPanelData), so reaching here means running one unfiltered      *
- * search (searchOutsideFilters) with the user's text verbatim and laying its hits out as a FLAT list - no due-date grouping. Each hit is drawn in its   *
- * own kind: a to-do as a to-do row, a regular note (is_todo falsy) as a note row with the display-only progress circle and no tickable checkbox, so a   *
- * non-to-do is never given a to-do's checkbox or completion menu. Selection and dragging are suppressed so a peeked row cannot be dragged onto a date   *
- * or leak into a later selection. The search text is user input, so it is                                                                               *
- * escaped everywhere it is interpolated. Nothing here writes a setting, a profile or the notebook picker: it is a pure read.                           *
- *   - No hits anywhere: a single muted line and nothing else.                                                                                          *
- *   - Hits: a "nothing matched in your filters" line, a group-style heading with the count, up to 15 rows, and a "…and N more" footer when there were  *
- *     more (N gets a trailing "+" when the API reported still more beyond the 50 fetched).                                                              *
+/** renderPeekRows **********************************************************************************************************************************
+ * The row body shared by the ordinary peek and its deep last-resort tier: the notebook pill needs notebookTitle/notebookPath, attached here the same   *
+ * way fetchTodos / renderNotesSection do, then the first 15 hits are drawn in the API's order and anything beyond is summarised in a "…and N more"       *
+ * footer (N gets a trailing "+" when the API reported still more beyond the 50 fetched). Each hit is drawn in its own kind: a to-do as a to-do row       *
+ * (draggable:false keeps it from being a drag-reschedule source, and it carries no drop target either), and a regular note (is_todo falsy) as a note     *
+ * row - the display-only progress circle the panel's Notes section uses, with no tickable checkbox and no to-do-completion menu, so ticking a non-to-do  *
+ * is impossible. Both are read-only: selection is suppressed the same way for both. Click-to-open and the notebook pill carry over from the shared row   *
+ * markup. Returns { rows, footer } so the caller can wrap them under whichever heading the tier calls for.                                              *
  ***************************************************************************************************************************************************/
-export async function renderOutsideResultsSection(profile, viewState, searchText){
-    var fast = viewState ? !!viewState.fastCheckboxCounts : false
-    // Mirror getTodos/getNotes: reuse the query-keyed peek cache on the optimistic / fill re-renders so the
-    // fast-paint -> fill -> optimistic sequence of one refresh costs a single outside search. The peek lays
-    // its hits out as a flat capped list (no viewport grouping), so its bodies are fetched in list order and
-    // it passes no priorityStart bias.
-    var useCache = viewState ? !!viewState.optimistic : false
-    var fillCounts = viewState ? !!viewState.fillCounts : false
-    var found = await searchOutsideFilters(searchText, fast, useCache, { fillCounts: fillCounts, priorityStart: 0 })
-    var items = found.items || []
-    var escaped = escapeHtml(searchText)
-    // No hits anywhere: a single muted line, matching the panel's plain-spoken voice, and nothing else.
-    if (!items.length){
-        return `
-        <section class="outside-results">
-            <p class="outside-results-message">No matches for "${escaped}" anywhere.</p>
-        </section>
-    `
-    }
-    // The rows reuse renderTodoRowHtml / renderNoteRowHtml, which read notebookTitle/notebookPath for the pill,
-    // so attach the notebook the same way fetchTodos / renderNotesSection do.
-    var notebooks = await getNotebookMap()
+function renderPeekRows(items, hasMore, notebooks, mobile){
     for (var item of items){
         var notebook = notebooks.get(item.parent_id)
         item.notebookTitle = notebook ? notebook.title : ""
         item.notebookPath = notebook ? notebook.path : ""
     }
-    var mobile = !!(viewState && viewState.isMobile)
-    // Display the first 15 in the API's order; anything beyond is summarised in the footer. Each hit is drawn in
-    // its own kind: a to-do as a to-do row (draggable:false keeps it from being a drag-reschedule source, and it
-    // carries no drop target either), and a regular note (is_todo falsy) as a note row - the display-only progress
-    // circle the panel's Notes section uses, with no tickable checkbox and no to-do-completion menu, so ticking a
-    // non-to-do is impossible here. Both are read-only: selection is suppressed the same way it is for the peek's
-    // to-do rows. Click-to-open and the notebook pill carry over from the shared row markup in both cases.
     var shown = items.slice(0, 15)
     var rows = shown.map(item => item.is_todo
         ? renderTodoRowHtml(item, item.title, { mobile: mobile, draggable: false })
@@ -872,14 +841,71 @@ export async function renderOutsideResultsSection(profile, viewState, searchText
     var footer = ""
     if (items.length > shown.length){
         var moreCount = items.length - shown.length
-        footer = `<p class="outside-results-message">…and ${moreCount}${found.hasMore ? "+" : ""} more matches</p>`
+        footer = `<p class="outside-results-message">…and ${moreCount}${hasMore ? "+" : ""} more matches</p>`
     }
+    return { rows: rows, footer: footer }
+}
+
+/** renderOutsideResultsSection *********************************************************************************************************************
+ * The read-only peek shown below an empty filtered view, composed server side in the panel render path. It is only ever called when the search box has *
+ * text AND the fully-filtered view came out empty (the caller decides that; see refreshPanelData), and it lays its hits out as a FLAT list - no         *
+ * due-date grouping. The search text is user input, so it is escaped everywhere it is interpolated. Nothing here writes a setting, a profile or the      *
+ * notebook picker: it is a pure read. It resolves a three-tier cascade, running at most one extra search per tier only until one produces rows:         *
+ *   1. Results outside current filters - one unfiltered search (searchOutsideFilters) that lifts the profile's filters but STILL respects the Excluded-  *
+ *      notebooks boundary. Any hits: a "nothing matched in your filters" line, a group-style heading with the count, up to 15 rows, and a footer.        *
+ *   2. Results in excluded notebooks - only when tier 1 came out empty, ONE more verbatim search (searchExcludedNotebooks) that does NOT respect the     *
+ *      exclusion, so a note deliberately hidden in an excluded notebook can still be found by explicit name-hunting. Because tier 1 was empty, every hit *
+ *      here lives in an excluded notebook, so it is headed as such (a muted deeper tier) below the same "nothing matched in your filters" line.          *
+ *   3. Nothing anywhere - only when BOTH searches came up empty is the "No matches ... anywhere." line shown, and only then is it truthful.              *
+ ***************************************************************************************************************************************************/
+export async function renderOutsideResultsSection(profile, viewState, searchText){
+    var fast = viewState ? !!viewState.fastCheckboxCounts : false
+    // Mirror getTodos/getNotes: reuse the query-keyed caches on the optimistic / fill re-renders so the
+    // fast-paint -> fill -> optimistic sequence of one refresh costs a single search per tier. Both tiers lay
+    // their hits out as a flat capped list (no viewport grouping), so bodies are fetched in list order (no
+    // priorityStart bias).
+    var useCache = viewState ? !!viewState.optimistic : false
+    var fillCounts = viewState ? !!viewState.fillCounts : false
+    var searchOpts = { fillCounts: fillCounts, priorityStart: 0 }
+    var escaped = escapeHtml(searchText)
+    var mobile = !!(viewState && viewState.isMobile)
+    var nothingHereLine = `<p class="outside-results-message">Nothing in current filters matches "${escaped}".</p>`
+
+    // Tier 1: the ordinary peek (profile filters lifted, exclusions respected).
+    var found = await searchOutsideFilters(searchText, fast, useCache, searchOpts)
+    var items = found.items || []
+    if (items.length){
+        var peek = renderPeekRows(items, found.hasMore, await getNotebookMap(), mobile)
+        return `
+        <section class="outside-results">
+            ${nothingHereLine}
+            <h2 class="outside-results-heading">Results outside current filters (${items.length})</h2>
+            ${peek.rows}
+            ${peek.footer}
+        </section>
+    `
+    }
+
+    // Tier 2: the deep last-resort tier (exclusions NOT respected), reached ONLY because tier 1 was empty, so
+    // this is the single extra search the cascade allows and every hit necessarily lives in an excluded notebook.
+    var deep = await searchExcludedNotebooks(searchText, fast, useCache, searchOpts)
+    var deepItems = deep.items || []
+    if (deepItems.length){
+        var deepRows = renderPeekRows(deepItems, deep.hasMore, await getNotebookMap(), mobile)
+        return `
+        <section class="outside-results">
+            ${nothingHereLine}
+            <h2 class="outside-results-heading -excluded">Results in excluded notebooks (${deepItems.length})</h2>
+            ${deepRows.rows}
+            ${deepRows.footer}
+        </section>
+    `
+    }
+
+    // Tier 3: nothing in either search - now the "anywhere" line is the whole truth.
     return `
         <section class="outside-results">
-            <p class="outside-results-message">Nothing in current filters matches "${escaped}".</p>
-            <h2 class="outside-results-heading">Results outside current filters (${items.length})</h2>
-            ${rows}
-            ${footer}
+            <p class="outside-results-message">No matches for "${escaped}" anywhere.</p>
         </section>
     `
 }

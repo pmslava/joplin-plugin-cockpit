@@ -55,6 +55,11 @@ var notesResultCache = new Map()
 // refresh reuses a single outside search instead of issuing one per render; a primary (committed) search
 // always refreshes the entry. Each entry keeps hasMore too, since it drives the peek's "+more" footer.
 var peekResultCache = new Map()
+// The deep last-resort tier's search (searchExcludedNotebooks), keyed by the verbatim search text, cached the
+// same way as the peek so the fast-paint -> fill -> optimistic sequence of one refresh re-uses a single deep
+// search instead of one per render. Separate from peekResultCache because the two run DIFFERENT queries for the
+// same text (the peek appends the exclusion clauses, the deep tier does not), so a shared key would collide.
+var excludedResultCache = new Map()
 
 /** invalidateResultCaches **************************************************************************************************************************
  * Drops every cached search result. Called when a change makes the cached sets wrong for a reason other than a fresh search of their own query - the    *
@@ -65,6 +70,7 @@ export function invalidateResultCaches(){
     todosResultCache = new Map()
     notesResultCache = new Map()
     peekResultCache = new Map()
+    excludedResultCache = new Map()
 }
 
 function cloneItems(items){
@@ -83,6 +89,13 @@ function cachePeek(query, items, hasMore){
     if (peekResultCache.has(query)) peekResultCache.delete(query)
     peekResultCache.set(query, { items: cloneItems(items), hasMore: hasMore })
     while (peekResultCache.size > resultCacheCap) peekResultCache.delete(peekResultCache.keys().next().value)
+}
+
+// The deep last-resort tier's equivalent of cachePeek, in its own map (see excludedResultCache above).
+function cacheExcluded(query, items, hasMore){
+    if (excludedResultCache.has(query)) excludedResultCache.delete(query)
+    excludedResultCache.set(query, { items: cloneItems(items), hasMore: hasMore })
+    while (excludedResultCache.size > resultCacheCap) excludedResultCache.delete(excludedResultCache.keys().next().value)
 }
 
 /** getTodos ****************************************************************************************************************************************
@@ -319,6 +332,58 @@ export async function searchOutsideFilters(searchText, fast?, useCache?, opts?){
         items = filterExcluded(items, excluded.set)
         await attachCheckboxCounts(items, fast, priorityStart)
         cachePeek(query, items, hasMore)
+    }
+    return { items: items, hasMore: hasMore }
+}
+
+/** searchExcludedNotebooks *************************************************************************************************************************
+ * The deep, last-resort tier below the peek. It runs the user's search text VERBATIM with NEITHER the exclusion boundary the peek applies: no server-  *
+ * side "-notebook:" clauses AND no client-side id filter - so it reaches into the excluded notebooks the peek deliberately skips. It exists only to     *
+ * answer explicit name-hunting ("where is my note called X?") when everything else came up empty, so the caller runs it in ONE narrow cascade only:     *
+ * committed search text -> zero in-filter rows -> zero peek rows (searchOutsideFilters, exclusions respected). Because that peek came out empty, no KEPT *
+ * notebook's note matched the text (the peek's clauses/filter only ever drop excluded content), so every hit this returns necessarily lives in an       *
+ * excluded notebook - which is what lets the caller head the section "Results in excluded notebooks" without re-filtering.                              *
+ *                                                                                                                                                       *
+ * Like searchOutsideFilters this is a pure read that consults no optimistic overlay, fetches one page capped at 50 with has_more surfaced for the        *
+ * "+more" footer, fills checkbox rings from cache (skipped under fast), and reuses a query-keyed cache (its own map, cleared alongside the others by     *
+ * invalidateResultCaches) on the optimistic / fill re-renders so the fast-paint -> fill -> optimistic sequence of one refresh costs ONE deep search.     *
+ ***************************************************************************************************************************************************/
+export async function searchExcludedNotebooks(searchText, fast?, useCache?, opts?){
+    // When nothing is excluded, the ordinary peek already searched the WHOLE vault (no clauses, no client
+    // filter), so its coming out empty means there is genuinely nothing to find and this tier would only re-run
+    // the identical search. Short-circuit to empty so the cascade's one extra search is spent ONLY when an
+    // exclusion is actually hiding something. A pure setting read, and no cache entry is written (there is no
+    // result to cache), so a later exclusion being switched on is honoured at once.
+    var excludedIds = parseExcludedIds(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY))
+    if (!excludedIds.length) return { items: [], hasMore: false }
+    // Verbatim text, no exclusion clauses - the whole point is to see past the exclusion the peek honours.
+    var query = String(searchText || "")
+    var fillCounts = !!(opts && opts.fillCounts)
+    var priorityStart = (opts && opts.priorityStart) || 0
+    var items
+    var hasMore
+    if ((useCache || fillCounts) && excludedResultCache.has(query)){
+        // Optimistic / fill re-render: reuse the deep search already run for this text this refresh.
+        var cached = excludedResultCache.get(query)
+        items = cloneItems(cached.items)
+        hasMore = cached.hasMore
+        if (fillCounts){
+            await attachCheckboxCounts(items, false, priorityStart)
+            cacheExcluded(query, items, hasMore)
+        }
+    } else {
+        var response = await joplin.data.get(['search'], {
+            query: query,
+            fields: ['id', 'title', 'is_todo', 'todo_completed', 'parent_id', 'user_updated_time'],
+            type: 'note',
+            limit: 50,
+            page: 1,
+        })
+        items = response.items || []
+        hasMore = !!response.has_more
+        // No filterExcluded here (unlike the peek): the excluded rows are exactly what this tier exists to surface.
+        await attachCheckboxCounts(items, fast, priorityStart)
+        cacheExcluded(query, items, hasMore)
     }
     return { items: items, hasMore: hasMore }
 }
