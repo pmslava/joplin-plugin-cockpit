@@ -42,10 +42,6 @@ const dialogCss = `
     #joplin-plugin-content.cockpit-mobile {
         width: calc(100vw - 16px);
     }
-    /* Use the full narrow width rather than capping at 400px */
-    .cockpit-mobile #alarmForm {
-        max-width: none;
-    }
     /* Calendar on top, the hour/minute columns below it */
     .cockpit-mobile #alarmBody {
         flex-direction: column;
@@ -66,14 +62,20 @@ const dialogCss = `
         gap: 10px;
         padding: 6px 4px;
         width: 100%;
-        max-width: 400px;
         box-sizing: border-box;
         font-size: var(--joplin-font-size, 13px);
     }
+    /* The row holding the calendar (always left) and the two time columns (always right). flex-wrap: nowrap
+     * keeps them side by side under ANY width, including Joplin's ~200px fit-to-content measurement pass, so
+     * they never stack. align-items: stretch is the whole mechanism for fix 1: the time panel (whose columns
+     * carry no intrinsic height - see .alarm-time-col) stretches to exactly the calendar's rendered height,
+     * whatever that is, with no fixed pixel height and no measurement. */
     #alarmBody {
         display: flex;
         flex-direction: row;
+        flex-wrap: nowrap;
         gap: 10px;
+        align-items: stretch;
     }
     #alarmFields {
         display: flex;
@@ -97,7 +99,7 @@ const dialogCss = `
     #alarmTime { width: 70px; }
     #alarmCalendar {
         flex: 1 1 auto;
-        min-height: 245px;
+        min-width: 0;
     }
     #alarmTimePanel {
         display: flex;
@@ -105,14 +107,23 @@ const dialogCss = `
         gap: 4px;
         flex-shrink: 0;
     }
+    /* Height-constraint wrapper (fix 1): it has no height of its own and its only child, the scroller, is
+     * taken out of flow (position: absolute), so the column contributes nothing to #alarmBody's height. In
+     * the align-items: stretch row it therefore stretches to the calendar's rendered height, and the absolute
+     * scroller fills it via inset: 0 - so the hour/minute lists end exactly at the calendar's bottom edge for
+     * a 5-week or a 6-week month alike. The internal scrolling is unchanged; it just lives on the scroller. */
     .alarm-time-col {
+        position: relative;
         width: 46px;
-        height: 245px;
+    }
+    .alarm-time-scroll {
+        position: absolute;
+        inset: 0;
         overflow-y: auto;
     }
-    .alarm-time-col::-webkit-scrollbar { width: 5px; }
-    .alarm-time-col::-webkit-scrollbar-track { background: transparent; }
-    .alarm-time-col::-webkit-scrollbar-thumb {
+    .alarm-time-scroll::-webkit-scrollbar { width: 5px; }
+    .alarm-time-scroll::-webkit-scrollbar-track { background: transparent; }
+    .alarm-time-scroll::-webkit-scrollbar-thumb {
         border-radius: 3px;
         background: var(--joplin-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
     }
@@ -256,11 +267,11 @@ export async function openAlarmDialog(todoIDs){
                 <input name="time" id="alarmTime" placeholder="HH:MM" value="${initialTime}" oninput="onAlarmTimeEdited()"
                     inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
             </div>
-            <div id="alarmBody">
+            <div id="alarmBody" class="alarm-stretch-row">
                 <div id="alarmCalendar"></div>
                 <div id="alarmTimePanel">
-                    <div class="alarm-time-col" id="alarmHourCol"></div>
-                    <div class="alarm-time-col" id="alarmMinuteCol"></div>
+                    <div class="alarm-time-col"><div class="alarm-time-scroll" id="alarmHourCol"></div></div>
+                    <div class="alarm-time-col"><div class="alarm-time-scroll" id="alarmMinuteCol"></div></div>
                 </div>
             </div>
             ${hadAlarm ? '<div id="alarmHadAlarm" hidden></div>' : ''}

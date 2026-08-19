@@ -1662,6 +1662,36 @@ async function main() {
         for (const handler of QUICK_HANDLERS) assert.ok(src.includes(handler), 'desktop dialog missing quick handler ' + handler)
         assert.ok(!src.includes('setAlarmDateOffset') && !src.includes('setAlarmDateNextMonth'), 'the old quick-button handlers must be gone from the desktop dialog')
     })
+    // Layout structure (owner UI polish, desktop dialog): pin the NEW markup+CSS shape so the two fixes can't
+    // silently regress. Layout correctness itself (columns end at the calendar's bottom, buttons fill the row)
+    // is verified visually by the owner; here we only assert the mechanism is present, reading alarm.ts as text.
+    await test('alarm dialog layout: columns stretch to the calendar and the quick row is a full-width sibling', () => {
+        const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'alarm', 'alarm.ts'), 'utf8')
+        // Fix 1 - the calendar+columns row is an explicit non-wrapping stretch container...
+        assert.ok(src.includes('class="alarm-stretch-row"'), 'the calendar+columns row is missing its stretch-container class')
+        assert.ok(/#alarmBody\s*{[^}]*flex-wrap:\s*nowrap/.test(src), 'the row must never wrap: calendar left, time columns right, side by side under any width')
+        assert.ok(/#alarmBody\s*{[^}]*align-items:\s*stretch/.test(src), 'the row must stretch its children to the calendar height')
+        // ...the calendar carries no fixed height the columns could overshoot...
+        assert.ok(!/#alarmCalendar\s*{[^}]*min-height/.test(src), 'the calendar must not carry a fixed min-height (columns must follow its rendered height)')
+        // ...and each column is a relative height-constraint wrapper around an absolutely-positioned scroller.
+        assert.ok(/\.alarm-time-col\s*{[^}]*position:\s*relative/.test(src), 'the time column must be the relative height-constraint wrapper')
+        assert.ok(!/\.alarm-time-col\s*{[^}]*height:/.test(src.replace(/\.cockpit-mobile[^}]*}/g, '')), 'the desktop time column must not carry a fixed pixel height')
+        assert.ok(/\.alarm-time-scroll\s*{[^}]*position:\s*absolute/.test(src) && /\.alarm-time-scroll\s*{[^}]*overflow-y:\s*auto/.test(src), 'the scroller must be an absolutely-positioned overflow area filling the column')
+        assert.ok(src.includes('class="alarm-time-scroll" id="alarmHourCol"') && src.includes('class="alarm-time-scroll" id="alarmMinuteCol"'), 'the hour/minute scrollers must keep their ids so the webview still populates and scrolls them')
+        // Fix 2 - the quick-button row is a sibling AFTER the calendar+columns container, not nested inside it.
+        const bodyOpen = src.indexOf('id="alarmBody"')
+        const quick = src.indexOf('id="alarmQuick"')
+        assert.ok(bodyOpen >= 0 && src.indexOf('id="alarmTimePanel"') > bodyOpen && quick > bodyOpen, 'the quick-button row must come after the calendar+columns row')
+        // Walk div depth from the alarmBody tag to its matching close; the quick row must begin after it.
+        let depth = 1, bodyEnd = -1
+        const tagRe = /<\/?div\b/g
+        tagRe.lastIndex = src.indexOf('>', bodyOpen) + 1
+        for (let m; (m = tagRe.exec(src)); ) {
+            depth += m[0] === '</div' ? -1 : 1
+            if (depth === 0) { bodyEnd = m.index; break }
+        }
+        assert.ok(bodyEnd >= 0 && quick > bodyEnd, 'the quick-button row must be a sibling of, not nested inside, the calendar+columns row')
+    })
     await test('quick markup (mobile overlay): the five labelled buttons render in panelWebview.js, old handlers gone', () => {
         for (const label of QUICK_LABELS) assert.ok(webviewSource.includes(label), 'mobile overlay missing quick label ' + label)
         for (const handler of QUICK_HANDLERS) assert.ok(webviewSource.includes(handler), 'mobile overlay missing quick handler ' + handler)
@@ -1670,13 +1700,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.8.2', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.8.3', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.8.2'
+        const expected = '1.8.3'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
