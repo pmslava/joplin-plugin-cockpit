@@ -1291,6 +1291,137 @@ async function main() {
             'the non-optimistic move keeps its later offsets armed despite the override retiring')
     })
 
+    // ------------------------------------------------ results outside current filters
+    // The read-only peek shown when the search box has text but the fully-filtered view is empty. The
+    // harness serves options.todos to the "type:todo ..." list query and options.outsideResults to the
+    // type-less verbatim search the peek runs, so a run with todos:[] models an empty filtered view whose
+    // search text still matches things elsewhere in the vault.
+    const outsideProfileData = JSON.stringify({
+        nextID: 2,
+        profiles: [{
+            id: 1, name: 'Filtered', searchCriteria: '', noteID: '',
+            showCompleted: true, showNoDue: true, showNotes: false,
+            displayFormat: 'interval', yearFormat: 'numeric', monthFormat: 'long', dayFormat: 'numeric',
+            weekdayFormat: 'short', timeIs12Hour: true, sortOrder: 0, noDueDatesAtEnd: false,
+        }],
+    })
+    const outsideResults = [
+        { id: 'a1'.repeat(16), title: 'Milk run in Shopping', is_todo: 1, todo_completed: 0, parent_id: 'nbShopping', user_updated_time: 10 },
+        { id: 'a2'.repeat(16), title: 'Milk delivery notes', is_todo: 1, todo_completed: 0, parent_id: 'nbShopping', user_updated_time: 11 },
+    ]
+    let outsideRunSeq = 0
+    const runOutside = (extra) => run(Object.assign({
+        dataDir: path.join(tmp, 'outside-' + (++outsideRunSeq)),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [],
+        initialSettings: { profileData: outsideProfileData, currentProfileID: 1 },
+    }, extra))
+
+    await test('outside results: empty filtered view + search shows the section from the unfiltered search', async () => {
+        const state = await runOutside({ outsideResults })
+        await state.panelMessageHandler(['searchFilterChanged', 'milk'])
+        const html = state.panelHtml['panel-panel']
+        assert.ok(html.includes('class="outside-results"'), 'the outside-results section is missing')
+        assert.ok(html.includes('Results outside current filters (2)'), 'missing the heading with the count')
+        // The two titles exist only in outsideResults (todos is []), so their presence proves the rows came
+        // from the unfiltered search rather than the filtered list.
+        assert.ok(html.includes('Milk run in Shopping') && html.includes('Milk delivery notes'), 'outside rows were not rendered')
+        // The peek rows must not be drag-reschedule sources: no other .todo rows exist here, so nothing is draggable.
+        assert.ok(!html.includes('draggable="true"'), 'outside rows must not be draggable')
+        assert.ok(!html.includes('ondragstart'), 'outside rows must not carry drag handlers')
+        // Nor may they enter the persistent selection set: selection survives re-renders on desktop and only
+        // powers dragging/bulk actions the peek cannot use, so a selectable peek row would leak into a later
+        // multi-row drag of an ordinary row. With todos:[] the only rows here are peek rows, so no selection
+        // onmousedown may appear at all.
+        assert.ok(!html.includes('onTodoRowMouseDown('), 'outside rows must not be selectable')
+        // They otherwise behave like normal rows (checkbox ticks, title opens).
+        assert.ok(html.includes('onTodoChecked('), 'outside rows should keep their checkbox')
+        assert.ok(html.includes('onTodoRowClicked('), 'outside rows should be openable')
+    })
+
+    await test('outside results: display is capped at 15 with a +more footer when there are more', async () => {
+        const many = []
+        for (let i = 0; i < 18; i++) many.push({ id: String(i).padStart(32, 'z'), title: 'Match number ' + i, is_todo: 1, todo_completed: 0, parent_id: 'nbX', user_updated_time: i })
+        const state = await runOutside({ outsideResults: many, outsideHasMore: true })
+        await state.panelMessageHandler(['searchFilterChanged', 'match'])
+        const html = state.panelHtml['panel-panel']
+        // Only 15 rows render; the panel has no other .todo rows (todos is []), so count data-todo-id.
+        assert.strictEqual((html.match(/data-todo-id=/g) || []).length, 15, 'the display should be capped at 15 rows')
+        assert.ok(html.includes('and 3+ more matches'), 'missing the +more footer (18 fetched, 15 shown, has_more)')
+        assert.ok(html.includes('Results outside current filters (18)'), 'the heading count should be the number fetched')
+    })
+
+    await test('outside results: no section when the search box is empty', async () => {
+        const state = await runOutside({ outsideResults })
+        // No searchFilterChanged: the search box is empty even though the filtered view is empty.
+        const html = state.panelHtml['panel-panel']
+        assert.ok(!html.includes('outside-results'), 'no section should show without search text')
+        assert.ok(!html.includes('Results outside current filters'), 'no heading should show without search text')
+    })
+
+    await test('outside results: no section when the filtered view has rows', async () => {
+        // todos is the three-item fixture from the top of the file, so the type:todo list query is non-empty.
+        const state = await runOutside({ todos, outsideResults })
+        await state.panelMessageHandler(['searchFilterChanged', 'milk'])
+        const html = state.panelHtml['panel-panel']
+        assert.ok(!html.includes('outside-results'), 'no section should show when the filtered list is non-empty')
+    })
+
+    await test('outside results: rendering the peek writes no setting, profile or note', async () => {
+        const state = await runOutside({ outsideResults })
+        const before = { settings: state.settingWrites.length, puts: state.notePuts.length, posts: state.dataPosts.length, deletes: state.dataDeletes.length }
+        await state.panelMessageHandler(['searchFilterChanged', 'milk'])
+        assert.ok(state.panelHtml['panel-panel'].includes('class="outside-results"'), 'precondition: the section should be shown')
+        assert.strictEqual(state.settingWrites.length, before.settings, 'the peek must not write a setting or profile')
+        assert.strictEqual(state.notePuts.length, before.puts, 'the peek must not write a note')
+        assert.strictEqual(state.dataPosts.length, before.posts, 'the peek must not create anything')
+        assert.strictEqual(state.dataDeletes.length, before.deletes, 'the peek must not delete anything')
+    })
+
+    await test('outside results: the search text is html-escaped in the output', async () => {
+        const state = await runOutside({ outsideResults })
+        await state.panelMessageHandler(['searchFilterChanged', '<img src=x onerror=1>'])
+        const html = state.panelHtml['panel-panel']
+        assert.ok(!html.includes('<img src=x onerror=1>'), 'raw search markup survived into the output')
+        assert.ok(html.includes('Nothing in current filters matches "&lt;img src=x onerror=1&gt;"'), 'the search text was not escaped in the message line')
+    })
+
+    await test('outside results: a to-do stays tickable but a regular note renders like the Notes section', async () => {
+        // type:'note' brings back BOTH to-dos and regular notes, told apart by is_todo. A to-do (is_todo:1) must
+        // keep its tickable checkbox and completion handler; a regular note (is_todo:0) must be drawn the way the
+        // panel's Notes section draws it - a display-only progress circle, no tickable checkbox, no to-do
+        // completion handler - so ticking a non-to-do is impossible, while it stays openable.
+        const todoId = 'to'.repeat(16)
+        const noteId = 'no'.repeat(16)
+        const mixed = [
+            { id: todoId, title: 'A real to-do', is_todo: 1, todo_completed: 0, parent_id: 'nbMix', user_updated_time: 3 },
+            { id: noteId, title: 'A plain note', is_todo: 0, todo_completed: 0, parent_id: 'nbMix', user_updated_time: 4 },
+        ]
+        const state = await runOutside({ outsideResults: mixed })
+        await state.panelMessageHandler(['searchFilterChanged', 'thing'])
+        const html = state.panelHtml['panel-panel']
+        assert.ok(html.includes('class="outside-results"'), 'precondition: the peek should be shown')
+
+        // The to-do renders as a to-do row: a tickable checkbox and the completion handler.
+        const todoAt = html.indexOf('data-todo-id="' + todoId + '"')
+        assert.notStrictEqual(todoAt, -1, 'the to-do should render as a to-do row')
+        const todoRow = html.slice(html.lastIndexOf('<div class="todo', todoAt), html.indexOf('</div>', todoAt))
+        assert.ok(todoRow.includes('onTodoChecked('), 'the peek to-do should keep its completion handler')
+        assert.ok(todoRow.includes('type="checkbox"'), 'the peek to-do should keep its tickable checkbox')
+
+        // The regular note renders as a note row: display-only circle, no checkbox, no completion handler, openable.
+        const noteAt = html.indexOf('data-note-id="' + noteId + '"')
+        assert.notStrictEqual(noteAt, -1, 'the regular note should render as a note row, not a to-do row')
+        assert.ok(!html.includes('data-todo-id="' + noteId + '"'), 'the note must not be given a to-do row')
+        const noteRow = html.slice(html.lastIndexOf('<div class="todo', noteAt), html.indexOf('</div>', noteAt))
+        assert.ok(!noteRow.includes('onTodoChecked('), 'the peek note must not get a to-do completion handler')
+        assert.ok(!noteRow.includes('type="checkbox"'), 'the peek note must not get a tickable checkbox')
+        assert.ok(noteRow.includes('note-progress'), 'the peek note should show the display-only progress circle')
+        assert.ok(noteRow.includes('onNoteRowClicked('), 'the peek note should still be openable')
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

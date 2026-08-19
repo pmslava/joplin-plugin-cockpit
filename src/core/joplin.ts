@@ -50,15 +50,21 @@ function filterExcluded(items, set){
 const resultCacheCap = 24
 var todosResultCache = new Map()
 var notesResultCache = new Map()
+// The unfiltered "results outside current filters" peek, keyed by the verbatim search text. Read only on the
+// non-primary renders (optimistic / fill), so the fast-paint -> fill -> optimistic sequence of one logical
+// refresh reuses a single outside search instead of issuing one per render; a primary (committed) search
+// always refreshes the entry. Each entry keeps hasMore too, since it drives the peek's "+more" footer.
+var peekResultCache = new Map()
 
 /** invalidateResultCaches **************************************************************************************************************************
  * Drops every cached search result. Called when a change makes the cached sets wrong for a reason other than a fresh search of their own query - the    *
  * "Excluded notebooks" setting changing is the case: the excluded id set and the query clauses both shift, so any previously cached (pre-exclusion)     *
- * result must not be reused by an optimistic repaint.                                                                                                   *
+ * result must not be reused by an optimistic repaint. The outside-results peek cache is dropped alongside them.                                          *
  ***************************************************************************************************************************************************/
 export function invalidateResultCaches(){
     todosResultCache = new Map()
     notesResultCache = new Map()
+    peekResultCache = new Map()
 }
 
 function cloneItems(items){
@@ -69,6 +75,14 @@ function cacheResult(cache, query, items){
     if (cache.has(query)) cache.delete(query)
     cache.set(query, cloneItems(items))
     while (cache.size > resultCacheCap) cache.delete(cache.keys().next().value)
+}
+
+// Like cacheResult, but stores the peek's { items, hasMore } wrapper (hasMore feeds the footer) with the same
+// clone-on-write and bounded LRU eviction.
+function cachePeek(query, items, hasMore){
+    if (peekResultCache.has(query)) peekResultCache.delete(query)
+    peekResultCache.set(query, { items: cloneItems(items), hasMore: hasMore })
+    while (peekResultCache.size > resultCacheCap) peekResultCache.delete(peekResultCache.keys().next().value)
 }
 
 /** getTodos ****************************************************************************************************************************************
@@ -246,6 +260,53 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     mergeOptimisticNotes(allNotes, opts && opts.viewKey)
     allNotes = filterExcluded(allNotes, excluded.set)
     return allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
+}
+
+/** searchOutsideFilters ****************************************************************************************************************************
+ * The read-only "results outside current filters" peek. When the panel's search box has text but nothing matches inside the active profile's        *
+ * filters, this runs the user's search text VERBATIM - no profile searchCriteria, no notebook:"..." narrowing, no iscompleted:/type: tokens the       *
+ * plugin would otherwise add - so it finds whatever that text matches anywhere in the vault. Tokens the user typed themselves (notebook:, tag:, ...)  *
+ * are kept exactly as typed, since they are passed through untouched. Both regular notes and to-dos come back: type:'note' is the item type searched   *
+ * (to-dos are notes), not a query filter, and no type: token is added. is_todo is fetched too, so the caller can tell the two apart and render each in  *
+ * kind. The Joplin search API already excludes trashed notes. One page only, capped at 50, with the API's has_more surfaced so the caller can show a     *
+ * "+more" hint. Checkbox rings fill from cache like the main lists (skipped under fast).                                                                 *
+ *                                                                                                                                                        *
+ * The item overlay is deliberately NOT consulted here: no viewKey is threaded and neither mergeOptimistic* runs, so a profile-scoped optimistic insert/  *
+ * remove computed for another view can never leak into this unfiltered search. Like getTodos/getNotes it reuses a query-keyed cache on the optimistic /  *
+ * fill re-renders (useCache / opts.fillCounts) so the fast-paint -> fill -> optimistic sequence of one refresh costs ONE outside search, not one each; a  *
+ * primary (committed) search always issues the request and refreshes the entry, so the cache never serves stale data on its own.                         *
+ ***************************************************************************************************************************************************/
+export async function searchOutsideFilters(searchText, fast?, useCache?, opts?){
+    var query = String(searchText || "")
+    var fillCounts = !!(opts && opts.fillCounts)
+    var priorityStart = (opts && opts.priorityStart) || 0
+    var items
+    var hasMore
+    if ((useCache || fillCounts) && peekResultCache.has(query)){
+        // Optimistic / fill re-render: reuse the unfiltered search already run for this text this refresh.
+        var cached = peekResultCache.get(query)
+        items = cloneItems(cached.items)
+        hasMore = cached.hasMore
+        if (fillCounts){
+            // The fast paint cached these with empty rings; fetch the bodies now and refresh the entry so the
+            // follow-up render (and any later optimistic paint) shows the real counts.
+            await attachCheckboxCounts(items, false, priorityStart)
+            cachePeek(query, items, hasMore)
+        }
+    } else {
+        var response = await joplin.data.get(['search'], {
+            query: query,
+            fields: ['id', 'title', 'is_todo', 'todo_completed', 'parent_id', 'user_updated_time'],
+            type: 'note',
+            limit: 50,
+            page: 1,
+        })
+        items = response.items || []
+        hasMore = !!response.has_more
+        await attachCheckboxCounts(items, fast, priorityStart)
+        cachePeek(query, items, hasMore)
+    }
+    return { items: items, hasMore: hasMore }
 }
 
 /** attachCheckboxCounts ****************************************************************************************************************************

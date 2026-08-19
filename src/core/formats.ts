@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getTodos, getNotes, getNotebookMap, notebookWithDescendants } from "./joplin";
+import { getTodos, getNotes, getNotebookMap, notebookWithDescendants, searchOutsideFilters } from "./joplin";
 import { viewKeyFor } from "./optimistic";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
@@ -27,6 +27,87 @@ import {
 } from "./calendar";
 
 export { escapeHtml } from "./html";
+
+/** renderTodoRowHtml *******************************************************************************************************************************
+ * The markup for a single to-do row: a progress-ringed checkbox that completes it, a title link that opens it, and its notebook pill. Shared by      *
+ * BaseFormat.renderTodoRow (the normal list) and renderOutsideResultsSection (the read-only peek), so both stay identical in look and behaviour.     *
+ * options.mobile drops the desktop-only hover action hints (mobile has long-press flows and no hover). options.draggable === false suppresses the     *
+ * draggable attribute, the drag start/end handlers AND the selection onmousedown, which is how the peek's rows are kept from being drag-reschedule    *
+ * sources: selection is desktop module state that survives re-renders and exists only to power dragging/bulk actions the read-only peek cannot use,   *
+ * so a peek row that entered it would otherwise persist and be swept into a later multi-row drag of an ordinary row. Every ordinary row passes         *
+ * draggable:true and is byte-for-byte what renderTodoRow emitted before this was extracted.                                                           *
+ ***************************************************************************************************************************************************/
+function renderTodoRowHtml(todo, label, options?){
+    var mobile = !!(options && options.mobile)
+    var draggable = !options || options.draggable !== false
+    var checkedString = todo.todo_completed ? "checked" : ""
+    var checkboxHints = mobile ? "" : "&#10;Left click to tick/untick&#10;Right click to change due"
+    var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
+    var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
+    var notebookString = todo.notebookTitle
+        ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(todo.parent_id)}" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
+        : ""
+    // The ring around the checkbox shows how many of the checkboxes inside the note are ticked.
+    // It is display only: filling it does not complete the to-do, and completing the to-do does
+    // not fill it.
+    var total = Number(todo.checkboxTotal) || 0
+    var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
+    var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
+    var draggableAttr = draggable ? ` draggable="true"` : ""
+    var dragHandlers = draggable
+        ? `
+                    ondragstart="onTodoDragStart(event, '${todo.id}')"
+                    ondragend="onTodoDragEnd(event)"`
+        : ""
+    // Selection is suppressed on non-draggable (peek) rows: it only powers dragging/bulk actions they cannot
+    // use, and being persisted desktop state it would otherwise leak a clicked peek row into a later drag.
+    var selectHandler = draggable ? `
+                    onmousedown="onTodoRowMouseDown(event, '${todo.id}')"` : ""
+    return `
+                <div class="todo${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}"${draggableAttr}${selectHandler}
+                    onclick="onTodoRowClicked(event, '${todo.id}')"
+                    ondblclick="onRowDoubleClicked(event, '${todo.id}')"
+                    oncontextmenu="onTodoContextMenu(event, '${todo.id}')"${dragHandlers}>
+                    <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
+                        onchange="onTodoChecked('${todo.id}', this.checked)" ${checkedString}>
+                    <a class="todo-title"${titleHint}>${escapeHtml(label)}</a>
+                    ${notebookString}
+                </div>
+            `
+}
+
+/** renderNoteRowHtml *******************************************************************************************************************************
+ * The markup for a single regular-note row: a display-only progress circle (a note has no due date and cannot be ticked), a title link that opens it, *
+ * and its notebook pill. Shared by renderNotesSection (the panel's Notes group) and renderOutsideResultsSection (the read-only peek, for the items      *
+ * that are notes rather than to-dos), so a note looks and behaves the same wherever it appears. options.mobile drops the desktop-only hover action      *
+ * hints. options.selectable === false suppresses the selection onmousedown, exactly as renderTodoRowHtml's draggable:false does for the peek's rows:     *
+ * pickedNoteID is persisted desktop state that only powers selection highlighting/bulk actions a read-only peek row cannot use, so a peek row is kept    *
+ * out of it. Every ordinary Notes-section row passes selectable:true and is byte-for-byte what renderNotesSection emitted before this was extracted.     *
+ ***************************************************************************************************************************************************/
+function renderNoteRowHtml(note, options?){
+    var mobile = !!(options && options.mobile)
+    var selectable = !options || options.selectable !== false
+    var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
+    var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
+    var notebookString = note.notebookTitle
+        ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(note.parent_id)}" title="${escapeHtml(note.notebookPath)}${notebookHints}">${escapeHtml(note.notebookTitle)}</span>`
+        : ""
+    var total = Number(note.checkboxTotal) || 0
+    var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
+    var progressTitle = total ? `${note.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
+    var selectHandler = selectable ? `
+                onmousedown="onNoteRowMouseDown(event, '${note.id}')"` : ""
+    return `
+            <div class="todo -note" data-note-id="${note.id}"${selectHandler}
+                onclick="onNoteRowClicked(event, '${note.id}')"
+                ondblclick="onRowDoubleClicked(event, '${note.id}')"
+                oncontextmenu="onNoteContextMenu(event, '${note.id}')">
+                <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
+                <a class="todo-title"${titleHint}>${escapeHtml(note.title)}</a>
+                ${notebookString}
+            </div>
+        `
+}
 
 /** BaseFormat **************************************************************************************************************************************
  * This is the abstract class that all other formats must inherit from.                                                                             *
@@ -51,6 +132,21 @@ abstract class BaseFormat {
      * This stores the current profile data used to customize the formatting of the todos                                                           *
      ***********************************************************************************************************************************************/
     protected profile = null
+
+    /** lastFetchedTodos ****************************************************************************************************************************
+     * The to-dos the most recent fetchTodos produced, i.e. after every profile / notebook / search filter has been applied. Every renderHtml path  *
+     * (the grouped list and both calendar views) runs fetchTodos exactly once, so this always reflects what the panel just rendered. It is recorded *
+     * only so the panel can tell, without re-running the query, whether the filtered view came out empty - the trigger for the outside-results peek.*
+     ***********************************************************************************************************************************************/
+    private lastFetchedTodos: any[] = []
+
+    /** getRenderedTodoCount ************************************************************************************************************************
+     * How many to-dos the last renderHtml produced (after all filtering). The panel reads this straight after renderHtml to decide, together with   *
+     * the notes section, whether the fully-filtered view is empty.                                                                                  *
+     ***********************************************************************************************************************************************/
+    public getRenderedTodoCount(){
+        return this.lastFetchedTodos ? this.lastFetchedTodos.length : 0
+    }
 
     /** outputFormat ********************************************************************************************************************************
      * This stores the output format that the todos are requested in. Valid values are "html" and "markdown"                                        *
@@ -162,6 +258,9 @@ abstract class BaseFormat {
             var compare = itemComparator(sort)
             todos.sort((first, second) => (first.todo_due - second.todo_due) || compare(first, second))
         }
+        // Record the fully-filtered set so the panel can detect an empty view (the outside-results trigger)
+        // without re-running the query. Kept here, the single choke point every renderHtml path passes through.
+        this.lastFetchedTodos = todos
         return todos
     }
 
@@ -169,38 +268,10 @@ abstract class BaseFormat {
      * A single to-do as it appears in the panel: a checkbox that completes it and a link that opens it                                              *
      ***********************************************************************************************************************************************/
     protected renderTodoRow(todo, label){
-        var checkedString = todo.todo_completed ? "checked" : ""
-        // Desktop only: append the per-zone action hints to each tooltip, merged with the content the zone
-        // already shows (the checkbox's progress, the notebook pill's full path), on their own lines via the
-        // &#10; entity. Mobile keeps its long-press flows and has no hover, so it gets no action lines - the
-        // existing tooltips there are unchanged. isMobile is carried in the view state (see panel.ts).
-        var mobile = !!(this.viewState && (this.viewState as any).isMobile)
-        var checkboxHints = mobile ? "" : "&#10;Left click to tick/untick&#10;Right click to change due"
-        var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
-        var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
-        var notebookString = todo.notebookTitle
-            ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(todo.parent_id)}" title="${escapeHtml(todo.notebookPath)}${notebookHints}">${escapeHtml(todo.notebookTitle)}</span>`
-            : ""
-        // The ring around the checkbox shows how many of the checkboxes inside the note are ticked.
-        // It is display only: filling it does not complete the to-do, and completing the to-do does
-        // not fill it.
-        var total = Number(todo.checkboxTotal) || 0
-        var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
-        var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
-        return `
-                <div class="todo${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}" draggable="true"
-                    onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
-                    onclick="onTodoRowClicked(event, '${todo.id}')"
-                    ondblclick="onRowDoubleClicked(event, '${todo.id}')"
-                    oncontextmenu="onTodoContextMenu(event, '${todo.id}')"
-                    ondragstart="onTodoDragStart(event, '${todo.id}')"
-                    ondragend="onTodoDragEnd(event)">
-                    <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
-                        onchange="onTodoChecked('${todo.id}', this.checked)" ${checkedString}>
-                    <a class="todo-title"${titleHint}>${escapeHtml(label)}</a>
-                    ${notebookString}
-                </div>
-            `
+        // The row markup lives in the shared renderTodoRowHtml so the read-only "results outside current
+        // filters" peek can reuse it verbatim. isMobile is carried in the view state (see panel.ts) and drops
+        // the desktop-only hover action hints; draggable stays true here so ordinary rows are unchanged.
+        return renderTodoRowHtml(todo, label, { mobile: !!(this.viewState && (this.viewState as any).isMobile), draggable: true })
     }
 
     /** getHeadingDropTarget ************************************************************************************************************************
@@ -733,36 +804,82 @@ export async function renderNotesSection(profile, viewState){
         notes.sort(itemComparator(viewState.sort))
     }
     if (!notes.length) return ""
-    // Desktop only: append the per-zone action hints, merged with the existing tooltips, on their own lines
-    // via &#10;. A note's progress ring is display-only (not tickable, no due date), so it gets no action
-    // lines - only the title and the notebook pill do. Mobile keeps its long-press flows and no hover, so no
-    // action lines there. isMobile is carried in the view state (see panel.ts).
+    // The row markup lives in the shared renderNoteRowHtml so the read-only "results outside current filters"
+    // peek can reuse it for its note items. isMobile is carried in the view state (see panel.ts) and drops the
+    // desktop-only hover action hints (a note's progress ring is display-only, so only its title and notebook
+    // pill carry action lines); selectable stays true here so ordinary Notes-section rows are unchanged.
     var mobile = !!(viewState && viewState.isMobile)
-    var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
-    var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
-    var rows = notes.map(note => {
-        var total = Number(note.checkboxTotal) || 0
-        var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
-        var progressTitle = total ? `${note.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
-        var notebookString = note.notebookTitle
-            ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(note.parent_id)}" title="${escapeHtml(note.notebookPath)}${notebookHints}">${escapeHtml(note.notebookTitle)}</span>`
-            : ""
-        return `
-            <div class="todo -note" data-note-id="${note.id}"
-                onmousedown="onNoteRowMouseDown(event, '${note.id}')"
-                onclick="onNoteRowClicked(event, '${note.id}')"
-                ondblclick="onRowDoubleClicked(event, '${note.id}')"
-                oncontextmenu="onNoteContextMenu(event, '${note.id}')">
-                <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
-                <a class="todo-title"${titleHint}>${escapeHtml(note.title)}</a>
-                ${notebookString}
-            </div>
-        `
-    }).join("")
+    var rows = notes.map(note => renderNoteRowHtml(note, { mobile: mobile })).join("")
     return `
         <section class="notes-section">
             <h2>Notes</h2>
             ${rows}
+        </section>
+    `
+}
+
+/** renderOutsideResultsSection *********************************************************************************************************************
+ * The read-only "results outside current filters" peek, composed server side in the panel render path. It is only ever called when the search box has *
+ * text AND the fully-filtered view came out empty (the caller decides that; see refreshPanelData), so reaching here means running one unfiltered      *
+ * search (searchOutsideFilters) with the user's text verbatim and laying its hits out as a FLAT list - no due-date grouping. Each hit is drawn in its   *
+ * own kind: a to-do as a to-do row, a regular note (is_todo falsy) as a note row with the display-only progress circle and no tickable checkbox, so a   *
+ * non-to-do is never given a to-do's checkbox or completion menu. Selection and dragging are suppressed so a peeked row cannot be dragged onto a date   *
+ * or leak into a later selection. The search text is user input, so it is                                                                               *
+ * escaped everywhere it is interpolated. Nothing here writes a setting, a profile or the notebook picker: it is a pure read.                           *
+ *   - No hits anywhere: a single muted line and nothing else.                                                                                          *
+ *   - Hits: a "nothing matched in your filters" line, a group-style heading with the count, up to 15 rows, and a "…and N more" footer when there were  *
+ *     more (N gets a trailing "+" when the API reported still more beyond the 50 fetched).                                                              *
+ ***************************************************************************************************************************************************/
+export async function renderOutsideResultsSection(profile, viewState, searchText){
+    var fast = viewState ? !!viewState.fastCheckboxCounts : false
+    // Mirror getTodos/getNotes: reuse the query-keyed peek cache on the optimistic / fill re-renders so the
+    // fast-paint -> fill -> optimistic sequence of one refresh costs a single outside search. The peek lays
+    // its hits out as a flat capped list (no viewport grouping), so its bodies are fetched in list order and
+    // it passes no priorityStart bias.
+    var useCache = viewState ? !!viewState.optimistic : false
+    var fillCounts = viewState ? !!viewState.fillCounts : false
+    var found = await searchOutsideFilters(searchText, fast, useCache, { fillCounts: fillCounts, priorityStart: 0 })
+    var items = found.items || []
+    var escaped = escapeHtml(searchText)
+    // No hits anywhere: a single muted line, matching the panel's plain-spoken voice, and nothing else.
+    if (!items.length){
+        return `
+        <section class="outside-results">
+            <p class="outside-results-message">No matches for "${escaped}" anywhere.</p>
+        </section>
+    `
+    }
+    // The rows reuse renderTodoRowHtml / renderNoteRowHtml, which read notebookTitle/notebookPath for the pill,
+    // so attach the notebook the same way fetchTodos / renderNotesSection do.
+    var notebooks = await getNotebookMap()
+    for (var item of items){
+        var notebook = notebooks.get(item.parent_id)
+        item.notebookTitle = notebook ? notebook.title : ""
+        item.notebookPath = notebook ? notebook.path : ""
+    }
+    var mobile = !!(viewState && viewState.isMobile)
+    // Display the first 15 in the API's order; anything beyond is summarised in the footer. Each hit is drawn in
+    // its own kind: a to-do as a to-do row (draggable:false keeps it from being a drag-reschedule source, and it
+    // carries no drop target either), and a regular note (is_todo falsy) as a note row - the display-only progress
+    // circle the panel's Notes section uses, with no tickable checkbox and no to-do-completion menu, so ticking a
+    // non-to-do is impossible here. Both are read-only: selection is suppressed the same way it is for the peek's
+    // to-do rows. Click-to-open and the notebook pill carry over from the shared row markup in both cases.
+    var shown = items.slice(0, 15)
+    var rows = shown.map(item => item.is_todo
+        ? renderTodoRowHtml(item, item.title, { mobile: mobile, draggable: false })
+        : renderNoteRowHtml(item, { mobile: mobile, selectable: false })
+    ).join("")
+    var footer = ""
+    if (items.length > shown.length){
+        var moreCount = items.length - shown.length
+        footer = `<p class="outside-results-message">…and ${moreCount}${found.hasMore ? "+" : ""} more matches</p>`
+    }
+    return `
+        <section class="outside-results">
+            <p class="outside-results-message">Nothing in current filters matches "${escaped}".</p>
+            <h2 class="outside-results-heading">Results outside current filters (${items.length})</h2>
+            ${rows}
+            ${footer}
         </section>
     `
 }

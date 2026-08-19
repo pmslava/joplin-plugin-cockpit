@@ -901,6 +901,30 @@ table {
     font-size: 0.9em;
 }
 
+/* Results outside current filters -------------------------------------------------------------
+ * The read-only peek shown when the search box has text but the filtered view came out empty. Rows
+ * reuse .todo and the heading reuses the sticky group <h2>, so only the wrapper spacing and the muted
+ * message lines are styled here. Theme variables only, no @media - the mobile look comes for free
+ * through the shared .todo / h2 rules (and their .cockpit-mobile tweaks). */
+.outside-results {
+    margin-top: 0.4em;
+}
+
+/* A divider only when something (a calendar grid) sits above the peek. When the filtered list is
+ * empty the peek is the first thing in the panel and needs no line stranded at the very top. */
+.todos > .outside-results:not(:first-child) {
+    margin-top: 0.6em;
+    padding-top: 0.5em;
+    border-top: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+}
+
+.outside-results-message {
+    margin: 0.35em 0;
+    padding: 0 0.2em;
+    color: var(--cockpit-color-faded, #999999);
+    font-size: 0.9em;
+}
+
 /* The planner becomes a multi column board when the panel is wide enough, with no media queries */
 .week-planner {
     display: grid;
