@@ -67,6 +67,13 @@
      * below so it survives a font-size setting change. The item glyph is centred on the first text
      * line of its row against this, independent of the circle size. */
     --cockpit-row-line-height: calc(var(--cockpit-font-size, calc(var(--joplin-font-size, 12px) * 1.0833)) * 1.5);
+    /* The dark rim drawn ONLY around the standalone plain to-do disc (.todo-checkbox.-plain), so a plain
+     * to-do reads as a solid disc-with-outline and never as an empty ring/checkbox. It must render DARK on
+     * every theme (a color-faded/divider border rendered near-white on dark backgrounds, which the owner
+     * rejected), so it is a deliberate literal rather than a --joplin-* alias: no existing --cockpit-* var
+     * is guaranteed dark on every preset. Translucent black lets the theme's background modulate it while
+     * staying dark everywhere. Declared here so custom CSS can override it. Only the plain disc uses it. */
+    --cockpit-plain-disc-rim: rgba(0, 0, 0, 0.55);
 }
 
 /* Joplin does not expose a light/dark appearance flag to plugin webviews. panelWebview.js therefore
@@ -605,16 +612,29 @@ h2 {
     background-size: 90% 90%;
 }
 
-/* A to-do with no checkboxes inside is marked .-plain, but its circle is deliberately given NO styling
- * of its own: it renders through the very same base rules above (the box's conic-gradient ring, the 3px
- * ::after hollow, the 4px ::before disc) as a counted to-do sitting at 0 of N done. Both emit --percent:0,
- * so the shared conic-gradient resolves to a pure --cockpit-divider-color track, and a plain row's circle
- * is pixel-identical to a 0/N ringed row's - there is one set of rules, so the two states cannot drift.
- * (1.8.7 briefly gave the plain disc a bespoke 1px border to make it read on the panel background; that
- * made the small disc look different alone vs inside a ring, so both border attempts are reverted and
- * there is intentionally no per-plain override here - the small circle is the same element everywhere.
- * The different case - a NOTE with no checkboxes, which shows no circle at all - keeps its own .-empty
- * rule below.) */
+/* A to-do with no checkboxes inside is marked .-plain: it shows ONLY the small disc, never the ring. The
+ * ring carries meaning (checkboxes exist / their progress), so drawing the full ring structure on a plain
+ * to-do makes it look like it HAS checkboxes - so the box's conic-gradient ring and the ::after hollow are
+ * both stripped here, leaving just the ::before disc. */
+.todo-checkbox.-plain,
+.todo-checkbox.-plain::after {
+    background: none;
+}
+
+/* Standalone, the bare disc can be hard to read on the panel background, so the plain state adds a dark rim
+ * AROUND the disc - without moving or resizing the disc itself, which must stay byte-identical to the disc
+ * inside a ring. The base ::before is a 10x10 fill pinned at inset 4 within the 18px host. Here the same
+ * ::before is grown to inset 2 (a 14x14 border box) with a 2px border: under the global border-box sizing
+ * that border occupies inset 2->4, so the content box stays exactly 10x10 at inset 4. background-clip:
+ * content-box keeps the divider-colour fill clipped to that unchanged 10x10 content box (border-box clip
+ * would spill the fill under the translucent rim and enlarge the visible disc), so the fill renders
+ * pixel-identical to before and the rim sits entirely OUTSIDE it, from 10px to 14px diameter. The rim
+ * colour is --cockpit-plain-disc-rim (dark on every theme; see :root). */
+.todo-checkbox.-plain::before {
+    inset: 2px;
+    border: 2px solid var(--cockpit-plain-disc-rim);
+    background-clip: content-box;
+}
 
 /* A note with no checkboxes inside shows no circle at all; the invisible spacer keeps the titles
  * of the notes group aligned */
@@ -1060,6 +1080,16 @@ table {
 
 .cockpit-mobile .todo-checkbox::after { inset: calc(var(--tap-pad) + 3px); }
 .cockpit-mobile .todo-checkbox::before { inset: calc(var(--tap-pad) + 4px); }
+/* Plain-disc rim, mobile equivalent (see the desktop .-plain::before rule). The pseudo-elements are pushed
+ * out by --tap-pad, so the disc's own inset is (tap-pad + 4); grow the border box to (tap-pad + 2) with a
+ * 2px border and border-box sizing keeps the content box at (tap-pad + 4), 10x10 - identical to the mobile
+ * disc above - while the rim sits just outside it. A dedicated selector is needed because the generic mobile
+ * ::before inset rule (equal specificity, later in the file) would otherwise win over the desktop .-plain. */
+.cockpit-mobile .todo-checkbox.-plain::before {
+    inset: calc(var(--tap-pad) + 2px);
+    border: 2px solid var(--cockpit-plain-disc-rim);
+    background-clip: content-box;
+}
 
 /* Vertical alignment on mobile. The desktop circle/pill margins centre on a fixed 0.75px optical
  * constant hand-calibrated for the ~13px desktop font. Mobile renders the whole panel at a larger base
