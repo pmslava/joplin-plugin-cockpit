@@ -426,42 +426,48 @@ function onNoteContextMenu(event, noteID){
 }
 
 /** Context menu ************************************************************************************************************************************
- * A small menu of note actions, drawn by the panel itself because Joplin's own note context menu cannot be opened from a plugin webview             *
+ * A small menu of note actions, drawn by the panel itself because Joplin's own note context menu cannot be opened from a plugin webview. The item   *
+ * list and its markup live in the shared window.NoteMenu module (noteMenu.js, loaded before this script), so the desktop menu and the Node harness  *
+ * build byte-identical HTML.                                                                                                                         *
+ *                                                                                                                                                    *
+ * MULTI-SELECT (desktop): when the right-clicked row is part of a Ctrl/Shift selection of more than one row, every action that CAN apply to many acts *
+ * on the WHOLE selection (routed to the host's batch handler) and the single-only actions render greyed out. A right click on a row OUTSIDE the       *
+ * selection, or a single selection, keeps today's single-note menu for that one row. Mobile has no multi-select, so IS_MOBILE always takes the        *
+ * single path (count 1) and its markup/behaviour are unchanged.                                                                                       *
  ***************************************************************************************************************************************************/
-var noteMenuItems = [
-    { action: 'open', label: 'Open' },
-    { action: 'toggleType', label: 'Switch between note and to-do type' },
-    { action: 'tags', label: 'Tags...' },
-    { action: 'moveToFolder', label: 'Move to notebook...' },
-    { action: 'duplicate', label: 'Duplicate' },
-    { action: 'copyMarkdownLink', label: 'Copy Markdown link' },
-    { action: 'copyNoteID', label: 'Copy note ID' },
-    { action: 'delete', label: 'Delete note' },
-]
-
 function showNoteContextMenu(event, noteID, isTodo){
     hideNoteContextMenu()
-    // On mobile the 18px checkbox circle is a hard touch target, so to-do rows get an explicit
-    // "Move to date…" entry that opens the same set-alarm dialog the circle long-press does. On desktop
-    // (IS_MOBILE false) the list is exactly noteMenuItems and the setDueDate branch below is unreachable,
-    // so the menu and its behaviour are byte-identical to before.
-    var items = (IS_MOBILE && isTodo)
-        ? [{ action: 'setDueDate', label: 'Move to date…' }].concat(noteMenuItems)
-        : noteMenuItems
+    // The ids this menu acts on. Only a to-do row that is itself part of a multi-row selection triggers the
+    // batch menu (a regular note row is never in selectedTodoIDs, and mobile has no multi-select); everything
+    // else is the single-note menu for the pressed row.
+    var selectionIDs = (!IS_MOBILE && selectedTodoIDs.has(noteID) && selectedTodoIDs.size > 1)
+        ? [...selectedTodoIDs]
+        : [noteID]
+    var count = selectionIDs.length
+    // On mobile the 18px checkbox circle is a hard touch target, so to-do rows get an explicit "Move to date…"
+    // entry that opens the same set-alarm dialog the circle long-press does. Mobile never reaches the multi
+    // path (count is always 1 there), so the menu and its behaviour stay byte-identical to before.
+    var extra = (IS_MOBILE && isTodo) ? [{ action: 'setDueDate', label: 'Move to date…' }] : []
     var menu = document.createElement('div')
     menu.id = 'noteContextMenu'
-    menu.innerHTML = items.map(item => {
-        return `<button type="button" class="context-menu-item${item.action == 'delete' ? ' -danger' : ''}" data-action="${item.action}">${item.label}</button>`
-    }).join('')
+    menu.innerHTML = window.NoteMenu.menuHtml(count, extra)
     menu.addEventListener('click', clickEvent => {
-        var action = clickEvent.target.dataset ? clickEvent.target.dataset.action : null
+        var button = clickEvent.target.closest ? clickEvent.target.closest('.context-menu-item') : null
+        // A greyed-out (single-only, on a multi-selection) item is inert: it fires no action and leaves the
+        // menu open, so a mis-aimed click on it does nothing.
+        if (button && button.classList.contains('-disabled')) return
+        var action = button ? button.dataset.action : null
         hideNoteContextMenu()
+        if (!action) return
         if (action === 'setDueDate'){ requestAlarm([noteID]); return }
+        // Multi-selection (desktop): route every capable action to the host's batch handler with all the ids.
+        // Single-only actions never get here - they render disabled and returned above.
+        if (count > 1){ void webviewApi.postMessage(['noteMenuActionMulti', action, selectionIDs]); return }
         // On mobile the notebook and tag pickers are in-panel overlays rather than native dialogs (which
         // would open behind the panel). Desktop keeps posting noteMenuAction so its native dialogs run.
         if (IS_MOBILE && action === 'moveToFolder'){ openNotebookOverlay('moveNotes', { noteIDs: [noteID] }); return }
         if (IS_MOBILE && action === 'tags'){ openTagOverlay(noteID); return }
-        if (action) void webviewApi.postMessage(['noteMenuAction', action, noteID]);
+        void webviewApi.postMessage(['noteMenuAction', action, noteID]);
     })
     document.body.appendChild(menu)
     menu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8))}px`

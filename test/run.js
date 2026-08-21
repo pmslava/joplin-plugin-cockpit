@@ -2810,6 +2810,132 @@ async function main() {
         assert.ok(/inset:\s*4px/.test(ruleBody('.todo-checkbox::before')), 'the 4px disc inset must be intact')
     })
 
+    // ============================================================ MULTI-SELECT CONTEXT MENU (desktop)
+    // With several rows Ctrl/Shift-selected, the panel's own note context menu must act on the WHOLE selection
+    // for the actions that can apply to many, and grey out (never hide) the single-only ones. Two layers are
+    // pinned here: (1) the shared markup module NoteMenu (required, like AlarmQuick, since this harness never
+    // executes the webview JS) builds a byte-stable single-note menu and, for N>1, a menu with count-bearing
+    // labels and a disabled single-only item; (2) the host batch handler (noteMenuActionMulti) applies each
+    // action to every id through the data API with ONE post-mutation refresh for the whole batch, not N.
+    const NoteMenu = require('../src/ui/panel/noteMenu.js')
+
+    // -- (1) markup -------------------------------------------------------------------------------------------
+    await test('multi-menu markup: N=1 is byte-identical to the pre-multi single-note menu', () => {
+        const item = (cls, action, label) => `<button type="button" class="${cls}" data-action="${action}">${label}</button>`
+        const expected = [
+            item('context-menu-item', 'open', 'Open'),
+            item('context-menu-item', 'toggleType', 'Switch between note and to-do type'),
+            item('context-menu-item', 'tags', 'Tags...'),
+            item('context-menu-item', 'moveToFolder', 'Move to notebook...'),
+            item('context-menu-item', 'duplicate', 'Duplicate'),
+            item('context-menu-item', 'copyMarkdownLink', 'Copy Markdown link'),
+            item('context-menu-item', 'copyNoteID', 'Copy note ID'),
+            item('context-menu-item -danger', 'delete', 'Delete note'),
+        ].join('')
+        assert.strictEqual(NoteMenu.menuHtml(1, []), expected)
+        assert.strictEqual(NoteMenu.menuHtml(1), expected, 'a lone selection coerces to the single-note menu')
+    })
+    await test('multi-menu markup: the mobile "Move to date…" extra prepends, single-note, unchanged', () => {
+        const html = NoteMenu.menuHtml(1, [{ action: 'setDueDate', label: 'Move to date…' }])
+        assert.ok(html.startsWith('<button type="button" class="context-menu-item" data-action="setDueDate">Move to date…</button>'),
+            'the mobile set-due-date entry must prepend the menu verbatim')
+        assert.ok(html.includes('data-action="delete">Delete note</button>'), 'the base single-note items follow unchanged')
+        assert.ok(!/aria-disabled/.test(html), 'a single-note menu disables nothing')
+    })
+    await test('multi-menu markup: N>1 greys out Open (shown, not hidden) and counts every capable action', () => {
+        const html = NoteMenu.menuHtml(6, [])
+        // Open is single-only: rendered, but disabled (greyed via -disabled + aria-disabled + inert), base label.
+        assert.ok(html.includes('<button type="button" class="context-menu-item -disabled" data-action="open" aria-disabled="true">Open</button>'),
+            'Open must render disabled (greyed, aria-disabled), never hidden')
+        assert.ok(html.includes('data-action="toggleType">Switch type of 6 items</button>'), 'toggleType must count')
+        assert.ok(html.includes('data-action="tags">Tags for 6 notes...</button>'), 'tags must count')
+        assert.ok(html.includes('data-action="moveToFolder">Move 6 to notebook...</button>'), 'move must count')
+        assert.ok(html.includes('data-action="duplicate">Duplicate 6 notes</button>'), 'duplicate must count')
+        assert.ok(html.includes('data-action="copyMarkdownLink">Copy 6 Markdown links</button>'), 'copy-link must count')
+        assert.ok(html.includes('data-action="copyNoteID">Copy 6 note IDs</button>'), 'copy-id must count')
+        assert.ok(html.includes('class="context-menu-item -danger" data-action="delete">Delete 6 notes</button>'), 'delete must count and stay -danger')
+        // Only the single-only action is disabled: exactly one aria-disabled in the whole menu.
+        assert.strictEqual((html.match(/aria-disabled/g) || []).length, 1, 'only Open may be disabled on a multi-selection')
+        assert.strictEqual((html.match(/ -disabled"/g) || []).length, 1, 'only Open carries the -disabled class')
+    })
+
+    // -- (2) host batch glue ----------------------------------------------------------------------------------
+    let multiRunSeq = 0
+    const desktopRun = async (opts) => {
+        const dir = path.join(tmp, `multi-${multiRunSeq}`)
+        const installDir = path.join(tmp, `multi-install-${multiRunSeq}`)
+        multiRunSeq++
+        await fs.ensureDir(dir)
+        return run(Object.assign({
+            dataDir: dir,
+            installationDir: installDir,
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+        }, opts))
+    }
+    const id32 = (prefix) => (prefix + '0'.repeat(32)).slice(0, 32)
+
+    await test('multi host glue (delete): N ids -> N DELETEs to the trash, and ONE refresh cycle (not N)', async () => {
+        // Baseline: a single-note action runs the same post-mutation refresh trio exactly once.
+        const single = await desktopRun({ notes: { [id32('s')]: { id: id32('s'), title: 's', is_todo: 1 } } })
+        await single.panelMessageHandler(['noteMenuAction', 'toggleType', id32('s')])
+        const singleTimers = single.timeouts.length
+
+        const ids = [id32('d1'), id32('d2'), id32('d3')]
+        const notes = {}
+        for (const id of ids) notes[id] = { id, title: 'todo ' + id, is_todo: 1, todo_completed: 0, todo_due: 0 }
+        const multi = await desktopRun({ notes })
+        await multi.panelMessageHandler(['noteMenuActionMulti', 'delete', ids])
+        // Exactly N DELETEs, each ['notes', id] (the data API delete moves the note to the trash, reversible).
+        assert.strictEqual(multi.dataDeletes.length, ids.length, 'one DELETE per selected note')
+        assert.deepStrictEqual(
+            multi.dataDeletes.map(p => p.join('/')).sort(),
+            ids.map(id => 'notes/' + id).sort(),
+            'each DELETE targets its own note id')
+        // ONE refresh cycle for the whole batch: the same lane-timer count a single action arms, not N times.
+        assert.strictEqual(multi.timeouts.length, singleTimers, 'the batch must refresh ONCE, not once per note')
+    })
+    await test('multi host glue (toggleType): each id toggles its OWN type (a mixed note+to-do selection)', async () => {
+        const ids = [id32('t1'), id32('t2'), id32('t3')]
+        const notes = {
+            [ids[0]]: { id: ids[0], title: 'a', is_todo: 1 },   // to-do -> note
+            [ids[1]]: { id: ids[1], title: 'b', is_todo: 0 },   // note  -> to-do
+            [ids[2]]: { id: ids[2], title: 'c', is_todo: 1 },   // to-do -> note
+        }
+        const m = await desktopRun({ notes })
+        await m.panelMessageHandler(['noteMenuActionMulti', 'toggleType', ids])
+        const puts = m.notePuts.filter(p => ids.includes(p.id))
+        assert.strictEqual(puts.length, 3, 'one is_todo PUT per selected note')
+        const byId = Object.fromEntries(puts.map(p => [p.id, p.fields.is_todo]))
+        assert.strictEqual(byId[ids[0]], 0, 'a to-do flips to a note')
+        assert.strictEqual(byId[ids[1]], 1, 'a note flips to a to-do')
+        assert.strictEqual(byId[ids[2]], 0, 'each item toggles its OWN type, never a shared one')
+    })
+    await test('multi host glue (moveToFolder): one notebook picker, then N parent_id PUTs', async () => {
+        const ids = [id32('m1'), id32('m2')]
+        const notes = {}
+        for (const id of ids) notes[id] = { id, title: 'todo', is_todo: 1, parent_id: 'src' }
+        const folders = [{ id: 'src', title: 'Source', parent_id: '' }, { id: 'dest', title: 'Dest', parent_id: '' }]
+        const m = await desktopRun({ notes, folders })
+        // The notebook picker returns the destination folder.
+        m.dialogResult = { id: 'ok', formData: { picker: { folderId: 'dest' } } }
+        await m.panelMessageHandler(['noteMenuActionMulti', 'moveToFolder', ids])
+        const puts = m.notePuts.filter(p => ids.includes(p.id))
+        assert.strictEqual(puts.length, 2, 'one parent_id PUT per selected note')
+        for (const p of puts) assert.strictEqual(p.fields.parent_id, 'dest', 'every selected note re-parents to the picked notebook')
+    })
+    await test('multi host glue (copyMarkdownLink): reads each title for the list, mutates nothing', async () => {
+        const ids = [id32('c1'), id32('c2')]
+        const notes = { [ids[0]]: { id: ids[0], title: 'First' }, [ids[1]]: { id: ids[1], title: 'Second' } }
+        const m = await desktopRun({ notes })
+        await m.panelMessageHandler(['noteMenuActionMulti', 'copyMarkdownLink', ids])
+        const titleGets = m.gets.filter(g => g.path[0] === 'notes' && g.path.length === 2 && ids.includes(g.path[1]))
+        assert.strictEqual(titleGets.length, 2, 'one title read per note for the newline-joined link list')
+        assert.strictEqual(m.notePuts.filter(p => ids.includes(p.id)).length, 0, 'a copy must not mutate any note')
+        assert.strictEqual(m.dataDeletes.length, 0, 'a copy must not delete any note')
+    })
+
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

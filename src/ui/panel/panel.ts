@@ -133,6 +133,9 @@ export async function setupPanel(){
     // The shared quick-button math (window.AlarmQuick) is loaded first, so it exists before panelWebview.js wires
     // the mobile alarm overlay's buttons to it - the same module the desktop alarm dialog and the unit tests use.
     await joplin.views.panels.addScript(panel, '/ui/alarm/alarmQuick.js')
+    // The shared note-context-menu markup (window.NoteMenu) is loaded before panelWebview.js builds the menu -
+    // the same module the Node unit tests require to pin the single- and multi-select markup.
+    await joplin.views.panels.addScript(panel, '/ui/panel/noteMenu.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panelWebview.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panel.css')
     await joplin.views.panels.onMessage(panel, eventHandler)
@@ -304,6 +307,10 @@ async function eventHandler(message){
         scheduleOverview()
     } else if (message[0] == 'noteMenuAction'){
         await runNoteMenuAction(String(message[1] || ""), String(message[2] || ""))
+    } else if (message[0] == 'noteMenuActionMulti'){
+        // The batch version: the webview posts this only when several rows are selected (desktop-only).
+        var menuMultiIDs = Array.isArray(message[2]) ? message[2].map(id => String(id || "")).filter(Boolean) : []
+        await runNoteMenuActionMulti(String(message[1] || ""), menuMultiIDs)
     } else if (message[0] == 'todoChecked'){
         await applyTodoChecked(String(message[1] || ""), !!message[2])
     } else if (message[0] == 'profilesDropdownChanged'){
@@ -1392,6 +1399,57 @@ async function runNoteMenuAction(action, noteID){
             // The command is desktop only; the data API delete moves the note to the trash
             await joplin.data.delete(['notes', noteID])
         }
+    } else {
+        return
+    }
+    await refreshInterfaces()
+    scheduleReconcile()
+    scheduleOverview()
+}
+
+/** runNoteMenuActionMulti **************************************************************************************************************************
+ * The batch version of runNoteMenuAction: applies a context-menu action to EVERY selected note in one go, with a SINGLE post-mutation refresh for   *
+ * the whole batch (the trio below runs once, after the loop, NOT once per note). Desktop only - the webview only posts this when several rows are    *
+ * Ctrl/Shift-selected, which cannot happen on mobile - and the single-only 'open' never reaches here (it renders greyed in the menu).                *
+ *                                                                                                                                                    *
+ * The destructive per-id writes go through the data API so the batch is atomic per note, goes to the trash reversibly (delete), and is observable:   *
+ *   - toggleType: each note flips its OWN type (a mixed note+to-do selection toggles each individually), one is_todo PUT per id.                      *
+ *   - moveToFolder: one notebook picker, then a parent_id PUT per note (the existing move fallback, which already loops over an id array).            *
+ *   - delete: one DELETE per note to the trash - parity with the single-note delete's data-API path, no extra confirmation dialog.                    *
+ * setTags and duplicateNote natively accept an id array and carry the desktop's own multi-note behaviour (setTags seeds the picker with the tags     *
+ * COMMON to the selection and applies the add/remove delta to every note; duplicateNote appends " - Copy" to each), so those run as one command with  *
+ * the whole set. The copy actions build one newline-joined list.                                                                                     *
+ ***************************************************************************************************************************************************/
+async function runNoteMenuActionMulti(action, ids){
+    if (!action || !Array.isArray(ids) || !ids.length) return
+    if (action == 'toggleType'){
+        for (var toggleID of ids){
+            var toggleNote = await joplin.data.get(['notes', toggleID], { fields: ['is_todo'] })
+            await joplin.data.put(['notes', toggleID], null, { is_todo: toggleNote.is_todo ? 0 : 1 })
+        }
+    } else if (action == 'tags'){
+        // Desktop's setTags natively takes an id array (common-tags picker + per-note add/remove delta).
+        await runAppCommand('setTags', ids)
+    } else if (action == 'moveToFolder'){
+        // One notebook picker, then a parent_id PUT per note (moveNotesFallback loops over the array).
+        await moveNotesFallback(ids)
+    } else if (action == 'duplicate'){
+        // duplicateNote natively takes an id array and appends " - Copy" to each title.
+        await runAppCommand('duplicateNote', ids)
+    } else if (action == 'copyMarkdownLink'){
+        var links = []
+        for (var linkID of ids){
+            var linkNote = await joplin.data.get(['notes', linkID], { fields: ['title'] })
+            links.push(`[${linkNote.title}](:/${linkID})`)
+        }
+        await copyToClipboard(links.join("\n"))
+        return
+    } else if (action == 'copyNoteID'){
+        await copyToClipboard(ids.join("\n"))
+        return
+    } else if (action == 'delete'){
+        // Batch delete to the trash (reversible), a DELETE per note.
+        for (var deleteID of ids) await joplin.data.delete(['notes', deleteID])
     } else {
         return
     }
