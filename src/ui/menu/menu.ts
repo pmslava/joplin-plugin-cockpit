@@ -18,6 +18,7 @@ import { isMobile } from "../../core/platform"
         "Cockpit",
         [
             {commandName: 'togglePanelVisibility'},
+            {commandName: 'toggleCockpitToolbarButton'},
             {commandName: 'showStylerDialog'},
         ],
         MenuItemLocation.Tools

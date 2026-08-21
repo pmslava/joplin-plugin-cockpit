@@ -14,6 +14,7 @@ import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches } from ".
 
 /** Variable Setup *********************************************************************************************************************************/
 export const customCssSettingKey = "customCss"
+export const showToolbarButtonSettingKey = "showToolbarButton"
 export const updateFrequencySettingKey = "updateFrequency"
 export const dayStartTimeSettingKey = "dayStartTime"
 
@@ -50,7 +51,7 @@ export async function setupSettings(){
 	await joplin.settings.registerSection(
 		"section", {
 			label: "Cockpit",
-			iconName: 'fas fa-calendar',
+			iconName: 'fas fa-tachometer-alt',
 			description: "Settings for the Cockpit Plugin",
 			name: "agenda"
 		})
@@ -81,6 +82,14 @@ export async function setupSettings(){
 			description: "How long Cockpit waits between refreshing the panel and the overview notes. Lower is more responsive; higher is lighter on the machine.",
 			value: 60,
 			type: SettingItemType.Int,
+			public: true,
+			section: 'section',
+		},
+		[showToolbarButtonSettingKey]: {
+			label: "Show the Cockpit button in the note toolbar",
+			description: "Shows the Cockpit panel toggle button (the gauge icon) in the note editor toolbar. Desktop only. Takes effect after Joplin restarts, since Joplin cannot add or remove a toolbar button while running.",
+			value: true,
+			type: SettingItemType.Bool,
 			public: true,
 			section: 'section',
 		},
@@ -310,6 +319,13 @@ export async function getDayStartTime(){
  ***************************************************************************************************************************************************/
 export async function getCustomCss(){
 	return await joplin.settings.value(customCssSettingKey) || ""
+}
+
+/** isToolbarButtonEnabled **************************************************************************************************************************
+ * Whether the Cockpit toolbar button should be created at startup																					*
+ ***************************************************************************************************************************************************/
+export async function isToolbarButtonEnabled(){
+	return await joplin.settings.value(showToolbarButtonSettingKey)
 }
 
 /** setCustomCss ************************************************************************************************************************************

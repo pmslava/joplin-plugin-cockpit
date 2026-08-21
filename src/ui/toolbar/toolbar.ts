@@ -6,6 +6,7 @@
 import joplin from "api";
 import { ToolbarButtonLocation } from "api/types";
 import { isMobile } from "../../core/platform";
+import { isToolbarButtonEnabled } from "../../core/settings";
 
 /** setupToolbar ************************************************************************************************************************************
  * Registers a toolbar button to toggle the panel visibility between shown and hidden.                                                              *
@@ -14,6 +15,7 @@ import { isMobile } from "../../core/platform";
  ***************************************************************************************************************************************************/
 export async function setupToolbar() {
     if (await isMobile()) return
+    if (!(await isToolbarButtonEnabled())) return
     await joplin.views.toolbarButtons.create(
         'togglePanelVisibilityButton',
         'togglePanelVisibility',
