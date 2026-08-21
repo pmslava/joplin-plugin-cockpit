@@ -2810,6 +2810,103 @@ async function main() {
         assert.ok(/inset:\s*4px/.test(ruleBody('.todo-checkbox::before')), 'the 4px disc inset must be intact')
     })
 
+    // ============================================================ notebook picker UX (taller menu, ESC-close, embedded filter)
+    // Three additions to the custom notebook-filter dropdown: it opens at least two-thirds tall, Escape closes it, and a
+    // filter box pinned at its top narrows the notebook rows live. The harness renders the panel markup but never runs the
+    // webview JS, so the runtime behaviour is proved by the e2e spec; here we pin (a) the markup - the filter box is present
+    // and pinned above the rows, the per-row rename/move/delete icons are untouched, every notebook row is a data-notebook-row
+    // and "All notebooks" is not - (b) the CSS - #notebookMenu is capped at 66vh (scoped, so profile/sort keep 320px), a
+    // filtered row is hidden, no @media - and (c) the webview source shape - the Escape-close is scoped to an OPEN dropdown,
+    // the filter is a case-insensitive path substring, Enter selects the first visible notebook, and the box auto-focuses on
+    // desktop only.
+    const nbFolders = [
+        { id: 'n'.repeat(32), title: 'Family', parent_id: '' },
+        { id: 'm'.repeat(32), title: 'Payments', parent_id: 'n'.repeat(32) },
+        { id: 'k'.repeat(32), title: 'Work', parent_id: '' },
+    ]
+    const nbState = await run({
+        dataDir: path.join(tmp, 'nb-data'),
+        installationDir: path.join(tmp, 'nb-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [],
+        folders: nbFolders,
+    })
+
+    await test('notebook markup: a filter box is pinned above the rows; per-row icons and the All/notebook markers are intact', () => {
+        const html = nbState.panelHtml['panel-panel']
+        const menuStart = html.indexOf('id="notebookMenu"')
+        assert.ok(menuStart >= 0, 'the notebook menu must be present')
+        // The filter box, with the live-filter handlers wired inline so it survives the panel's innerHTML swaps.
+        const filterAt = html.indexOf('notebook-filter-input', menuStart)
+        assert.ok(filterAt >= 0, 'the notebook menu must carry the embedded filter input')
+        assert.ok(html.includes('oninput="onNotebookFilterInput(event)"'), 'the filter box must filter live on input')
+        assert.ok(html.includes('onkeydown="onNotebookFilterKeyDown(event)"'), 'the filter box must handle Enter/Escape')
+        // Pinned at the TOP: the box comes before the All-notebooks row (and therefore before every notebook row) in the menu.
+        const allRowAt = html.indexOf('data-notebook-all', menuStart)
+        assert.ok(allRowAt >= 0 && filterAt < allRowAt, 'the filter box must be pinned above the All-notebooks row')
+        // "All notebooks" is NOT a filterable notebook row (Enter must never land on it, the filter must never hide it).
+        assert.ok(!/data-notebook-all[^>]*data-notebook-row|data-notebook-row[^>]*data-notebook-all/.test(html),
+            'the All-notebooks row must not be a data-notebook-row')
+        // Every real notebook row is a data-notebook-row and still shows its full breadcrumb path in the label.
+        assert.ok(/data-notebook-row[^>]*>\s*<span class="dropdown-label">Family \/ Payments<\/span>/.test(html),
+            'each notebook row must be a data-notebook-row carrying its full path label')
+        // The per-row action icons are byte-for-byte unchanged.
+        assert.ok(html.includes("onDropdownActionClicked(event, 'renameNotebookClicked'"), 'the Rename icon must be intact')
+        assert.ok(html.includes("onDropdownActionClicked(event, 'moveNotebookClicked'"), 'the Move icon must be intact')
+        assert.ok(html.includes("onDropdownActionClicked(event, 'deleteNotebookClicked'"), 'the Delete icon must be intact')
+    })
+
+    await test('notebook css: #notebookMenu is capped near 66vh (scoped), a filtered row is hidden, no @media', () => {
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        const ruleBody = (selector) => {
+            const at = css.indexOf(selector)
+            assert.ok(at >= 0, `panel.css is missing the ${selector} rule`)
+            const open = css.indexOf('{', at), close = css.indexOf('}', open)
+            return css.slice(open + 1, close)
+        }
+        const nbMenu = ruleBody('#notebookMenu {')
+        assert.ok(/max-height:[^;]*66vh/.test(nbMenu), 'the notebook menu must open at least two-thirds tall (66vh)')
+        assert.ok(!/@media/.test(nbMenu), 'the notebook menu height rule must not use @media')
+        // Scoped: the shared .dropdown-menu keeps its 320px cap, so the profile and sort menus are unchanged. Anchored to
+        // the line-start rule so the lookup does not collide with ".dropdown.-compact .dropdown-menu {".
+        assert.ok(/max-height:\s*320px/.test(ruleBody('\n.dropdown-menu {')), 'the shared dropdown cap (profile/sort) must stay 320px')
+        // A filtered-out notebook row must actually vanish (the base .dropdown-item display:flex would otherwise win over [hidden]).
+        assert.ok(/display:\s*none/.test(ruleBody('.dropdown-item[hidden] {')), 'a filtered notebook row must be hidden')
+        // The pinned box colours its background from a --cockpit-* variable (theme-following), not a hard-coded literal.
+        assert.ok(/var\(--cockpit-/.test(ruleBody('.notebook-filter {')), 'the pinned filter background must come from a --cockpit-* variable')
+    })
+
+    await test('notebook webview: Escape-close is scoped to an OPEN dropdown, the filter is a case-insensitive path substring, Enter picks the first visible', () => {
+        // (a) Escape closes an OPEN custom dropdown only - scoped by the selector so it never fires when nothing is open,
+        // and so it leaves the search-suggestion and mobile-overlay Escape handlers alone.
+        const escIdx = webviewSource.indexOf('.dropdown > .dropdown-menu:not([hidden])')
+        assert.ok(escIdx >= 0, 'the Escape-close must be scoped to an OPEN dropdown (.dropdown > .dropdown-menu:not([hidden]))')
+        const escRegion = webviewSource.slice(escIdx - 220, escIdx + 160)
+        assert.ok(escRegion.includes("'Escape'"), 'the scoped close must be gated on the Escape key')
+        assert.ok(escRegion.includes('closeAllDropdowns()'), 'the scoped Escape must close the open dropdown via closeAllDropdowns()')
+        // (b) The live filter: a case-insensitive substring of the full path, read from each data-notebook-row's label.
+        const filterBody = handlerBody('filterNotebookMenu')
+        assert.ok(filterBody.includes('data-notebook-row'), 'the filter must walk the notebook rows (data-notebook-row)')
+        assert.ok(filterBody.includes('.toLowerCase()') && filterBody.includes('indexOf('), 'the filter must be a case-insensitive substring match')
+        assert.ok(filterBody.includes("setAttribute('hidden'") && filterBody.includes("removeAttribute('hidden')"),
+            'the filter must show/hide rows by the hidden attribute')
+        // (c) Enter selects the first STILL-VISIBLE notebook - the same action as clicking its row - never "All notebooks".
+        const keyBody = handlerBody('onNotebookFilterKeyDown')
+        assert.ok(keyBody.includes("'Enter'") && keyBody.includes('selectFirstVisibleNotebook('), 'Enter must select the first visible notebook')
+        const firstBody = handlerBody('selectFirstVisibleNotebook')
+        assert.ok(firstBody.includes('[data-notebook-row]:not([hidden])') && firstBody.includes('.click()'),
+            'the first-visible pick must click the first unhidden notebook row (the same action as a click)')
+        // (d) Escape is a two-step: clear the text first (swallowed so the menu stays open), then - box empty - fall through
+        // to the scoped document handler that closes it.
+        assert.ok(/Escape[\s\S]*input\.value[\s\S]*stopPropagation\(\)/.test(keyBody),
+            'the first Escape must clear the filter text and be swallowed so the menu stays open')
+        // (e) The box auto-focuses on OPEN, desktop only (mobile would pop the soft keyboard).
+        const toggleBody = handlerBody('onDropdownToggle')
+        assert.ok(toggleBody.includes('notebook-filter-input') && toggleBody.includes('.focus()') && toggleBody.includes('!IS_MOBILE'),
+            'opening the notebook menu must reset and (desktop-only) focus the filter box')
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

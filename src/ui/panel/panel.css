@@ -375,6 +375,52 @@ option {
     display: none;
 }
 
+/* The notebook filter can list many notebooks, so its open menu is given at least two-thirds of the panel
+ * height, the list scrolling inside; a short list keeps its natural height. The menu is anchored just below
+ * the two top control rows (~72px down), so 66vh clears the panel bottom with headroom; the calc() caps it
+ * on an unusually short panel so the menu always stays fully visible. Scoped to the notebook menu - the
+ * profile and sort menus keep the shared 320px cap above. */
+#notebookMenu {
+    max-height: min(66vh, calc(100vh - 88px));
+}
+
+/* The embedded notebook filter: a small search box pinned at the top of the open menu while the notebook
+ * rows scroll beneath it. The negative margins let its background span the menu's 4px padding so no row
+ * peeks above it while scrolling; top: -4px sticks it flush to the menu's top edge. */
+.notebook-filter {
+    position: sticky;
+    top: -4px;
+    z-index: 1;
+    margin: -4px -4px 2px;
+    padding: 4px 4px 6px;
+    background-color: var(--cockpit-background-color, #1D2024);
+}
+
+.notebook-filter-input {
+    box-sizing: border-box;
+    width: 100%;
+    height: 26px;
+    min-height: 26px;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--cockpit-color, inherit);
+    background-color: var(--cockpit-background-color4, transparent);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 3px;
+}
+
+.notebook-filter-input:focus {
+    outline: none;
+    border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
+}
+
+/* A notebook row filtered out by the box above. The base .dropdown-item sets display:flex, which overrides
+ * the UA [hidden] rule, so a filtered row needs an explicit hide (mirrors .dropdown-menu[hidden]). */
+.dropdown-item[hidden] {
+    display: none;
+}
+
 .dropdown-menu::-webkit-scrollbar { width: 6px; }
 .dropdown-menu::-webkit-scrollbar-track { background: transparent; }
 .dropdown-menu::-webkit-scrollbar-thumb {
@@ -1180,6 +1226,9 @@ table {
  * A taller menu row is the standard touch pattern and does not alter the resting panel. */
 .cockpit-mobile .dropdown-item { min-height: 40px; }
 .cockpit-mobile .context-menu-item { display: flex; align-items: center; min-height: 40px; }
+
+/* The notebook filter box is a comfortable tap target on mobile, matching the 40px rows above. */
+.cockpit-mobile .notebook-filter-input { min-height: 40px; }
 
 .cockpit-mobile .calendar-title { min-height: 40px; }
 

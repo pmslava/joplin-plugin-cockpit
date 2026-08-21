@@ -1008,8 +1008,18 @@ function getProfileDropdownHTML(profiles, currentProfileID){
  ***************************************************************************************************************************************************/
 function getNotebookDropdownHTML(notebooks){
     var currentLabel = "All notebooks"
+    // A filter box pinned at the top of the open menu (see panel.css .notebook-filter). Its behaviour lives
+    // in panelWebview.js (onNotebookFilterInput / onNotebookFilterKeyDown, wired here as inline handlers so
+    // it survives the panel's innerHTML swaps like every other control). "All notebooks" carries no
+    // data-notebook-row marker, so it is never filtered out and Enter never lands on it; every real notebook
+    // row does, which is what the live filter narrows and what Enter-selects-first walks.
     var itemsHtml = `
-        <div class="dropdown-item${notebookFilter ? "" : " -current"}" onclick="onDropdownItemClicked(event, 'notebookFilterChanged', '')">
+        <div class="notebook-filter">
+            <input type="text" class="notebook-filter-input" placeholder="Filter notebooks..." aria-label="Filter notebooks"
+                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                oninput="onNotebookFilterInput(event)" onkeydown="onNotebookFilterKeyDown(event)">
+        </div>
+        <div class="dropdown-item${notebookFilter ? "" : " -current"}" data-notebook-all onclick="onDropdownItemClicked(event, 'notebookFilterChanged', '')">
             <span class="dropdown-label">All notebooks</span>
         </div>
     `
@@ -1017,7 +1027,7 @@ function getNotebookDropdownHTML(notebooks){
         var isCurrent = notebook.id === notebookFilter
         if (isCurrent) currentLabel = notebook.path
         itemsHtml += `
-            <div class="dropdown-item${isCurrent ? " -current" : ""}" onclick="onDropdownItemClicked(event, 'notebookFilterChanged', '${escapeHtml(notebook.id)}')">
+            <div class="dropdown-item${isCurrent ? " -current" : ""}" data-notebook-row onclick="onDropdownItemClicked(event, 'notebookFilterChanged', '${escapeHtml(notebook.id)}')">
                 <span class="dropdown-label">${escapeHtml(notebook.path)}</span>
                 <button type="button" class="row-action" title="Rename notebook" onclick="onDropdownActionClicked(event, 'renameNotebookClicked', '${escapeHtml(notebook.id)}')">${icons["edit"]}</button>
                 <button type="button" class="row-action" title="Move notebook" onclick="onDropdownActionClicked(event, 'moveNotebookClicked', '${escapeHtml(notebook.id)}')">${icons["chevronRight"]}</button>
