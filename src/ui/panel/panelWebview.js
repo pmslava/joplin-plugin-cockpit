@@ -899,7 +899,19 @@ function onDropdownToggle(event, menuID){
     var wasHidden = menu.hasAttribute('hidden')
     closeAllDropdowns()
     hideNoteContextMenu()
-    if (wasHidden) menu.removeAttribute('hidden')
+    if (wasHidden){
+        menu.removeAttribute('hidden')
+        // The notebook menu carries an embedded filter box: start every open from a fresh, empty filter (all
+        // rows shown), and on desktop focus it so typing filters at once. On mobile it is left unfocused so
+        // opening the menu does not pop the soft keyboard. Menus without a filter box (profile, sort) are
+        // unaffected - the querySelector simply finds nothing.
+        var filterInput = menu.querySelector('.notebook-filter-input')
+        if (filterInput){
+            filterInput.value = ''
+            filterNotebookMenu(menu)
+            if (!IS_MOBILE) filterInput.focus()
+        }
+    }
 }
 
 function onDropdownItemClicked(event, messageName, value){
@@ -931,6 +943,75 @@ function onDropdownActionClicked(event, messageName, value){
 document.addEventListener('click', event => {
     if (!event.target.closest || !event.target.closest('.dropdown')) closeAllDropdowns()
 }, true)
+
+// Escape closes an open custom dropdown (notebook / profile / sort all share this menu machinery). Scoped
+// to "a dropdown is actually open" so it stays inert otherwise, and so it never fights the two other Escape
+// handlers: the search-suggestion Escape is swallowed by the search field itself (it stopPropagation()s),
+// and the mobile overlay Escape is swallowed in the capture phase before this bubble-phase listener runs.
+// The suggestion list is a .dropdown-menu inside #searchRow (NOT inside a .dropdown), so the selector below
+// excludes it and leaves it to its own handler. The notebook filter's own Escape (clear-then-close) runs
+// first on the focused input and only lets the empty-box press reach here.
+document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return
+    if (!document.querySelector('.dropdown > .dropdown-menu:not([hidden])')) return
+    closeAllDropdowns()
+})
+
+/** Notebook filter (embedded in the notebook dropdown) ******************************************************************************************
+ * The notebook menu can list many notebooks, so a filter box is pinned at its top. Typing filters the notebook rows live by a case-insensitive  *
+ * substring of the full path ("fam" matches "Family / Payments"); "All notebooks" always stays visible (it carries no data-notebook-row marker). *
+ * Enter selects the first still-visible notebook - the same action as clicking its row. Escape clears the text on the first press and, once the   *
+ * box is empty, lets the shared dropdown-Escape handler above close the menu. The box is reset (and, on desktop, focused) each time the menu       *
+ * opens, so its state never outlives one open; desktop dropdowns are rebuilt on every render anyway, so there is nothing to persist.              *
+ ***************************************************************************************************************************************************/
+function notebookMenuOf(el){
+    return el && el.closest ? el.closest('.dropdown-menu') : null
+}
+
+function filterNotebookMenu(menu){
+    if (!menu) return
+    var input = menu.querySelector('.notebook-filter-input')
+    var query = (input ? input.value : '').trim().toLowerCase()
+    var rows = menu.querySelectorAll('[data-notebook-row]')
+    for (var i = 0; i < rows.length; i++){
+        var label = rows[i].querySelector('.dropdown-label')
+        var path = (label ? label.textContent : '').toLowerCase()
+        if (!query || path.indexOf(query) !== -1) rows[i].removeAttribute('hidden')
+        else rows[i].setAttribute('hidden', '')
+    }
+}
+
+function onNotebookFilterInput(event){
+    filterNotebookMenu(notebookMenuOf(event.target))
+}
+
+function selectFirstVisibleNotebook(menu){
+    if (!menu) return
+    // The first NOTEBOOK row still visible after filtering ("All notebooks" is not a data-notebook-row, so
+    // Enter never lands on it). Clicking it runs the row's own onclick - the same action as a real click.
+    var firstRow = menu.querySelector('[data-notebook-row]:not([hidden])')
+    if (firstRow) firstRow.click()
+}
+
+function onNotebookFilterKeyDown(event){
+    var input = event.currentTarget
+    if (event.key === 'Escape'){
+        // First Escape with text clears the filter (the menu stays open); swallow it so the shared dropdown
+        // Escape handler above does not also close the menu. A second Escape (the box now empty) is NOT
+        // swallowed, so it falls through to that handler, which closes the open dropdown.
+        if (input.value){
+            event.preventDefault()
+            event.stopPropagation()
+            input.value = ''
+            filterNotebookMenu(notebookMenuOf(input))
+        }
+        return
+    }
+    if (event.key === 'Enter'){
+        event.preventDefault()
+        selectFirstVisibleNotebook(notebookMenuOf(input))
+    }
+}
 
 /** onNewNoteClicked / onNewTodoClicked **************************************************************************************************************/
 async function onNewNoteClicked(){
