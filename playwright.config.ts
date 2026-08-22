@@ -12,6 +12,11 @@ import { defineConfig } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e',
+  // Resource-safety guard (see e2e/guard.ts): a machine-wide lock so only one Joplin E2E run exists
+  // at a time across all sibling repos, a pre-run sweep that reaps orphans a previous crashed run
+  // left behind, and a soft RAM gate. globalTeardown releases the lock.
+  globalSetup: './e2e/global-setup.ts',
+  globalTeardown: './e2e/global-teardown.ts',
   // Launching Joplin + waiting for the plugin to register can take a while on a cold profile, and
   // some tests wait out more than one of the panel's fallback refresh intervals.
   timeout: 240_000,

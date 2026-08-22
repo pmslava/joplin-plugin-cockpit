@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as net from 'net';
+import { registerInstance } from './guard';
 
 /**
  * Helpers for launching a real Joplin desktop (Electron) instance with this plugin loaded as a
@@ -171,8 +172,15 @@ async function startInstance(profileDir: string): Promise<JoplinInstance> {
         }`,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Own process group, so a crash/interrupt handler can SIGKILL the whole Electron tree with a
+      // negative pid instead of leaking orphaned renderers. See e2e/guard.ts.
+      detached: true,
     }
   );
+
+  // Track it so the guard's signal/exit handlers can reap this instance if the run dies before the
+  // per-spec afterAll -> closeJoplin() gets to run. closeJoplin() stays the happy-path authority.
+  registerInstance(child, profileDir);
 
   try {
     await waitForCDP(port, 90_000);
