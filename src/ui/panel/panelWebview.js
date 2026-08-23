@@ -12,6 +12,11 @@ async function onTodoClicked(todoID){
  ***************************************************************************************************************************************************/
 var selectedTodoIDs = new Set()
 var lastClickedTodoID = null
+// The row of the most recent press that SELECTED something: a plain press, a Ctrl+press that added a row, or
+// the far end of a Shift range. It is deliberately NOT the same thing as lastClickedTodoID, which is the
+// Shift-range anchor and must stay put while a range is resized; this one always follows the last thing the
+// user selected, which is the row an Escape collapses a multi-selection onto (see collapseMultiSelection).
+var lastSelectionInteractionID = null
 // The item that is highlighted WITHOUT being part of the panel's own selection: a picked regular note
 // row, or the note the main editor is showing (see applyEditorNoteSelection). It takes no part in drag or
 // set-alarm operations, so an item the user has not picked in the panel can never ride along in a batch.
@@ -78,6 +83,39 @@ function paintTodoSelection(){
         noteRow.classList.toggle('-selected', noteRow.dataset.noteId === pickedNoteID)
     }
 }
+
+/** Escape collapses a multi-selection **************************************************************************************************************
+ * With several rows selected, Escape leaves ONE selected rather than clearing the lot: the LAST row the user selected, the same way for every way of *
+ * building a selection - the last Ctrl+press that added a row, or the far end of a Shift range (never the anchor it was measured from). When that row *
+ * is no longer in the selection or no longer in the list, the topmost still-listed selected row survives instead. The rule itself is in the shared    *
+ * window.EditorNote so it is covered by tests. A selection of one or none is untouched: this collapses, it never deselects, and it never opens the     *
+ * kept note or moves the editor-tracking highlight (pickedNoteID).                                                                                    *
+ *                                                                                                                                                    *
+ * Escape belongs first to whatever transient thing is open - the context menu, a dropdown, the search suggestions, a mobile overlay - and only a BARE *
+ * press reaches the selection. This listener is registered ABOVE every other Escape handler in this file, so those are all still open when it runs    *
+ * and it can stand aside; each of them then closes on its own handler exactly as before. A press inside the search field is the field's own.          *
+ ***************************************************************************************************************************************************/
+function collapseMultiSelection(){
+    if (selectedTodoIDs.size <= 1) return
+    var kept = window.EditorNote.collapseSelection([...selectedTodoIDs], lastSelectionInteractionID, allTodoRows().map(row => row.dataset.todoId))
+    selectedTodoIDs.clear()
+    for (var id of kept) selectedTodoIDs.add(id)
+    // The surviving row becomes both the range anchor and the last interaction, so a Shift+press after an
+    // Escape measures from what is actually still selected.
+    lastClickedTodoID = kept.length ? kept[0] : null
+    lastSelectionInteractionID = lastClickedTodoID
+    paintTodoSelection()
+}
+
+document.addEventListener('keydown', function(event){
+    if (event.key !== 'Escape') return
+    if (document.getElementById('noteContextMenu')) return
+    if (document.querySelector('.dropdown > .dropdown-menu:not([hidden])')) return
+    if (document.getElementById('searchSuggestions')) return
+    if (overlayOpen) return
+    if (document.activeElement === getSearchInput()) return
+    collapseMultiSelection()
+})
 
 /** Editor note tracking ****************************************************************************************************************************
  * The row highlight follows the note the MAIN editor/viewer is showing, wherever it was opened from: a row in this panel, Joplin's note list, a link *
@@ -451,8 +489,18 @@ function onTodoRowMouseDown(event, todoID){
         for (var index = Math.min(from, to); index <= Math.max(from, to); index++){
             selectedTodoIDs.add(ids[index])
         }
+        // The range's far end is the row just pressed, NOT the anchor the range was measured from (which
+        // deliberately stays put so a further Shift+press resizes the range).
+        lastSelectionInteractionID = todoID
     } else if (event.ctrlKey || event.metaKey){
-        selectedTodoIDs.has(todoID) ? selectedTodoIDs.delete(todoID) : selectedTodoIDs.add(todoID)
+        if (selectedTodoIDs.has(todoID)){
+            // A Ctrl+press that DESELECTS points at a row that is no longer in the selection, so it is not
+            // recorded: the last row the user actually selected stays the one an Escape collapses onto.
+            selectedTodoIDs.delete(todoID)
+        } else {
+            selectedTodoIDs.add(todoID)
+            lastSelectionInteractionID = todoID
+        }
         lastClickedTodoID = todoID
     } else if (selectedTodoIDs.has(todoID) && selectedTodoIDs.size > 1){
         // A plain press on a row that is ALREADY part of a multi-selection PRESERVES the whole set, so a
@@ -461,10 +509,12 @@ function onTodoRowMouseDown(event, todoID){
         // onTodoDragStart would then see a single id and only one to-do would move. The collapse-to-single
         // instead happens on a plain CLICK with no drag (onTodoRowClicked), which since 1.8.1 opens the row.
         lastClickedTodoID = todoID
+        lastSelectionInteractionID = todoID
     } else {
         selectedTodoIDs.clear()
         selectedTodoIDs.add(todoID)
         lastClickedTodoID = todoID
+        lastSelectionInteractionID = todoID
     }
     paintTodoSelection()
 }

@@ -177,6 +177,72 @@ test.describe('Multi-select context menu (desktop)', () => {
     expect((await panelTodoTitles(win)).some((t) => t.includes(DC))).toBe(true);
   });
 
+  /**
+   * Escape collapses a multi-selection to ONE row - the LAST row the user selected - instead of clearing it, the
+   * same way whether the selection was built with Ctrl or with Shift. Driven with REAL input, which is what makes
+   * it meaningful: genuine clicks build the selection (and give the panel iframe the focus that a synthetic
+   * dispatch never would), so the Escape keypress actually lands in the panel document.
+   */
+  test('Escape collapses a Ctrl-built multi-selection to the last row clicked', async () => {
+    const { win } = joplin;
+    const panel = await agendaPanel(joplin.win);
+    const rowFor = (marker: string) => panel.locator('.todo[data-todo-id]', { hasText: marker }).first();
+
+    // A plain click selects (and opens) the first row; Ctrl-clicks extend without opening.
+    await rowFor(DC).locator('.todo-title').click();
+    await rowFor(MA).locator('.todo-title').click({ modifiers: ['Control'] });
+    await rowFor(MB).locator('.todo-title').click({ modifiers: ['Control'] });
+    // Read the panel's own selection rather than the -selected class: the class is also painted for the
+    // editor-tracking highlight (the note the plain click opened), which is not part of the selection.
+    const selectionMarkers = () =>
+      panel.evaluate((markers: string[]) => {
+        const ids: string[] = [...((window as any).selectedTodoIDs || [])];
+        const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
+        return ids
+          .map((id) => rows.find((r) => r.dataset.todoId === id))
+          .map((row) => markers.find((m) => ((row && row.textContent) || '').includes(m)) || '?')
+          .sort();
+      }, [DC, MA, MB]);
+
+    await expect.poll(selectionMarkers, { timeout: 10_000 }).toEqual([DC, MA, MB].sort());
+
+    await win.keyboard.press('Escape');
+
+    // The survivor is the last row selected: the most recent Ctrl press that added one.
+    await expect.poll(selectionMarkers, { timeout: 10_000 }).toEqual([MB]);
+  });
+
+  /**
+   * The Shift half of the same rule, and the case that actually changed: a range collapses onto the row the user
+   * just pressed (the far END of the range), never onto the anchor it was measured from - which is what an earlier
+   * build did, and what made Shift and Ctrl disagree.
+   */
+  test('Escape collapses a Shift-built range to the row just pressed, not the anchor', async () => {
+    const { win } = joplin;
+    const panel = await agendaPanel(joplin.win);
+    const rowFor = (marker: string) => panel.locator('.todo[data-todo-id]', { hasText: marker }).first();
+
+    // A plain click anchors the range on DC; the Shift-click extends it down to MB, taking MA with it.
+    await rowFor(DC).locator('.todo-title').click();
+    await rowFor(MB).locator('.todo-title').click({ modifiers: ['Shift'] });
+
+    const selectionMarkers = () =>
+      panel.evaluate((markers: string[]) => {
+        const ids: string[] = [...((window as any).selectedTodoIDs || [])];
+        const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
+        return ids
+          .map((id) => rows.find((r) => r.dataset.todoId === id))
+          .map((row) => markers.find((m) => ((row && row.textContent) || '').includes(m)) || '?')
+          .sort();
+      }, [DC, MA, MB]);
+
+    await expect.poll(selectionMarkers, { timeout: 10_000 }).toEqual([DC, MA, MB].sort());
+
+    await win.keyboard.press('Escape');
+
+    await expect.poll(selectionMarkers, { timeout: 10_000 }).toEqual([MB]);
+  });
+
   test('moving a multi-selection re-parents every selected to-do to the picked notebook', async () => {
     const { win } = joplin;
     // Precondition: both move fixtures start in the source notebook.

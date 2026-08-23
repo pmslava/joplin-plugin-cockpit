@@ -2747,13 +2747,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.9.6', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.9.7', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.9.6'
+        const expected = '1.9.7'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
@@ -3005,7 +3005,9 @@ async function main() {
     await test('notebook webview: Escape-close is scoped to an OPEN dropdown, the filter is a case-insensitive path substring, Enter picks the first visible', () => {
         // (a) Escape closes an OPEN custom dropdown only - scoped by the selector so it never fires when nothing is open,
         // and so it leaves the search-suggestion and mobile-overlay Escape handlers alone.
-        const escIdx = webviewSource.indexOf('.dropdown > .dropdown-menu:not([hidden])')
+        // The selector appears twice now: the bare-Escape selection collapse reads it as a "a dropdown owns this
+        // Escape" guard before this handler is reached. The close handler is the later one.
+        const escIdx = webviewSource.lastIndexOf('.dropdown > .dropdown-menu:not([hidden])')
         assert.ok(escIdx >= 0, 'the Escape-close must be scoped to an OPEN dropdown (.dropdown > .dropdown-menu:not([hidden]))')
         const escRegion = webviewSource.slice(escIdx - 220, escIdx + 160)
         assert.ok(escRegion.includes("'Escape'"), 'the scoped close must be gated on the Escape key')
@@ -3142,6 +3144,79 @@ async function main() {
         assert.strictEqual(EditorNote.acceptsPush({ isMobile: true, windowFocused: false }), true,
             'mobile has no second window, so it always applies')
         assert.strictEqual(EditorNote.acceptsPush(), false, 'a missing context must not be read as focused')
+    })
+
+    // -- Escape collapses a multi-selection to one row ---------------------------------------------------------
+    await test('escape collapse: the LAST row the user selected survives, the same way for Shift and Ctrl', () => {
+        const order = [id32('r1'), id32('r2'), id32('r3'), id32('r4')]
+        // A Shift range r1..r3 pressed at r3: the far END of the range is the last thing selected, NOT the
+        // anchor it was measured from. (This is the case that changed: the anchor used to win here.)
+        assert.deepStrictEqual(EditorNote.collapseSelection([order[0], order[1], order[2]], order[2], order), [order[2]],
+            'a Shift range collapses onto the row that was just pressed')
+        // A range dragged UPWARDS (anchor r4, pressed r2) keeps the pressed row just the same.
+        assert.deepStrictEqual(EditorNote.collapseSelection([order[1], order[2], order[3]], order[1], order), [order[1]],
+            'the direction the range was built in makes no difference')
+        // A Ctrl-built set collapses onto the last Ctrl+press that ADDED a row, wherever it sits in the list.
+        assert.deepStrictEqual(EditorNote.collapseSelection([order[2], order[0], order[1]], order[0], order), [order[0]],
+            'a Ctrl set collapses onto the last row added, not the topmost one')
+    })
+
+    await test('escape collapse: without a usable last selection the TOPMOST selected row in list order survives', () => {
+        const order = [id32('r1'), id32('r2'), id32('r3'), id32('r4')]
+        // A Ctrl+press that DESELECTS records nothing, so the last recorded row is the one selected before it -
+        // and if THAT row has since been deselected too, the collapse falls through to the topmost selected row.
+        assert.deepStrictEqual(EditorNote.collapseSelection([order[2], order[1]], order[0], order), [order[1]],
+            'a recorded row that is no longer selected falls back to the topmost selected row')
+        assert.deepStrictEqual(EditorNote.collapseSelection([order[2], id32('gone')], id32('gone'), order), [order[2]],
+            'a recorded row that has left the list falls back the same way')
+        assert.deepStrictEqual(EditorNote.collapseSelection([id32('x'), id32('y')], id32('q'), order), [id32('x')],
+            'a selection whose rows are all off the list still collapses to exactly one')
+    })
+
+    await test('escape collapse: one or no selected rows are left exactly as they are', () => {
+        const order = [id32('r1'), id32('r2')]
+        // Slava asked for collapse-to-one, not deselect-all: a single selection must survive Escape untouched.
+        assert.deepStrictEqual(EditorNote.collapseSelection([order[1]], order[0], order), [order[1]], 'a single selection is a no-op')
+        assert.deepStrictEqual(EditorNote.collapseSelection([], order[0], order), [], 'an empty selection is a no-op')
+    })
+
+    await test('escape collapse (webview): the last SELECTING press is recorded, and it is not the range anchor', () => {
+        const body = handlerBody('onTodoRowMouseDown')
+        // The Shift branch records the row just pressed - the far end of the range - while lastClickedTodoID,
+        // the range anchor, deliberately stays put so a further Shift+press still resizes the range.
+        assert.ok(/for \(var index[\s\S]*lastSelectionInteractionID = todoID/.test(body),
+            'a Shift range must record the row just pressed as the last selection')
+        assert.ok(!/shiftKey\)\{[\s\S]*lastClickedTodoID = todoID[\s\S]*\} else if \(event\.ctrlKey/.test(body),
+            'the Shift branch must NOT move the range anchor')
+        // A Ctrl+press records only when it ADDS: a press that deselects points at a row that is no longer in
+        // the selection, so the last row actually selected stays the one an Escape collapses onto.
+        assert.ok(/selectedTodoIDs\.delete\(todoID\)[\s\S]{0,120}\} else \{[\s\S]{0,120}selectedTodoIDs\.add\(todoID\)[\s\S]{0,120}lastSelectionInteractionID = todoID/.test(body),
+            'a Ctrl+press must record the row only when it adds it to the selection')
+        assert.ok(handlerBody('collapseMultiSelection').includes('lastSelectionInteractionID'),
+            'the collapse must be driven by the last selecting press, not by the range anchor')
+    })
+
+    await test('escape collapse (webview): only a BARE Escape reaches the selection, and it never opens anything', () => {
+        const body = handlerBody('collapseMultiSelection')
+        assert.ok(body.includes('if (selectedTodoIDs.size <= 1) return'), 'it must only act on a real multi-selection')
+        assert.ok(body.includes('window.EditorNote.collapseSelection('), 'the kept row must come from the shared rule')
+        assert.ok(body.includes('paintTodoSelection()'), 'the collapse must repaint')
+        assert.ok(!body.includes('pickedNoteID') && !body.includes('onTodoClicked'),
+            'the collapse is selection-only: it must not move the editor-tracking highlight or open the kept note')
+        // Escape belongs first to whatever is open. The guards are read from the DOM, and this listener is
+        // registered ABOVE every other Escape handler in the file, so those popups are still open when it runs.
+        const collapseIdx = webviewSource.indexOf('collapseMultiSelection()\n})')
+        assert.ok(collapseIdx >= 0, 'the bare-Escape listener must call the collapse')
+        const guards = webviewSource.slice(webviewSource.lastIndexOf("event.key !== 'Escape'", collapseIdx), collapseIdx)
+        for (const [needle, why] of [
+            ["getElementById('noteContextMenu')", 'the context menu keeps Escape'],
+            ['.dropdown > .dropdown-menu:not([hidden])', 'an open dropdown keeps Escape'],
+            ["getElementById('searchSuggestions')", 'the suggestion list keeps Escape'],
+            ['overlayOpen', 'a mobile overlay keeps Escape'],
+            ['document.activeElement === getSearchInput()', 'the search field keeps its own Escape'],
+        ]) assert.ok(guards.includes(needle), why)
+        assert.ok(collapseIdx < webviewSource.indexOf("if (event.key === 'Escape') hideNoteContextMenu()"),
+            'the collapse listener must be registered before the other Escape handlers, so it sees them still open')
     })
 
     await test('editor highlight: a read-back is stale exactly when the selection generation moved on', () => {

@@ -44,6 +44,29 @@
         return askedAt !== current
     }
 
+    // Escape on a multi-selection collapses it to ONE row rather than clearing it: the LAST row the user
+    // selected, whichever way the selection was built. `lastInteraction` is that row (the panel records it on
+    // every press that selects - a plain press, a Ctrl+press that ADDS, and the far end of a Shift range,
+    // never the anchor the range was measured from), so Shift and Ctrl behave the same way round. A Ctrl+press
+    // that DESELECTS records nothing, so the last row actually selected stays the one that survives. The
+    // fallback, when that row is not part of the selection or is no longer in the list, is the TOPMOST
+    // selected row in the list's own order (`order`, omitted when the caller has no list to consult). A
+    // selection of one, or none, comes back untouched: this collapses a selection, it never deselects one.
+    function collapseSelection(selected, lastInteraction, order){
+        var current = Array.isArray(selected) ? selected.slice() : []
+        if (current.length <= 1) return current
+        var listed = Array.isArray(order) ? order : null
+        var keepID = lastInteraction ? String(lastInteraction) : ''
+        if (keepID && current.indexOf(keepID) >= 0 && (!listed || listed.indexOf(keepID) >= 0)) return [keepID]
+        if (listed){
+            for (var index = 0; index < listed.length; index++){
+                if (current.indexOf(listed[index]) >= 0) return [listed[index]]
+            }
+        }
+        // Nothing selected is on the list any more: keep the first id, so a collapse always leaves exactly one.
+        return [current[0]]
+    }
+
     // The panel's next highlight/selection state for `noteID` (the note the editor now shows, or a falsy value
     // for "no single note is open"). `state` is { selected: [ids], picked: id|null, lastClicked: id|null };
     // the same shape comes back, with `selected` a NEW array so a caller can never mutate the input by accident.
@@ -66,6 +89,7 @@
     return {
         acceptsPush: acceptsPush,
         readBackIsStale: readBackIsStale,
+        collapseSelection: collapseSelection,
         nextSelection: nextSelection,
     }
 })
