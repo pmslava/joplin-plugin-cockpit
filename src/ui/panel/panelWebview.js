@@ -12,7 +12,9 @@ async function onTodoClicked(todoID){
  ***************************************************************************************************************************************************/
 var selectedTodoIDs = new Set()
 var lastClickedTodoID = null
-// A picked regular note is only highlighted; it takes no part in drag or set-alarm operations
+// The item that is highlighted WITHOUT being part of the panel's own selection: a picked regular note
+// row, or the note the main editor is showing (see applyEditorNoteSelection). It takes no part in drag or
+// set-alarm operations, so an item the user has not picked in the panel can never ride along in a batch.
 var pickedNoteID = null
 
 /** Scroll preservation *********************************************************************************************************************************
@@ -68,12 +70,134 @@ function allTodoRows(){
 
 function paintTodoSelection(){
     for (var row of allTodoRows()){
-        row.classList.toggle('-selected', selectedTodoIDs.has(row.dataset.todoId))
+        // A to-do row is highlighted when it is in the panel's own selection, or when it is the item the
+        // editor is showing (pickedNoteID) - which highlights without joining any batch.
+        row.classList.toggle('-selected', selectedTodoIDs.has(row.dataset.todoId) || row.dataset.todoId === pickedNoteID)
     }
     for (var noteRow of document.querySelectorAll('.todo[data-note-id]')){
         noteRow.classList.toggle('-selected', noteRow.dataset.noteId === pickedNoteID)
     }
 }
+
+/** Editor note tracking ****************************************************************************************************************************
+ * The row highlight follows the note the MAIN editor/viewer is showing, wherever it was opened from: a row in this panel, Joplin's note list, a link *
+ * inside another note. The plugin holds the id (panel.ts, from workspace.onNoteSelectionChange) and pushes it here as ['editorNoteChanged', id]; this *
+ * webview also READS it back (getEditorNote) on two occasions, so a dropped push can never leave the highlight stale for good:                        *
+ *   - once per document load, which is what paints the highlight on a fresh panel and, on mobile, carries it across a render at all (a mobile render  *
+ *     is a full webview reload that destroys the module state below);                                                                                 *
+ *   - whenever the panel's window regains the focus, because every push arriving while it did NOT have focus was deliberately dropped (below), and    *
+ *     anything that moved the selection meanwhile - a note opened from another application, an alarm, a sync retiring the open note - would otherwise  *
+ *     never be re-sent (the host suppresses an unchanged id).                                                                                          *
+ *                                                                                                                                                     *
+ * SECONDARY WINDOWS (desktop, Joplin 3.x): Joplin keeps ONE store whose top-level selection belongs to whichever window is focused, so a note opened   *
+ * in a separate window arrives here as an ordinary selection change. It must not move the highlight - this panel belongs to the main window, whose     *
+ * editor did not change - so a push is ignored while the panel's own window is not the focused one, and the read-back is filtered the same way. Mobile *
+ * has no second window (and an Android webview's focus state is not a reliable proxy for one), so there both are always accepted.                      *
+ *                                                                                                                                                     *
+ * What each of those does to the panel's own selection is decided by the shared, DOM-free window.EditorNote (editorNote.js): the highlight always      *
+ * moves, a multi-selection is never touched, and a lone selected row is kept only when it IS the opened note.                                          *
+ ***************************************************************************************************************************************************/
+// Let the host settle before a regained-focus read-back: switching from a Joplin secondary window back to
+// the main one makes Joplin swap ITS selection to the top of the store a beat later, and reading before
+// that swap would briefly paint the other window's note.
+var EDITOR_NOTE_RESYNC_DELAY = 150
+var editorNoteResyncTimer = null
+// The selection generation, bumped by every accepted push AND by every row press: a read-back that was
+// already in flight when either happened is dropped instead of painting its older answer over the newer
+// state - which for a row press would mean dropping the single-row selection the press just made (the
+// searchTitleSuggestions pattern).
+var editorNoteSeq = 0
+
+function panelWindowIsFocused(){
+    try {
+        // The panel is an iframe, so its OWN document only has focus when focus sits inside the panel;
+        // the question here is which WINDOW is focused, which is what the top document answers.
+        var top = window.top || window
+        return !!(top.document && top.document.hasFocus())
+    } catch (error){
+        return true                    // a cross-origin host cannot be asked: treat every push as the main window's
+    }
+}
+
+function acceptsEditorNote(){
+    return window.EditorNote.acceptsPush({ isMobile: IS_MOBILE, windowFocused: panelWindowIsFocused() })
+}
+
+// Move the highlight to the note the editor is showing, and let the shared rules decide what becomes of the
+// panel's own selection (see editorNote.js). The id lands in pickedNoteID, the highlight-only store, so a row
+// the user never picked in the panel can never ride along in a drag or a batch action; an id the list does not
+// hold matches no row, so the highlight simply goes, and a render that later brings that row in picks it up.
+function applyEditorNoteSelection(noteID){
+    var next = window.EditorNote.nextSelection({
+        selected: [...selectedTodoIDs],
+        picked: pickedNoteID,
+        lastClicked: lastClickedTodoID,
+    }, noteID)
+    selectedTodoIDs.clear()
+    for (var id of next.selected) selectedTodoIDs.add(id)
+    pickedNoteID = next.picked
+    lastClickedTodoID = next.lastClicked
+    paintTodoSelection()
+}
+
+// Read the editor's note back from the host and apply it, unless a push has overtaken this round-trip.
+function requestEditorNote(){
+    if (!acceptsEditorNote()) return
+    var seq = editorNoteSeq
+    webviewApi.postMessage(['getEditorNote']).then(function(id){
+        if (window.EditorNote.readBackIsStale(seq, editorNoteSeq)) return
+        if (!acceptsEditorNote()) return
+        applyEditorNoteSelection(id)
+    }).catch(function(){})
+}
+
+function queueEditorNoteResync(){
+    if (editorNoteResyncTimer) clearTimeout(editorNoteResyncTimer)
+    editorNoteResyncTimer = setTimeout(function(){
+        editorNoteResyncTimer = null
+        requestEditorNote()
+    }, EDITOR_NOTE_RESYNC_DELAY)
+}
+
+/** Create-button width stages (desktop) ************************************************************************************************************
+ * The profile row must stay ONE line at every panel width, so the create buttons degrade instead of wrapping: icon + "New note" / "New to-do", then  *
+ * icon + "Note" / "To-do", then the icon alone (the title/aria-label keeps naming the action). Which stage fits is MEASURED rather than guessed at a  *
+ * pixel breakpoint: the row's content width scales with Joplin's font-size setting (and with whatever font a theme picks), so a fixed @media          *
+ * threshold that is clean at the 13px default clips the second button at 16-18px. The row is a full-width block whose size does not depend on its     *
+ * contents, so stepping the labels down cannot change what is being measured and the loop cannot oscillate.                                          *
+ *                                                                                                                                                     *
+ * Runs on every real re-render (reconcile) and on every panel resize. Mobile renders icon-only markup already and is skipped.                          *
+ ***************************************************************************************************************************************************/
+function applyCreateButtonStage(){
+    if (IS_MOBILE) return
+    var row = document.getElementById('profileControls')
+    if (!row) return
+    // Widest first: with both stage classes off the row shows the full wording. Each measurement is a live
+    // layout read, so "does it overflow" is the real answer for this width, font-size and theme.
+    row.classList.remove('-labels-short', '-labels-none')
+    if (row.scrollWidth <= row.clientWidth) return
+    row.classList.add('-labels-short')
+    if (row.scrollWidth <= row.clientWidth) return
+    row.classList.remove('-labels-short')
+    row.classList.add('-labels-none')
+}
+
+// Coalesced measurement, for the signals that can arrive in bursts: a host stylesheet swap can fire the
+// head observer several times for one theme or font-size change. Deliberately NOT wired to the panel's own
+// mutation observer - the stage classes are themselves mutations, which would drive it round every frame.
+var createStageFrame = null
+
+function scheduleCreateButtonStage(){
+    if (createStageFrame != null) return
+    createStageFrame = requestAnimationFrame(function(){
+        createStageFrame = null
+        applyCreateButtonStage()
+    })
+}
+
+// A panel resize changes the width the stage was chosen for. The class toggles above never change the row's
+// own size, so this listener cannot be re-entered by its own effect.
+window.addEventListener('resize', applyCreateButtonStage)
 
 /** reconcile ***************************************************************************************************************************************
  * Runs once at startup and on every DOM mutation. When a fresh .todos node has replaced the previous one (identity change == a real re-render),    *
@@ -172,14 +296,22 @@ function startThemeAppearanceObserver(){
     if (themeAppearanceObserverStarted) return
     themeAppearanceObserverStarted = true
 
+    // A host stylesheet change is also a font change: Joplin's font-size setting is what the create
+    // buttons are measured against, and it can move with no resize and no re-render, which would
+    // otherwise leave the stage the previous size chose until the next refresh.
+    function onHostStyleChanged(){
+        scheduleEffectiveThemeClass()
+        scheduleCreateButtonStage()
+    }
+
     // A capturing load listener fires after a replacement stylesheet has actually loaded. The head
     // observer also covers inline style replacement and href changes; both paths are coalesced into
     // one animation-frame read so a Joplin theme switch updates without waiting for Cockpit's timer.
     document.addEventListener('load', function(event){
-        if (event.target && event.target.tagName === 'LINK') scheduleEffectiveThemeClass()
+        if (event.target && event.target.tagName === 'LINK') onHostStyleChanged()
     }, true)
     if (document.head){
-        new MutationObserver(scheduleEffectiveThemeClass).observe(document.head, {
+        new MutationObserver(onHostStyleChanged).observe(document.head, {
             childList: true,
             subtree: true,
             attributes: true,
@@ -227,6 +359,10 @@ function reconcile(){
         if (IS_MOBILE) savedTodosScrollTop = savedTodosScrollTop || Number(el.dataset.scrollTop || 0)
         restoreTodosScroll(el)
         paintTodoSelection()
+        // The controls were replaced with this render, so the create buttons are back at their widest;
+        // re-measure which stage fits. Done here (a real re-render) rather than on every mutation, so the
+        // class it sets - itself a mutation - cannot drive the observer round again.
+        applyCreateButtonStage()
         // The suggestion menu was in the replaced markup; drop its now-stale state (closing on a
         // re-render is fine - only the typed text must survive, which restoreSearchDraft handles).
         searchSuggestion = null
@@ -257,8 +393,24 @@ function startPanelObserver(){
         var stateText = readEmbeddedOverlayStateText()
         void webviewApi.postMessage(['dialogGuardReset', !!stateText]);
     }
+    // The host pushes the main editor's note here whenever it changes (see applyEditorNoteSelection).
+    // Registered once per document load, because Joplin allows a single onMessage handler per view. It is
+    // the panel's only inbound channel and everything below is the panel itself, so a runtime that does not
+    // offer one must lose the highlight rather than the bootstrap.
+    try {
+        webviewApi.onMessage(function(event){
+            var message = event && event.message
+            if (!Array.isArray(message)) return
+            if (message[0] === 'editorNoteChanged'){
+                if (!acceptsEditorNote()) return
+                editorNoteSeq++
+                applyEditorNoteSelection(message[1])
+            }
+        })
+    } catch (error){}
     reconcile()
     new MutationObserver(reconcile).observe(document.body, { childList: true, subtree: true })
+    requestEditorNote()
 }
 
 // The Android back gesture (when it pops webview history rather than the whole viewer) closes an open
@@ -286,6 +438,9 @@ function onTodoRowMouseDown(event, todoID){
     // A press on the notebook pill filters by that notebook on the following click; it takes no part in
     // selection, so leave the current selection untouched (like the checkbox above).
     if (event.target.classList.contains('todo-notebook')) return
+    // The selection is about to change, so an editor-note read-back still in flight now describes an older
+    // state: bump the generation to discard its answer rather than let it drop this press's selection.
+    editorNoteSeq++
     pickedNoteID = null
     if (event.shiftKey){
         var ids = allTodoRows().map(row => row.dataset.todoId)
@@ -387,6 +542,8 @@ function onNoteRowMouseDown(event, noteID){
     // A press on the notebook pill filters by that notebook on the following click and takes no part in
     // selection, so leave the current pick untouched.
     if (event.target.classList.contains('todo-notebook')) return
+    // Discard an editor-note read-back still in flight, as the to-do row press does.
+    editorNoteSeq++
     selectedTodoIDs.clear()
     pickedNoteID = noteID
     paintTodoSelection()
@@ -472,11 +629,36 @@ function showNoteContextMenu(event, noteID, isTodo){
     document.body.appendChild(menu)
     menu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8))}px`
     menu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8))}px`
+    // Desktop: pull focus into the panel frame, so the outside-dismissal below has a blur to fire on. A
+    // right click does not reliably focus an iframe, and with focus left in the editor a click into another
+    // Joplin webview (the rendered note viewer is an iframe of its own) reaches neither this document nor
+    // the main one, which is exactly how the menu used to survive a click outside the panel. tabindex -1
+    // makes the container focusable without putting it in the tab order.
+    if (!IS_MOBILE){
+        menuReturnFocus = document.activeElement
+        menu.tabIndex = -1
+        try { menu.focus({ preventScroll: true }) } catch (error){ menu.focus() }
+    }
 }
+
+// Whatever held focus in the panel when the menu took it, so closing the menu can hand it back.
+var menuReturnFocus = null
 
 function hideNoteContextMenu(){
     var menu = document.getElementById('noteContextMenu')
-    if (menu) menu.remove()
+    if (!menu) return
+    // Hand focus back only when the menu still holds it AND the panel's window is still the focused one -
+    // i.e. the menu was closed by Escape or by running one of its items. A dismissal that came from OUTSIDE
+    // the panel is excluded explicitly (dismissingFromOutside): the parent's capturing mousedown runs BEFORE
+    // the browser moves focus to whatever was clicked, so both other guards still read "the menu has focus,
+    // in the focused window" and the panel would pull focus back out of the click the user just made.
+    var returnTo = menuReturnFocus
+    var restore = !dismissingFromOutside && menu.contains(document.activeElement) && panelWindowIsFocused()
+    menuReturnFocus = null
+    menu.remove()
+    if (restore && returnTo && returnTo.isConnected && typeof returnTo.focus === 'function'){
+        try { returnTo.focus({ preventScroll: true }) } catch (error){ returnTo.focus() }
+    }
 }
 
 document.addEventListener('click', event => {
@@ -492,6 +674,54 @@ document.addEventListener('scroll', hideNoteContextMenu, true)
 document.addEventListener('keydown', event => {
     if (event.key === 'Escape') hideNoteContextMenu()
 })
+
+/** Dismissal from outside the panel (desktop) ******************************************************************************************************
+ * A native menu closes the moment the user clicks anywhere else, but the panel is an IFRAME: a click in the note editor, the rendered viewer or the  *
+ * sidebar never reaches this document, so the in-panel click listener above is blind to it and the menu stayed open over the editor. Two signals     *
+ * cover the ground between them:                                                                                                                     *
+ *   - this window's own blur, which fires as soon as focus leaves the panel frame for anything at all - the editor, another Joplin webview (the      *
+ *     rendered viewer is its own iframe, whose events reach neither this document nor the main one), another window, another application. The menu   *
+ *     takes focus when it opens (showNoteContextMenu), so there is always focus here to lose. Element blur does not bubble, so this listener sees    *
+ *     only the window's own blur, never a field losing focus inside the panel.                                                                       *
+ *   - a capturing mousedown on the PARENT document, which catches a press anywhere in the main window even if the panel never held focus. Events     *
+ *     inside this iframe do not propagate to the parent, so it only ever fires for a press OUTSIDE the panel.                                        *
+ * Desktop only: on mobile the panel is a fullscreen native modal with no "outside" to click, and an Android webview blurs for its own reasons (the    *
+ * soft keyboard, a native message box), which would close the menu under the user's finger. The same-origin parent access is the one Joplin's panel   *
+ * iframe already grants (see wireParentSelectionDragRestore); a cross-origin host simply loses that half.                                             *
+ ***************************************************************************************************************************************************/
+// True for the duration of an outside dismissal, so the menu's focus hand-back knows this close was not the
+// panel's own (see hideNoteContextMenu).
+var dismissingFromOutside = false
+
+function dismissPanelPopups(){
+    if (IS_MOBILE) return
+    dismissingFromOutside = true
+    try {
+        hideNoteContextMenu()
+        // The panel's other transient popups - the profile / notebook / sort dropdowns and the search
+        // suggestion list they share their machinery with - close on the same signal, for the same reason:
+        // they already close on any click INSIDE the panel, so a click outside it was the same blind spot.
+        closeAllDropdowns()
+    } finally {
+        dismissingFromOutside = false
+    }
+}
+
+;(function wirePanelWindowListeners(){
+    window.addEventListener('blur', dismissPanelPopups)
+    try {
+        var parentWindow = window.parent
+        if (!parentWindow || parentWindow === window) return
+        parentWindow.addEventListener('mousedown', dismissPanelPopups, true)
+        // The window regaining focus is also when the editor's note is re-read: every push that arrived
+        // while another window (or another application) held the focus was dropped, and the host does not
+        // re-send an unchanged id. Listened for on the PARENT, because this iframe's own window only fires
+        // focus when focus lands INSIDE the panel, which a window switch rarely does. NOT capturing, unlike
+        // the listeners around it: focus does not bubble, so a capturing listener here would also fire for
+        // every element focused anywhere in the main window, and only the window's own event is wanted.
+        parentWindow.addEventListener('focus', queueEditorNoteResync)
+    } catch (error){}
+})()
 
 /** onHeadingContextMenu ****************************************************************************************************************************
  * Right click on a group heading ("Today", "No Due Date", a week planner day...) opens the set alarm dialog for every to-do in that group.          *

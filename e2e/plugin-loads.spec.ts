@@ -61,6 +61,22 @@ test.describe('Plugin loads', () => {
     expect(await profileNames(joplin.win)).toEqual(['All todo and notes']);
   });
 
+  /**
+   * The profile row is one line at every width: the create buttons shorten and then drop their labels rather
+   * than wrapping or being clipped. Which stage fits is measured in the webview (applyCreateButtonStage),
+   * because the row's content width scales with Joplin's font-size setting. Here that measurement is checked
+   * against the REAL panel at its real width: no horizontal overflow.
+   */
+  test('the create buttons fit the profile row without overflowing', async () => {
+    const panel = await agendaPanel(joplin.win);
+    const row = await panel.evaluate(() => {
+      const el = document.getElementById('profileControls')!;
+      return { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth };
+    });
+    expect(row.clientWidth).toBeGreaterThan(0);
+    expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+  });
+
   test('the profile buttons use inline icons rather than an icon font', async () => {
     const panel = await agendaPanel(joplin.win);
     // Font Awesome is not available in plugin webviews on mobile, so the icons must be inline SVG.

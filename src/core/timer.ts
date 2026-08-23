@@ -18,7 +18,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { reconcileExternalNoteChange, refreshPanelData } from "../ui/panel/panel";
+import { reconcileExternalNoteChange, refreshPanelData, trackEditorNoteSelection } from "../ui/panel/panel";
 import { getOverviewNoteIDs, refreshNoteData } from "./markdown";
 import { updateFrequencySettingKey } from "./settings";
 import { getSyncStatus, markSyncComplete, markSyncStart } from "./syncStatus";
@@ -237,6 +237,11 @@ export async function setupWorkspaceEvents(){
         scheduleOverview()
     })
     await registerEvent("onNoteAlarmTrigger", () => { scheduleReconcile(); scheduleOverview() })
+    // The only subscription here that is NOT a refresh trigger: which note the editor is showing decides
+    // which row the panel highlights, and nothing else. It changes no note data and no markup, so it arms
+    // no lane and issues no search, GET or render - just a message to the webview (see panel.ts). The
+    // event carries the selected ids as { value: [...] }.
+    await registerEvent("onNoteSelectionChange", (event) => trackEditorNoteSelection(event && event.value))
 }
 
 /** registerEvent ************************************************************************************************************************************

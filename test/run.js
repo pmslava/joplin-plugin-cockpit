@@ -76,7 +76,7 @@ async function main() {
         assert.ok(!html.includes('class="fa '), 'font awesome classes still present')
     })
     await test('mobile: workspace events are subscribed', () => {
-        assert.deepStrictEqual(mobile.workspaceEvents.sort(), ['onNoteAlarmTrigger', 'onNoteChange', 'onSyncComplete', 'onSyncStart'])
+        assert.deepStrictEqual(mobile.workspaceEvents.sort(), ['onNoteAlarmTrigger', 'onNoteChange', 'onNoteSelectionChange', 'onSyncComplete', 'onSyncStart'])
     })
     await test('mobile: no message box shown on a clean install', () => {
         assert.deepStrictEqual(mobile.messageBoxes, [])
@@ -2747,13 +2747,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.9.4', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.9.6', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.9.4'
+        const expected = '1.9.6'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
@@ -3030,6 +3030,288 @@ async function main() {
         const toggleBody = handlerBody('onDropdownToggle')
         assert.ok(toggleBody.includes('notebook-filter-input') && toggleBody.includes('.focus()') && toggleBody.includes('!IS_MOBILE'),
             'opening the notebook menu must reset and (desktop-only) focus the filter box')
+    })
+
+    // ============================================================ 1.9.5: outside dismissal, editor-note highlight, create buttons
+    // Three changes ship together here. (1) The custom context menu (Cockpit draws its own, because Joplin's native note
+    // menu cannot be opened from a plugin webview) stayed open when the user clicked the main editor: the panel is an
+    // IFRAME, so such a click reaches neither this document nor - when it lands in another Joplin webview - the main one.
+    // (2) The row highlight now follows the note the MAIN editor shows, with notes opened in a SECONDARY Joplin window
+    // deliberately ignored. (3) The create buttons lose their plus-bearing icons and degrade in two stages instead of
+    // wrapping. The harness renders the panel markup but never executes the webview JS, so the webview halves are pinned
+    // by source shape (as the row-click / notebook-filter checks above are) and the host half is driven for real.
+    const panelCssSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+    const iconsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'icons.ts'), 'utf8')
+
+    await test('outside dismiss: the menu closes on the panel window blur AND on a press in the parent document, desktop only', () => {
+        const body = handlerBody('dismissPanelPopups')
+        assert.ok(body.includes('if (IS_MOBILE) return'), 'the outside dismissal must be desktop-only (mobile has no outside)')
+        assert.ok(body.includes('hideNoteContextMenu()'), 'it must close the custom context menu')
+        assert.ok(body.includes('closeAllDropdowns()'), 'it must close the panel dropdowns / suggestion list on the same signal')
+        // Signal 1: this iframe's own window blur - the only thing that fires when focus goes to ANOTHER webview
+        // (the rendered note viewer is an iframe of its own, whose events reach neither document).
+        assert.ok(/window\.addEventListener\('blur', dismissPanelPopups\)/.test(webviewSource),
+            "the panel window's blur must dismiss the popups")
+        // Signal 2: a capturing mousedown on the PARENT document - a press outside the panel even when it never had focus.
+        assert.ok(/parentWindow\.addEventListener\('mousedown', dismissPanelPopups, true\)/.test(webviewSource),
+            'a press in the main window must dismiss the popups (capture, on the parent document)')
+        // The menu takes focus when it opens, so there is always focus to lose; desktop only.
+        const menuBody = handlerBody('showNoteContextMenu')
+        assert.ok(/if \(!IS_MOBILE\)\{[\s\S]*menu\.tabIndex = -1[\s\S]*menu\.focus\(/.test(menuBody),
+            'the menu must take focus on desktop so the blur dismissal has focus to lose')
+        // Closing the menu hands focus back to whatever held it - but NEVER on the outside-click path: the
+        // parent's capturing mousedown runs BEFORE the browser moves focus to the clicked element, so the
+        // other two guards still read "menu has focus, in the focused window" and the panel would pull focus
+        // back out of the click the user just made.
+        assert.ok(body.includes('dismissingFromOutside = true'), 'an outside dismissal must mark itself')
+        assert.ok(/var restore = !dismissingFromOutside &&/.test(handlerBody('hideNoteContextMenu')),
+            'the focus hand-back must be suppressed for an outside dismissal, and kept for Escape / an item click')
+        // Taking focus must not make the menu LOOK focused: it is a container, not a keyboard control, and
+        // without this it picks up the browser's :focus-visible ring (which follows the desktop accent
+        // colour on Linux). Both states are covered so a host theme styling either is neutralised, and the
+        // suppression is scoped to the container so the items keep their own hover/keyboard styling.
+        assert.ok(/#noteContextMenu:focus,\s*#noteContextMenu:focus-visible \{[^}]*outline:\s*none/.test(panelCssSource),
+            'the focused menu must not paint a focus ring, in either focus state')
+        assert.ok(!/\.context-menu-item[^{]*:focus[^{]*\{[^}]*outline:\s*none/.test(panelCssSource),
+            'the suppression must not reach the menu items')
+        // The pre-existing in-panel dismissals are untouched.
+        assert.ok(webviewSource.includes("document.addEventListener('scroll', hideNoteContextMenu, true)"), 'the scroll dismissal must stay')
+        assert.ok(/event\.key === 'Escape'\) hideNoteContextMenu\(\)/.test(webviewSource), 'the Escape dismissal must stay')
+    })
+
+    // -- the highlight rules, driven for real ------------------------------------------------------------------
+    // The decision "what does an editor change do to the highlight and to the panel's own selection" lives in a
+    // pure, DOM-free module (editorNote.js) exactly so it can be EXERCISED here rather than pattern-matched in the
+    // webview source: the earlier source-shape-only cover let two wrong rules through (an unrelated selection
+    // change wiping a deliberate multi-selection, and an external open of a selected note leaving that whole
+    // selection armed for the next drag). The webview is then only asserted to delegate to it.
+    const EditorNote = require('../src/ui/panel/editorNote.js')
+    const applyNote = (selected, id, extra) => EditorNote.nextSelection(
+        Object.assign({ selected, picked: null, lastClicked: selected.length ? selected[0] : null }, extra), id)
+
+    await test('editor highlight: the highlight always moves to the open note, and never joins the selection', () => {
+        const next = applyNote([], id32('e1'))
+        assert.strictEqual(next.picked, id32('e1'), 'the open note must become the highlight')
+        assert.deepStrictEqual(next.selected, [], 'and must NOT enter the drag/batch selection')
+        // "No single note is open" (Joplin's own list holds several, or none) clears the highlight.
+        assert.strictEqual(applyNote([], '').picked, null, 'an empty id must clear the highlight')
+        assert.strictEqual(applyNote([], null).picked, null, 'a null id must clear the highlight')
+    })
+
+    await test('editor highlight: a DELIBERATE multi-selection survives every editor change (M3)', () => {
+        // Joplin emits selection changes for reasons that have nothing to do with the panel - clicking a notebook
+        // in the sidebar auto-selects its first note, a sync or an alarm moves the cursor. None of them may destroy
+        // a multi-row selection the user is halfway through building.
+        const ids = [id32('m1'), id32('m2'), id32('m3')]
+        const unrelated = EditorNote.nextSelection({ selected: ids, picked: null, lastClicked: ids[0] }, id32('zz'))
+        assert.deepStrictEqual(unrelated.selected, ids, 'an unrelated open must leave the multi-selection intact')
+        assert.strictEqual(unrelated.picked, id32('zz'), 'while the highlight still moves to the open note')
+        assert.strictEqual(unrelated.lastClicked, ids[0], "and the user's Shift anchor is left alone")
+        // Same when the opened note happens to BE one of the selected rows (M4): the set is user-owned either way.
+        const member = EditorNote.nextSelection({ selected: ids, picked: null, lastClicked: ids[0] }, ids[1])
+        assert.deepStrictEqual(member.selected, ids, 'opening a member of the selection must not silently trim it')
+        assert.strictEqual(member.picked, ids[1], 'the highlight follows the opened member')
+        // Clearing the highlight (no single note open) must not take the selection with it either.
+        assert.deepStrictEqual(EditorNote.nextSelection({ selected: ids, picked: ids[0], lastClicked: null }, '').selected, ids,
+            'losing the open note must not clear a multi-selection')
+    })
+
+    await test('editor highlight: a lone selected row is kept only when it IS the opened note', () => {
+        const own = id32('s1')
+        // Cockpit's own row-click open: the click collapsed the selection onto the row, then the open arrives.
+        const kept = applyNote([own], own)
+        assert.deepStrictEqual(kept.selected, [own], "Cockpit's own open must keep the row it just selected")
+        assert.strictEqual(kept.picked, own)
+        // The editor genuinely moving elsewhere drops the now-stale single selection AND moves the highlight.
+        const moved = applyNote([own], id32('s2'))
+        assert.deepStrictEqual(moved.selected, [], 'a stale single selection must not be left behind')
+        assert.strictEqual(moved.picked, id32('s2'), 'the highlight moves to the newly opened note')
+        assert.strictEqual(moved.lastClicked, id32('s2'), 'the Shift anchor follows the highlight when the selection is dropped')
+        // A note the panel does not list is simply an id that matches no row: the highlight is effectively removed.
+        assert.deepStrictEqual(applyNote([own], '').selected, [], 'no open note clears a single selection')
+        assert.strictEqual(applyNote([own], '').picked, null)
+    })
+
+    await test('editor highlight: a push is accepted only from the window the panel lives in (secondary windows)', () => {
+        // Joplin keeps ONE store whose top-level selection belongs to the FOCUSED window, so a secondary window's
+        // note arrives as an ordinary selection change. Only the webview can tell which window has focus.
+        assert.strictEqual(EditorNote.acceptsPush({ isMobile: false, windowFocused: true }), true,
+            "a push must apply while the panel's own window is focused")
+        assert.strictEqual(EditorNote.acceptsPush({ isMobile: false, windowFocused: false }), false,
+            'a push arriving while another window (or another app) holds the focus must be ignored')
+        assert.strictEqual(EditorNote.acceptsPush({ isMobile: true, windowFocused: false }), true,
+            'mobile has no second window, so it always applies')
+        assert.strictEqual(EditorNote.acceptsPush(), false, 'a missing context must not be read as focused')
+    })
+
+    await test('editor highlight: a read-back is stale exactly when the selection generation moved on', () => {
+        // getEditorNote answers a question asked a moment ago. Both an accepted push AND a row press bump the
+        // generation, so an answer that arrives after either must be discarded - otherwise the answer paints
+        // the older editor note over the newer state, which for a row press means dropping the single-row
+        // selection that press just made.
+        assert.strictEqual(EditorNote.readBackIsStale(4, 4), false, 'an untouched generation must apply the answer')
+        assert.strictEqual(EditorNote.readBackIsStale(4, 5), true, 'a bump while the read-back was in flight must discard it')
+    })
+
+    await test('editor highlight (webview): the webview delegates to the shared rules and re-reads on regained focus (M2)', () => {
+        const body = handlerBody('applyEditorNoteSelection')
+        assert.ok(body.includes('window.EditorNote.nextSelection('), 'the webview must apply the shared rules, not its own')
+        assert.ok(body.includes('pickedNoteID = next.picked') && body.includes('paintTodoSelection()'),
+            'and write the decision back into the highlight store, repainting at once')
+        // The paint must honour the highlight-only store on TO-DO rows too (it used to key those off
+        // selectedTodoIDs alone, so a to-do open in the editor would not have highlighted).
+        assert.ok(/selectedTodoIDs\.has\(row\.dataset\.todoId\) \|\| row\.dataset\.todoId === pickedNoteID/.test(handlerBody('paintTodoSelection')),
+            'a to-do row must highlight from the selection OR the editor note')
+        // Both inbound paths - the push and the read-back - are filtered through the same acceptance rule.
+        const acceptBody = handlerBody('acceptsEditorNote')
+        assert.ok(acceptBody.includes('window.EditorNote.acceptsPush(') && acceptBody.includes('panelWindowIsFocused()'),
+            'acceptance must combine the shared rule with the live window focus')
+        const pushIdx = webviewSource.indexOf("message[0] === 'editorNoteChanged'")
+        assert.ok(pushIdx >= 0, 'the webview must handle the editorNoteChanged push')
+        assert.ok(/if \(!acceptsEditorNote\(\)\) return/.test(webviewSource.slice(pushIdx, pushIdx + 260)),
+            'a push from another window must be dropped')
+        const readBody = handlerBody('requestEditorNote')
+        assert.ok(readBody.includes('if (!acceptsEditorNote()) return'),
+            'the read-back must apply the SAME filter, so a panel loading behind a secondary window is not seeded from it')
+        assert.ok(readBody.includes("postMessage(['getEditorNote'])") && readBody.includes('applyEditorNoteSelection(id)'),
+            'the read-back must ask the host and apply the answer (no self-disabling guard: a resync must be able to move or clear the highlight)')
+        assert.ok(/readBackIsStale\(seq, editorNoteSeq\)/.test(readBody), 'a read-back overtaken by a newer generation must be dropped')
+        // Both things that move the panel's selection bump that generation: an accepted push, and a row press.
+        assert.ok(/editorNoteSeq\+\+[\s\S]{0,120}applyEditorNoteSelection\(message\[1\]\)/.test(webviewSource),
+            'an accepted push must bump the selection generation')
+        for (const handler of ['onTodoRowMouseDown', 'onNoteRowMouseDown']){
+            assert.ok(handlerBody(handler).includes('editorNoteSeq++'),
+                `${handler} must bump the generation, so an in-flight read-back cannot drop the selection the press just made`)
+        }
+        // The resync itself: a regained window focus re-reads, because every push that arrived unfocused was
+        // dropped and the host does not re-send an unchanged id.
+        assert.ok(/parentWindow\.addEventListener\('focus', queueEditorNoteResync\)/.test(webviewSource),
+            'the panel must re-read the editor note when its window regains focus')
+        assert.ok(!/parentWindow\.addEventListener\('focus', queueEditorNoteResync, true\)/.test(webviewSource),
+            'the focus listener must NOT capture, or it would fire for every element focused in the main window')
+        // The panel's window focus is read from the TOP document: the panel's own iframe document only has focus
+        // when focus sits inside the panel.
+        const focusBody = handlerBody('panelWindowIsFocused')
+        assert.ok(focusBody.includes('window.top') && focusBody.includes('hasFocus()'),
+            'the focus question is about the WINDOW, so it must ask the top document')
+        assert.ok(/catch[\s\S]*return true/.test(focusBody), 'a cross-origin host must fall back to accepting the push')
+    })
+
+    // -- host glue: the selection event pushes the id and costs nothing else -----------------------------------
+    const selectionNoteA = id32('sela')
+    const selectionNoteB = id32('selb')
+    const selection = await desktopRun({
+        notes: {
+            [selectionNoteA]: { id: selectionNoteA, title: 'Selected A', is_todo: 1 },
+            [selectionNoteB]: { id: selectionNoteB, title: 'Selected B', is_todo: 1 },
+        },
+    })
+
+    await test('editor highlight (host): a selection change pushes the id and issues no search, GET, render or lane', async () => {
+        const getsBefore = selection.gets.length
+        const htmlBefore = selection.setHtmlCalls
+        const timersBefore = selection.timeouts.length
+        const messagesBefore = selection.panelMessages.length
+        await selection.noteSelectionHandler({ value: [selectionNoteA] })
+        assert.deepStrictEqual(selection.panelMessages.slice(messagesBefore), [['editorNoteChanged', selectionNoteA]],
+            'the open note must be pushed to the panel webview')
+        assert.strictEqual(selection.gets.length, getsBefore, 'a selection change must cost no data API call')
+        assert.strictEqual(selection.setHtmlCalls, htmlBefore, 'a selection change must not re-render the panel')
+        assert.strictEqual(selection.timeouts.length, timersBefore, 'a selection change must arm no refresh lane')
+    })
+
+    await test('editor highlight (host): an unchanged selection is not re-pushed (a window refocus must not collapse a multi-selection)', async () => {
+        const messagesBefore = selection.panelMessages.length
+        await selection.noteSelectionHandler({ value: [selectionNoteA] })
+        assert.strictEqual(selection.panelMessages.length, messagesBefore,
+            'Joplin re-emits the selection on every window focus change; only a genuine move may reach the panel')
+    })
+
+    await test('editor highlight (host): several notes selected in Joplin\'s list means no single note is open, so the highlight clears', async () => {
+        await selection.noteSelectionHandler({ value: [selectionNoteA, selectionNoteB] })
+        assert.deepStrictEqual(selection.panelMessages[selection.panelMessages.length - 1], ['editorNoteChanged', ''],
+            'a multi-note selection must clear the highlight rather than pick one arbitrarily')
+        assert.strictEqual(await selection.panelMessageHandler(['getEditorNote']), '',
+            'a freshly loaded webview must be told there is no open note')
+    })
+
+    await test('editor highlight (host): getEditorNote answers a reloaded webview with the note the editor holds', async () => {
+        await selection.noteSelectionHandler({ value: [selectionNoteB] })
+        assert.strictEqual(await selection.panelMessageHandler(['getEditorNote']), selectionNoteB,
+            'the round-trip must return the host-held id (the mobile reload restores the highlight through it)')
+    })
+
+    // -- create buttons: clean icons, two-stage degradation, never wrapping -----------------------------------
+    await test('create buttons: the icons carry no plus, and the note / to-do pair share one silhouette', () => {
+        assert.ok(!/notePlus|todoPlus/.test(iconsSource), 'the plus-bearing icon names must be gone')
+        assert.ok(/\bnote: svgIcon\(/.test(iconsSource) && /\btodo: svgIcon\(/.test(iconsSource),
+            'the create buttons must use the plain note / to-do icons')
+        // The two retired plus glyphs: the "+" punched into the note sheet, and the "+" badge on the check circle.
+        assert.ok(!iconsSource.includes('h-3v3h-2v-3H8v-2h3v-3h2v3h3v2z'), 'the note icon must no longer carry a plus cutout')
+        assert.ok(!iconsSource.includes('M19 15h-2v2h-2v2h2v2h2v-2h2v-2h-2v-2z'), 'the to-do icon must no longer carry a plus badge')
+        // Both icons are the same document sheet (same outline + folded corner), so the pair reads as one family.
+        const sheet = 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM13 9V3.5L18.5 9H13z'
+        assert.strictEqual((iconsSource.match(new RegExp(sheet.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length, 2,
+            'the note and to-do icons must share the same sheet outline and folded corner')
+    })
+
+    await test('create buttons: the desktop markup carries both wordings, and the full one stays the accessible name', () => {
+        const html = desktop.panelHtml['panel-panel']
+        assert.ok(html.includes('<span class="create-label -long">New note</span><span class="create-label -short">Note</span>'),
+            'the new-note button must carry the full and short wordings')
+        assert.ok(html.includes('<span class="create-label -long">New to-do</span><span class="create-label -short">To-do</span>'),
+            'the new-to-do button must carry the full and short wordings')
+        // The icon-only stage still names the action for the tooltip and for assistive tech.
+        assert.ok(html.includes('title="New note" aria-label="New note"'), 'the new-note button must stay named at every stage')
+        assert.ok(html.includes('title="New to-do" aria-label="New to-do"'), 'the new-to-do button must stay named at every stage')
+        // Mobile stays icon-only (MOBILE.md §5): the label spans exist only in the desktop markup.
+        assert.ok(!mobile.panelHtml['panel-panel'].includes('create-label'), 'mobile keeps its icon-only create buttons')
+    })
+
+    await test('create buttons css: the profile row never wraps, and the two degraded stages are class-driven', () => {
+        // Never a second line: the buttons shorten and then drop their labels instead.
+        assert.ok(/#profileControls \{[^}]*flex-wrap:\s*nowrap/.test(panelCssSource),
+            'the profile row must not wrap - the create buttons degrade instead')
+        // Widest stage: only the full wording shows.
+        assert.ok(/\.create-label\.-short \{\s*display:\s*none/.test(panelCssSource), 'at full width only the full wording shows')
+        // The stages are CLASSES set by measurement (see below), not pixel media queries: the row's content width
+        // scales with Joplin's font-size setting, so a fixed breakpoint clean at the 13px default clips the second
+        // button at 16-18px.
+        assert.ok(!/@media[^}]*create-label/.test(panelCssSource), 'the stages must not be pinned to a pixel breakpoint')
+        assert.ok(/#profileControls\.-labels-short \.create-label\.-long \{[^}]*display:\s*none/.test(panelCssSource),
+            'the short stage hides the full wording')
+        assert.ok(/#profileControls\.-labels-short \.create-label\.-short \{[^}]*display:\s*inline/.test(panelCssSource),
+            'the short stage shows the short wording')
+        assert.ok(/#profileControls\.-labels-none \.create-label\.-long,\s*#profileControls\.-labels-none \.create-label\.-short \{[^}]*display:\s*none/.test(panelCssSource),
+            'the icon-only stage drops both wordings (both selectors, so it never loses on specificity)')
+        assert.ok(/#profileControls\.-labels-none \.dropdown \{[^}]*min-width:\s*40px/.test(panelCssSource),
+            'at the narrowest the profile picker gives up its width before the buttons can overflow')
+    })
+
+    await test('create buttons: the stage is MEASURED per render and per resize, widest first, desktop only', () => {
+        const body = handlerBody('applyCreateButtonStage')
+        assert.ok(body.includes('if (IS_MOBILE) return'), 'mobile renders icon-only markup already')
+        // Widest first, stepping down only while the row actually overflows - so the stage follows the real font
+        // size and theme rather than a guessed breakpoint.
+        assert.ok(/classList\.remove\('-labels-short', '-labels-none'\)/.test(body), 'each measurement must start from the widest stage')
+        assert.strictEqual((body.match(/row\.scrollWidth <= row\.clientWidth\) return/g) || []).length, 2,
+            'it must stop at the first stage that fits (two overflow checks: full, then short)')
+        assert.ok(/classList\.add\('-labels-short'\)[\s\S]*classList\.add\('-labels-none'\)/.test(body),
+            'the stages must be applied in order: short wording, then icon only')
+        assert.ok(/window\.addEventListener\('resize', applyCreateButtonStage\)/.test(webviewSource),
+            'a panel resize must re-measure')
+        // Measured on a real re-render (the controls are rebuilt at their widest each time), inside the .todos
+        // identity branch so the class it sets cannot drive the mutation observer round again.
+        assert.ok(handlerBody('reconcile').includes('applyCreateButtonStage()'), 'every re-render must re-measure')
+        // A host stylesheet change is a font change too - Joplin's font-size setting is what the row is
+        // measured against - and it arrives with no resize and no re-render. Coalesced, because a theme swap
+        // fires the head observer several times, and deliberately not wired to the panel's own mutation
+        // observer (the stage classes are mutations, which would drive it round every frame).
+        assert.ok(handlerBody('onHostStyleChanged').includes('scheduleCreateButtonStage()'),
+            'a theme / font-size change must re-measure without waiting for a resize or a render')
+        assert.ok(/new MutationObserver\(onHostStyleChanged\)\.observe\(document\.head/.test(webviewSource),
+            'the head observer must drive that re-measure')
+        assert.ok(handlerBody('scheduleCreateButtonStage').includes('requestAnimationFrame'), 'the re-measure must be coalesced')
     })
 
     await fs.remove(tmp)

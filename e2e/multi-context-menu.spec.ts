@@ -138,6 +138,30 @@ test.describe('Multi-select context menu (desktop)', () => {
     throw new Error('notebook picker dialog not found');
   }
 
+  /**
+   * Outside dismissal. The menu is drawn by Cockpit, so it is not dismissed by the window manager the way a native
+   * menu is - and the panel is an IFRAME, so a click in the main editor never reaches the panel's document. It used
+   * to stay open on top of the editor. It now closes on the panel window's own blur and on a press anywhere in the
+   * main window (panelWebview.js). Driven with REAL input on both ends: a right click on a row opens the menu, a
+   * click on Joplin's note title field - in the main window, outside the panel iframe - must close it.
+   *
+   * Declared FIRST in this file so it runs against the intact fixtures: the specs below delete and move to-dos, and
+   * a moved note leaves the selected notebook's list, which can leave the editor showing no note (and no title field).
+   */
+  test('a click outside the panel closes the custom context menu', async () => {
+    const { win } = joplin;
+    const panel = await agendaPanel(win);
+    const title = panel.locator('.todo[data-todo-id]', { hasText: DC }).first().locator('.todo-title');
+    await title.scrollIntoViewIfNeeded();
+    await title.click({ button: 'right' });
+    await expect(panel.locator('#noteContextMenu')).toHaveCount(1);
+
+    await win.locator('input.title-input').click();
+    await expect
+      .poll(async () => panel.locator('#noteContextMenu').count(), { timeout: 15_000 })
+      .toBe(0);
+  });
+
   test('deleting a multi-selection removes every selected to-do, leaving the unselected one', async () => {
     const { win } = joplin;
     const menu = await multiSelectAndOpenMenu([DA, DB]);

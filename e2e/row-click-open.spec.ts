@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, Locator } from '@playwright/test';
 import { launchJoplin, closeJoplin, JoplinInstance } from './launch';
 import {
   agendaPanel,
@@ -88,5 +88,39 @@ test.describe('Row dead-zone click opens the note', () => {
     await expect
       .poll(async () => win.locator('input.title-input').inputValue(), { timeout: 30_000 })
       .toBe(noteTitle);
+  });
+
+  /**
+   * The panel's row highlight follows the MAIN editor, not only the rows opened from the panel: the plugin watches
+   * workspace.onNoteSelectionChange and pushes the open note's id to the panel webview, which highlights that row
+   * (or none, when the list does not hold it). This runs after the test above, so the panel starts highlighting the
+   * target note it just opened; selecting the decoy in Joplin's OWN note list must move the highlight to its row.
+   */
+  test('opening another note in Joplin moves the panel highlight to that row', async () => {
+    const { win } = joplin;
+    const panel = await agendaPanel(win);
+    const isSelected = (row: Locator) =>
+      row.evaluate((el) => el.classList.contains('-selected')).catch(() => false);
+
+    const targetRow = panel.locator('.todo[data-note-id]', { hasText: marker }).first();
+    await expect.poll(() => isSelected(targetRow), { timeout: 30_000 }).toBe(true);
+
+    // The decoy is a note in the same notebook, so the profile lists it too - wait for its row, prompting a
+    // refresh each tick like the test above does, then select it in Joplin's note list.
+    const decoyRow = panel.locator('.todo[data-note-id]', { hasText: decoyTitle }).first();
+    await expect
+      .poll(
+        async () => {
+          await refreshPanel(win);
+          return decoyRow.count();
+        },
+        { timeout: PANEL_REFRESH_TIMEOUT, intervals: [1500, 2500, 4000] }
+      )
+      .toBeGreaterThan(0);
+
+    await selectNote(win, decoyTitle);
+
+    await expect.poll(() => isSelected(decoyRow), { timeout: 30_000 }).toBe(true);
+    expect(await isSelected(targetRow)).toBe(false);
   });
 });

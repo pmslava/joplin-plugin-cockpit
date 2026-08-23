@@ -14,6 +14,8 @@ function makeJoplin(options) {
         dialogs: [],
         panelHtml: {},
         panelScripts: [],
+        // Every views.panels.postMessage the plugin sends to the panel webview, in order.
+        panelMessages: [],
         toolbarButtons: [],
         menus: [],
         commands: [],
@@ -125,6 +127,9 @@ function makeJoplin(options) {
                 create: async (id) => { state.panels.push(id); return `panel-${id}` },
                 addScript: async (handle, script) => { state.panelScripts.push(script) },
                 onMessage: async (handle, handler) => { state.panelMessageHandler = withTimerCapture(handler) },
+                // Host -> webview push (fire and forget in the real API). Recorded so a test can assert what
+                // the plugin told the panel, e.g. which note the editor is showing.
+                postMessage: (handle, message) => { state.panelMessages.push(message) },
                 setHtml: async (handle, html) => { state.setHtmlCalls++; state.callLog.push('setHtml'); state.panelHtml[handle] = html },
                 show: async () => {},
                 visible: async () => true,
@@ -149,6 +154,7 @@ function makeJoplin(options) {
             onSyncStart: async (h) => { state.workspaceEvents.push('onSyncStart'); state.syncStartHandler = withTimerCapture(h) },
             onSyncComplete: async (h) => { state.workspaceEvents.push('onSyncComplete'); state.syncCompleteHandler = withTimerCapture(h) },
             onNoteAlarmTrigger: async (h) => { state.workspaceEvents.push('onNoteAlarmTrigger'); state.noteAlarmHandler = withTimerCapture(h) },
+            onNoteSelectionChange: async (h) => { state.workspaceEvents.push('onNoteSelectionChange'); state.noteSelectionHandler = withTimerCapture(h) },
         },
         data: {
             get: async (pathParts, query) => {

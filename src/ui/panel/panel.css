@@ -283,6 +283,45 @@ option {
     min-width: 60px;
 }
 
+/* The profile row is a single line at EVERY width: rather than wrapping the second create button onto a
+ * line of its own, the buttons degrade in two stages - full wording, short wording, then the icon alone,
+ * with the title/aria-label still naming the action. Which stage applies is chosen by MEASUREMENT in
+ * panelWebview.js (applyCreateButtonStage), which sets the classes below, because the row's content width
+ * scales with Joplin's font-size setting and with the theme's font: a fixed pixel breakpoint that is clean
+ * at the default size clips the second button at a larger one. The stage rules sit after the base ones they
+ * override (the row's flex-wrap, the picker's width) and the narrowest stage names both label classes, so
+ * neither depends on specificity accidents. */
+#profileControls {
+    flex-wrap: nowrap;
+}
+
+.create-label.-short {
+    display: none;
+}
+
+#profileControls.-labels-short .create-label.-long {
+    display: none;
+}
+
+#profileControls.-labels-short .create-label.-short {
+    display: inline;
+}
+
+#profileControls.-labels-none .create-label.-long,
+#profileControls.-labels-none .create-label.-short {
+    display: none;
+}
+
+#profileControls.-labels-none .create-button {
+    padding: 0 6px;
+}
+
+/* At the narrowest stage the profile picker gives up the last of its width before the buttons overflow. */
+#profileControls.-labels-none .dropdown {
+    flex: 1 1 40px;
+    min-width: 40px;
+}
+
 .dropdown-toggle {
     display: flex;
     flex-direction: row;
@@ -795,6 +834,18 @@ h2 {
     color: var(--cockpit-color, inherit);
     border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
     border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* The menu takes focus when it opens (panelWebview.js) purely so the panel window has focus to LOSE, which
+ * is what dismisses it when the user clicks outside the panel. It is a container, not a keyboard control,
+ * so it must not paint a focus ring: without this it picks up the browser's :focus-visible ring, which on
+ * Linux follows the desktop's accent colour. Both :focus and :focus-visible are covered so a host theme
+ * that styles either is neutralised too, and the menu's own shadow is restated so a theme cannot draw a
+ * ring through box-shadow. Scoped to the container: the items keep their hover and keyboard styling. */
+#noteContextMenu:focus,
+#noteContextMenu:focus-visible {
+    outline: none;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 

@@ -83,6 +83,36 @@ var searchFocused = false
  ***************************************************************************************************************************************************/
 var openOverlayState = null
 
+/** editorNoteID (the row highlight follows the main editor) ****************************************************************************************
+ * The id of the note the MAIN window's editor/viewer is showing, or "" when none is - including when Joplin's own note list holds SEVERAL notes      *
+ * selected, where no single note is open. The panel highlights that row, so its highlight tracks the editor wherever the note was opened from (a      *
+ * Cockpit row, the note list, a link). The value is held HERE rather than in the webview because on mobile every render is a full webview reload that *
+ * destroys module state; a freshly loaded webview asks for it back (getEditorNote) and the host pushes every change (editorNoteChanged).              *
+ *                                                                                                                                                    *
+ * It sits outside the refresh lanes on purpose: a selection change mutates no note and changes no markup, so it issues no search, no data call and no *
+ * render - only the message. Notes opened in a SECONDARY Joplin window arrive here as ordinary selection changes (Joplin keeps one store whose        *
+ * top-level selection belongs to the focused window); they are filtered in the webview, which is the only side that can read which window has focus.  *
+ ***************************************************************************************************************************************************/
+var editorNoteID = ""
+
+/** trackEditorNoteSelection ************************************************************************************************************************
+ * Handles workspace.onNoteSelectionChange: records which note the editor now holds and pushes it to the panel webview. An unchanged selection is     *
+ * dropped rather than pushed - Joplin re-emits the selection whenever the focused window changes, and the push collapses the panel's multi-selection *
+ * onto the open note, which must only happen when the editor genuinely moved to another note.                                                        *
+ ***************************************************************************************************************************************************/
+export function trackEditorNoteSelection(noteIDs){
+    var ids = Array.isArray(noteIDs) ? noteIDs : []
+    var id = ids.length === 1 ? String(ids[0] || "") : ""
+    if (id === editorNoteID) return
+    editorNoteID = id
+    if (!panel) return
+    try {
+        joplin.views.panels.postMessage(panel, ['editorNoteChanged', id])
+    } catch (error) {
+        console.warn("Cockpit: could not tell the panel which note is open", error)
+    }
+}
+
 /** calendarViewState *******************************************************************************************************************************
  * Which month or week the calendar views are showing, and which day is selected. This is where the user has navigated to rather than a setting, so   *
  * it is kept in memory and starts again at today whenever the plugin restarts or the profile changes.                                               *
@@ -136,6 +166,9 @@ export async function setupPanel(){
     // The shared note-context-menu markup (window.NoteMenu) is loaded before panelWebview.js builds the menu -
     // the same module the Node unit tests require to pin the single- and multi-select markup.
     await joplin.views.panels.addScript(panel, '/ui/panel/noteMenu.js')
+    // The shared editor-note highlight rules (window.EditorNote), loaded before panelWebview.js applies them -
+    // the same module the Node unit tests drive through the selection scenarios.
+    await joplin.views.panels.addScript(panel, '/ui/panel/editorNote.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panelWebview.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panel.css')
     await joplin.views.panels.onMessage(panel, eventHandler)
@@ -462,6 +495,11 @@ async function eventHandler(message){
         // re-arms it when it rebuilds, so this fires exactly once and cannot loop (a document that already
         // carries the descriptor reports message[1] true and is skipped).
         if (openOverlayState && !message[1]) await refreshPanelData()
+    } else if (message[0] == 'getEditorNote'){
+        // A two-way round-trip: a freshly loaded webview asks which note the editor is showing, so it can
+        // paint the highlight straight away rather than waiting for the next selection change. Reads
+        // host-held state only - no data call, no render.
+        return editorNoteID
     } else if (message[0] == 'getNoteTags'){
         // A two-way round-trip (like searchTitleSuggestions): the tag overlay awaits this to prefill its
         // input with the note's current tags, comma separated.
@@ -938,10 +976,14 @@ async function getControlsHTML(currentProfileID){
     // The create buttons are labelled on desktop; on mobile they become icon-only (the icon and the title
     // tooltip are kept) so the narrow header gives its width to the profile dropdown instead. Custom panel
     // CSS stays a desktop-only feature reached from the Tools menu, so there is no mobile styler button.
+    // The desktop button carries BOTH label wordings - the full one and the short one - and panel.css shows
+    // exactly one of them (or neither) for the panel's current width, so the row degrades in two stages and
+    // never wraps to a second line. The title/aria-label stay the full wording at every stage, so the
+    // icon-only state is still named for a tooltip and for assistive tech.
     var createButtons = mobile
-        ? iconButton("notePlus", "New note", "onNewNoteClicked()") + iconButton("todoPlus", "New to-do", "onNewTodoClicked()")
-        : `<button type="button" class="create-button" title="New note" onclick="onNewNoteClicked()">${icons["notePlus"]}<span>New note</span></button>
-            <button type="button" class="create-button" title="New to-do" onclick="onNewTodoClicked()">${icons["todoPlus"]}<span>New to-do</span></button>`
+        ? iconButton("note", "New note", "onNewNoteClicked()") + iconButton("todo", "New to-do", "onNewTodoClicked()")
+        : `<button type="button" class="create-button" title="New note" aria-label="New note" onclick="onNewNoteClicked()">${icons["note"]}<span class="create-label -long">New note</span><span class="create-label -short">Note</span></button>
+            <button type="button" class="create-button" title="New to-do" aria-label="New to-do" onclick="onNewTodoClicked()">${icons["todo"]}<span class="create-label -long">New to-do</span><span class="create-label -short">To-do</span></button>`
     // The "-sync" class gives the button a stable selector for the mobile long-press adapter (which
     // shows its status tooltip as a toast, since touch has no hover). It has no CSS of its own, so it is
     // inert on desktop; "-syncing" still drives the spin animation while a sync runs.
