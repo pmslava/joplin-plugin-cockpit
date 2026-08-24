@@ -364,6 +364,9 @@ function reconcile(){
     // unconditionally, not only when the .todos node identity changes, so the flag is set before the
     // first pointer event even on renders that reuse the scroll container.
     applyPlatformClass()
+    // The gesture-trace setting rides in the same re-emitted markup, so it is re-read here too - once per
+    // render, which is what keeps it off the per-event path.
+    refreshGestureTraceFlag()
     // The inline theme marker can change when Cockpit settings re-render the panel. Host Joplin
     // stylesheet changes are covered separately by startThemeAppearanceObserver().
     scheduleEffectiveThemeClass()
@@ -1425,9 +1428,9 @@ function readSearchData(){
     if (!node) return { tags: [], notebooks: [] }
     try {
         var data = JSON.parse(node.textContent || '{}')
-        return { tags: data.tags || [], notebooks: data.notebooks || [] }
+        return { tags: data.tags || [], notebooks: data.notebooks || [], gestureTrace: !!data.gestureTrace }
     } catch (error) {
-        return { tags: [], notebooks: [] }
+        return { tags: [], notebooks: [], gestureTrace: false }
     }
 }
 
@@ -1555,6 +1558,8 @@ function renderSearchSuggestions(input){
     var menu = document.createElement('div')
     menu.className = 'dropdown-menu'
     menu.id = 'searchSuggestions'
+    // A list can open between renders (every keystroke builds one), so pick the setting up here as well.
+    refreshGestureTraceFlag()
     menu.appendChild(buildSuggestFilterRow(input))
 
     var list = document.createElement('div')
@@ -1662,9 +1667,16 @@ function wireSuggestList(list, input){
  ***************************************************************************************************************************************************/
 var GESTURE_TRACE_MAX = 6
 var gestureTrace = []
+// The setting, read ONCE per render rather than per traced pointer event: tracing sits on the gesture path,
+// and JSON-parsing the data island on every pointermove would make "costs nothing when off" untrue.
+var gestureTraceOn = false
+
+function refreshGestureTraceFlag(){
+    gestureTraceOn = IS_MOBILE && !!readSearchData().gestureTrace
+}
 
 function gestureTraceEnabled(){
-    return IS_MOBILE && !!readSearchData().gestureTrace
+    return gestureTraceOn
 }
 
 function traceGesture(code){
@@ -1715,7 +1727,9 @@ function onSuggestPointerDown(event){
     suggestPress.value = item.dataset.suggestValue
     suggestPress.fired = false
     suggestPress.moved = false
-    // Every press that began on a row owns the click the browser will synthesise for it.
+    // Every press that began on a row owns the click the browser will synthesise for it. A pending release
+    // from the previous gesture is dropped, so the new press keeps its own arm.
+    if (suggestClickArmTimer){ clearTimeout(suggestClickArmTimer); suggestClickArmTimer = null }
     suggestPress.clickArmed = true
     traceGesture('down')
 }
@@ -1756,6 +1770,24 @@ document.addEventListener('pointercancel', cancelSuggestPress, true)
 // adapter uses so it catches the inner scroll container too.
 document.addEventListener('scroll', cancelSuggestPress, true)
 
+// The arm is released a tick after the gesture ENDS, mirroring releaseSuggestPointerInside. Clearing it only
+// when the swallower consumes a click was a leak: a press cancelled by a scroll produces no synthetic click at
+// all, so the arm survived and the NEXT click anywhere - this listener is on the document - was eaten instead
+// (measured: long-press to mark, scroll, then tap Apply and nothing happens until a second tap). Releasing on
+// a tick rather than immediately still covers the click of a cancelled press that does land, and then disarms.
+var suggestClickArmTimer = null
+
+function releaseSuggestClickArm(){
+    if (!suggestPress.clickArmed || suggestClickArmTimer) return
+    suggestClickArmTimer = setTimeout(function(){
+        suggestClickArmTimer = null
+        suggestPress.clickArmed = false
+    }, 0)
+}
+
+document.addEventListener('pointerup', releaseSuggestClickArm, true)
+document.addEventListener('pointercancel', releaseSuggestClickArm, true)
+
 // The browser synthesises a click right after a touch gesture. The to-do long-press adapter swallows that
 // click; this list did not, and that is a concrete difference between the working gesture and the broken one:
 // the click lands wherever the gesture ended - which after a cancelled or re-targeted press need not be a row -
@@ -1764,7 +1796,14 @@ document.addEventListener('scroll', cancelSuggestPress, true)
 // dismissal listeners it is protecting the list from.
 document.addEventListener('click', function(event){
     if (!IS_MOBILE || !suggestPress.clickArmed) return
+    // One click per gesture, consumed either way, so the arm cannot outlive the press that set it.
     suggestPress.clickArmed = false
+    // Only a click that landed OUTSIDE the list can do harm: that is the one which reaches
+    // closeAllDropdowns and takes the list down. A click INSIDE the list is already safe (the dismissal
+    // listener excludes it) and is very often a control the user meant to press - the Apply button, the
+    // filter box, another row - so swallowing it is pure damage. Scoping the swallow this way makes it
+    // deterministic: it no longer depends on whether the arm's release wins a race with the synthetic click.
+    if (event.target && event.target.closest && event.target.closest('#searchSuggestions')) return
     traceGesture('click-swallowed')
     event.preventDefault()
     event.stopPropagation()

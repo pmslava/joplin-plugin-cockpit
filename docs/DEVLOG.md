@@ -185,7 +185,29 @@ And because guessing has now cost two device sessions, 1.9.10 ships a diagnostic
 including WHY the list closed (`list-closed:field-left`, `:menus-closed`, `:commit`, `:escape`, …). If the
 next device round fails, the trace can be read back instead of theorised about.
 
-Suite: 261 harness checks + 58 Playwright tests (57 run, 1 opt-in showcase skipped).
+Review round on the delta found both mobile deltas carried a one-line defect that defeated its own purpose,
+each measured with real touch emulation (CDP `Input.dispatchTouchEvent`) rather than reasoned about:
+
+- **The click-swallower arm leaked.** It was set on pointerdown and cleared *only* by the swallower consuming
+  a click — but a press cancelled by a scroll produces no synthetic click at all, so the arm survived and the
+  next click *anywhere* (the listener is on the document) was eaten. Repro: long-press to mark, scroll, tap
+  Apply, nothing happens until a second tap. Now released a tick after the gesture ends, however it ends —
+  and the swallow is scoped to clicks landing OUTSIDE the list, which makes it deterministic instead of a race
+  with that release: a click inside the list is already safe, and is usually a control the user meant to press.
+- **The gesture trace was dead code.** The flag reached the data island but `readSearchData()` never returned
+  it, so `gestureTraceEnabled()` read `undefined` and the diagnostic never ran. Surfaced, and now read once per
+  render into a cached boolean rather than JSON-parsing the island on every traced pointer event, which is what
+  makes "costs nothing when off" true. The harness now drives the real reader against a real island, so a
+  missing property fails here instead of on a device.
+
+Also: the any-mode cache key is self-describing (it carries the narrowing state it applied, since an any:1
+query no longer encodes it), and the e2e union test asserts the exact row count, not just membership.
+
+Suite: 262 harness checks + 58 Playwright tests (57 run, 1 opt-in showcase skipped).
+
+Process note: two multi-edit scripts aborted midway on a bad assertion and silently discarded *all* their
+edits — including one I had reported as applied. That is how the dead-code trace shipped. Write edits
+per-item, and verify the file afterwards rather than trusting the script exited.
 
 Process note: three of the four assertion failures this round were my own test premises, not product bugs —
 twice a regex matched the word `preventDefault` inside the comment explaining its absence. Pin behaviour by

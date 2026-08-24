@@ -159,6 +159,14 @@ export function applyNoteNarrowing(items){
     var query = anyMode
         ? String(searchCritera || "")
         : `type:todo ${completed} ${noDue} ${searchCritera}${excluded.clauses ? " " + excluded.clauses : ""}`
+    // The ordinary query encodes the whole view (its narrowing terms ARE the query), so it doubles as the cache
+    // key. An any:1 query does not: the narrowing moved out of it, while the value cached under it is the
+    // NARROWED list. Two views differing only in "show completed" would then share one entry. Unreachable today
+    // (the key is per-render and the flags cannot change within one), but a cache key that does not describe
+    // what it caches is a trap for the next change, so the any-mode key carries the narrowing state.
+    var cacheKey = anyMode
+        ? `any|c${showCompleted ? 1 : 0}|d${showNoDue ? 1 : 0}|x${excluded.clauses}|${query}`
+        : query
     // fillCounts is the background pass of the fast-first-paint flow: reuse the search the fast paint
     // already cached (no new round-trip) but this time DO fetch the note bodies so the checkbox rings
     // fill in. priorityStart is the estimated first-visible row, so the bodies nearest the viewport are
@@ -166,16 +174,16 @@ export function applyNoteNarrowing(items){
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
     var allTodos;
-    if ((useCache || fillCounts) && todosResultCache.has(query)){
+    if ((useCache || fillCounts) && todosResultCache.has(cacheKey)){
         // Optimistic / fill re-render: reuse the last search for this query instead of searching again.
         // The overlay/overrides below still layer the just-changed item on top, so the user's action shows
         // without waiting on the index.
-        allTodos = cloneItems(todosResultCache.get(query))
+        allTodos = cloneItems(todosResultCache.get(cacheKey))
         if (fillCounts){
             // The fast paint cached these with empty rings; fetch the bodies now (viewport first) and
             // refresh the cache so the follow-up render and any later optimistic paint show real counts.
             await attachCheckboxCounts(allTodos, false, priorityStart)
-            cacheResult(todosResultCache, query, allTodos)
+            cacheResult(todosResultCache, cacheKey, allTodos)
         }
     } else {
         allTodos = [];
@@ -200,7 +208,7 @@ export function applyNoteNarrowing(items){
         // GET, and BEFORE the cache is written, so the cache holds only kept rows.
         allTodos = filterExcluded(allTodos, excluded.set)
         await attachCheckboxCounts(allTodos, fast, priorityStart)
-        cacheResult(todosResultCache, query, allTodos)
+        cacheResult(todosResultCache, cacheKey, allTodos)
     }
     // Fold in the host-held optimistic layer: created/newly-matching to-dos the index has not returned
     // yet, then the completion overrides (applied last so they also correct an overlay record). The item
@@ -305,14 +313,16 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var query = anyMode
         ? String(searchCriteria || "")
         : `type:note ${searchCriteria}${excluded.clauses ? " " + excluded.clauses : ""}`
+    // Self-describing on the any-mode path, for the reason given in getTodos.
+    var cacheKey = anyMode ? `any|x${excluded.clauses}|${query}` : query
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
     var allNotes;
-    if ((useCache || fillCounts) && notesResultCache.has(query)){
-        allNotes = cloneItems(notesResultCache.get(query))
+    if ((useCache || fillCounts) && notesResultCache.has(cacheKey)){
+        allNotes = cloneItems(notesResultCache.get(cacheKey))
         if (fillCounts){
             await attachCheckboxCounts(allNotes, false, priorityStart)
-            cacheResult(notesResultCache, query, allNotes)
+            cacheResult(notesResultCache, cacheKey, allNotes)
         }
     } else {
         allNotes = [];
@@ -331,7 +341,7 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
         if (anyMode) allNotes = applyNoteNarrowing(allNotes)
         allNotes = filterExcluded(allNotes, excluded.set)
         await attachCheckboxCounts(allNotes, fast, priorityStart)
-        cacheResult(notesResultCache, query, allNotes)
+        cacheResult(notesResultCache, cacheKey, allNotes)
     }
     // A created regular note (is_todo 0) shows here before the index returns it; the overlay filters to
     // the notes list, so a created to-do never leaks into this section. View-scoped by opts.viewKey, so a

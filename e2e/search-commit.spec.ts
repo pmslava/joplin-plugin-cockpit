@@ -548,6 +548,10 @@ test.describe('Search commit on Enter', () => {
       }, { timeout: PANEL_REFRESH_TIMEOUT, intervals: [1000, 2000, 3000] })
       // gamma false is the regression: with Cockpit's type:todo OR-ed in, EVERY to-do matched.
       .toEqual({ alpha: true, beta: true, gamma: false });
+
+    // EXACTLY the union, nothing else. The membership check above would still pass if the list also carried
+    // unrelated rows, which is precisely the shape the bug had: everything matched.
+    expect(await listRowCount(panel)).toBe(2);
   });
 
 });

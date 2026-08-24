@@ -3863,6 +3863,28 @@ async function main() {
             'the suggestion list must swallow the click of its own gesture, mobile only')
         assert.ok(/suggestPress\.clickArmed = true/.test(handlerBody('onSuggestPointerDown')),
             'a press that began on a row owns the click that follows it')
+        // THE RELEASE SIDE. Arming was pinned; releasing was not, which is exactly how a leak shipped: the arm
+        // was cleared ONLY by the swallower consuming a click, and a press cancelled by a scroll produces no
+        // synthetic click at all - so the arm survived and this document-level listener ate the NEXT click
+        // anywhere (measured: long-press to mark, scroll, tap Apply, nothing happens until a second tap).
+        assert.ok(webviewSource.includes("document.addEventListener('pointerup', releaseSuggestClickArm, true)") &&
+                  webviewSource.includes("document.addEventListener('pointercancel', releaseSuggestClickArm, true)"),
+            'the arm must be released when the gesture ENDS, however it ended')
+        const armRelease = handlerBody('releaseSuggestClickArm')
+        assert.ok(armRelease.includes('setTimeout('),
+            'a tick later, so a cancelled press whose click DOES land is still covered before disarming')
+        assert.ok(armRelease.includes('if (!suggestPress.clickArmed || suggestClickArmTimer) return'),
+            'and idempotently, only for a live arm')
+        assert.ok(handlerBody('onSuggestPointerDown').includes('if (suggestClickArmTimer){ clearTimeout(suggestClickArmTimer); suggestClickArmTimer = null }'),
+            'a fresh press must cancel a pending release so it keeps its own arm')
+        // The swallow is scoped to clicks OUTSIDE the list, which is what makes it deterministic rather than a
+        // race with the release: a click inside the list is already safe (the dismissal listener excludes it)
+        // and is usually a control the user meant to press - the Apply button, the filter box, another row.
+        const swallowAt = webviewSource.indexOf("if (!IS_MOBILE || !suggestPress.clickArmed) return")
+        const swallowBody = webviewSource.slice(swallowAt, webviewSource.indexOf('}, true)', swallowAt))
+        assert.ok(swallowBody.includes('suggestPress.clickArmed = false'), 'it consumes the arm either way')
+        assert.ok(swallowBody.includes("closest('#searchSuggestions')) return"),
+            'and never swallows a click that landed inside the list')
         // Capture phase, so it runs before the dismissal listeners it is protecting the list from.
         const swallower = /if \(!IS_MOBILE \|\| !suggestPress\.clickArmed\) return[\s\S]*?\}, true\)/.exec(webviewSource)
         assert.ok(swallower, 'the swallower must be registered in the capture phase')
@@ -3880,8 +3902,30 @@ async function main() {
         const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
         assert.ok(/gestureTrace: gestureTrace,/.test(panelSource), 'it must ride in the search-data island')
         // Inert unless mobile AND enabled, so it costs nothing when off.
-        assert.ok(/return IS_MOBILE && !!readSearchData\(\)\.gestureTrace/.test(handlerBody('gestureTraceEnabled')),
-            'the trace must be mobile-only and opt-in')
+        // THE SURFACING. The flag reached the island but readSearchData() never returned it, so
+        // gestureTraceEnabled() read undefined and the whole diagnostic was dead code. The previous pin only
+        // checked that the setting existed, which is why that shipped. Drive the real reader against a real
+        // island instead of pattern-matching it.
+        const readBody = handlerBody('readSearchData')
+        assert.ok(readBody.includes('gestureTrace: !!data.gestureTrace'),
+            'readSearchData must surface gestureTrace, or the setting does nothing at all')
+        assert.ok(readBody.includes('return { tags: [], notebooks: [], gestureTrace: false }'),
+            'including on the malformed-island fallback, so the shape never varies')
+        // Executed for real against a stub document, so a missing property fails here rather than on a device.
+        const runReader = new Function('document', readBody + '\n}; return readSearchData()')
+        const island = (text) => ({ getElementById: () => ({ textContent: text }) })
+        assert.strictEqual(runReader(island('{"gestureTrace":true,"tags":[],"notebooks":[]}')).gestureTrace, true,
+            'an island carrying the flag must come back with it set')
+        assert.strictEqual(runReader(island('{"tags":[],"notebooks":[]}')).gestureTrace, false,
+            'and an island without it must come back false, never undefined')
+        // Read ONCE per render, not per traced pointer event - tracing sits on the gesture path.
+        assert.ok(handlerBody('gestureTraceEnabled').includes('return gestureTraceOn'),
+            'the per-event check must be a cached boolean, not a JSON parse')
+        assert.ok(handlerBody('refreshGestureTraceFlag').includes('gestureTraceOn = IS_MOBILE && !!readSearchData().gestureTrace'),
+            'the cached flag stays mobile-only and opt-in')
+        assert.ok(handlerBody('reconcile').includes('refreshGestureTraceFlag()'), 'refreshed once per render')
+        assert.ok(handlerBody('renderSearchSuggestions').includes('refreshGestureTraceFlag()'),
+            'and when a list opens between renders')
         assert.ok(handlerBody('traceGesture').includes('if (!gestureTraceEnabled()) return'),
             'and every trace point must bail out first when it is off')
         // It reports WHY the list closed, which is the question two device rounds could not answer.
@@ -3985,6 +4029,26 @@ async function main() {
         assert.ok(/iscompleted:0/.test(listQuery), 'and iscompleted:0, since this profile hides completed')
         assert.ok(/due:19700201/.test(listQuery), 'and the due floor, since this profile hides no-due')
         assert.ok(listQuery.includes('tag:one tag:two'), 'with the user criteria appended as always')
+    })
+
+    await test('any:1: the cache key describes what it caches', () => {
+        // The ordinary query encodes the whole view - its narrowing terms ARE the query - so it doubles as the
+        // key. An any:1 query does not: the narrowing moved out of it while the cached value is the NARROWED
+        // list, so two views differing only in "show completed" would share one entry. Unreachable today, but a
+        // key that does not describe its value is a trap for the next change.
+        const cacheSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'joplin.ts'), 'utf8')
+        assert.ok(cacheSource.includes('`any|c${showCompleted ? 1 : 0}|d${showNoDue ? 1 : 0}|x${excluded.clauses}|${query}`'),
+            'the any-mode to-do key must carry the narrowing state it applied')
+        assert.ok(cacheSource.includes('var cacheKey = anyMode ? `any|x${excluded.clauses}|${query}` : query'),
+            'and the notes key its own')
+        for (const site of ['todosResultCache.has(cacheKey)', 'todosResultCache.get(cacheKey)',
+                            'notesResultCache.has(cacheKey)', 'notesResultCache.get(cacheKey)',
+                            'cacheResult(todosResultCache, cacheKey, allTodos)',
+                            'cacheResult(notesResultCache, cacheKey, allNotes)']){
+            assert.ok(cacheSource.includes(site), `every cache site must use the key: ${site}`)
+        }
+        assert.ok(!/cacheResult\((todos|notes)ResultCache, query,/.test(cacheSource),
+            'nothing may still cache under the raw query')
     })
 
     await test('any:1: detection is a whole token, and errs towards the safe (client-side) path', async () => {
