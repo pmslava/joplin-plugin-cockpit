@@ -212,3 +212,39 @@ per-item, and verify the file afterwards rather than trusting the script exited.
 Process note: three of the four assertion failures this round were my own test premises, not product bugs —
 twice a regex matched the word `preventDefault` inside the comment explaining its absence. Pin behaviour by
 matching the CALL, never the word.
+
+## 2026-08-24 — v1.9.11: committed searches actually filter on mobile
+
+Pixel round 3: long-press multi-select works, desktop is good, but committing a search — `tag:`,
+`notebook:`, `title:`, by pick, apply button or Enter — left the list unfiltered. Slava saw the filtered
+view flash twice: once on pressing the ×, once on reopening the panel.
+
+**Diagnosed against the harness before changing anything**, and the whole picture came out of three
+measured sequences.
+
+- **The primary bug**: a commit with the field focused rendered **0 times**. `refreshPanelData`
+  early-returns while `mobile && searchFocused`, and every commit path deliberately keeps the field
+  focused so the soft keyboard stays up. The commit landed host-side — `searchFilter` was set — and the
+  paint was swallowed. Hence "it behaves like search doesn't implement at all".
+- **The × flash, explained**: pressing × blurs the field / closes the keyboard, which posts
+  `searchFocusChanged(false)`; the host then runs the refresh it had been *holding*, and that paints the
+  filtered view — the flash. The empty-field auto-reset immediately commits `""` (with `renderNow`) and
+  paints the unfiltered view over it. Measured as renders 0 → 1 (`value="tag:foo"`) → 1 (`value=""`).
+  Nothing was actively reverting: it was the held render finally landing, then the user's own × .
+- **The reopen flash**: measured, and **no path commits `""` the user did not ask for**. A fresh webview
+  bootstrap (`dialogGuardReset`) renders nothing by itself and leaves the committed filter intact, as does
+  a following refresh. The observation is the same hold mechanism — a held render landing on reopen, over
+  a document served from before the commit. Proven absent rather than assumed; final confirmation is a
+  device check.
+
+**The rule, per manager decision**: every EXPLICIT commit renders. `renderNow` is now the **default** of
+`onSearchFilterChanged`, because all four of its call sites are explicit user commits — a picked
+suggestion, an applied multi-select, Enter in the field, the clear button / blur-change — plus the
+empty-field reset. A future non-commit caller must opt out with `{ renderNow: false }`, so a commit path
+cannot silently forget it. The hold keeps doing its real job: typing never reaches this function, and an
+unflagged commit is still held (measured: still 0 renders).
+
+Desktop is provably unaffected: the same commit rendered with and without the flag produces the same
+render count and **byte-identical markup**.
+
+Suite: 265 harness checks + 58 Playwright tests (57 run, 1 opt-in showcase skipped).

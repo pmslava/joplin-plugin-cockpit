@@ -1361,9 +1361,21 @@ async function onSearchFilterChanged(searchString, opts){
     // The search is now committed, so any uncommitted draft and the open suggestion list are done.
     searchDraft = null
     hideSearchSuggestions({ reason: 'commit' })
-    // message[2] asks the host to render even while the mobile search-focus hold is armed. Only the empty-field
-    // auto-reset sets it; every other caller omits it, so their behaviour is unchanged.
-    await webviewApi.postMessage(['searchFilterChanged', searchString, !!(opts && opts.renderNow)]);
+    // message[2] asks the host to render even while the mobile search-focus hold is armed, and it is the
+    // DEFAULT because every caller of this function is an explicit user commit: a picked suggestion, an applied
+    // multi-select, Enter in the field or in the list's filter box, the clear button, the empty-field reset.
+    //
+    // The hold exists to stop a setHtml wiping the field while the user is TYPING - on mobile a render is a
+    // full webview reload. It was never meant to hide results the user has just asked for, but that is what it
+    // did: these paths deliberately keep the field focused (so the soft keyboard stays up), so the commit
+    // landed host-side and the render was swallowed - the panel simply never filtered. The keyboard closing
+    // with the reload is the accepted trade, the same one the empty-field reset already makes: the user has
+    // finished searching. Typing itself never reaches here (it only updates the draft), so the hold still
+    // protects exactly what it was built for.
+    //
+    // A future caller that is NOT an explicit commit must opt out with { renderNow: false }.
+    var renderNow = !(opts && opts.renderNow === false)
+    await webviewApi.postMessage(['searchFilterChanged', searchString, renderNow]);
 }
 
 /** maybeAutoResetSearch ***************************************************************************************************************************

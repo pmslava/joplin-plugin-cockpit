@@ -149,6 +149,14 @@ All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click
   type. NOTE: a mobile render is a full webview reload, so the soft keyboard closes as a consequence —
   Cockpit does not blur the field or dismiss the keyboard itself, and the hold stays armed for any
   later typing.
+- **Every explicit commit renders, even with the field focused**: picking a suggestion, applying a
+  multi-select, Enter in the field or in the list's filter box, and the clear button all ask the host to
+  render through the search-focus hold. Without that the commit landed host-side and the render was
+  swallowed — these paths deliberately keep the field focused so the soft keyboard stays up — and the
+  panel simply never filtered ("it behaves like search doesn't implement at all"). The hold still does
+  its real job: it protects the field while the user is TYPING, which never commits. As with the
+  empty-field reset, the keyboard closing with the reload is the accepted trade — the user has finished
+  searching.
 - **Autocomplete on touch**: a suggestion is picked on `pointerup` (not `mousedown`, and no longer on
   `pointerdown`). It moved off `pointerdown` when the dropdowns became **multi-select**: a long press has
   to *begin* with a pointerdown, so committing there would close the list before the hold could ever
@@ -427,6 +435,13 @@ success vs failure looks like. The build to install is
     - Failure: the list stays empty (or stays filtered) until you press something else. Note whether the
       × even appears in the field on Android — it is not expected to, which is exactly why backspace has
       to work.
+
+9b. **A committed search actually filters (no Enter needed on the results).** With "All notebooks",
+    type `tag:` and pick a tag — by tapping it, and again via long-press + the apply button, and again by
+    typing a full query and pressing Enter.
+    - Success: the list filters **immediately** in every case. The soft keyboard closing at that moment is
+      expected (a mobile render reloads the webview). Reopening the panel keeps the filter.
+    - Failure: the list stays unfiltered, or the filtered view flashes and then reverts to unfiltered.
 
 10a. **Suggestion list: size, scroll and filter.** Type `tag:` (then `notebook:`, then `title:`) with
     nothing after the colon.

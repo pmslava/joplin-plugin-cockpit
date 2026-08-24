@@ -2751,13 +2751,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.9.10', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.9.11', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.9.10'
+        const expected = '1.9.11'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
@@ -4108,6 +4108,98 @@ async function main() {
         await mobile.panelMessageHandler(['searchFocusChanged', false])
     })
 
+    await test('committed search (host): EVERY explicit commit renders, even with the field focused', async () => {
+        // The Pixel report: committing a tag:/notebook:/title: search left the list unfiltered. The pick, the
+        // apply button and Enter all deliberately keep the field focused (so the soft keyboard stays up), and
+        // the mobile hold swallowed the render - the commit landed host-side and nothing painted. The hold is
+        // there to stop a setHtml wiping the field while the user is TYPING, not to hide results they asked
+        // for, so every explicit commit is now exempt.
+        const focused = await run({
+            dataDir: path.join(tmp, 'commit-hold-data'),
+            installationDir: path.join(tmp, 'mobile-install'),
+            require: mobileRequire,
+            versionInfo: { version: '3.7.0', platform: 'mobile' },
+            todos,
+        })
+        await focused.panelMessageHandler(['searchFocusChanged', true])
+
+        const beforeFlagged = focused.setHtmlCalls
+        await focused.panelMessageHandler(['searchFilterChanged', 'tag:foo', true])
+        assert.strictEqual(focused.setHtmlCalls - beforeFlagged, 1,
+            'an explicit commit must paint at once, focused or not')
+        assert.ok(/id="searchFilter"[\s\S]*?value="tag:foo"/.test(focused.panelHtml['panel-panel']),
+            'and the painted markup must carry the committed filter')
+
+        // The hold still does its real job: a commit that is NOT an explicit one is still held while typing.
+        const beforeUnflagged = focused.setHtmlCalls
+        await focused.panelMessageHandler(['searchFilterChanged', 'tag:partial'])
+        assert.strictEqual(focused.setHtmlCalls - beforeUnflagged, 0,
+            'the typing protection must survive - an unflagged commit is still held on mobile')
+
+        // And the committed search survives the reload cycle the render causes.
+        await focused.panelMessageHandler(['searchFilterChanged', 'tag:foo', true])
+        const beforeReopen = focused.setHtmlCalls
+        await focused.panelMessageHandler(['dialogGuardReset', false])
+        assert.strictEqual(focused.setHtmlCalls - beforeReopen, 0, 'a fresh webview bootstrap renders nothing by itself')
+        assert.ok(/id="searchFilter"[\s\S]*?value="tag:foo"/.test(focused.panelHtml['panel-panel']),
+            'and it must not revert the committed filter - no path may commit "" the user did not ask for')
+    })
+
+    await test('committed search (host): the exemption is inert on desktop, byte for byte', async () => {
+        // renderNow only ever matters under the mobile hold. Proven by rendering the same commit both ways on
+        // desktop and comparing the markup, rather than by reading the guard.
+        const opts = (tag) => ({
+            dataDir: path.join(tmp, 'commit-desktop-' + tag),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos,
+        })
+        const plain = await run(opts('plain'))
+        const flagged = await run(opts('flagged'))
+        await plain.panelMessageHandler(['searchFocusChanged', true])
+        await flagged.panelMessageHandler(['searchFocusChanged', true])
+        const beforePlain = plain.setHtmlCalls
+        const beforeFlagged = flagged.setHtmlCalls
+        await plain.panelMessageHandler(['searchFilterChanged', 'tag:foo'])
+        await flagged.panelMessageHandler(['searchFilterChanged', 'tag:foo', true])
+        assert.strictEqual(plain.setHtmlCalls - beforePlain, flagged.setHtmlCalls - beforeFlagged,
+            'desktop must render the same number of times either way')
+        assert.strictEqual(plain.panelHtml['panel-panel'], flagged.panelHtml['panel-panel'],
+            'and produce byte-identical markup')
+    })
+
+    await test('committed search (webview): the flag is the DEFAULT, and only commits can carry it', () => {
+        const body = handlerBody('onSearchFilterChanged')
+        assert.ok(body.includes('var renderNow = !(opts && opts.renderNow === false)'),
+            'renderNow must default ON, so a commit path cannot forget it')
+        assert.ok(body.includes("postMessage(['searchFilterChanged', searchString, renderNow])"),
+            'and travel as message[2]')
+        // Every caller of this function is an explicit user commit - that is what makes the default safe.
+        const callSites = (webviewSource.match(/onSearchFilterChanged\(/g) || []).length
+        assert.strictEqual(callSites, 5, 'the commit function plus its four explicit call sites')
+        for (const site of [
+            "onSearchFilterChanged('', { renderNow: true })",     // the empty-field auto-reset
+            'onSearchFilterChanged(input.value)',                  // a picked suggestion / applied multi-select
+            'onSearchFilterChanged(searchInput.value)',            // Enter in the field
+            'onSearchFilterChanged(pending.value)',                // the clear button / a blur-change
+        ]){
+            assert.ok(webviewSource.includes(site), `explicit commit path missing: ${site}`)
+        }
+        // Typing must NOT commit: the input path only updates the draft (and the empty-field reset, which is
+        // itself an explicit commit on an observed empty value).
+        const input = handlerBody('onSearchInput')
+        assert.ok(input.includes('updateSearchDraft(input)'), 'typing updates the draft')
+        assert.ok(!/onSearchFilterChanged/.test(input), 'and never commits directly')
+        assert.ok(!/onSearchFilterChanged/.test(handlerBody('updateSearchDraft')), 'nor does the draft writer')
+        // Host side: message[2] becomes the exemption, and the hold is honoured otherwise.
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        assert.ok(/message\[2\] \? \{ renderWhileSearchFocused: true \} : undefined/.test(panelSource),
+            'the host must turn message[2] into the render exemption')
+        assert.ok(/if \(mobile && searchFocused && !\(options && options\.renderWhileSearchFocused\)\) return/.test(panelSource),
+            'and the hold must stay in place for everything else')
+    })
+
     await test('empty search (webview): the reset is an explicit commit on an observed empty value', () => {
         const body = handlerBody('maybeAutoResetSearch')
         // "Still filtered?" is read from the server-rendered value ATTRIBUTE, which the user's editing never
@@ -4129,8 +4221,8 @@ async function main() {
         assert.ok(handlerBody('onSearchFilterChanged').includes('pendingSearchCommit = null'),
             'the reset must supersede a pending blur-commit')
         // The renderNow flag rides as message[2]; every other caller omits it.
-        assert.ok(/postMessage\(\['searchFilterChanged', searchString, !!\(opts && opts\.renderNow\)\]\)/.test(handlerBody('onSearchFilterChanged')),
-            'renderNow must travel as message[2]')
+        assert.ok(handlerBody('onSearchFilterChanged').includes("postMessage(['searchFilterChanged', searchString, renderNow])"),
+            'renderNow must travel as message[2] (it is the default now - see the commit-render rule below)')
         const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
         assert.ok(/message\[2\] \? \{ renderWhileSearchFocused: true \} : undefined/.test(panelSource),
             'the host must turn message[2] into the render exemption')
