@@ -131,6 +131,27 @@ test.describe('Search commit on Enter', () => {
     await expect(peek).toBeVisible();
     await expect(peek).toContainText('Results outside current filters');
     await expect(peek.locator('.todo-title', { hasText: marker })).toBeVisible();
+
+    // The commit hands the caret straight back, so the user can keep typing into the query they just ran.
+    // The re-render REPLACES the input, so this is not "focus was never lost" but "focus was put back on the
+    // freshly rendered field": reconcile restores it after the host's setHtml has swapped the markup. It only
+    // works because the removal-blur that swap fires is DEFERRED rather than taken for a departure - measured
+    // on this build that blur arrives with its target still connected and with no relatedTarget, so before the
+    // fix it ran leaveSearchField and every commit left activeElement on <body>.
+    await expect(search).toBeFocused();
+    // And the caret sits at the END of the committed value, not at 0 - continued typing appends to the query
+    // instead of being injected in front of it.
+    await expect
+      .poll(
+        async () =>
+          await panel.evaluate(() => {
+            const el = document.activeElement as HTMLInputElement | null;
+            if (!el || el.id !== 'searchFilter') return null;
+            return { start: el.selectionStart, end: el.selectionEnd, length: el.value.length };
+          }),
+        { timeout: 10_000, intervals: [300, 1000] }
+      )
+      .toEqual({ start: marker.length, end: marker.length, length: marker.length });
   });
 
   /**
@@ -178,6 +199,12 @@ test.describe('Search commit on Enter', () => {
           await search.click();
           await search.press('Control+a');
           await search.press('Delete');
+          // Emptying the field is itself a COMMIT: the previous test leaves a search committed, so the
+          // auto-reset fires here and the host re-renders. That render has to land BEFORE the typing starts,
+          // or it replaces the input mid-keystroke - and the panel now (correctly) carries the half-typed
+          // draft across such a render instead of dropping it, so a race here corrupts the free text rather
+          // than merely losing it and retrying. Settled once, here, rather than papered over with a retry.
+          await win.waitForTimeout(2_000);
           await search.pressSequentially('any:1 milk notebook:Cockpit', { delay: 20 });
           return (await menu.count()) > 0;
         },
@@ -261,6 +288,9 @@ test.describe('Search commit on Enter', () => {
           await search.click();
           await search.press('Control+a');
           await search.press('Delete');
+          // As above: the previous test applied its tokens, which committed, so emptying the field auto-commits
+          // a reset and re-renders. Let that render land before typing into the field it replaces.
+          await win.waitForTimeout(2_000);
           await search.pressSequentially('notebook:Cockpit', { delay: 20 });
           return (await menu.count()) > 0;
         },
@@ -404,10 +434,13 @@ test.describe('Search commit on Enter', () => {
       .poll(async () => await listRowCount(panel), { timeout: 20_000, intervals: [500, 1500] })
       .toBeGreaterThan(0);
     // The field stays empty afterwards - the reset commits the empty query, it does not repopulate the field
-    // from the committed value. (Focus is deliberately NOT asserted: measured on this build, the panel leaves
-    // activeElement on <body> after ANY commit, an Enter commit included, so it is pre-existing behaviour and
-    // not something this reset introduces.)
+    // from the committed value.
     expect(await search.inputValue()).toBe('');
+    // And the caret stays in the field across the reset's re-render. The auto-reset commits while the user is
+    // still typing in the field, so losing focus here would be the worst case of all: the next keystroke would
+    // go nowhere. Same mechanism as the Enter commit above - the render's blur is deferred, so reconcile's
+    // restore still sees searchFocused and hands the freshly rendered field the caret back.
+    await expect(search).toBeFocused();
   });
 
   /**

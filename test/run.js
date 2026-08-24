@@ -3602,6 +3602,17 @@ async function main() {
             'a tap on a non-focusable row (null relatedTarget) must hand the caret back, not tear the list down')
         assert.ok(/setTimeout\(function\(\)\{ if \(!searchRegionHasFocus\(\)\) leaveSearchField\(\) \}, 0\)/.test(blur),
             'an otherwise-unhelpful null relatedTarget must be decided next tick, not guessed at')
+        // ...and the SAME deferral with no list open, which is the commit-with-focus case. A commit closes the
+        // list before it asks the host to render, so the render's removal-blur arrives with no menu; gating the
+        // deferral on a menu therefore sent every commit (Enter, the clear button, a pick, the empty-field
+        // auto-reset) straight to leaveSearchField, clearing searchFocused a couple of milliseconds before
+        // reconcile's restoreSearchDraft ran - measured: the restore was reached every time and returned at its
+        // first line, leaving activeElement on <body>. Desktop only: on mobile a setHtml is a full reload, so
+        // there is no surviving state to restore and the host's focus hold must not be released a tick later.
+        assert.ok(/if \(!IS_MOBILE && related == null\)\{/.test(blur),
+            'a null-relatedTarget blur with NO list open must be deferred too, or every commit loses the caret')
+        assert.ok(blur.indexOf('if (menu && related == null)') < blur.indexOf('if (!IS_MOBILE && related == null)'),
+            'the open-list branch keeps first refusal, so the mobile path through this function is unchanged')
         const region = handlerBody('inSearchRegion')
         assert.ok(region.includes('getSearchInput()') && region.includes('searchSuggestions'),
             'the region is the field plus the open list')

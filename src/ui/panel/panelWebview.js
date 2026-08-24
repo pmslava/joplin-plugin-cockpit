@@ -2123,10 +2123,18 @@ function flushPendingSearchCommit(){
 }
 
 function onSearchBlur(event){
-    // A refresh removes the focused field mid-typing. Some Chromium builds fire blur on that removal
-    // and some do not; either way this is not a genuine blur and the draft must survive so
-    // restoreSearchDraft can put it back. The removed field is already disconnected from the document
-    // when its removal-blur fires, so ignore a blur whose target is no longer connected.
+    // A refresh removes the focused field mid-typing, and that removal blurs it. It is not a genuine blur -
+    // the user has not gone anywhere - so searchFocused and the draft must survive it for restoreSearchDraft
+    // to hand the caret back. A field that is ALREADY detached when its blur arrives is the easy case and is
+    // dropped here.
+    //
+    // MEASURED, that easy case is not the one this build produces. The desktop host's setHtml is a plain
+    // `contentElement.innerHTML = html` inside the panel iframe, and Blink clears focus out of the subtree it
+    // is about to remove BEFORE detaching it: the removal-blur arrives with event.target STILL CONNECTED,
+    // still document.getElementById('searchFilter'), and with a null relatedTarget - at that instant
+    // indistinguishable from the user clicking onto something unfocusable. So this check is kept only as a
+    // cheap early-out for builds that do detach first; what actually covers the render case is the deferred
+    // re-check below.
     if (event && event.target && event.target.isConnected === false) return
     // Focus moving WITHIN the region (field -> filter box, filter box -> apply button, and back) is not a blur
     // of the search at all.
@@ -2141,6 +2149,30 @@ function onSearchBlur(event){
         if (suggestPointerInside){ restoreSearchDraft(); return }
         // Otherwise a null relatedTarget is simply unhelpful, so decide on the next tick, once the browser has
         // finished moving focus, rather than tearing an open list down on a guess.
+        setTimeout(function(){ if (!searchRegionHasFocus()) leaveSearchField() }, 0)
+        return
+    }
+    /** The same deferral, for a blur with NO list open - DESKTOP only *****************************************
+     * This is the commit-with-focus case, and it is why every commit used to end up on <body>. A commit (Enter,
+     * the clear button, a picked suggestion, the empty-field auto-reset) closes the suggestion list FIRST and
+     * only then asks the host to re-render. So by the time the render's removal-blur arrived there was no menu,
+     * the branch above was skipped, control fell straight through to leaveSearchField(), and searchFocused was
+     * already false when reconcile's restoreSearchDraft ran two milliseconds later - measured: the restore was
+     * reached on every commit and returned at its very first line, every time.
+     *
+     * Deferring answers the question when it is actually answerable. reconcile() runs from a MutationObserver,
+     * i.e. a MICROTASK, so it has always run by the time this macrotask does: if the blur came from a render,
+     * restoreSearchDraft has already put the caret back into the freshly rendered field, searchRegionHasFocus()
+     * is true and this stands down; if the user genuinely clicked away, nothing refocused and the departure
+     * goes through one tick later than it used to - which no caller can observe, since the commit that a
+     * departure flushes is itself already deferred a tick by onSearchFieldChanged.
+     *
+     * DESKTOP ONLY, deliberately. On mobile a setHtml is a full webview reload: no module state survives for a
+     * restore to run from, so there is nothing for this to wait for, and the host's search-focus hold - which
+     * leaveSearchField releases, and which is what lets a held refresh finally run - must not be delayed. The
+     * mobile path through this function is therefore exactly what it was.
+     ***************************************************************************************************************/
+    if (!IS_MOBILE && related == null){
         setTimeout(function(){ if (!searchRegionHasFocus()) leaveSearchField() }, 0)
         return
     }
@@ -2166,8 +2198,11 @@ function leaveSearchField(){
 
 /** restoreSearchDraft *****************************************************************************************************************************
  * After a refresh replaced the panel while the user was in the search field, this puts focus (and, when present, the uncommitted draft text/caret)   *
- * back. onSearchBlur ignores the blur fired when the focused field is removed, so searchFocused still reflects that the user was in the field, and a  *
- * genuine blur clears searchFocused so no focus is stolen back after the user has left. Two cases:                                                    *
+ * back. It hangs entirely on searchFocused still being true, which is onSearchBlur's job: the removal of the focused field fires a blur that this     *
+ * build reports with the target still connected and no relatedTarget, so onSearchBlur does not answer it on the spot - it defers the decision one     *
+ * tick, by which time this restore (a MutationObserver microtask) has already run and refocused the field, and the deferred check sees focus back     *
+ * inside the region and stands down. A genuine departure refocuses nothing, so that same check clears searchFocused and no focus is stolen back       *
+ * after the user has left. Two cases:                                                                                                                 *
  *  - an uncommitted draft survived the refresh: restore its text and caret;                                                                           *
  *  - the refresh was triggered by a commit-with-focus (Enter, or a picked suggestion, or the clear button): no draft survives a commit, but the user  *
  *    is still in the field, so refocus the freshly rendered input on its server-rendered (committed) value with the caret at the end, so continued    *
