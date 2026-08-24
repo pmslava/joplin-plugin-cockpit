@@ -26,7 +26,14 @@ export var icons = {
     sort: svgIcon("M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z"),
     arrowUp: svgIcon("M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"),
     arrowDown: svgIcon("M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"),
-    todo: svgIcon("M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM13 9V3.5L18.5 9H13zM16.5 11 10.6 16.9 7.5 13.8l1.41-1.41 1.69 1.69 4.49-4.49z"),
+    // A ring with a checkmark inside, not a sheet of paper: the panel's own glyph language uses circles and
+    // rings for to-dos (every row carries one), so the create button now says "to-do" the same way instead of
+    // borrowing the note icon's document silhouette. Drawn as one path in three subpaths - outer circle, inner
+    // circle wound the other way to punch the ring open, then the check - so the shared svgIcon() wrapper (one
+    // `d`, fill:currentColor, no stroke) still applies and the glyph inherits colour and size like every other.
+    // The ring is 2 units thick against the note icon's 1.8-unit rules, so at button size the pair reads as one
+    // family; the check clears the inner edge by ~1.5 units, which keeps them apart down to 18px.
+    todo: svgIcon("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM16.05 8 10.2 13.85 8 11.65 6.4 13.25l3.8 3.8 7.45-7.45z"),
 }
 
 /** iconButton **************************************************************************************************************************************

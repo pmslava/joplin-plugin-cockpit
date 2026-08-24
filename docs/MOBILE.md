@@ -138,8 +138,59 @@ All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click
   (last-sync time / duration / errors) as a transient bottom toast.
 - **Tap targets**: ~40 px hit areas via `::after` overlays and stacked-row `min-height`, with the
   18 px checkbox ring and row layout preserved visually.
-- **Autocomplete on touch**: the search-suggestion pick commits on `pointerdown` (not `mousedown`) on
-  mobile, keeping the field focused and the soft keyboard up.
+- **Clearing the search resets the panel (no Enter)**: emptying the field returns the list to the
+  unfiltered "all" view by itself, however it was emptied. This matters most on mobile: the soft
+  keyboard has no Enter that commits here, and Android's WebView does **not** render the
+  `::-webkit-search-cancel-button` ×, so backspacing to empty is the only way to clear a query — and
+  before 1.9.9 it did nothing, leaving the panel filtered with no way back. The reset is an explicit
+  commit made on the `input` event (the only event a backspace fires), and it is the one commit
+  allowed to render **through** the mobile search-focus hold: that hold exists so a `setHtml` cannot
+  wipe the field mid-typing, but here the user has emptied the field and there is nothing left to
+  type. NOTE: a mobile render is a full webview reload, so the soft keyboard closes as a consequence —
+  Cockpit does not blur the field or dismiss the keyboard itself, and the hold stays armed for any
+  later typing.
+- **Autocomplete on touch**: a suggestion is picked on `pointerup` (not `mousedown`, and no longer on
+  `pointerdown`). It moved off `pointerdown` when the dropdowns became **multi-select**: a long press has
+  to *begin* with a pointerdown, so committing there would close the list before the hold could ever
+  fire, and `preventDefault()`ing a touch pointerdown also stops the (now ~15-row, scrolling) list from
+  scrolling. Since nothing is prevented, the tap drops focus to `<body>` with a null blur
+  `relatedTarget` — `onSearchBlur` recognises that (the press tracker knows the press landed inside the
+  list) and hands the caret straight back, so the field stays focused, the soft keyboard stays up, and
+  the host's refresh hold is not released. **Device-check only** — this ordering cannot be reproduced
+  off-device (checklist step 10).
+- **Multi-select in the token dropdowns (touch)**: `tag:` / `notebook:` / `title:` all support marking
+  several entries. Desktop marks with Ctrl+click; touch has no modifier, so a **long press (500 ms)**
+  marks the first row and enters selection mode, after which a **plain tap toggles** — the standard
+  Android pattern. The row gestures are wired exactly like the proven to-do-row long press: the same
+  `-webkit-touch-callout: none` / `user-select: none` suppression in `panel.css` (plus
+  `touch-action: pan-y`, so the list still scrolls), the same document-level **capture** listeners rather
+  than listeners on the list element, and — added in 1.9.10 — the same **swallowing of the synthetic
+  click** the browser fires after a touch gesture. That last one was the difference that kept the bug
+  alive: the to-do adapter has always swallowed it, this list did not, so the click landed wherever the
+  gesture ended and a click outside the list ran `closeAllDropdowns`, removing the list while leaving the
+  typed text behind. 1.9.10 also **cancels the default action of the touch `pointerdown`** on a row: an
+  earlier round left it in place on the belief that cancelling it blocks panning, which is wrong —
+  panning is governed by `touch-action` and by `touchstart`/`touchmove`, not by `pointerdown` — and
+  leaving it was what let Android's native long press take the gesture. Cancelling it stops the focus
+  change and the native selection at source, so the field never blurs. Without the CSS half, Android's native long press wins —
+  it starts a text selection on the row, takes the pointer (a `pointercancel` abandons the 500 ms hold,
+  so no mark is ever made) and blurs the search field, which used to tear the whole list down. That was
+  the 1.9.8 device bug; `contextmenu` inside the list is now suppressed on mobile too, and the
+  press-inside flag that protects the field's focus covers the **whole hold**, not just a tap. An apply button (enter-arrow) appears at the right of the list's embedded filter box
+  whenever ≥1 row is marked, and doubles as the selection-mode indicator (mobile has no Ctrl to hint
+  at, and the hint line at the list's bottom edge reads "Press and hold - select several" there). The
+  marks are held by value, so filtering the list and clearing the filter never loses them.
+- **Accepted gap — marks do not survive a host-initiated reload.** The open dropdown is *already* safe
+  from Cockpit's own renders: the mobile search-focus hold (`searchFocusChanged`) blocks every
+  `setHtml` while the field has focus, and the list cannot outlive that focus. It is **not** safe from
+  an Android renderer-process kill, which reloads the webview and destroys module state. Neither is the
+  uncommitted query text — a reloaded document renders the last *committed* `searchFilter` — so
+  restoring marks without restoring the text they were meant for would be meaningless. The dropdown is
+  therefore deliberately **not** routed through the overlay descriptor / `dialogGuard` machinery: the
+  guard would be redundant (the focus hold already pauses refreshes) and would be a leak hazard (the
+  list opens and closes on every keystroke, whereas an overlay has exactly two call sites). A follow-up
+  could hold a `{ draft, caret, marks }` descriptor on the host in its own channel — no `dialogGuard`
+  involved — which would fix the pre-existing "typed query lost on reload" gap at the same time.
 - **Viewport**: `#joplin-plugin-content` keeps `height: 100vh` as the base, with a mobile-gated
   `@supports (height: 100dvh)` override to `100dvh` on `.cockpit-mobile`. Inside the plugin-dialog
   iframe `dvh == vh`, so this is a harmless, future-proof line; the real fill guarantee is the flex
@@ -366,6 +417,70 @@ success vs failure looks like. The build to install is
     suggestion.
     - Success: the suggestion commits into the field, the field stays focused, the keyboard stays up.
     - Failure: the tap dismisses the keyboard without committing, or double-commits.
+    - **This step is the one that changed in 1.9.8** (the pick moved from `pointerdown` to `pointerup`
+      and nothing is `preventDefault()`ed any more), so check it carefully even if it passed before.
+
+9a. **Clearing the search returns to "all" (no Enter).** With "All notebooks" selected, type a query that
+    matches nothing and commit it, then **backspace the field empty** and simply stop.
+    - Success: the full list comes back on its own within a moment — no Enter, no tapping elsewhere. Try
+      it again by holding backspace down to delete the query character by character.
+    - Failure: the list stays empty (or stays filtered) until you press something else. Note whether the
+      × even appears in the field on Android — it is not expected to, which is exactly why backspace has
+      to work.
+
+10a. **Suggestion list: size, scroll and filter.** Type `tag:` (then `notebook:`, then `title:`) with
+    nothing after the colon.
+    - Success: the list is tall — around 15 rows — with a filter box pinned at its top, a muted
+      "Press and hold - select several" line pinned at its bottom, and the **rows scrolling between
+      them** while the box and the hint stay put. The list never runs off the bottom of the panel.
+      Typing in the filter box narrows the rows, and doing so does **not** close the list or drop the
+      keyboard.
+    - Failure: the whole list scrolls (filter box or hint scrolling away), the list is clipped by the
+      panel edge, or touching the filter box closes the list / triggers a full panel reload.
+
+10b. **Multi-select by long press (the core of this change).** With the `tag:` list open, **press and
+    hold** a row for about half a second.
+    - Success: a short vibration, the row becomes visibly marked, and an **apply button with an
+      enter-arrow appears beside the filter box**. The list stays open. Now **tap** two more rows —
+      each toggles its mark (no note opens, nothing commits). Tapping a marked row again unmarks it.
+    - Failure: the hold picks the row and closes the list (the old pointerdown behaviour), the hold
+      does nothing, a plain tap commits while marks exist, or the list closes on the first tap.
+    - **If it fails again, turn on the trace.** Settings → Cockpit → "Show a touch-gesture trace in the
+      search suggestions (diagnostic)". With it on, the list's hint line is replaced by the last few
+      touch events as they happen — e.g. `down > hold-fired > up > click-swallowed`, or
+      `down > press-cancelled > field-left > list-closed:field-left`. Read that line back to us: it says
+      what actually fired and, when the list disappears, WHY it closed. Turn it off afterwards.
+    - **This is the step that failed on the Pixel in 1.9.8 and 1.9.9** — the hold closed the whole list and left
+      only the typed `tag:` fragment in the field. Watch specifically for: a text-selection handle or a
+      Copy/Select-all bar appearing over the row (the native gesture winning), and for the list
+      vanishing mid-hold. Neither should happen now. Also confirm the list still **scrolls** by flick
+      after the change (`touch-action: pan-y`).
+
+10c. **Marks survive filtering.** With two rows marked, type into the filter box so one of them is
+    hidden, then clear the filter box.
+    - Success: both marks are still there; the apply button is still shown.
+    - Failure: a mark is lost when its row is filtered away.
+
+10d. **Applying.** Put some text in the field first (e.g. `any:1 milk `), then complete a `tag:` token,
+    mark two or three tags, and tap the apply button.
+    - Success: the field becomes `any:1 milk tag:a tag:b tag:c ` — the marked tokens are inserted where
+      the half-typed `tag:` fragment was, **`any:1 milk` is untouched**, values with spaces come back
+      quoted, and the search commits. Repeat with `notebook:` (whose names have spaces) and `title:`.
+    - Failure: anything else in the query is rewritten or lost, a token is unquoted where it needed
+      quotes, or a tag already in the query is inserted a second time.
+
+10e. **Scrolling a long list does not mark or pick.** With a long `tag:` or `title:` list open, flick
+    the rows up and down.
+    - Success: the list scrolls; no row is marked, and no suggestion is picked when the finger lifts.
+    - Failure: a scroll marks a row or commits a pick.
+
+10f. **Reload while marking (the accepted gap).** With marks made, provoke a panel reload (background
+    the app during a sync).
+    - Success: the dropdown is simply **gone** and the field shows the last committed search; the panel
+      is alive and refreshes normally. This loss is expected and documented — the uncommitted query
+      text is lost the same way, and always has been.
+    - Failure: refreshes stay paused afterwards (a guard leak — which should be impossible, the
+      dropdown posts no `dialogGuard`), or the panel comes back stuck.
 
 11. **Cold-start feel over a real vault.** Note time-to-first-render and scrolling smoothness on the
     first open over the full vault.

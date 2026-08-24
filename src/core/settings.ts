@@ -15,6 +15,7 @@ import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches } from ".
 /** Variable Setup *********************************************************************************************************************************/
 export const customCssSettingKey = "customCss"
 export const showToolbarButtonSettingKey = "showToolbarButton"
+export const gestureTraceSettingKey = "gestureTrace"
 export const updateFrequencySettingKey = "updateFrequency"
 export const dayStartTimeSettingKey = "dayStartTime"
 
@@ -82,6 +83,14 @@ export async function setupSettings(){
 			description: "How long Cockpit waits between refreshing the panel and the overview notes. Lower is more responsive; higher is lighter on the machine.",
 			value: 60,
 			type: SettingItemType.Int,
+			public: true,
+			section: 'section',
+		},
+		[gestureTraceSettingKey]: {
+			label: "Show a touch-gesture trace in the search suggestions (diagnostic)",
+			description: "Mobile only, and only while the search suggestion list is open: replaces the list's hint line with the last few touch events (press, hold, cancel, context menu, why the list closed). Leave this off - it exists so a touch problem on a real device can be reported precisely instead of guessed at.",
+			value: false,
+			type: SettingItemType.Bool,
 			public: true,
 			section: 'section',
 		},

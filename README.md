@@ -12,7 +12,7 @@ Cockpit is a single [Joplin](https://joplinapp.org) panel built to replace the n
      a profile selected, the interval view showing Overdue / Today / This Week groups, a couple of
      rows with a partly-filled progress ring, and a visible notebook pill on at least one row. -->
 
-Save any set-up as a profile — its view, filters, search, and what counts as done — then switch profiles to switch the whole view. Narrow the list by notebook or full Joplin search, with autocomplete for `tag:`, `notebook:`, and `title:`. Reschedule by dragging a to-do onto a day or a group, or open the alarm picker for an exact date and time. Recolour the panel to match Joplin or a built-in theme. It runs on Android too, where the pickers and the profile editor are drawn as touch-native overlays.
+Save any set-up as a profile — its view, filters, search, and what counts as done — then switch profiles to switch the whole view. Narrow the list by notebook or full Joplin search, with autocomplete for `tag:`, `notebook:`, and `title:` — filter the suggestions and pick several at once (Ctrl+click, or press and hold on touch). Reschedule by dragging a to-do onto a day or a group, or open the alarm picker for an exact date and time. Recolour the panel to match Joplin or a built-in theme. It runs on Android too, where the pickers and the profile editor are drawn as touch-native overlays.
 
 ![Theme presets and custom colours](docs/images/themes.png)
 

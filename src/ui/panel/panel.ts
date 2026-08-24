@@ -16,7 +16,7 @@ import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
 import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
-import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID } from "../../core/settings";
+import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
 import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
@@ -169,6 +169,10 @@ export async function setupPanel(){
     // The shared editor-note highlight rules (window.EditorNote), loaded before panelWebview.js applies them -
     // the same module the Node unit tests drive through the selection scenarios.
     await joplin.views.panels.addScript(panel, '/ui/panel/editorNote.js')
+    // The shared search-token text rules (window.SearchTokens), loaded before panelWebview.js builds the search
+    // suggestion dropdown and inserts a picked (or multi-marked) token - the same module the Node unit tests drive
+    // through the insertion / quoting / duplicate-skip cases.
+    await joplin.views.panels.addScript(panel, '/ui/panel/searchTokens.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panelWebview.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panel.css')
     await joplin.views.panels.onMessage(panel, eventHandler)
@@ -377,7 +381,11 @@ async function eventHandler(message){
     } else if (message[0] == 'searchFilterChanged'){
         searchFilter = String(message[1] || "").trim()
         lastScrollTop = 0
-        await refreshPanelData()
+        // message[2] is set only by the webview's empty-field auto-reset, and asks for the render to happen even
+        // though the mobile search-focus hold is armed. The hold exists so a setHtml cannot wipe the field
+        // mid-typing, but this commit IS the user finishing with the field - they have emptied it and there is
+        // nothing left to type - and waiting for a blur that may never come would leave the panel filtered.
+        await refreshPanelData(message[2] ? { renderWhileSearchFocused: true } : undefined)
     } else if (message[0] == 'setAlarmClicked'){
         var alarmTodoIDs = Array.isArray(message[1]) ? message[1] : []
         if (alarmTodoIDs.length) await openAlarmDialog(alarmTodoIDs)
@@ -805,7 +813,7 @@ export async function togglePanelVisibility() {
     // reload that would wipe the search input, caret, suggestion list and soft keyboard mid-typing; the held
     // refresh runs when the field blurs (searchFocusChanged). Gated to mobile: on desktop setHtml keeps the
     // field's module-state draft, which restoreSearchDraft paints back, so its refresh timing is unchanged.
-    if (mobile && searchFocused) return
+    if (mobile && searchFocused && !(options && options.renderWhileSearchFocused)) return
     // Building the markup runs the full search / notes / body query cycle, so it is skipped while the
     // panel is hidden (a closed desktop panel, or a plugin dialog the user has not opened on mobile),
     // which otherwise happens on every 60s timer tick and its follow-ups for no visible effect. The
@@ -997,7 +1005,11 @@ async function getControlsHTML(currentProfileID){
     // built straight from this island (the same list the autocomplete reads), and notebookFilter lets the
     // webview know whether "All notebooks" is active when deciding if a New note needs the notebook
     // overlay. The autocomplete only reads title/path, so the extra fields are inert there and on desktop.
+    // The mobile gesture-trace diagnostic (off by default) rides in the island the webview already reads, so
+    // it costs no extra round-trip and no new plumbing.
+    var gestureTrace = !!(await joplin.settings.value(gestureTraceSettingKey))
     var searchData = JSON.stringify({
+        gestureTrace: gestureTrace,
         tags: tags.map(tag => tag.title),
         notebooks: notebooks.map(notebook => ({ id: notebook.id, title: notebook.title, path: notebook.path })),
         notebookFilter: notebookFilter,
@@ -1019,7 +1031,7 @@ async function getControlsHTML(currentProfileID){
                 value="${escapeHtml(searchFilter)}"
                 oninput="onSearchInput(this)" onkeydown="onSearchKeyDown(event)"
                 onfocus="onSearchFocus()" onblur="onSearchBlur(event)"
-                onchange="onSearchFilterChanged(this.value)" onsearch="onSearchFilterChanged(this.value)">
+                onchange="onSearchFieldChanged(this.value)" onsearch="onSearchFieldChanged(this.value)">
             <script id="cockpitSearchData" type="application/json">${searchData}</script>
         </section>
     `

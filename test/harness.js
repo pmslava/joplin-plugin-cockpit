@@ -185,6 +185,17 @@ function makeJoplin(options) {
                     if (isNoteQuery) {
                         return { items: options.searchNotes || [], has_more: false }
                     }
+                    // An any:1 search is ALSO type-less: the plugin deliberately keeps its own type:/iscompleted:/
+                    // due: terms out of such a query, because Joplin's any:1 would turn each of them into an OR
+                    // alternative instead of a constraint (see usesAnyMode in core/joplin.ts). It narrows the
+                    // results itself instead. Serving the main fixture set here - to BOTH the list and the notes
+                    // search, exactly as the real API would - is what lets a test prove that client-side
+                    // narrowing does the job the query terms used to do. Checked before the peek branch below,
+                    // which is the other type-less search.
+                    if (q.includes('any:1')) {
+                        const anyItems = typeof options.todos === 'function' ? (options.todos(q) || []) : (options.todos || [])
+                        return { items: anyItems, has_more: false }
+                    }
                     // The "results outside current filters" peek searches the user's text verbatim, with
                     // none of the type:/iscompleted:/notebook: tokens the plugin otherwise adds - so a search
                     // carrying neither type token is that peek. (Title autocomplete is also type-less, but the

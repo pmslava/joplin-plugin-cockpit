@@ -403,8 +403,14 @@ function reconcile(){
         applyCreateButtonStage()
         // The suggestion menu was in the replaced markup; drop its now-stale state (closing on a
         // re-render is fine - only the typed text must survive, which restoreSearchDraft handles).
+        // A multi-select IN PROGRESS is the exception: the marks are user-owned state, and a background
+        // refresh (a sync landing, a note changing) must not silently destroy a half-built selection of ten
+        // tags. They are carried across the render and the list is re-opened from the restored draft below.
+        var keptMarks = searchFocused ? searchMarks : null
         searchSuggestion = null
+        searchMarks = null
         restoreSearchDraft()
+        if (keptMarks && keptMarks.values.length) reopenSearchSuggestions(keptMarks)
         // Overlay reload-survival: when this render carries the overlay descriptor island (the host's
         // reconstruct render after a mid-overlay reload) and no overlay is open in this webview yet, rebuild
         // it from the descriptor. Mobile only; the island is never emitted on desktop.
@@ -1162,14 +1168,20 @@ async function onSortDirectionClicked(){
  * The profile and notebook pickers are drawn by the panel so that every row can carry its own action buttons. The buttons are always visible -      *
  * hover only emphasises them - so they work the same by tap on mobile.                                                                             *
  ***************************************************************************************************************************************************/
-function closeAllDropdowns(){
+function closeAllDropdowns(options){
+    // keepSuggestions spares the search suggestion list (and with it a multi-select in progress) while still
+    // closing the profile / notebook / sort menus. Used for a click that lands INSIDE the search interaction -
+    // see the capturing click listener below. Every other caller passes nothing and closes everything, exactly
+    // as before.
+    var keepSuggestions = !!(options && options.keepSuggestions)
     for (var menu of document.querySelectorAll('.dropdown-menu')){
+        if (keepSuggestions && menu.id === 'searchSuggestions') continue
         menu.setAttribute('hidden', '')
     }
     // The search suggestion list carries the .dropdown-menu class too, so the loop above just hid it.
     // Drop its logical state as well, or it would stay "open" while invisible and a following Enter or
     // arrow key would act on the hidden menu instead of committing the search.
-    hideSearchSuggestions()
+    if (!keepSuggestions) hideSearchSuggestions({ reason: 'menus-closed' })
 }
 
 function onDropdownToggle(event, menuID){
@@ -1220,8 +1232,23 @@ function onDropdownActionClicked(event, messageName, value){
     void webviewApi.postMessage([messageName, value]);
 }
 
+// A click anywhere outside the panel's menus closes them. The search suggestion list is deliberately named
+// alongside .dropdown here: it carries the .dropdown-menu class but lives in #searchRow, NOT inside a .dropdown,
+// so without this it would count as "outside" and close on a click on one of its own rows. That never showed
+// while every pick committed and closed the menu anyway, but a Ctrl+click marks a row and the menu must STAY
+// open - and the click that follows the marking mousedown would otherwise shut it immediately.
+//
+// The SEARCH ROW is spared too, but only while the list is open: going back to the field to type more of the
+// token is a move within the search interaction, not a dismissal of it, and it must keep a multi-select in
+// progress - the same move Escape already makes when it hands the caret back with the list still open. The
+// other menus still close, so clicking the field while the notebook menu is open behaves as before, and a
+// click on a row or anywhere else in the panel still closes everything.
 document.addEventListener('click', event => {
-    if (!event.target.closest || !event.target.closest('.dropdown')) closeAllDropdowns()
+    var target = event.target
+    if (!target || !target.closest){ closeAllDropdowns(); return }
+    if (target.closest('.dropdown, #searchSuggestions')) return
+    if (searchSuggestion && target.closest('#searchRow')){ closeAllDropdowns({ keepSuggestions: true }); return }
+    closeAllDropdowns()
 }, true)
 
 // Escape closes an open custom dropdown (notebook / profile / sort all share this menu machinery). Scoped
@@ -1248,17 +1275,23 @@ function notebookMenuOf(el){
     return el && el.closest ? el.closest('.dropdown-menu') : null
 }
 
+/** applyMenuFilter *********************************************************************************************************************************
+ * Shows or hides each of `rows` by whether its .dropdown-label matches `text`, the shared narrowing behind BOTH embedded filter boxes - the notebook  *
+ * menu's and the search suggestion list's. The match rule itself lives in the pure window.SearchTokens.matchesFilter, so it is covered by tests. A     *
+ * hidden row needs the explicit attribute because .dropdown-item sets display:flex, which overrides the UA [hidden] rule (see panel.css).              *
+ ***************************************************************************************************************************************************/
+function applyMenuFilter(rows, text){
+    for (var i = 0; i < rows.length; i++){
+        var label = rows[i].querySelector('.dropdown-label')
+        if (window.SearchTokens.matchesFilter(label ? label.textContent : '', text)) rows[i].removeAttribute('hidden')
+        else rows[i].setAttribute('hidden', '')
+    }
+}
+
 function filterNotebookMenu(menu){
     if (!menu) return
     var input = menu.querySelector('.notebook-filter-input')
-    var query = (input ? input.value : '').trim().toLowerCase()
-    var rows = menu.querySelectorAll('[data-notebook-row]')
-    for (var i = 0; i < rows.length; i++){
-        var label = rows[i].querySelector('.dropdown-label')
-        var path = (label ? label.textContent : '').toLowerCase()
-        if (!query || path.indexOf(query) !== -1) rows[i].removeAttribute('hidden')
-        else rows[i].setAttribute('hidden', '')
-    }
+    applyMenuFilter(menu.querySelectorAll('[data-notebook-row]'), input ? input.value : '')
 }
 
 function onNotebookFilterInput(event){
@@ -1317,12 +1350,46 @@ function createNeedsNotebookOverlay(){
  * When the search field is committed (Enter, or its clear button), this function sends the search string to the main plugin. It supports the full   *
  * Joplin search syntax: tag:, notebook:, title:, plain words, and so on.                                                                            *
  ***************************************************************************************************************************************************/
-async function onSearchFilterChanged(searchString){
+async function onSearchFilterChanged(searchString, opts){
     savedTodosScrollTop = 0
+    // An explicit commit (Enter, a pick, an apply) supersedes any commit still held pending by
+    // onSearchFieldChanged, so the two can never both fire.
+    pendingSearchCommit = null
     // The search is now committed, so any uncommitted draft and the open suggestion list are done.
     searchDraft = null
-    hideSearchSuggestions()
-    await webviewApi.postMessage(['searchFilterChanged', searchString]);
+    hideSearchSuggestions({ reason: 'commit' })
+    // message[2] asks the host to render even while the mobile search-focus hold is armed. Only the empty-field
+    // auto-reset sets it; every other caller omits it, so their behaviour is unchanged.
+    await webviewApi.postMessage(['searchFilterChanged', searchString, !!(opts && opts.renderNow)]);
+}
+
+/** maybeAutoResetSearch ***************************************************************************************************************************
+ * Emptying the search field returns the panel to the unfiltered "all" view by itself, however the field was emptied - backspace, a cut, or the       *
+ * clear button. Without this the panel stayed filtered until the user pressed Enter on an empty field: non-obvious on desktop, and unreachable on    *
+ * mobile, where the soft keyboard has no Enter that commits here and Android's WebView does not even render the × (so backspace is the ONLY way to   *
+ * clear a query, and it did nothing).                                                                                                                *
+ *                                                                                                                                                    *
+ * WHAT "still filtered" MEANS, with no new state to keep in sync: input.defaultValue is the server-rendered value ATTRIBUTE, i.e. the filter the host *
+ * last committed. Editing the field changes .value and never touches it, so a non-empty defaultValue with an empty .value is exactly "the panel is    *
+ * filtered by something the field no longer contains".                                                                                                *
+ *                                                                                                                                                    *
+ * This is an EXPLICIT programmatic commit on an observed empty value, not another change/search-event dependency - those are precisely what cannot be *
+ * relied on here (`input` is the only event a backspace fires). It routes through onSearchFilterChanged, which clears any commit still held pending   *
+ * by onSearchFieldChanged, so a later blur cannot commit the same reset a second time.                                                                *
+ ***************************************************************************************************************************************************/
+// Set once a reset has been posted, so a burst of input events cannot post it again while the render is still
+// in flight. Cleared the moment the field has content again (and, on mobile, by the reload itself).
+var searchResetPosted = false
+
+function maybeAutoResetSearch(input){
+    if (input.value.trim()){ searchResetPosted = false; return false }
+    if (searchResetPosted) return false
+    if (!String(input.defaultValue || '').trim()) return false      // nothing committed, so nothing to reset
+    searchResetPosted = true
+    // renderNow: on mobile the host holds every refresh while this field has focus, so without it the reset
+    // would produce no visible change until the user happened to blur - which is the whole bug on that platform.
+    onSearchFilterChanged('', { renderNow: true })
+    return true
 }
 
 /** Search autocomplete *********************************************************************************************************************************
@@ -1339,6 +1406,15 @@ var searchDraft = null
 var searchFocused = false
 // The open suggestion list: the parsed token it is for, its items, and which one is highlighted
 var searchSuggestion = null
+// The MARKED values of a multi-select in progress: { kind, values: [insert, ...] }, or null when nothing is
+// marked. Held by VALUE rather than by row index precisely so the marks survive the dropdown's embedded filter
+// being typed, cleared and retyped (and the list being rebuilt as the token fragment changes). The kind rides
+// along so marks are dropped the moment the token being completed becomes a different kind.
+var searchMarks = null
+// The long press that marks a row on touch, and the movement slop that tells a press from a scroll. Same
+// numbers as the list's own long-press adapter, so the two gestures feel identical.
+var SUGGEST_LONG_PRESS_MS = 500
+var SUGGEST_MOVE_SLOP = 10
 
 function getSearchInput(){
     return document.getElementById('searchFilter')
@@ -1379,17 +1455,24 @@ function tokenAtCaret(value, caret){
     return null
 }
 
+// How many candidates a dropdown may hold. The menu shows ~15 rows and scrolls the rest (see panel.css), so the
+// cap is about how much is reachable by scrolling rather than about how much is visible. It is deliberately far
+// above the old 8: with multi-select the user marks several rows across a long list, and a cap that hid the rest
+// would make that impossible. The list is rebuilt on every keystroke, so the build loop is kept cheap - two
+// elements per row and ONE delegated listener for the whole list, never a listener or a layout read per row.
+var SUGGEST_MAX_ITEMS = 200
+
 function suggestionsFor(token, data){
     var partial = token.partial.toLowerCase()
     if (token.kind === 'tag'){
         return data.tags
             .filter(title => String(title).toLowerCase().indexOf(partial) >= 0)
-            .slice(0, 8)
+            .slice(0, SUGGEST_MAX_ITEMS)
             .map(title => ({ insert: String(title), label: String(title) }))
     }
     return data.notebooks
         .filter(notebook => (String(notebook.path).toLowerCase().indexOf(partial) >= 0) || (String(notebook.title).toLowerCase().indexOf(partial) >= 0))
-        .slice(0, 8)
+        .slice(0, SUGGEST_MAX_ITEMS)
         .map(notebook => ({ insert: String(notebook.title), label: String(notebook.path) }))
 }
 
@@ -1401,11 +1484,22 @@ var titleSuggestTimer = null
 
 function onSearchInput(input){
     updateSearchDraft(input)
+    // An emptied field resets the panel to "all" on its own. Checked before the token parsing below because an
+    // empty field has no token at all, so that path would simply close the list and return.
+    if (maybeAutoResetSearch(input)) return
     var token = tokenAtCaret(input.value, input.selectionStart)
-    if (!token){ hideSearchSuggestions(); return }
+    if (!token){ hideSearchSuggestions({ reason: 'no-token' }); return }
+    // Marks belong to the token KIND being completed: they survive the user narrowing a tag: list keystroke by
+    // keystroke (the list is rebuilt, the marks are by value), and are dropped the moment the token becomes a
+    // different kind - a tag: mark has no meaning in a notebook: list. No token at all clears them above.
+    if (searchMarks && searchMarks.kind !== token.kind) searchMarks = null
     if (token.kind === 'title'){ requestTitleSuggestions(input, token); return }
     var items = suggestionsFor(token, readSearchData())
-    if (!items.length){ hideSearchSuggestions(); return }
+    // Typing one character past the last match empties the list. That is not the end of the multi-select: the
+    // user is still completing the same token and a backspace brings the rows straight back, so the marks are
+    // kept across the empty state rather than silently thrown away (they would be unrecoverable - the marked
+    // values are no longer on screen to re-mark).
+    if (!items.length){ hideSearchSuggestions({ keepMarks: true, reason: 'no-matches' }); return }
     searchSuggestion = { token: token, items: items, activeIndex: 0 }
     renderSearchSuggestions(input)
 }
@@ -1434,15 +1528,22 @@ function requestTitleSuggestions(input, token){
         if (!liveInput) return
         var current = tokenAtCaret(liveInput.value, liveInput.selectionStart)
         if (!current || current.kind !== 'title' || current.partial !== partial) return
-        if (!titles || !titles.length){ hideSearchSuggestions(); return }
-        var items = titles.slice(0, 10).map(title => ({ insert: String(title), label: String(title) }))
+        // Same as the tag:/notebook: path above: an empty answer while the caret is still on the same title:
+        // token is a state the user can back out of, so the marks are kept for the backspace.
+        if (!titles || !titles.length){ hideSearchSuggestions({ keepMarks: true }); return }
+        var items = titles.slice(0, SUGGEST_MAX_ITEMS).map(title => ({ insert: String(title), label: String(title) }))
         searchSuggestion = { token: current, items: items, activeIndex: 0 }
         renderSearchSuggestions(liveInput)
     }, 200)
 }
 
 /** renderSearchSuggestions ************************************************************************************************************************
- * Draws the suggestion list under the search row. Items are built with textContent, so a tag or notebook name is never interpreted as markup.        *
+ * Draws the suggestion list under the search row: a sticky filter box (with the apply button at its right) on top, the scrolling rows in the middle,  *
+ * and a muted hint line pinned at the bottom. Row labels are set with textContent, so a tag, notebook or note title is never interpreted as markup.   *
+ *                                                                                                                                                     *
+ * The list is rebuilt on EVERY keystroke in the search field, so the loop is kept cheap: two elements and one    *
+ * dataset write per row, no per-row listener (both platforms delegate from the list container) and no layout read *
+ * of any kind. See SUGGEST_MAX_ITEMS.                                                                             *
  ***************************************************************************************************************************************************/
 function renderSearchSuggestions(input){
     // Remove any previous menu directly, so searchSuggestion (just set by the caller) is kept
@@ -1454,26 +1555,361 @@ function renderSearchSuggestions(input){
     var menu = document.createElement('div')
     menu.className = 'dropdown-menu'
     menu.id = 'searchSuggestions'
+    menu.appendChild(buildSuggestFilterRow(input))
+
+    var list = document.createElement('div')
+    list.className = 'suggest-list'
     searchSuggestion.items.forEach((suggestion, index) => {
         var item = document.createElement('div')
         item.className = 'dropdown-item' + (index === searchSuggestion.activeIndex ? ' -current' : '')
+        // The value the row inserts, so the delegated handlers below (and the mark painter) can identify a row
+        // without carrying an index that filtering would invalidate.
+        item.dataset.suggestValue = suggestion.insert
         var label = document.createElement('span')
         label.className = 'dropdown-label'
         label.textContent = suggestion.label
         item.appendChild(label)
-        // mousedown, not click, so the selection happens before the field's blur can commit or the
-        // menu can be torn down. On mobile the pointer/mouse/blur ordering in the Android webview is
-        // unreliable, so pointerdown is used instead: it fires for touch, is cancelable (so
-        // preventDefault keeps the field focused and the soft keyboard up), and precedes the synthesised
-        // mousedown and any blur, so the pick commits before the menu can be torn down.
-        var pickEvent = IS_MOBILE ? 'pointerdown' : 'mousedown'
-        item.addEventListener(pickEvent, event => {
-            event.preventDefault()
-            applySearchSuggestion(input, suggestion)
-        })
-        menu.appendChild(item)
+        list.appendChild(item)
     })
+    wireSuggestList(list, input)
+    menu.appendChild(list)
+
+    var hint = document.createElement('div')
+    hint.className = 'suggest-hint'
+    hint.textContent = window.SearchTokens.hintText(IS_MOBILE)
+    menu.appendChild(hint)
+
     row.appendChild(menu)
+    paintSearchMarks()
+}
+
+/** buildSuggestFilterRow **************************************************************************************************************************
+ * The box pinned at the top of the open list, narrowing the rows by a case-insensitive substring of their label - the same affordance the notebook   *
+ * menu has carried since 1.9.4, for the same reason (the list can be long). Beside it sits the apply button, which inserts every MARKED row at once   *
+ * and is shown only while at least one mark exists, so on both platforms it doubles as the multi-select-mode indicator.                               *
+ *                                                                                                                                                     *
+ * The box is deliberately NOT focused when the list opens: unlike the notebook menu (opened by pressing a button) this list opens while the user is    *
+ * typing in the search field, and stealing the caret out of it mid-word would be wrong.                                                               *
+ ***************************************************************************************************************************************************/
+function buildSuggestFilterRow(input){
+    var kind = searchSuggestion.token.kind
+    var wrap = document.createElement('div')
+    wrap.className = 'suggest-filter'
+
+    var box = document.createElement('input')
+    box.type = 'text'
+    box.className = 'suggest-filter-input'
+    box.placeholder = window.SearchTokens.filterPlaceholder(kind)
+    box.setAttribute('aria-label', window.SearchTokens.filterPlaceholder(kind))
+    box.setAttribute('autocomplete', 'off')
+    box.setAttribute('autocorrect', 'off')
+    box.setAttribute('autocapitalize', 'off')
+    box.setAttribute('spellcheck', 'false')
+    box.addEventListener('input', function(){ applySuggestFilter(document.getElementById('searchSuggestions')) })
+    box.addEventListener('keydown', function(event){ handleSuggestKey(event, input) })
+    // The box is inside the search field's focus region, so leaving it for anything outside that region ends the
+    // search interaction exactly as leaving the field itself does.
+    box.addEventListener('blur', onSearchBlur)
+
+    var apply = document.createElement('button')
+    apply.type = 'button'
+    apply.className = 'suggest-apply'
+    apply.title = 'Insert the marked entries'
+    apply.setAttribute('aria-label', 'Insert the marked entries')
+    apply.innerHTML = window.SearchTokens.APPLY_ICON
+    apply.setAttribute('hidden', '')
+    apply.addEventListener('click', function(){ applyMarkedSuggestions(getSearchInput()) })
+    apply.addEventListener('blur', onSearchBlur)
+
+    wrap.appendChild(box)
+    wrap.appendChild(apply)
+    return wrap
+}
+
+/** wireSuggestList ********************************************************************************************************************************
+ * ONE set of listeners for the whole list, delegating to whichever row an event landed on. Desktop keeps picking on mousedown (so the pick beats the  *
+ * field's blur), with Ctrl/Cmd+press toggling a mark instead and leaving the list open. Touch cannot use a modifier, so it marks with a long press -   *
+ * the standard Android pattern - and once anything is marked a plain tap toggles rather than picks; see onSuggestPointerDown for why the touch pick    *
+ * had to move from pointerdown to pointerup.                                                                                                          *
+ ***************************************************************************************************************************************************/
+function wireSuggestList(list, input){
+    // Mobile needs nothing here: its press tracking lives in the document-level CAPTURE listeners below,
+    // exactly like the to-do rows' long-press adapter. Capture on the document is what makes the gesture
+    // immune to anything that might stop propagation on the way up, and it survives the list being rebuilt
+    // on every keystroke without re-attaching a thing.
+    if (IS_MOBILE) return
+    list.addEventListener('mousedown', function(event){
+        var item = event.target.closest ? event.target.closest('.dropdown-item') : null
+        if (!item) return
+        // mousedown, not click, so the pick happens before the field's blur can commit or the menu can be torn
+        // down. preventDefault keeps the caret in the search field.
+        event.preventDefault()
+        var value = item.dataset.suggestValue
+        // Ctrl/Cmd+press toggles a mark and leaves the list open; a plain press is the unchanged single pick,
+        // whether or not anything is marked.
+        if (event.ctrlKey || event.metaKey){ toggleSearchMark(value); return }
+        applySearchSuggestion(input, suggestionByValue(value))
+    })
+}
+
+/** Gesture trace (mobile diagnostic, off by default) **********************************************************************************************
+ * Two device rounds have been spent guessing at why a long press on a suggestion row behaves differently on the Pixel than everything here predicts.  *
+ * This records the gesture-relevant events as they happen and shows them, newest last, in place of the list's hint line - so the next device session   *
+ * can report what actually fired instead of what it looked like.                                                                                       *
+ *                                                                                                                                                      *
+ * Off unless the "Gesture trace" setting is on, mobile only, and capped at a handful of entries: a ring buffer of short codes and one textContent write *
+ * per event, so it costs nothing when off and next to nothing when on.                                                                                  *
+ ***************************************************************************************************************************************************/
+var GESTURE_TRACE_MAX = 6
+var gestureTrace = []
+
+function gestureTraceEnabled(){
+    return IS_MOBILE && !!readSearchData().gestureTrace
+}
+
+function traceGesture(code){
+    if (!gestureTraceEnabled()) return
+    gestureTrace.push(code)
+    if (gestureTrace.length > GESTURE_TRACE_MAX) gestureTrace.shift()
+    var hint = document.querySelector('#searchSuggestions .suggest-hint')
+    if (hint) hint.textContent = gestureTrace.join(' > ')
+}
+
+/** Touch press tracking (mobile) ******************************************************************************************************************
+ * A press that stays put for 500ms marks the row it began on and enters selection mode; a shorter press picks it (or, once anything is marked,        *
+ * toggles it). Movement beyond the slop, a pointer cancel or a scroll of the list abandons the press entirely, so scrolling a long list neither marks  *
+ * nor picks anything.                                                                                                                                 *
+ ***************************************************************************************************************************************************/
+var suggestPress = { timer: null, x: 0, y: 0, value: null, fired: false, moved: false, clickArmed: false }
+
+function cancelSuggestPress(){
+    if (suggestPress.timer){ clearTimeout(suggestPress.timer); suggestPress.timer = null; traceGesture('press-cancelled') }
+    suggestPress.moved = true
+}
+
+function onSuggestPointerDown(event){
+    if (!IS_MOBILE) return
+    if (event.pointerType === 'mouse') return
+    if (!event.target || !event.target.closest) return
+    // Scoped to a ROW of the open suggestion list; a press on its filter box or apply button is not a mark.
+    var item = event.target.closest('#searchSuggestions .dropdown-item')
+    if (!item) return
+    // preventDefault here cancels the DEFAULT ACTIONS of the press - the focus change and the native text
+    // selection / callout that Android would otherwise start - at source, so the search field never blurs and
+    // there is nothing to restore. It does NOT stop the list scrolling: panning is governed by touch-action
+    // (pan-y, see panel.css) and by touchstart/touchmove, not by cancelling pointerdown. An earlier round
+    // assumed otherwise and left the default in place, which is what let the native long press win.
+    //
+    // What must NOT happen here is committing the pick: a long press begins with this same pointerdown, so a
+    // commit here would close the list before the hold could ever fire. The pick waits for pointerup.
+    event.preventDefault()
+    suggestPress.timer = setTimeout(function(){
+        suggestPress.timer = null
+        suggestPress.fired = true
+        traceGesture('hold-fired')
+        if (navigator.vibrate){ try { navigator.vibrate(10) } catch (error){} }
+        toggleSearchMark(suggestPress.value)
+    }, SUGGEST_LONG_PRESS_MS)
+    suggestPress.x = event.clientX
+    suggestPress.y = event.clientY
+    suggestPress.value = item.dataset.suggestValue
+    suggestPress.fired = false
+    suggestPress.moved = false
+    // Every press that began on a row owns the click the browser will synthesise for it.
+    suggestPress.clickArmed = true
+    traceGesture('down')
+}
+
+function onSuggestPointerMove(event){
+    if (!suggestPress.timer) return
+    if (Math.abs(event.clientX - suggestPress.x) > SUGGEST_MOVE_SLOP || Math.abs(event.clientY - suggestPress.y) > SUGGEST_MOVE_SLOP) cancelSuggestPress()
+}
+
+function onSuggestPointerUp(event){
+    if (!IS_MOBILE) return
+    if (event.pointerType === 'mouse') return
+    traceGesture('up')
+    var held = suggestPress.fired
+    var moved = suggestPress.moved
+    var pressed = suggestPress.value
+    cancelSuggestPress()
+    suggestPress.fired = false
+    suggestPress.value = null
+    if (held || moved || pressed == null) return                    // the hold already marked it, or this was a scroll
+    var item = event.target && event.target.closest ? event.target.closest('#searchSuggestions .dropdown-item') : null
+    if (!item || item.dataset.suggestValue !== pressed) return      // the finger ended on a different row
+    // In selection mode (something is marked) a tap toggles; otherwise it is the ordinary single pick.
+    if (markedSearchValues().length) toggleSearchMark(pressed)
+    else applySearchSuggestion(getSearchInput(), suggestionByValue(pressed))
+}
+
+/** The suggestion-row press listeners ***************************************************************************************************************
+ * Registered ONCE on the document in the CAPTURE phase, mirroring the to-do rows' long-press adapter above rather than hanging off the list element:  *
+ * capture means nothing can stop the gesture on its way up, and a single registration survives the list being rebuilt on every keystroke. All four    *
+ * are inert on desktop and for a mouse pointer, and only act on a press that began on a row of the open list.                                          *
+ ***************************************************************************************************************************************************/
+document.addEventListener('pointerdown', onSuggestPointerDown, true)
+document.addEventListener('pointermove', onSuggestPointerMove, true)
+document.addEventListener('pointerup', onSuggestPointerUp, true)
+document.addEventListener('pointercancel', cancelSuggestPress, true)
+// A scroll of the list is not a press on a row - the same signal, and the same capture phase, the to-do
+// adapter uses so it catches the inner scroll container too.
+document.addEventListener('scroll', cancelSuggestPress, true)
+
+// The browser synthesises a click right after a touch gesture. The to-do long-press adapter swallows that
+// click; this list did not, and that is a concrete difference between the working gesture and the broken one:
+// the click lands wherever the gesture ended - which after a cancelled or re-targeted press need not be a row -
+// and a click outside the list runs closeAllDropdowns, taking the list down while leaving the typed text
+// behind. Exactly the reported "the window closes and bare tag: remains". Capture phase, so it runs before the
+// dismissal listeners it is protecting the list from.
+document.addEventListener('click', function(event){
+    if (!IS_MOBILE || !suggestPress.clickArmed) return
+    suggestPress.clickArmed = false
+    traceGesture('click-swallowed')
+    event.preventDefault()
+    event.stopPropagation()
+}, true)
+
+// Android's native long press would otherwise raise the system callout / selection bar over the list and take
+// the gesture. The CSS suppression (-webkit-touch-callout / user-select, see panel.css) is the main defence;
+// this is the belt to its braces. Mobile only, so a desktop right-click inside the list is untouched.
+document.addEventListener('contextmenu', function(event){
+    if (!IS_MOBILE) return
+    if (event.target && event.target.closest && event.target.closest('#searchSuggestions')){
+        traceGesture('contextmenu')
+        event.preventDefault()
+    }
+}, true)
+
+// True for exactly as long as a press inside the open suggestion list is losing the field its focus. A tap on a
+// row is a press on a non-focusable element, which the Android webview answers by dropping focus to <body> with
+// a null blur relatedTarget - indistinguishable, from the blur alone, from the user leaving the search field for
+// good. This flag is what tells the two apart (see onSearchBlur).
+var suggestPointerInside = false
+var suggestPointerInsideTimer = null
+
+document.addEventListener('pointerdown', function(event){
+    var menu = document.getElementById('searchSuggestions')
+    if (!(menu && event.target && menu.contains(event.target))) return
+    if (suggestPointerInsideTimer){ clearTimeout(suggestPointerInsideTimer); suggestPointerInsideTimer = null }
+    suggestPointerInside = true
+}, true)
+
+// The flag lives for the WHOLE press, plus one tick after it ends. Anchoring it to the end rather than to the
+// start is what makes it cover a HOLD: a tap's blur arrives within a tick of the pointerdown, but a long press
+// keeps the finger down for half a second, and on Android the gesture can blur the field at any point in that
+// window (the soft keyboard, a system gesture, the selection UI). Clearing after a tick, as this once did, left
+// every one of those blurs looking like the user leaving - which tore the list down mid-hold. It is still tied
+// strictly to the press, so an unrelated blur while no finger is down is still read as a genuine departure.
+function releaseSuggestPointerInside(){
+    if (!suggestPointerInside || suggestPointerInsideTimer) return
+    suggestPointerInsideTimer = setTimeout(function(){
+        suggestPointerInsideTimer = null
+        suggestPointerInside = false
+    }, 0)
+}
+
+document.addEventListener('pointerup', releaseSuggestPointerInside, true)
+document.addEventListener('pointercancel', releaseSuggestPointerInside, true)
+
+function suggestionByValue(value){
+    if (!searchSuggestion) return null
+    for (var index = 0; index < searchSuggestion.items.length; index++){
+        if (searchSuggestion.items[index].insert === value) return searchSuggestion.items[index]
+    }
+    return null
+}
+
+/** Marks ******************************************************************************************************************************************
+ * The marked rows of a multi-select in progress. Held by value (see searchMarks), so filtering the list, clearing the filter and filtering again all  *
+ * leave them intact, and so does the list being rebuilt as the token fragment changes.                                                                *
+ ***************************************************************************************************************************************************/
+function markedSearchValues(){
+    return searchMarks ? searchMarks.values : []
+}
+
+function toggleSearchMark(value){
+    if (!searchSuggestion || value == null) return
+    var kind = searchSuggestion.token.kind
+    if (!searchMarks || searchMarks.kind !== kind) searchMarks = { kind: kind, values: [] }
+    var at = searchMarks.values.indexOf(value)
+    if (at >= 0) searchMarks.values.splice(at, 1)
+    else searchMarks.values.push(value)
+    if (!searchMarks.values.length) searchMarks = null
+    paintSearchMarks()
+}
+
+function clearSearchMarks(){
+    searchMarks = null
+    paintSearchMarks()
+}
+
+// Paint the -marked class onto whichever rows are marked, and show the apply button exactly when at least one
+// mark exists. Separate from -current (the keyboard highlight): a row can be both, and they mean different things.
+function paintSearchMarks(){
+    var menu = document.getElementById('searchSuggestions')
+    if (!menu) return
+    var marked = markedSearchValues()
+    var items = menu.querySelectorAll('.dropdown-item')
+    for (var index = 0; index < items.length; index++){
+        items[index].classList.toggle('-marked', marked.indexOf(items[index].dataset.suggestValue) >= 0)
+    }
+    var apply = menu.querySelector('.suggest-apply')
+    if (apply){
+        if (marked.length) apply.removeAttribute('hidden')
+        else apply.setAttribute('hidden', '')
+    }
+}
+
+/** applySuggestFilter *****************************************************************************************************************************
+ * Narrows the open list by its embedded filter box, then makes sure the keyboard highlight is still on a visible row. Marks are untouched: they are   *
+ * held by value, so a row that filtering hides keeps its mark and comes back marked.                                                                  *
+ ***************************************************************************************************************************************************/
+function applySuggestFilter(menu){
+    if (!menu) return
+    var box = menu.querySelector('.suggest-filter-input')
+    // One query for both the narrowing and the highlight fix-up: the list can hold SUGGEST_MAX_ITEMS rows and
+    // this runs on every keystroke in the filter box.
+    var items = menu.querySelectorAll('.dropdown-item')
+    applyMenuFilter(items, box ? box.value : '')
+    if (!searchSuggestion) return
+    var current = items[searchSuggestion.activeIndex]
+    if (current && !current.hasAttribute('hidden')) return
+    for (var index = 0; index < items.length; index++){
+        if (!items[index].hasAttribute('hidden')){ searchSuggestion.activeIndex = index; break }
+    }
+    paintSearchSuggestionActive()
+}
+
+// The suggestion the keyboard is on: the row at activeIndex when it is visible, otherwise the first row the
+// filter still shows. Both Enter paths use this, so pressing Enter in the field and in the filter box agree.
+function activeSuggestion(){
+    if (!searchSuggestion) return null
+    var menu = document.getElementById('searchSuggestions')
+    if (!menu) return searchSuggestion.items[searchSuggestion.activeIndex] || null
+    var items = menu.querySelectorAll('.dropdown-item')
+    var current = items[searchSuggestion.activeIndex]
+    if (current && !current.hasAttribute('hidden')) return searchSuggestion.items[searchSuggestion.activeIndex] || null
+    for (var index = 0; index < items.length; index++){
+        if (!items[index].hasAttribute('hidden')) return searchSuggestion.items[index] || null
+    }
+    return null
+}
+
+// Move the keyboard highlight by one row, skipping whatever the filter is hiding.
+function moveSuggestActive(delta){
+    var menu = document.getElementById('searchSuggestions')
+    if (!menu || !searchSuggestion) return
+    var items = menu.querySelectorAll('.dropdown-item')
+    if (!items.length) return
+    var index = searchSuggestion.activeIndex
+    for (var step = 0; step < items.length; step++){
+        index = (index + delta + items.length) % items.length
+        if (!items[index].hasAttribute('hidden')) break
+    }
+    searchSuggestion.activeIndex = index
+    paintSearchSuggestionActive()
+    if (items[index] && items[index].scrollIntoView) items[index].scrollIntoView({ block: 'nearest' })
 }
 
 function paintSearchSuggestionActive(){
@@ -1485,10 +1921,16 @@ function paintSearchSuggestionActive(){
     }
 }
 
-function hideSearchSuggestions(){
+function hideSearchSuggestions(options){
     var menu = document.getElementById('searchSuggestions')
+    if (menu) traceGesture('list-closed:' + ((options && options.reason) || 'other'))
     if (menu) menu.remove()
     searchSuggestion = null
+    // No list, no multi-select: the marks belong to the open list and never outlive it - EXCEPT when the list
+    // went away only because the user typed past the last match while still completing the SAME token (see
+    // keepMarks below). Every other close - a blur, a commit, Escape, a re-render, the token going away
+    // entirely - drops them.
+    if (!(options && options.keepMarks)) searchMarks = null
 }
 
 /** applySearchSuggestion **************************************************************************************************************************
@@ -1498,24 +1940,83 @@ function hideSearchSuggestions(){
  * paint is held until blur, exactly as the existing search-focus hold already does.                                                                   *
  ***************************************************************************************************************************************************/
 function applySearchSuggestion(input, suggestion){
+    if (!input || !searchSuggestion || !suggestion) return
+    insertSearchTokens(input, [suggestion.insert])
+}
+
+/** applyMarkedSuggestions *************************************************************************************************************************
+ * Inserts EVERY marked row at once - the multi-select commit, reached from the apply button and from Enter while anything is marked. It shares one    *
+ * insertion path with the single pick above, so quoting, spacing, the duplicate skip and "never touch the rest of the query" are decided in exactly   *
+ * one place (the pure window.SearchTokens).                                                                                                          *
+ ***************************************************************************************************************************************************/
+function applyMarkedSuggestions(input){
     if (!input || !searchSuggestion) return
-    var token = searchSuggestion.token
-    // Strip embedded double-quotes before wrapping: a title (or tag/notebook) can itself contain a
-    // quote, and Joplin's phrase syntax has no way to escape one, so a raw quote would break the
-    // committed token. This matches how searchTitleSuggestions already sanitizes the query side.
-    var insert = String(suggestion.insert).replace(/"/g, '')
-    var needsQuote = /\s/.test(insert)
-    var replacement = token.kind + ':' + (needsQuote ? '"' + insert + '"' : insert) + ' '
-    var value = input.value
-    input.value = value.slice(0, token.start) + replacement + value.slice(token.end)
-    var caret = token.start + replacement.length
+    var values = markedSearchValues()
+    if (!values.length) return
+    insertSearchTokens(input, values.slice())
+}
+
+/** insertSearchTokens *****************************************************************************************************************************
+ * Splices the given values into the field in place of the incomplete token being completed, then commits, so a pick shows its results at once (pick   *
+ * -> see results), which is what the user expects. The field keeps focus for continued typing: on desktop restoreSearchDraft refocuses the freshly     *
+ * rendered input (caret at end) after the commit's re-render; on mobile the commit's paint is held until blur, exactly as the existing search-focus    *
+ * hold already does.                                                                                                                                  *
+ *                                                                                                                                                     *
+ * Everything about WHAT the new text is - which values are skipped as already present, how they are quoted, where the caret lands, and the guarantee   *
+ * that the query either side of the fragment comes back byte-identical - lives in window.SearchTokens.buildTokenInsertion, so it is covered by tests   *
+ * rather than by reading this function.                                                                                                                *
+ ***************************************************************************************************************************************************/
+function insertSearchTokens(input, values){
+    var next = window.SearchTokens.buildTokenInsertion(input.value, searchSuggestion.token, values)
+    input.value = next.value
     input.focus()
-    input.setSelectionRange(caret, caret)
+    input.setSelectionRange(next.caret, next.caret)
     updateSearchDraft(input)
-    hideSearchSuggestions()
-    // Commit the picked value. onSearchFilterChanged clears the (now moot) draft and posts the search; the
-    // caret settles at the end of the committed text after the re-render's refocus.
+    hideSearchSuggestions({ reason: 'applied' })
+    // onSearchFilterChanged clears the (now moot) draft and posts the search; the caret settles at the end of
+    // the committed text after the re-render's refocus.
     onSearchFilterChanged(input.value)
+}
+
+/** handleSuggestKey *******************************************************************************************************************************
+ * The keyboard for an OPEN suggestion list, shared by the search field and by the list's embedded filter box so both behave identically.             *
+ *   - Arrow up/down move the highlight, skipping rows the filter is hiding.                                                                           *
+ *   - Enter APPLIES: with marks it inserts all of them, with none it picks the highlighted row (the first match, unless the arrows moved it) - the     *
+ *     unchanged single-pick behaviour.                                                                                                                *
+ *   - Escape unwinds one step at a time: the marks first, then the filter text, and only then the list itself. It is swallowed at every step, so it    *
+ *     never also reaches the context-menu, dropdown or bare-Escape-collapses-the-selection handlers - the dropdowns keep winning Escape.               *
+ ***************************************************************************************************************************************************/
+function handleSuggestKey(event, input){
+    if (!searchSuggestion) return
+    if (event.key === 'ArrowDown'){
+        event.preventDefault()
+        moveSuggestActive(1)
+    } else if (event.key === 'ArrowUp'){
+        event.preventDefault()
+        moveSuggestActive(-1)
+    } else if (event.key === 'Enter'){
+        event.preventDefault()
+        if (markedSearchValues().length){ applyMarkedSuggestions(input); return }
+        applySearchSuggestion(input, activeSuggestion())
+    } else if (event.key === 'Escape'){
+        event.preventDefault()
+        event.stopPropagation()
+        escapeSearchSuggestions()
+    }
+}
+
+function escapeSearchSuggestions(){
+    var menu = document.getElementById('searchSuggestions')
+    // 1. Marks first: a mis-built multi-selection is undone without losing the list the user is working through.
+    if (markedSearchValues().length){ clearSearchMarks(); return }
+    // 2. Then the embedded filter text, exactly as the notebook menu's filter does.
+    var box = menu ? menu.querySelector('.suggest-filter-input') : null
+    if (box && box.value){ box.value = ''; applySuggestFilter(menu); return }
+    // 3. Then the list itself, handing the caret back to the search field (the press may have come from the
+    //    filter box, which this removes).
+    hideSearchSuggestions({ reason: 'escape' })
+    var input = getSearchInput()
+    if (input) input.focus()
 }
 
 function onSearchKeyDown(event){
@@ -1533,23 +2034,7 @@ function onSearchKeyDown(event){
         }
         return
     }
-    if (event.key === 'ArrowDown'){
-        event.preventDefault()
-        searchSuggestion.activeIndex = (searchSuggestion.activeIndex + 1) % searchSuggestion.items.length
-        paintSearchSuggestionActive()
-    } else if (event.key === 'ArrowUp'){
-        event.preventDefault()
-        searchSuggestion.activeIndex = (searchSuggestion.activeIndex - 1 + searchSuggestion.items.length) % searchSuggestion.items.length
-        paintSearchSuggestionActive()
-    } else if (event.key === 'Enter'){
-        // Pick the highlighted suggestion; applySearchSuggestion inserts it AND commits (pick -> see results).
-        event.preventDefault()
-        applySearchSuggestion(getSearchInput(), searchSuggestion.items[searchSuggestion.activeIndex])
-    } else if (event.key === 'Escape'){
-        event.preventDefault()
-        event.stopPropagation()
-        hideSearchSuggestions()
-    }
+    handleSuggestKey(event, getSearchInput())
 }
 
 function updateSearchDraft(input){
@@ -1565,20 +2050,117 @@ function onSearchFocus(){
     if (IS_MOBILE) void webviewApi.postMessage(['searchFocusChanged', true]);
 }
 
+/** The search focus REGION ************************************************************************************************************************
+ * The search field and its open suggestion list are ONE focus region. That matters because the list now contains focusable controls of its own - the  *
+ * embedded filter box and the apply button - and reaching for either of them blurs the field. Treating that as "the user left the search" would tear   *
+ * down the very list they were reaching for, and on mobile would also release the host's refresh hold, whose next setHtml is a full webview reload.    *
+ ***************************************************************************************************************************************************/
+function inSearchRegion(node){
+    if (!node) return false
+    if (node === getSearchInput()) return true
+    var menu = document.getElementById('searchSuggestions')
+    return !!(menu && menu.contains(node))
+}
+
+function searchRegionHasFocus(){
+    return inSearchRegion(document.activeElement)
+}
+
+// Focus is inside the suggestion LIST specifically - not merely somewhere in the search region. The difference
+// matters for the deferred commit below: the field keeping focus is exactly how the clear button behaves, and
+// that must still commit, while focus having moved into the list is the one case that must not.
+function suggestionsHaveFocus(){
+    var menu = document.getElementById('searchSuggestions')
+    return !!(menu && menu.contains(document.activeElement))
+}
+
+/** onSearchFieldChanged ***************************************************************************************************************************
+ * The field's own change / search events, which commit the search. They stay the fallbacks they have always been (Electron fires change on blur and  *
+ * search on the clear button; Enter is committed explicitly in the keydown), with ONE case handled differently: focus moving from the field into the  *
+ * field's OWN suggestion list.                                                                                                                       *
+ *                                                                                                                                                    *
+ * WHY. The browser fires `change` whenever an input whose value the user edited loses focus - and since the list gained focusable controls (its       *
+ * filter box, its apply button), simply reaching for one of them is such a blur. Committing there would run the half-typed query the user was still   *
+ * completing, and its re-render would tear the list out from under them mid-interaction.                                                              *
+ *                                                                                                                                                    *
+ * WHY DEFERRED, and not just "is focus in the list?". At `change` time the browser has NOT yet assigned focus: document.activeElement is still <body> *
+ * on every route, so the question cannot be answered yet. One tick later focus has landed and it can. This also makes the answer independent of HOW   *
+ * focus moved - a mouse press, Tab (the filter box is literally the field's next tab stop), or a programmatic focus() all behave the same.            *
+ *                                                                                                                                                    *
+ * AND IT IS ONLY DEFERRED, NEVER DROPPED. A suppressed commit stays PENDING and is flushed by leaveSearchField the moment focus finally does leave    *
+ * the search region, so "type a query, reach into the list, then click away" still commits exactly once - the change->commit fallback is delayed, not  *
+ * lost. An explicit commit (Enter, a pick, an apply) supersedes any pending one, so the two can never both fire.                                      *
+ ***************************************************************************************************************************************************/
+// The commit a `change` asked for, held until it is known whether focus left the search region. Null when none
+// is waiting.
+var pendingSearchCommit = null
+
+function onSearchFieldChanged(value){
+    pendingSearchCommit = { value: value }
+    setTimeout(function(){
+        if (!pendingSearchCommit) return                 // superseded by an explicit commit, or already flushed
+        // Focus landed inside the field's own LIST: keep it pending rather than committing now. Deliberately
+        // narrower than the whole search region - the clear button fires `search` while the FIELD keeps focus,
+        // and that has always committed straight away, so testing the region here would strand it.
+        if (suggestionsHaveFocus()) return
+        flushPendingSearchCommit()
+    }, 0)
+}
+
+// Run a commit that was held while focus sat inside the suggestion list. A no-op when nothing is pending.
+//
+// THEORETICAL RACE, deliberately left alone. If a `change` and a host re-render ever landed in the same task,
+// this flush could run AFTER reconcile had re-opened the list, closing the list it had just restored (the
+// commit's own hideSearchSuggestions). It is unreachable from real input: `change` only fires on a focus move
+// the user makes, the flush is one tick behind it, and a render arriving in that same tick would have to be
+// triggered by something other than this commit. Probed during review and never observed. Recorded so the
+// ordering is understood rather than "fixed" blindly - moving the flush earlier would reintroduce M2 (the
+// commit must outlive the teardown), and dropping it would strand the typed query uncommitted.
+function flushPendingSearchCommit(){
+    var pending = pendingSearchCommit
+    pendingSearchCommit = null
+    if (pending) onSearchFilterChanged(pending.value)
+}
+
 function onSearchBlur(event){
     // A refresh removes the focused field mid-typing. Some Chromium builds fire blur on that removal
     // and some do not; either way this is not a genuine blur and the draft must survive so
     // restoreSearchDraft can put it back. The removed field is already disconnected from the document
     // when its removal-blur fires, so ignore a blur whose target is no longer connected.
     if (event && event.target && event.target.isConnected === false) return
+    // Focus moving WITHIN the region (field -> filter box, filter box -> apply button, and back) is not a blur
+    // of the search at all.
+    var related = event ? event.relatedTarget : null
+    if (inSearchRegion(related)) return
+    var menu = document.getElementById('searchSuggestions')
+    if (menu && related == null){
+        // A press on a suggestion ROW is a press on a non-focusable element: the browser drops focus to <body>
+        // and reports no relatedTarget, which from the blur alone looks exactly like the user leaving. The
+        // press tracker knows better - if the press landed inside the list, hand the caret straight back and
+        // keep everything up. (Desktop never gets here: its picks preventDefault the mousedown.)
+        if (suggestPointerInside){ restoreSearchDraft(); return }
+        // Otherwise a null relatedTarget is simply unhelpful, so decide on the next tick, once the browser has
+        // finished moving focus, rather than tearing an open list down on a guess.
+        setTimeout(function(){ if (!searchRegionHasFocus()) leaveSearchField() }, 0)
+        return
+    }
+    leaveSearchField()
+}
+
+// The user has genuinely left the search: drop the uncommitted draft (or a later focus + refresh would
+// resurrect this stale text over the freshly rendered field), close the list, and release the mobile refresh
+// hold armed on focus so the host runs any refresh it skipped. A commit (Enter / clear) also posts
+// searchFilterChanged right after, which the host's equality guard collapses to a single render.
+function leaveSearchField(){
+    traceGesture('field-left')
+    // Focus has now left the region for good, so a commit held back while it sat inside the suggestion list is
+    // due: this is what keeps "type a query, reach into the list, then click away" committing exactly once.
+    // Flushed FIRST, so the commit lands before the draft is dropped, in the order the browser used to produce
+    // (change, then blur).
+    flushPendingSearchCommit()
     searchFocused = false
-    // The user left the field without committing, so the uncommitted draft is abandoned. Drop it, or a
-    // later focus + refresh would resurrect this stale text over the freshly rendered field.
     searchDraft = null
-    hideSearchSuggestions()
-    // Release the mobile refresh hold armed on focus, so the host runs any refresh it skipped while the
-    // field was focused. A commit (Enter / clear) also posts searchFilterChanged right after, which the
-    // host's equality guard collapses to a single render. Mobile only, matching onSearchFocus.
+    hideSearchSuggestions({ reason: 'field-left' })
     if (IS_MOBILE) void webviewApi.postMessage(['searchFocusChanged', false]);
 }
 
@@ -1592,6 +2174,19 @@ function onSearchBlur(event){
  *    typing works. This adds no new webview state - it reuses the existing searchFocused flag - so the mobile reload path is unaffected (there the     *
  *    module state is zeroed by the reload and the host-held search-focus hold drives the refresh instead).                                            *
  ***************************************************************************************************************************************************/
+/** reopenSearchSuggestions ************************************************************************************************************************
+ * Rebuilds the suggestion list after a re-render replaced the panel while a multi-select was in progress, with the marks the user had already made.   *
+ * The list itself is rebuilt from the RESTORED draft text (onSearchInput re-parses the token under the caret and re-queries the candidates), so it     *
+ * reflects whatever is now in the field; the marks are simply put back first, and onSearchInput drops them itself if the token has become a different  *
+ * kind. For title: the list arrives a moment later through its debounced round-trip, and renders marked when it does.                                  *
+ ***************************************************************************************************************************************************/
+function reopenSearchSuggestions(marks){
+    var input = getSearchInput()
+    if (!input) return
+    searchMarks = marks
+    onSearchInput(input)
+}
+
 function restoreSearchDraft(){
     if (!searchFocused) return
     var input = getSearchInput()

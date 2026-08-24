@@ -541,6 +541,127 @@ option {
     max-width: none;
 }
 
+/* The suggestion list is tall on purpose: it offers every matching tag / notebook / title so several can be
+ * marked, and multi-select is unusable through a peephole. Target ~15 rows, then scroll. A row is one line of
+ * text plus its 4px padding top and bottom, so 15 of them is 15 * (1.5em + 8px); the constant adds the sticky
+ * filter box (~34px), the hint line (~20px) and the menu's own 8px padding. The min() caps it on a short panel
+ * so the list always stays fully visible - the same guarantee (and the same shape) as #notebookMenu's cap, with
+ * a larger offset because this menu hangs off the THIRD control row rather than the second. */
+#searchSuggestions {
+    max-height: min(calc(15 * (1.5em + 8px) + 62px), calc(100vh - 128px));
+    /* The menu is the flex column; the ROWS scroll inside it (.suggest-list), so the filter box and the hint
+     * stay put. Without this the shared .dropdown-menu overflow-y would scroll the whole menu instead. */
+    overflow: hidden;
+}
+
+/* The rows scroll; the filter box above and the hint below stay put. */
+.suggest-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.suggest-list::-webkit-scrollbar { width: 6px; }
+.suggest-list::-webkit-scrollbar-track { background: transparent; }
+.suggest-list::-webkit-scrollbar-thumb {
+    border-radius: 3px;
+    background: var(--cockpit-scrollbar-thumb-color, rgba(127, 127, 127, 0.4));
+}
+
+/* The embedded filter box, pinned at the top of the open list with the apply button beside it. The negative
+ * margins let its background span the menu's 4px padding, so no row peeks past it while scrolling - the same
+ * treatment .notebook-filter gets. */
+.suggest-filter {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    margin: -4px -4px 2px;
+    padding: 4px 4px 6px;
+    background-color: var(--cockpit-background-color, #1D2024);
+}
+
+.suggest-filter-input {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 26px;
+    min-height: 26px;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--cockpit-color, inherit);
+    background-color: var(--cockpit-background-color4, transparent);
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 3px;
+}
+
+.suggest-filter-input:focus {
+    outline: none;
+    border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
+}
+
+.suggest-filter-input::placeholder {
+    color: var(--cockpit-color-faded, #999999);
+    opacity: 0.8;
+}
+
+/* Shown only while at least one row is marked, so it doubles as the multi-select-mode indicator on both
+ * platforms (touch has no Ctrl to hint at). */
+.suggest-apply {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    min-height: 26px;
+    padding: 2px;
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 3px;
+    background: none;
+    color: var(--cockpit-url-color, #2D6BDC);
+    cursor: pointer;
+}
+
+.suggest-apply[hidden] {
+    display: none;
+}
+
+.suggest-apply:hover {
+    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+}
+
+.suggest-apply .icon {
+    width: 0.95em;
+    height: 0.95em;
+    display: block;
+}
+
+/* A marked row. A row can be marked AND be the keyboard highlight at the same time, so the mark adds a left
+ * accent bar; the background it shares with .dropdown-item.-current is what the two have in common, and the bar
+ * is the only thing that distinguishes a marked row from a merely highlighted one. */
+.dropdown-item.-marked {
+    background-color: var(--cockpit-selected-color, rgba(127, 127, 127, 0.3));
+    box-shadow: inset 3px 0 0 0 var(--cockpit-url-color, #2D6BDC);
+}
+
+/* The muted line at the list's bottom edge naming the gesture that marks several rows. The rule above it
+ * separates it from the rows sliding past underneath, so it reads as the list's chrome rather than as a row. */
+.suggest-hint {
+    flex-shrink: 0;
+    margin: 2px -4px -4px;
+    padding: 5px 6px 4px;
+    border-top: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    font-size: 0.85em;
+    opacity: 0.6;
+    background-color: var(--cockpit-background-color, #1D2024);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* The search field, styled like the dropdowns and Joplin's own search box */
 #searchFilter {
     flex: 1 1 auto;
@@ -1185,6 +1306,23 @@ table {
     user-select: none;
 }
 
+/* The SAME suppression for the search suggestion rows, which are long-pressed to mark them for a multi-select.
+ * Without it Android's native long press wins: it starts a text selection on the row's label and raises the
+ * system callout, which takes the pointer (a pointercancel abandons the 500ms hold, so no mark is ever made)
+ * and blurs the search field (which tore the whole list down). This is the one thing the proven to-do-row long
+ * press had that this list did not - the JS press tracker was already a copy of that adapter.
+ *
+ * touch-action: pan-y keeps the list scrolling vertically, which it must (15 rows and more), while telling the
+ * browser Cockpit owns every other gesture on these rows. Preventing the default on pointerdown instead would
+ * suppress the gesture but also kill the scroll. */
+.cockpit-mobile #searchSuggestions .dropdown-item,
+.cockpit-mobile #searchSuggestions .dropdown-label {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: pan-y;
+}
+
 /* Tap-target enlargement. Every rule below grows only the touch/hit area to ~40px; the visible box and
  * the row layout are unchanged (the checkbox cancels its added padding with an equal negative margin,
  * and the ::after overlays add no layout). */
@@ -1292,6 +1430,11 @@ table {
 
 /* The notebook filter box is a comfortable tap target on mobile, matching the 40px rows above. */
 .cockpit-mobile .notebook-filter-input { min-height: 40px; }
+
+/* The search suggestion list's own filter box and its apply button, likewise. The apply button is the commit
+ * of a multi-select made by long-press, so it must be as easy to hit as the rows that built it. */
+.cockpit-mobile .suggest-filter-input { min-height: 40px; }
+.cockpit-mobile .suggest-apply { width: 40px; height: 40px; min-height: 40px; }
 
 .cockpit-mobile .calendar-title { min-height: 40px; }
 

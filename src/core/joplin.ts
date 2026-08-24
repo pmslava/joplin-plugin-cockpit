@@ -98,6 +98,48 @@ function cacheExcluded(query, items, hasMore){
     while (excludedResultCache.size > resultCacheCap) excludedResultCache.delete(excludedResultCache.keys().next().value)
 }
 
+/** any:1 and Cockpit's own narrowing ***************************************************************************************************************
+ * Joplin's `any:1` turns a query into an OR of its terms - and it does that to EVERY term in the string, not just the ones the user typed. Cockpit    *
+ * builds its searches by concatenating its own narrowing onto the user's criteria (`type:todo`, `iscompleted:0`, `due:...`, the excluded-notebook     *
+ * clauses), so under any:1 each of those became an ALTERNATIVE instead of a constraint. `type:todo` matches every to-do, so the whole filter          *
+ * collapsed and the panel listed everything - the reported "any:1 shows notes with none of the tags".                                                  *
+ *                                                                                                                                                     *
+ * The fix keeps Cockpit's narrowing OUT of such a query and applies it to the results instead, so it stays a constraint whatever the user's terms do.  *
+ * The user's own string is sent verbatim, so `any:1` means exactly what Joplin says it means across the terms the user wrote. `notebook:` is left in   *
+ * the query on purpose: Joplin's query builder keeps notebook scope as AND even under any:1, so it is still a constraint there. The excluded-notebook  *
+ * ids were always filtered client-side as the authority (filterExcluded), so dropping their query clauses costs nothing but a wider first page.        *
+ *                                                                                                                                                     *
+ * Detection is a whitespace-delimited any:1 token. A false positive (the text appearing inside a quoted phrase) only takes the client-side path, which *
+ * returns the same rows - it is the safe direction to be wrong in.                                                                                     *
+ ***************************************************************************************************************************************************/
+const ANY_MODE_PATTERN = /(^|\s)any:1(\s|$)/i
+
+export function usesAnyMode(criteria){
+    return ANY_MODE_PATTERN.test(String(criteria || ""))
+}
+
+// The floor `due:19700201` encodes: a to-do with a real due date set. Mirrored here so the client-side path
+// keeps the same boundary as the query it replaces.
+const DUE_DATE_FLOOR = Date.UTC(1970, 1, 1)
+
+/** applyTodoNarrowing *****************************************************************************************************************************
+ * The client-side equivalent of the `type:todo` / `iscompleted:0` / `due:19700201` terms, for the any:1 path where they cannot be sent as query      *
+ * terms. Same three questions, same order, asked of the returned rows instead of the index.                                                          *
+ ***************************************************************************************************************************************************/
+export function applyTodoNarrowing(items, showCompleted, showNoDue){
+    return (items || []).filter(function(item){
+        if (!item.is_todo) return false                                   // type:todo
+        if (!showCompleted && item.todo_completed) return false            // iscompleted:0
+        if (!showNoDue && !(item.todo_due >= DUE_DATE_FLOOR)) return false // due:19700201
+        return true
+    })
+}
+
+// The client-side equivalent of `type:note`: the notes format lists only regular notes.
+export function applyNoteNarrowing(items){
+    return (items || []).filter(function(item){ return !item.is_todo })
+}
+
 /** getTodos ****************************************************************************************************************************************
  * Returns the list of todos, sorted by due date. If show completed is true, it will include completed todos. If show no due is true, it will       *
  * include todos without due dates.                                                                                                                 *
@@ -111,7 +153,12 @@ function cacheExcluded(query, items, hasMore){
     // cache key, so a cached set is never reused across an exclusion change (the setting change also clears
     // the caches outright).
     var excluded = await excludedContext()
-    var query = `type:todo ${completed} ${noDue} ${searchCritera}${excluded.clauses ? " " + excluded.clauses : ""}`
+    // Under any:1 Cockpit's own terms would become OR alternatives (see usesAnyMode); send the user's string
+    // alone and narrow the results instead. Without any:1 the query is byte-identical to what it always was.
+    var anyMode = usesAnyMode(searchCritera)
+    var query = anyMode
+        ? String(searchCritera || "")
+        : `type:todo ${completed} ${noDue} ${searchCritera}${excluded.clauses ? " " + excluded.clauses : ""}`
     // fillCounts is the background pass of the fast-first-paint flow: reuse the search the fast paint
     // already cached (no new round-trip) but this time DO fetch the note bodies so the checkbox rings
     // fill in. priorityStart is the estimated first-visible row, so the bodies nearest the viewport are
@@ -137,13 +184,18 @@ function cacheExcluded(query, items, hasMore){
             countData('search')
             var response = await joplin.data.get(['search'], {
                 query: query,
-                fields: ['id', 'title', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time'],
+                // is_todo rides along so the any:1 path can apply `type:todo` itself; it costs nothing on the
+                // ordinary path, where the query already guarantees it.
+                fields: ['id', 'title', 'is_todo', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time'],
                 type: 'note',
                 order_by: 'todo_due',
                 page: pageNum++,
             })
             allTodos = allTodos.concat(response.items)
         } while (response.has_more)
+        // The any:1 path asked for none of Cockpit's narrowing in the query, so it is applied here - in the
+        // same place, and before the same body fetch and cache write, as the query terms it replaces.
+        if (anyMode) allTodos = applyTodoNarrowing(allTodos, showCompleted, showNoDue)
         // Excluded rows are dropped BEFORE the checkbox-body fetch, so an excluded note never costs a body
         // GET, and BEFORE the cache is written, so the cache holds only kept rows.
         allTodos = filterExcluded(allTodos, excluded.set)
@@ -171,11 +223,17 @@ function cacheExcluded(query, items, hasMore){
 }
 
 /** searchTitleSuggestions **************************************************************************************************************************
- * Returns up to ten distinct note titles for the search field's title: autocomplete. Joplin's search wildcard is suffix only and quoting a phrase   *
- * with a trailing * is unreliable, so the query matches the LAST typed word with a suffix wildcard (title:word*) and the results are then filtered   *
- * case-insensitively against the whole typed partial. An empty partial (the bare "title:" state) has nothing to match on, so it returns the ten most  *
- * recently updated notes/to-dos instead, mirroring how tag:/notebook: list their whole set immediately after the colon.                             *
+ * Returns the distinct note titles for the search field's title: autocomplete, up to titleSuggestionLimit. Joplin's search wildcard is suffix only   *
+ * and quoting a phrase with a trailing * is unreliable, so the query matches the LAST typed word with a suffix wildcard (title:word*) and the results  *
+ * are then filtered case-insensitively against the whole typed partial. An empty partial (the bare "title:" state) has nothing to match on, so it      *
+ * returns the most recently updated notes/to-dos instead, mirroring how tag:/notebook: list their whole set immediately after the colon.               *
+ *                                                                                                                                                     *
+ * The limit is well above the ~15 rows the dropdown shows at once because that dropdown is now MULTI-select: the user marks several titles across a    *
+ * scrolled list, so a cap that stopped at what fits on screen would put the rest out of reach. It costs no extra round-trip - the same single request   *
+ * simply asks for a bigger page.                                                                                                                       *
  ***************************************************************************************************************************************************/
+const titleSuggestionLimit = 50
+
 export async function searchTitleSuggestions(partial){
     var typed = String(partial || "").trim()
     if (!typed) {
@@ -186,7 +244,9 @@ export async function searchTitleSuggestions(partial){
             fields: ['id', 'title', 'deleted_time'],
             order_by: 'updated_time',
             order_dir: 'DESC',
-            limit: 20,
+            // Over-fetch a little: trashed and untitled notes are dropped below, so the page must be able to
+            // yield titleSuggestionLimit survivors.
+            limit: titleSuggestionLimit * 2,
         })
         var recentTitles = []
         var recentSeen = new Set()
@@ -201,7 +261,7 @@ export async function searchTitleSuggestions(partial){
             if (recentSeen.has(recentKey)) continue
             recentSeen.add(recentKey)
             recentTitles.push(recentTitle)
-            if (recentTitles.length >= 10) break
+            if (recentTitles.length >= titleSuggestionLimit) break
         }
         return recentTitles
     }
@@ -217,7 +277,7 @@ export async function searchTitleSuggestions(partial){
         query: `title:${safeLastWord}*`,
         fields: ['title'],
         type: 'note',
-        limit: 10,
+        limit: titleSuggestionLimit,
     })
     var needle = typed.toLowerCase()
     var seen = new Set()
@@ -229,7 +289,7 @@ export async function searchTitleSuggestions(partial){
         if (seen.has(key)) continue
         seen.add(key)
         titles.push(title)
-        if (titles.length >= 10) break
+        if (titles.length >= titleSuggestionLimit) break
     }
     return titles
 }
@@ -240,7 +300,11 @@ export async function searchTitleSuggestions(partial){
  ***************************************************************************************************************************************************/
 export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var excluded = await excludedContext()
-    var query = `type:note ${searchCriteria}${excluded.clauses ? " " + excluded.clauses : ""}`
+    // See usesAnyMode: under any:1 `type:note` would be an alternative, not a constraint.
+    var anyMode = usesAnyMode(searchCriteria)
+    var query = anyMode
+        ? String(searchCriteria || "")
+        : `type:note ${searchCriteria}${excluded.clauses ? " " + excluded.clauses : ""}`
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
     var allNotes;
@@ -257,12 +321,14 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
             countData('search')
             var response = await joplin.data.get(['search'], {
                 query: query,
-                fields: ['id', 'title', 'parent_id', 'user_updated_time', 'user_created_time'],
+                fields: ['id', 'title', 'is_todo', 'parent_id', 'user_updated_time', 'user_created_time'],
                 type: 'note',
                 page: pageNum++,
             })
             allNotes = allNotes.concat(response.items)
         } while (response.has_more)
+        // The any:1 path applies `type:note` itself, for the same reason getTodos does.
+        if (anyMode) allNotes = applyNoteNarrowing(allNotes)
         allNotes = filterExcluded(allNotes, excluded.set)
         await attachCheckboxCounts(allNotes, fast, priorityStart)
         cacheResult(notesResultCache, query, allNotes)

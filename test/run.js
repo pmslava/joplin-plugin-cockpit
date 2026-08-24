@@ -1738,6 +1738,10 @@ async function main() {
     const webviewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panelWebview.js'), 'utf8')
     // The body of a top-level webview handler: from its `function name(` to the closing brace at column 0. The
     // inner blocks all close with an indented `}` (never `\n}`), so the first `\n}` is the function's own end.
+    // The shared search-token text rules, required like AlarmQuick / NoteMenu / EditorNote: the same file the
+    // webview loads, so these tests exercise what ships. Used by the notebook-filter pin (which shares the
+    // narrowing rule) and by the multi-select suite near the end of this file.
+    const SearchTokens = require('../src/ui/panel/searchTokens.js')
     const handlerBody = (name) => {
         const start = webviewSource.indexOf('function ' + name + '(')
         assert.ok(start >= 0, name + ' not found in panelWebview.js')
@@ -2747,13 +2751,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 1.9.7', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 1.9.10', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '1.9.7'
+        const expected = '1.9.10'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
@@ -3013,11 +3017,18 @@ async function main() {
         assert.ok(escRegion.includes("'Escape'"), 'the scoped close must be gated on the Escape key')
         assert.ok(escRegion.includes('closeAllDropdowns()'), 'the scoped Escape must close the open dropdown via closeAllDropdowns()')
         // (b) The live filter: a case-insensitive substring of the full path, read from each data-notebook-row's label.
+        // The narrowing itself now lives in the shared applyMenuFilter (the search suggestion list grew the same
+        // embedded filter box in 1.9.8), whose match rule is the pure, tested window.SearchTokens.matchesFilter -
+        // so this menu is pinned on WHICH rows it narrows, and the rule is exercised for real above.
         const filterBody = handlerBody('filterNotebookMenu')
         assert.ok(filterBody.includes('data-notebook-row'), 'the filter must walk the notebook rows (data-notebook-row)')
-        assert.ok(filterBody.includes('.toLowerCase()') && filterBody.includes('indexOf('), 'the filter must be a case-insensitive substring match')
-        assert.ok(filterBody.includes("setAttribute('hidden'") && filterBody.includes("removeAttribute('hidden')"),
+        assert.ok(filterBody.includes('applyMenuFilter('), 'the notebook filter must go through the shared narrowing')
+        const sharedFilter = handlerBody('applyMenuFilter')
+        assert.ok(sharedFilter.includes('window.SearchTokens.matchesFilter('), 'the match rule must be the shared, tested one')
+        assert.ok(sharedFilter.includes("setAttribute('hidden'") && sharedFilter.includes("removeAttribute('hidden')"),
             'the filter must show/hide rows by the hidden attribute')
+        assert.strictEqual(SearchTokens.matchesFilter('Family / Payments', 'FAM'), true,
+            'and that rule is a case-insensitive substring of the full path')
         // (c) Enter selects the first STILL-VISIBLE notebook - the same action as clicking its row - never "All notebooks".
         const keyBody = handlerBody('onNotebookFilterKeyDown')
         assert.ok(keyBody.includes("'Enter'") && keyBody.includes('selectFirstVisibleNotebook('), 'Enter must select the first visible notebook')
@@ -3317,17 +3328,30 @@ async function main() {
     })
 
     // -- create buttons: clean icons, two-stage degradation, never wrapping -----------------------------------
-    await test('create buttons: the icons carry no plus, and the note / to-do pair share one silhouette', () => {
+    // The to-do icon was REPLACED (1.9.8): it used to be the note icon's document sheet with a checkmark on it,
+    // which read as "note", and the panel's own glyph language uses a ring for a to-do on every single row. It is
+    // now a ring with a checkmark inside. The note icon is untouched, so the sheet must appear exactly ONCE.
+    await test('create buttons: the note icon is a sheet, the to-do icon is a ring with a check, neither carries a plus', () => {
         assert.ok(!/notePlus|todoPlus/.test(iconsSource), 'the plus-bearing icon names must be gone')
         assert.ok(/\bnote: svgIcon\(/.test(iconsSource) && /\btodo: svgIcon\(/.test(iconsSource),
             'the create buttons must use the plain note / to-do icons')
         // The two retired plus glyphs: the "+" punched into the note sheet, and the "+" badge on the check circle.
         assert.ok(!iconsSource.includes('h-3v3h-2v-3H8v-2h3v-3h2v3h3v2z'), 'the note icon must no longer carry a plus cutout')
         assert.ok(!iconsSource.includes('M19 15h-2v2h-2v2h2v2h2v-2h2v-2h-2v-2z'), 'the to-do icon must no longer carry a plus badge')
-        // Both icons are the same document sheet (same outline + folded corner), so the pair reads as one family.
+        // The document sheet belongs to the note icon ALONE now.
         const sheet = 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM13 9V3.5L18.5 9H13z'
-        assert.strictEqual((iconsSource.match(new RegExp(sheet.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length, 2,
-            'the note and to-do icons must share the same sheet outline and folded corner')
+        assert.strictEqual((iconsSource.match(new RegExp(sheet.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length, 1,
+            'only the note icon may carry the document sheet - the to-do icon is a ring, not a sheet')
+        // The to-do glyph: an outer circle, an inner circle wound the other way (which is what punches the ring
+        // open under the shared svgIcon wrapper's single fill:currentColor path), then the check.
+        const todoPath = (iconsSource.match(/\btodo: svgIcon\("([^"]+)"\)/) || [])[1] || ''
+        assert.ok(todoPath.startsWith('M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z'),
+            'the to-do icon must open with the outer circle')
+        assert.ok(todoPath.includes('zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z'),
+            'it must carry the counter-wound inner circle that makes the ring an open ring rather than a disc')
+        assert.ok(/z[Mm][^z]*l[^z]*z$/.test(todoPath), 'it must end with the checkmark subpath inside the ring')
+        assert.ok(/fill="currentColor"/.test(iconsSource) && !/stroke=/.test(iconsSource),
+            'the icons stay fill-only: the ring is an open path, never a stroked circle (svgIcon emits no stroke attribute)')
     })
 
     await test('create buttons: the desktop markup carries both wordings, and the full one stays the accessible name', () => {
@@ -3387,6 +3411,717 @@ async function main() {
         assert.ok(/new MutationObserver\(onHostStyleChanged\)\.observe\(document\.head/.test(webviewSource),
             'the head observer must drive that re-measure')
         assert.ok(handlerBody('scheduleCreateButtonStage').includes('requestAnimationFrame'), 'the re-measure must be coalesced')
+    })
+
+    // ============================================================ multi-select in the search token dropdowns
+    // The tag: / notebook: / title: autocomplete became a MULTI-select: the list is taller (~15 rows, scrolling),
+    // carries its own filter box and an apply button, and rows can be MARKED (Ctrl+click on desktop, a long press
+    // then taps on touch) so several tokens are inserted at once.
+    //
+    // The part that can actually go wrong is the TEXT, and it is the part Slava drew a hard line under: this is a
+    // pure text helper that must never delete or rewrite what the user has already typed. That decision lives in a
+    // pure, DOM-free module (searchTokens.js) exactly so it can be EXERCISED here rather than pattern-matched in
+    // the webview source. The webview halves (wiring, marks, focus region, Escape chain) are pinned by shape, as
+    // the row-click / notebook-filter / editor-highlight checks above are, because this harness renders the panel
+    // markup but never executes the webview JS.
+    // The field as the user left it, with the incomplete token located the way tokenAtCaret reports it.
+    const insertAt = (query, kind, fragment, values) => {
+        // lastIndexOf, not indexOf: the fragment being completed is the one at the caret, and an earlier
+        // COMPLETE token can contain it as a prefix ("tag:done" contains "tag:d").
+        const start = query.lastIndexOf(fragment)
+        assert.ok(start >= 0, `fixture error: "${fragment}" is not in "${query}"`)
+        return SearchTokens.buildTokenInsertion(query, { kind, start, end: start + fragment.length }, values)
+    }
+
+    await test('search tokens: everything outside the completed fragment comes back byte-identical', () => {
+        // The whole point. Other tokens, free text, any:1 and a negation all survive an apply untouched.
+        const query = 'any:1 milk -tag:done notebook:Home tag:pro'
+        const next = insertAt(query, 'tag', 'tag:pro', ['project'])
+        assert.strictEqual(next.value, 'any:1 milk -tag:done notebook:Home tag:project ',
+            'only the half-typed tag: fragment may be replaced')
+        // And in the MIDDLE of a query, where the tail is what a rewrite would damage.
+        const mid = insertAt('tag:pro and then some free text', 'tag', 'tag:pro', ['project'])
+        assert.strictEqual(mid.value.slice(mid.caret), ' and then some free text',
+            'the text after the fragment must be preserved verbatim, double space and all')
+    })
+
+    await test('search tokens: several marked values insert as one properly spaced run, caret after it', () => {
+        const next = insertAt('any:1 milk tag:pro', 'tag', 'tag:pro', ['project', 'work', 'home'])
+        assert.strictEqual(next.value, 'any:1 milk tag:project tag:work tag:home ',
+            'exactly one space between the tokens and exactly one trailing space')
+        assert.strictEqual(next.caret, next.value.length, 'the caret lands after the inserted run, ready to keep typing')
+    })
+
+    await test('search tokens: values needing quotes are quoted, and an embedded quote is stripped', () => {
+        const next = insertAt('notebook:fam', 'notebook', 'notebook:fam', ['Family / Payments', 'Home'])
+        assert.strictEqual(next.value, 'notebook:"Family / Payments" notebook:Home ',
+            'only the value with whitespace is quoted')
+        // Joplin's phrase syntax cannot escape a quote, so a raw one would break the committed token.
+        assert.strictEqual(SearchTokens.renderToken('title', 'He said "hi" now'), 'title:"He said hi now"')
+        assert.strictEqual(SearchTokens.renderToken('tag', 'plain'), 'tag:plain')
+    })
+
+    await test('search tokens: a value already in the query is skipped, but a NEGATION is not the same term', () => {
+        // Already there, verbatim.
+        assert.strictEqual(insertAt('tag:done tag:d', 'tag', 'tag:d', ['done', 'new']).value, 'tag:done tag:new ',
+            'a token already in the query must not be inserted a second time')
+        // Quoted and unquoted spellings of one value are the same term.
+        assert.strictEqual(insertAt('notebook:"A B" notebook:', 'notebook', 'notebook:', ['A B', 'C']).value,
+            'notebook:"A B" notebook:C ', 'the quoted and unquoted spellings must collapse onto one term')
+        // Case-insensitive: Joplin stores tags lower-cased and searches case-insensitively.
+        assert.strictEqual(insertAt('tag:Work tag:w', 'tag', 'tag:w', ['work']).value, 'tag:Work ',
+            'the duplicate check must be case-insensitive')
+        // A negation means the opposite, so it must NOT suppress the positive term.
+        assert.strictEqual(insertAt('-tag:x tag:', 'tag', 'tag:', ['x']).value, '-tag:x tag:x ',
+            '-tag:x must not suppress tag:x - they are different terms')
+        // Repeats within one marked set collapse too.
+        assert.strictEqual(insertAt('tag:', 'tag', 'tag:', ['a', 'b', 'a']).value, 'tag:a tag:b ',
+            'a value marked twice must be inserted once')
+    })
+
+    await test('search tokens: when every value is skipped the fragment goes, leaving no dangling half-token', () => {
+        const next = insertAt('milk tag:done tag:do', 'tag', 'tag:do', ['done'])
+        assert.strictEqual(next.value, 'milk tag:done ', 'the half-typed fragment must not be left behind')
+        assert.strictEqual(insertAt('milk tag:pro', 'tag', 'tag:pro', []).value, 'milk ', 'no values at all removes the fragment')
+        // An empty value would render as a bare "tag:", which is not a filter.
+        assert.strictEqual(insertAt('tag:p', 'tag', 'tag:p', ['', 'ok']).value, 'tag:ok ', 'an empty value is skipped')
+    })
+
+    await test('search tokens: a quoted free-text phrase cannot suppress a real insertion (m5)', () => {
+        // The duplicate skip reads the query as Joplin does: a double-quoted phrase is ONE piece, so `tag:work`
+        // sitting INSIDE `"foo tag:work"` is not a filter term at all and must not make the pick silently insert
+        // nothing. A real term, quoted value and all, still suppresses.
+        assert.strictEqual(insertAt('"foo tag:work" tag:', 'tag', 'tag:', ['work']).value, '"foo tag:work" tag:work ',
+            'a term inside a quoted phrase must not suppress the insertion')
+        assert.strictEqual(insertAt('tag:work tag:', 'tag', 'tag:', ['work']).value, 'tag:work ',
+            'a real term still suppresses')
+        assert.strictEqual(insertAt('tag:"a b" tag:', 'tag', 'tag:', ['a b']).value, 'tag:"a b" ',
+            'and so does one whose value is a quoted phrase')
+        // An unterminated quote is read conservatively: the rest of the query becomes one piece, which is not a
+        // term, so nothing is suppressed (a wrong skip is silent, a wrong insert is visible and undoable).
+        assert.strictEqual(insertAt('"foo tag:work tag:', 'tag', 'tag:', ['work']).value, '"foo tag:work tag:work ',
+            'an unterminated quote must not suppress either')
+    })
+
+    await test('search tokens: the two DELIBERATE divergences from the old single-pick output (m6)', () => {
+        // Found by fuzzing. Both are improvements over what the pre-multi-select code emitted, and both are
+        // pinned here so the difference is a decision on the record rather than a surprise.
+        //
+        // 1. A value that is empty once its quotes are stripped. The old code emitted a bare `tag: ` - not a
+        //    filter, just litter the user then had to delete. Now the fragment is simply removed.
+        assert.strictEqual(insertAt('tag:p', 'tag', 'tag:p', ['"']).value, '',
+            'a value that sanitises to nothing must leave no bare "tag:" behind')
+        // 2. A value already present in the query. The old code inserted it a second time; now it is skipped and
+        //    the half-typed fragment goes, which is what the user meant by picking it.
+        assert.strictEqual(insertAt('tag:done tag:d', 'tag', 'tag:d', ['done']).value, 'tag:done ',
+            'an already-present value must not be duplicated')
+    })
+
+    await test('search tokens: a SINGLE value otherwise produces exactly what the pre-multi-select pick produced', () => {
+        // The regression pin. The old applySearchSuggestion built `kind + ':' + maybeQuoted + ' '` and spliced it
+        // over [token.start, token.end); one insertion path now serves both, so it must agree byte for byte -
+        // apart from the two deliberate divergences pinned just above.
+        const cases = [
+            ['tag:pro', 'tag', 'tag:pro', 'project', 'tag:project '],
+            ['find tag:', 'tag', 'tag:', 'a b', 'find tag:"a b" '],
+            // The double space is the OLD behaviour too, and is the point: the tail keeps its own leading
+            // space because nothing after the fragment is ever rewritten.
+            ['notebook:x rest', 'notebook', 'notebook:x', 'Home', 'notebook:Home  rest'],
+        ]
+        for (const [query, kind, fragment, value, expected] of cases){
+            assert.strictEqual(insertAt(query, kind, fragment, [value]).value, expected,
+                `single pick of "${value}" into "${query}"`)
+        }
+    })
+
+    await test('search tokens: an out-of-range token span can only splice inside the text, never throw', () => {
+        // The field can change under an in-flight suggestion (the debounced title: round-trip).
+        const next = SearchTokens.buildTokenInsertion('ab', { kind: 'tag', start: 99, end: 120 }, ['x'])
+        assert.strictEqual(next.value, 'abtag:x ')
+        assert.strictEqual(SearchTokens.buildTokenInsertion(null, null, ['x']).value, 'tag:x '.replace('tag', ''),
+            'a missing kind still yields a well-formed string')
+    })
+
+    await test('search tokens: the filter match, the platform hint and the per-kind placeholder', () => {
+        assert.strictEqual(SearchTokens.matchesFilter('Family / Payments', 'fam'), true, 'case-insensitive substring')
+        assert.strictEqual(SearchTokens.matchesFilter('Family / Payments', 'PAY'), true)
+        assert.strictEqual(SearchTokens.matchesFilter('Family / Payments', 'zzz'), false)
+        assert.strictEqual(SearchTokens.matchesFilter('anything', '   '), true, 'a blank filter matches everything')
+        assert.strictEqual(SearchTokens.matchesFilter('anything', ''), true)
+        // Touch has no Ctrl and no hover, so the hint names the gesture that actually works there.
+        assert.ok(/Ctrl\+click/.test(SearchTokens.hintText(false)), 'desktop names Ctrl+click')
+        assert.ok(/[Pp]ress and hold/.test(SearchTokens.hintText(true)), 'mobile names the long press')
+        assert.strictEqual(SearchTokens.filterPlaceholder('tag'), 'Filter tags...')
+        assert.strictEqual(SearchTokens.filterPlaceholder('notebook'), 'Filter notebooks...')
+        assert.strictEqual(SearchTokens.filterPlaceholder('title'), 'Filter titles...')
+    })
+
+    await test('search tokens: the module is loaded into the webview BEFORE panelWebview.js can use it', () => {
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const tokensAt = panelSource.indexOf("addScript(panel, '/ui/panel/searchTokens.js')")
+        const webviewAt = panelSource.indexOf("addScript(panel, '/ui/panel/panelWebview.js')")
+        assert.ok(tokensAt >= 0, 'searchTokens.js must be added to the panel')
+        assert.ok(webviewAt > tokensAt, 'it must be loaded before panelWebview.js, which calls into it at render time')
+        // UMD, like editorNote.js / noteMenu.js: the same file serves the webview and this harness.
+        const moduleSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'searchTokens.js'), 'utf8')
+        assert.ok(/module\.exports = api/.test(moduleSource) && /window\.SearchTokens = api/.test(moduleSource),
+            'the module must export to both Node and the webview')
+    })
+
+    await test('search dropdown: ONE insertion path - the webview delegates the text decision to the pure module', () => {
+        // No second copy of the quoting / splicing logic in the webview, or the tests above would stop covering
+        // what actually ships.
+        assert.ok(handlerBody('insertSearchTokens').includes('window.SearchTokens.buildTokenInsertion('),
+            'the insertion must come from the shared module')
+        assert.ok(handlerBody('applySearchSuggestion').includes('insertSearchTokens('), 'the single pick goes through it')
+        assert.ok(handlerBody('applyMarkedSuggestions').includes('insertSearchTokens('), 'the multi apply goes through it')
+        assert.ok(!/needsQuote/.test(webviewSource), 'the webview must not keep its own quoting logic')
+    })
+
+    await test('search dropdown: Ctrl/Cmd+click marks and KEEPS the list open; a plain click still picks', () => {
+        const body = handlerBody('wireSuggestList')
+        assert.ok(/event\.ctrlKey \|\| event\.metaKey/.test(body), 'Ctrl and Cmd must both mark (the row code uses both)')
+        assert.ok(/toggleSearchMark\(value\); return/.test(body), 'marking must return before the pick, leaving the list open')
+        assert.ok(body.includes('applySearchSuggestion(input, suggestionByValue(value))'), 'a plain press must still pick')
+        assert.ok(body.includes("addEventListener('mousedown'"), 'desktop keeps picking on mousedown, so the pick beats the blur')
+        // ONE delegated listener for the whole list, not one per row: the list is rebuilt on every keystroke and
+        // now holds up to SUGGEST_MAX_ITEMS rows.
+        assert.ok(/SUGGEST_MAX_ITEMS = 200/.test(webviewSource), 'the candidate cap must be raised well past the visible rows')
+        assert.ok(!/item\.addEventListener/.test(handlerBody('renderSearchSuggestions')),
+            'the row loop must not attach a listener per row')
+    })
+
+    await test('search dropdown: the field and the open list are ONE focus region', () => {
+        // Reaching for the list's filter box or apply button blurs the field. Treating that as leaving would tear
+        // down the very list the user reached for - and on mobile would release the host refresh hold, whose next
+        // setHtml is a full webview reload.
+        const blur = handlerBody('onSearchBlur')
+        assert.ok(blur.includes('if (inSearchRegion(related)) return'), 'a blur into the region must be ignored')
+        assert.ok(blur.includes('isConnected === false) return'), 'the removal-blur guard must stay')
+        assert.ok(/if \(suggestPointerInside\)\{ restoreSearchDraft\(\); return \}/.test(blur),
+            'a tap on a non-focusable row (null relatedTarget) must hand the caret back, not tear the list down')
+        assert.ok(/setTimeout\(function\(\)\{ if \(!searchRegionHasFocus\(\)\) leaveSearchField\(\) \}, 0\)/.test(blur),
+            'an otherwise-unhelpful null relatedTarget must be decided next tick, not guessed at')
+        const region = handlerBody('inSearchRegion')
+        assert.ok(region.includes('getSearchInput()') && region.includes('searchSuggestions'),
+            'the region is the field plus the open list')
+        // The teardown itself is unchanged, just moved behind the region test.
+        const leave = handlerBody('leaveSearchField')
+        assert.ok(leave.includes('searchFocused = false') && leave.includes('searchDraft = null') &&
+                  /hideSearchSuggestions\(\{ reason: 'field-left' \}\)/.test(leave),
+            'a genuine leave still drops the draft and closes the list')
+        assert.ok(/IS_MOBILE\) void webviewApi\.postMessage\(\['searchFocusChanged', false\]\)/.test(leave),
+            'and still releases the mobile refresh hold')
+    })
+
+    await test('search commit: a change caused by focus entering the list is DEFERRED, not dropped (M1/M2)', () => {
+        // The browser fires `change` on an edited input whenever it loses focus, and the list now holds focusable
+        // controls (its filter box, its apply button), so simply reaching for one is such a blur. Committing there
+        // runs the half-typed query and re-renders the panel out from under the interaction.
+        //
+        // It must be answered on a DEFERRED tick, not inline: at `change` time the browser has not yet assigned
+        // focus (activeElement is still <body> on every route), so an inline activeElement test is dead code - and
+        // it would answer only for the mouse anyway, leaving Tab (the filter box is the field's next tab stop) and
+        // programmatic focus() committing. Deferring makes the answer independent of HOW focus moved.
+        const body = handlerBody('onSearchFieldChanged')
+        assert.ok(/setTimeout\(/.test(body), 'the decision must be deferred a tick - at change time focus has not landed yet')
+        assert.ok(/if \(suggestionsHaveFocus\(\)\) return/.test(body),
+            'and must then ask where focus actually IS, so mouse, Tab and focus() all behave alike')
+        // NARROWER than the whole search region on purpose: the clear button fires `search` while the FIELD
+        // keeps focus, and that has always committed at once. Testing the region here would strand it pending
+        // until the user happened to click away - the same class of bug as the dead activeElement test.
+        assert.ok(!/searchRegionHasFocus/.test(body) && !/inSearchRegion/.test(body),
+            'the clear button still commits - do not use the whole-region test here')
+        assert.ok(handlerBody('suggestionsHaveFocus').includes("getElementById('searchSuggestions')"),
+            'the narrow test asks only about the suggestion list')
+        assert.ok(body.includes('pendingSearchCommit = { value: value }'), 'the commit is held, not discarded')
+        assert.ok(!/activeElement/.test(body), 'the dead inline activeElement test must be gone')
+        // M2: a held commit is DEFERRED, never lost - leaveSearchField flushes it once focus leaves the region,
+        // so "type, reach into the list, click away" still commits exactly once.
+        const leave = handlerBody('leaveSearchField')
+        assert.ok(leave.includes('flushPendingSearchCommit()'), 'leaving the region must flush a held commit')
+        assert.ok(leave.indexOf('flushPendingSearchCommit()') < leave.indexOf('searchDraft = null'),
+            'flushed before the draft is dropped, so the committed value is still the typed one')
+        // Exactly once: an explicit commit supersedes a pending one, so the two can never both fire.
+        assert.ok(handlerBody('onSearchFilterChanged').includes('pendingSearchCommit = null'),
+            'an explicit commit (Enter, a pick, an apply) must supersede a held one')
+        assert.ok(handlerBody('flushPendingSearchCommit').includes('pendingSearchCommit = null'),
+            'and a flush must clear the slot before running, so it cannot fire twice')
+        // Wired on the markup side, on BOTH fallback events.
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        assert.ok(/onchange="onSearchFieldChanged\(this\.value\)" onsearch="onSearchFieldChanged\(this\.value\)"/.test(panelSource),
+            'the field must route change and search through the deferred commit')
+        assert.ok(!/onchange="onSearchFilterChanged/.test(panelSource), 'the unguarded handler must not remain wired')
+        // Enter is unaffected: it commits explicitly in the keydown, which is why it never relied on `change`.
+        assert.ok(handlerBody('onSearchKeyDown').includes('onSearchFilterChanged(searchInput.value)'),
+            'Enter must still commit directly')
+    })
+
+    await test('search dropdown: clicking back into the search field keeps the list and its marks (M3)', () => {
+        // Escape already hands the caret back to the field with the list still open; the mouse must be allowed the
+        // same move. Before this, the capturing click-closer saw #searchFilter as "outside" and ran
+        // closeAllDropdowns, silently destroying a multi-select in progress.
+        assert.ok(/if \(searchSuggestion && target\.closest\('#searchRow'\)\)\{ closeAllDropdowns\(\{ keepSuggestions: true \}\); return \}/.test(webviewSource),
+            'with the list open, a click in the search row must keep it (and its marks)')
+        // Only the suggestion list is spared - the other menus still close, so clicking the field while the
+        // notebook menu is open behaves exactly as before.
+        const close = handlerBody('closeAllDropdowns')
+        assert.ok(/keepSuggestions && menu\.id === 'searchSuggestions'\) continue/.test(close),
+            'keepSuggestions must spare only the suggestion list')
+        assert.ok(/if \(!keepSuggestions\) hideSearchSuggestions\(\{ reason: 'menus-closed' \}\)/.test(close),
+            'and only then skip dropping its state')
+        // A click on a row, or anywhere else, still closes everything; a target with no closest() still does too.
+        assert.ok(/if \(!target \|\| !target\.closest\)\{ closeAllDropdowns\(\); return \}/.test(webviewSource),
+            'a target without closest() must still close everything, as before')
+        assert.ok(/closest\('\.dropdown, #searchSuggestions'\)\) return/.test(webviewSource),
+            'clicks inside a menu or the list are still the menus\' own')
+    })
+
+    await test('search dropdown: typing past the last match keeps the marks so a backspace gets them back (m7)', () => {
+        // The empty state is recoverable - one backspace brings the rows straight back - but the marked values are
+        // no longer on screen, so dropping them there would be unrecoverable.
+        const input = handlerBody('onSearchInput')
+        assert.ok(/if \(!items\.length\)\{ hideSearchSuggestions\(\{ keepMarks: true, reason: 'no-matches' \}\); return \}/.test(input),
+            'no matches must not throw away a multi-select in progress')
+        assert.ok(/if \(!token\)\{ hideSearchSuggestions\(\{ reason: 'no-token' \}\); return \}/.test(input),
+            'but the token going away entirely still drops them')
+        assert.ok(/hideSearchSuggestions\(\{ keepMarks: true[^}]*\}\)/.test(handlerBody('requestTitleSuggestions')),
+            'the title: round-trip must treat an empty answer the same way')
+        const hide = handlerBody('hideSearchSuggestions')
+        assert.ok(/if \(!\(options && options\.keepMarks\)\) searchMarks = null/.test(hide),
+            'every other close - blur, commit, Escape, a re-render - still drops the marks')
+        // The kind guard still applies, so the kept marks cannot leak into a different token.
+        assert.ok(/searchMarks && searchMarks\.kind !== token\.kind\) searchMarks = null/.test(input),
+            'a different token kind must still drop them')
+    })
+
+    await test('search dropdown: Escape unwinds marks, then the filter, then the list - and is swallowed each time', () => {
+        const body = handlerBody('escapeSearchSuggestions')
+        const marksAt = body.indexOf('clearSearchMarks()')
+        const filterAt = body.indexOf("box.value = ''")
+        const closeAt = body.indexOf('hideSearchSuggestions(')
+        assert.ok(marksAt >= 0 && filterAt > marksAt && closeAt > filterAt,
+            'the order must be marks, then filter text, then the list itself')
+        assert.ok(body.includes('input.focus()'), 'closing from the filter box must hand the caret back to the field')
+        const keys = handlerBody('handleSuggestKey')
+        assert.ok(/event\.key === 'Escape'\)\{[\s\S]*preventDefault\(\)[\s\S]*stopPropagation\(\)[\s\S]*escapeSearchSuggestions\(\)/.test(keys),
+            'every Escape step must be swallowed, so the dropdown keeps winning Escape')
+        // The bare-Escape selection collapse (1.9.7) must still stand aside while this list is open.
+        assert.ok(/if \(document\.getElementById\('searchSuggestions'\)\) return/.test(webviewSource),
+            'the bare-Escape collapse must still yield to an open suggestion list')
+    })
+
+    await test('search dropdown: Enter applies every mark, or picks the highlighted row when there is none', () => {
+        const keys = handlerBody('handleSuggestKey')
+        assert.ok(/if \(markedSearchValues\(\)\.length\)\{ applyMarkedSuggestions\(input\); return \}/.test(keys),
+            'with marks, Enter must insert them all')
+        assert.ok(keys.includes('applySearchSuggestion(input, activeSuggestion())'),
+            'with none, Enter keeps the existing first-match pick')
+        // The same handler serves the field and the list's filter box, so both agree.
+        assert.ok(handlerBody('onSearchKeyDown').includes('handleSuggestKey(event, getSearchInput())'),
+            'the search field uses the shared handler while the list is open')
+        assert.ok(handlerBody('buildSuggestFilterRow').includes('handleSuggestKey(event, input)'),
+            'so does the embedded filter box')
+        // Arrow keys skip whatever the filter is hiding.
+        assert.ok(handlerBody('moveSuggestActive').includes("hasAttribute('hidden')"), 'the arrows must skip filtered-out rows')
+    })
+
+    await test('search dropdown: marks are held by VALUE, so filtering cannot lose them', () => {
+        assert.ok(/var searchMarks = null/.test(webviewSource), 'the marks live outside the per-keystroke list state')
+        const toggle = handlerBody('toggleSearchMark')
+        assert.ok(toggle.includes('searchMarks.values.indexOf(value)'), 'a mark is identified by its value, never by a row index')
+        assert.ok(/searchMarks\.kind !== kind/.test(toggle), 'marks belong to one token kind')
+        // Filtering only hides rows; it must not touch the marks.
+        assert.ok(!/searchMarks/.test(handlerBody('applySuggestFilter')), 'filtering must leave the marks alone')
+        // A kind change (tag: -> notebook:) drops them; no list at all drops them.
+        assert.ok(/searchMarks && searchMarks\.kind !== token\.kind\) searchMarks = null/.test(handlerBody('onSearchInput')),
+            'a different token kind must drop the marks')
+        assert.ok(handlerBody('hideSearchSuggestions').includes('searchMarks = null'), 'no list, no marks')
+    })
+
+    await test('search dropdown: a background re-render carries an in-progress multi-select across', () => {
+        // The panel markup is replaced on every refresh, which used to close the list. Losing a half-built
+        // ten-tag selection to a sync landing would be expensive, so the marks ride across and the list re-opens
+        // from the restored draft.
+        const body = handlerBody('reconcile')
+        assert.ok(/var keptMarks = searchFocused \? searchMarks : null/.test(body), 'the marks are kept across the render')
+        const restoreAt = body.indexOf('restoreSearchDraft()')
+        const reopenAt = body.indexOf('reopenSearchSuggestions(keptMarks)')
+        assert.ok(restoreAt >= 0 && reopenAt > restoreAt, 'the list is rebuilt AFTER the draft text is back')
+        assert.ok(handlerBody('reopenSearchSuggestions').includes('onSearchInput(input)'),
+            'the rebuild goes through the normal path, so the candidates match whatever is now in the field')
+    })
+
+    await test('search dropdown: touch marks with a long press, and the pick moved off pointerdown', () => {
+        // A long press BEGINS with a pointerdown, so the old commit-on-pointerdown would have closed the list
+        // before the hold could fire; and preventDefault on a touch pointerdown also stops the list scrolling.
+        const down = handlerBody('onSuggestPointerDown')
+        assert.ok(/event\.preventDefault\(\)/.test(down),
+            'the touch pointerdown cancels its default actions (see the 1.9.10 mirror test for why)')
+        assert.ok(/setTimeout\([\s\S]*toggleSearchMark\(suggestPress\.value\)[\s\S]*SUGGEST_LONG_PRESS_MS/.test(down),
+            'a hold must mark the row it began on')
+        assert.ok(/SUGGEST_LONG_PRESS_MS = 500/.test(webviewSource), 'the hold matches the list long-press (500ms)')
+        const up = handlerBody('onSuggestPointerUp')
+        assert.ok(/if \(held \|\| moved/.test(up), 'a hold that already marked, or a scroll, must not also pick')
+        assert.ok(/if \(markedSearchValues\(\)\.length\) toggleSearchMark\(pressed\)/.test(up),
+            'in selection mode a tap toggles')
+        assert.ok(/else applySearchSuggestion\(getSearchInput\(\), suggestionByValue\(pressed\)\)/.test(up),
+            'with nothing marked a tap is the ordinary single pick')
+        assert.ok(handlerBody('onSuggestPointerMove').includes('SUGGEST_MOVE_SLOP'), 'movement past the slop abandons the press')
+        assert.ok(/document\.addEventListener\('scroll', cancelSuggestPress, true\)/.test(webviewSource),
+            'scrolling must abandon the press, on the same capture signal the to-do adapter uses')
+        // The dropdown deliberately posts NO dialogGuard: it opens and closes on every keystroke, so bracketing it
+        // could leak the guard and freeze mobile refreshes forever - and the search-focus hold already pauses them.
+        assert.ok(!/dialogGuard/.test(handlerBody('renderSearchSuggestions')) && !/dialogGuard/.test(handlerBody('hideSearchSuggestions')),
+            'the suggestion list must not touch the overlay refresh guard')
+    })
+
+    await test('mobile long press: the row gestures mirror the PROVEN to-do-row adapter (1.9.9 device fix)', () => {
+        // Slava's Pixel: a short tap picked correctly, but a HOLD closed the whole list and left only the typed
+        // fragment. The JS press tracker was already a copy of the to-do adapter; what it did NOT copy was that
+        // adapter's CSS. Android's native long press therefore won on these rows - it started a text selection
+        // and raised the system callout, which takes the pointer (pointercancel abandons the 500ms hold) and
+        // blurs the field (which tore the list down). These pin both halves of the mirror.
+        //
+        // (a) The CSS suppression, the same three properties the to-do rows carry, mobile-gated like them.
+        const suppression = /\.cockpit-mobile #searchSuggestions \.dropdown-item,\s*\.cockpit-mobile #searchSuggestions \.dropdown-label \{([^}]*)\}/.exec(panelCssSource)
+        assert.ok(suppression, 'the suggestion rows must carry the mobile gesture suppression')
+        assert.ok(/-webkit-touch-callout:\s*none/.test(suppression[1]), 'the iOS/Android long-press callout must be suppressed')
+        assert.ok(/-webkit-user-select:\s*none/.test(suppression[1]) && /[^-]user-select:\s*none/.test(suppression[1]),
+            'native text selection must be suppressed, in both spellings')
+        // pan-y, NOT a blanket preventDefault: the list must still scroll vertically (15 rows and more).
+        assert.ok(/touch-action:\s*pan-y/.test(suppression[1]),
+            'the rows must keep vertical scrolling while giving up every other native gesture')
+        // 1.9.10 correction: the earlier round asserted the ABSENCE of preventDefault here, on the premise that
+        // cancelling a touch pointerdown blocks panning. That premise was wrong - panning is governed by
+        // touch-action (pan-y, asserted above) and by touchstart/touchmove, not by pointerdown - and leaving
+        // the default in place is what let Android's native long press take the gesture. Cancelling it kills
+        // the focus change and the native selection at source, so the field never blurs.
+        assert.ok(/event\.preventDefault\(\)/.test(handlerBody('onSuggestPointerDown')),
+            'the touch pointerdown must cancel its default actions (focus change, native selection)')
+        // What must not happen is a SYNCHRONOUS pick: a hold begins with this same pointerdown, so committing
+        // here would close the list before the 500ms could elapse. Marking from inside the hold's timer is the
+        // gesture itself and is expected.
+        const downBody = handlerBody('onSuggestPointerDown')
+        assert.ok(!/applySearchSuggestion/.test(downBody), 'the pointerdown must never pick - the pick waits for pointerup')
+        const beforeTimer = downBody.slice(0, downBody.indexOf('setTimeout('))
+        assert.ok(!/toggleSearchMark/.test(beforeTimer), 'and must not mark before the hold has actually fired')
+        // The to-do rows keep their own rule - this ADDS to the proven one, it does not move it.
+        assert.ok(/\.cockpit-mobile \.todo,\s*\.cockpit-mobile h2\[data-todo-ids\] \{[^}]*-webkit-touch-callout:\s*none/.test(panelCssSource),
+            'the to-do rows must keep the suppression that has always worked')
+
+        // (b) The listeners are registered ONCE on the document in the CAPTURE phase, like the to-do adapter,
+        // rather than on the list element: capture cannot be stopped on the way up, and one registration
+        // survives the list being rebuilt on every keystroke.
+        for (const wiring of [
+            "document.addEventListener('pointerdown', onSuggestPointerDown, true)",
+            "document.addEventListener('pointermove', onSuggestPointerMove, true)",
+            "document.addEventListener('pointerup', onSuggestPointerUp, true)",
+            "document.addEventListener('pointercancel', cancelSuggestPress, true)",
+        ]){
+            assert.ok(webviewSource.includes(wiring), `the press tracking must be wired as: ${wiring}`)
+        }
+        assert.ok(handlerBody('wireSuggestList').includes('if (IS_MOBILE) return'),
+            'nothing touch-related may hang off the list element any more')
+        // Each handler does its own gating, exactly as the to-do adapter's does.
+        const down = handlerBody('onSuggestPointerDown')
+        assert.ok(down.includes('if (!IS_MOBILE) return') && down.includes("event.pointerType === 'mouse'"),
+            'the press tracker must be inert on desktop and for a mouse')
+        assert.ok(down.includes("closest('#searchSuggestions .dropdown-item')"),
+            'and must only arm on a row of the OPEN suggestion list')
+
+        // (c) contextmenu inside the list is suppressed on mobile - the belt to the CSS braces - and left alone
+        // on desktop, where a right-click in the list is unchanged.
+        const menuBlock = /document\.addEventListener\('contextmenu', function\(event\)\{([\s\S]*?)\}, true\)/.exec(webviewSource)
+        assert.ok(menuBlock, 'contextmenu inside the suggestion list must be handled')
+        assert.ok(menuBlock[1].includes('if (!IS_MOBILE) return'), 'and only on mobile - desktop right-click is untouched')
+        assert.ok(menuBlock[1].includes("closest('#searchSuggestions')") && menuBlock[1].includes('preventDefault()'),
+            'the native menu must be prevented inside the list')
+    })
+
+    await test('mobile long press: the synthetic click is swallowed, as the to-do adapter has always done (1.9.10)', () => {
+        // The named difference between the working gesture and the broken one. The browser synthesises a click
+        // after a touch gesture; the to-do adapter swallows it, this list did not. That click lands wherever the
+        // gesture ended - after a cancelled or re-targeted press, not necessarily on a row - and a click outside
+        // the list runs closeAllDropdowns, which removes the list while leaving the typed text in the field:
+        // exactly the reported "the window closes and bare tag: remains".
+        const proven = /document\.addEventListener\('click', function\(event\)\{\s*if \(longPress\.fired\)\{ longPress\.fired = false; event\.preventDefault\(\); event\.stopPropagation\(\) \}\s*\}, true\)/
+        assert.ok(proven.test(webviewSource), 'the to-do adapter must keep its click swallower (the model being copied)')
+        // The suggestion list now has the same guard, armed by any press that began on one of its rows.
+        assert.ok(/if \(!IS_MOBILE \|\| !suggestPress\.clickArmed\) return/.test(webviewSource),
+            'the suggestion list must swallow the click of its own gesture, mobile only')
+        assert.ok(/suggestPress\.clickArmed = true/.test(handlerBody('onSuggestPointerDown')),
+            'a press that began on a row owns the click that follows it')
+        // Capture phase, so it runs before the dismissal listeners it is protecting the list from.
+        const swallower = /if \(!IS_MOBILE \|\| !suggestPress\.clickArmed\) return[\s\S]*?\}, true\)/.exec(webviewSource)
+        assert.ok(swallower, 'the swallower must be registered in the capture phase')
+    })
+
+    await test('mobile diagnostic: the gesture trace is a mobile-only, default-off setting (1.9.10)', () => {
+        // After two device rounds spent guessing, the next one can report what actually fired.
+        const settingsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settings.ts'), 'utf8')
+        assert.ok(/gestureTraceSettingKey = "gestureTrace"/.test(settingsSource), 'the setting must exist')
+        const block = /\[gestureTraceSettingKey\]: \{([\s\S]*?)\},/.exec(settingsSource)
+        assert.ok(block, 'the setting must be registered')
+        assert.ok(/value: false/.test(block[1]), 'and default to OFF')
+        assert.ok(/type: SettingItemType\.Bool/.test(block[1]), 'as a Bool')
+        // Reaches the webview through the island it already reads - no new plumbing, no extra round-trip.
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        assert.ok(/gestureTrace: gestureTrace,/.test(panelSource), 'it must ride in the search-data island')
+        // Inert unless mobile AND enabled, so it costs nothing when off.
+        assert.ok(/return IS_MOBILE && !!readSearchData\(\)\.gestureTrace/.test(handlerBody('gestureTraceEnabled')),
+            'the trace must be mobile-only and opt-in')
+        assert.ok(handlerBody('traceGesture').includes('if (!gestureTraceEnabled()) return'),
+            'and every trace point must bail out first when it is off')
+        // It reports WHY the list closed, which is the question two device rounds could not answer.
+        assert.ok(/list-closed:' \+ \(\(options && options\.reason\)/.test(webviewSource),
+            'the teardown must record its reason')
+        for (const reason of ['menus-closed', 'field-left', 'commit', 'no-token', 'escape', 'applied']){
+            assert.ok(webviewSource.includes("reason: '" + reason + "'"), `the ${reason} teardown must be named`)
+        }
+    })
+
+    await test('mobile long press: the press-inside flag covers the whole HOLD, not just a tap (1.9.9 device fix)', () => {
+        // A tap's blur lands within a tick of the pointerdown, so clearing the flag on a start-anchored tick was
+        // enough for a tap. A HOLD keeps the finger down for half a second, and any blur Android raises in that
+        // window then looked like the user leaving: leaveSearchField hid the list and posted
+        // searchFocusChanged(false), which is exactly the reported "the window closes, leaving only tag:".
+        assert.ok(/document\.addEventListener\('pointerup', releaseSuggestPointerInside, true\)/.test(webviewSource) &&
+                  /document\.addEventListener\('pointercancel', releaseSuggestPointerInside, true\)/.test(webviewSource),
+            'the flag must be released when the press ENDS, not a tick after it began')
+        const release = handlerBody('releaseSuggestPointerInside')
+        assert.ok(/setTimeout\(/.test(release),
+            'and one tick after that, so the blur the press itself causes is still covered')
+        // It stays tied strictly to the press: an unrelated blur with no finger down is still a real departure.
+        assert.ok(/if \(!suggestPointerInside \|\| suggestPointerInsideTimer\) return/.test(release),
+            'releasing must be idempotent and only apply to a live press')
+        // The blur path consumes it, keeping the list and handing the caret back.
+        assert.ok(/if \(suggestPointerInside\)\{ restoreSearchDraft\(\); return \}/.test(handlerBody('onSearchBlur')),
+            'a blur during a press inside the list must hand the caret back, not tear the list down')
+    })
+
+    // ============================================================ any:1 must not dissolve Cockpit's narrowing
+    // The bug: Cockpit builds its searches by concatenating its own terms onto the user's criteria
+    // (`type:todo`, `iscompleted:0`, `due:...`, the excluded-notebook clauses). Joplin's `any:1` ORs EVERY term
+    // in the string, so each of those became an alternative rather than a constraint - and `type:todo` matches
+    // every to-do, so the filter collapsed and the panel listed everything (Slava: "any:1 shows notes with none
+    // of the tags"). Proven by logging the query that was sent; fixed by keeping Cockpit's terms out of such a
+    // query and applying them to the results instead.
+    const anyFolder = 'n'.repeat(32)
+    const anySoon = Date.now() + 3600000
+    // One of each thing the narrowing is supposed to remove, plus one row that must survive.
+    const anyTodos = [
+        { id: 'a'.repeat(32), title: 'AnyOpenDue',   is_todo: 1, todo_completed: 0,          todo_due: anySoon, parent_id: anyFolder, user_updated_time: 1 },
+        { id: 'b'.repeat(32), title: 'AnyCompleted', is_todo: 1, todo_completed: Date.now(), todo_due: anySoon, parent_id: anyFolder, user_updated_time: 1 },
+        { id: 'c'.repeat(32), title: 'AnyNoDue',     is_todo: 1, todo_completed: 0,          todo_due: 0,       parent_id: anyFolder, user_updated_time: 1 },
+        { id: 'd'.repeat(32), title: 'AnyPlainNote', is_todo: 0, todo_completed: 0,          todo_due: 0,       parent_id: anyFolder, user_updated_time: 1 },
+    ]
+    // A profile that hides completed and no-due, so all three narrowing terms are actually in play.
+    const anyProfile = {
+        ...baseProfile, name: 'Any', showNotes: false, showNoDue: false,
+        showCompletedPast: false, showCompletedToday: false, showCompletedFuture: false, showCompletedNoDue: false,
+    }
+    const anyRun = async () => await run({
+        dataDir: path.join(tmp, 'any-mode-data-' + Math.random().toString(36).slice(2)),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: anyTodos,
+        folders: [{ id: anyFolder, title: 'Box', parent_id: '' }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...anyProfile, id: 1, sortOrder: 0, noteID: '' }] }),
+            currentProfileID: 1,
+        },
+    })
+    const listQueries = (state) => state.gets.filter(g => g.path[0] === 'search').map(g => String(g.query.query))
+    const shownTitles = (state) => (String(state.panelHtml['panel-panel'] || '').match(/class="todo-title"[^>]*>([^<]*)/g) || [])
+        // Interval rows render as "11:09 AM - Title"; the time prefix is not what these checks are about.
+        .map(x => x.split('>').pop().trim().replace(/^\d{1,2}:\d{2}(\s?[AP]M)?\s*-\s*/i, ''))
+
+    await test('any:1: Cockpit sends the user query ALONE - none of its own terms become OR alternatives', async () => {
+        const state = await anyRun()
+        state.gets.length = 0
+        await state.panelMessageHandler(['searchFilterChanged', 'tag:one tag:two any:1'])
+        const queries = listQueries(state)
+        assert.ok(queries.length > 0, 'a search must have run')
+        for (const q of queries){
+            // These are the terms that silently became alternatives, and with them the whole filter.
+            assert.ok(!/type:todo/.test(q), `type:todo must not ride along in an any:1 query: ${q}`)
+            assert.ok(!/type:note/.test(q), `type:note must not ride along in an any:1 query: ${q}`)
+            assert.ok(!/iscompleted:/.test(q), `iscompleted: must not ride along in an any:1 query: ${q}`)
+            assert.ok(!/due:19700201/.test(q), `the due floor must not ride along in an any:1 query: ${q}`)
+            assert.strictEqual(q.trim(), 'tag:one tag:two any:1', 'the user string is sent verbatim')
+        }
+    })
+
+    await test('any:1: the narrowing those terms did is applied to the results instead', async () => {
+        // The stub answers the type-less any:1 search with the whole fixture set, exactly as the real API
+        // would once type:todo is gone. Only the open, due to-do may survive: the completed one, the one with
+        // no due date and the plain note are all removed by Cockpit itself.
+        const state = await anyRun()
+        await state.panelMessageHandler(['searchFilterChanged', 'tag:one tag:two any:1'])
+        assert.deepStrictEqual(shownTitles(state), ['AnyOpenDue'],
+            'type:todo, iscompleted:0 and the due floor must still be constraints under any:1')
+    })
+
+    await test('any:1: a query WITHOUT it is byte-identical to before - the common path is untouched', async () => {
+        const state = await anyRun()
+        state.gets.length = 0
+        await state.panelMessageHandler(['searchFilterChanged', 'tag:one tag:two'])
+        const queries = listQueries(state)
+        const listQuery = queries.find(q => q.includes('type:todo'))
+        assert.ok(listQuery, 'the ordinary path must still push type:todo into the query')
+        assert.ok(/iscompleted:0/.test(listQuery), 'and iscompleted:0, since this profile hides completed')
+        assert.ok(/due:19700201/.test(listQuery), 'and the due floor, since this profile hides no-due')
+        assert.ok(listQuery.includes('tag:one tag:two'), 'with the user criteria appended as always')
+    })
+
+    await test('any:1: detection is a whole token, and errs towards the safe (client-side) path', async () => {
+        // Read from the webview-independent source: the same rule the plugin compiles in.
+        const joplinSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'joplin.ts'), 'utf8')
+        assert.ok(/const ANY_MODE_PATTERN = \/\(\^\|\\s\)any:1\(\\s\|\$\)\/i/.test(joplinSource),
+            'any:1 must be matched as a whitespace-delimited token, case-insensitively')
+        // notebook: is deliberately LEFT in the query: Joplin keeps notebook scope as AND even under any:1, so
+        // it is still a constraint there, and moving it client-side would cost a much wider search.
+        assert.ok(/notebook:` keeps|notebook:` is|notebook:. is left in the query|keeps notebook scope as AND/.test(joplinSource),
+            'the notebook: decision must be recorded next to the rule')
+        // The excluded-notebook ids were always the authority client-side, so dropping their clauses is safe.
+        assert.ok(/filterExcluded\(allTodos, excluded\.set\)/.test(joplinSource),
+            'the excluded-notebook filter must still run on the any:1 path')
+    })
+
+    // ---- emptying the field returns the panel to "all" (the second Pixel report, 1.9.9) -------------------
+    // Diagnosed empirically before fixing: the HOST was never at fault - an empty committed query already
+    // restores the unfiltered view on both platforms. The two broken layers were (1) the webview never
+    // committed at all when the field was emptied by input (backspace/cut: `input` is the only event they
+    // fire, `change` waits for a blur, `search` for the ×), and (2) on mobile the search-focus hold swallowed
+    // the render even when a commit did happen.
+    await test('empty search (host): an empty committed query restores the unfiltered view on both platforms', async () => {
+        for (const state of [desktop, mobile]){
+            await state.panelMessageHandler(['searchFilterChanged', 'Zzqq-no-such-note'])
+            const filtered = state.panelHtml['panel-panel']
+            assert.ok(/id="searchFilter"[\s\S]*?value="Zzqq-no-such-note"/.test(filtered), 'the filter must render as committed')
+            await state.panelMessageHandler(['searchFilterChanged', ''])
+            const cleared = state.panelHtml['panel-panel']
+            assert.ok(/id="searchFilter"[\s\S]*?value=""/.test(cleared),
+                'an empty commit must clear the committed filter - the host side was never the bug')
+        }
+    })
+
+    await test('empty search (host): the auto-reset renders through the mobile focus hold, ordinary commits still do not', async () => {
+        // The hold exists so a setHtml cannot wipe the field mid-typing - on mobile a render is a full webview
+        // reload. The reset is the one commit that must be exempt: the user has emptied the field, there is
+        // nothing left to type, and waiting for a blur that may never come leaves the panel filtered forever.
+        await mobile.panelMessageHandler(['searchFilterChanged', 'tag:work'])
+        await mobile.panelMessageHandler(['searchFocusChanged', true])
+
+        const beforeOrdinary = mobile.setHtmlCalls
+        await mobile.panelMessageHandler(['searchFilterChanged', 'tag:other'])
+        assert.strictEqual(mobile.setHtmlCalls - beforeOrdinary, 0,
+            'an ordinary commit while the field is focused must still be held on mobile')
+
+        const beforeReset = mobile.setHtmlCalls
+        await mobile.panelMessageHandler(['searchFilterChanged', '', true])
+        assert.strictEqual(mobile.setHtmlCalls - beforeReset, 1, 'the auto-reset must render straight away')
+        assert.ok(/id="searchFilter"[\s\S]*?value=""/.test(mobile.panelHtml['panel-panel']),
+            'and the render must show the cleared filter')
+        // The hold is not torn down by the exemption: the field is still focused as far as the host knows, so
+        // the next ordinary commit is held again.
+        const afterReset = mobile.setHtmlCalls
+        await mobile.panelMessageHandler(['searchFilterChanged', 'tag:again'])
+        assert.strictEqual(mobile.setHtmlCalls - afterReset, 0, 'the hold must survive the exempted render')
+        await mobile.panelMessageHandler(['searchFocusChanged', false])
+    })
+
+    await test('empty search (webview): the reset is an explicit commit on an observed empty value', () => {
+        const body = handlerBody('maybeAutoResetSearch')
+        // "Still filtered?" is read from the server-rendered value ATTRIBUTE, which the user's editing never
+        // touches - so there is no new state to keep in sync with the host.
+        assert.ok(body.includes('input.defaultValue'),
+            'the committed filter must come from defaultValue, not from a second copy of the host state')
+        assert.ok(/if \(input\.value\.trim\(\)\)\{ searchResetPosted = false; return false \}/.test(body),
+            'a field with content resets the guard and does nothing else')
+        assert.ok(body.includes("onSearchFilterChanged('', { renderNow: true })"),
+            'the reset must be an EXPLICIT commit, and must ask to render through the mobile hold')
+        assert.ok(body.includes('searchResetPosted = true'), 'and must not post itself twice while a render is in flight')
+        // Wired into the INPUT path - the only event a backspace or a cut fires - ahead of the token parsing.
+        const input = handlerBody('onSearchInput')
+        assert.ok(input.includes('if (maybeAutoResetSearch(input)) return'), 'the input path must try the reset')
+        assert.ok(input.indexOf('maybeAutoResetSearch') < input.indexOf('tokenAtCaret'),
+            'before the token parsing, since an empty field has no token')
+        // It composes with the deferred-commit machinery: routing through onSearchFilterChanged clears any
+        // commit still held pending, so a later blur cannot commit the same reset again.
+        assert.ok(handlerBody('onSearchFilterChanged').includes('pendingSearchCommit = null'),
+            'the reset must supersede a pending blur-commit')
+        // The renderNow flag rides as message[2]; every other caller omits it.
+        assert.ok(/postMessage\(\['searchFilterChanged', searchString, !!\(opts && opts\.renderNow\)\]\)/.test(handlerBody('onSearchFilterChanged')),
+            'renderNow must travel as message[2]')
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        assert.ok(/message\[2\] \? \{ renderWhileSearchFocused: true \} : undefined/.test(panelSource),
+            'the host must turn message[2] into the render exemption')
+        assert.ok(/if \(mobile && searchFocused && !\(options && options\.renderWhileSearchFocused\)\) return/.test(panelSource),
+            'and the hold must honour it without being removed')
+    })
+
+    await test('search dropdown markup: a filter box with the apply button, and the hint at the bottom edge', () => {
+        const body = handlerBody('renderSearchSuggestions')
+        assert.ok(body.includes('buildSuggestFilterRow(input)'), 'the filter row is pinned above the rows')
+        assert.ok(body.includes("hint.textContent = window.SearchTokens.hintText(IS_MOBILE)"),
+            'the hint wording is platform-specific and comes from the shared module')
+        assert.ok(body.includes("label.textContent = suggestion.label"), 'row labels stay textContent - never interpreted as markup')
+        const filter = handlerBody('buildSuggestFilterRow')
+        assert.ok(filter.includes('window.SearchTokens.APPLY_ICON'), 'the apply button carries the enter-arrow glyph')
+        assert.ok(filter.includes("apply.setAttribute('hidden', '')"), 'it starts hidden - it appears only once something is marked')
+        assert.ok(!/box\.focus\(\)/.test(filter),
+            'the filter box must NOT steal the caret: this list opens while the user is typing in the search field')
+        const paint = handlerBody('paintSearchMarks')
+        assert.ok(/classList\.toggle\('-marked'/.test(paint), 'marked rows get their own class')
+        assert.ok(/apply\.removeAttribute\('hidden'\)/.test(paint), 'the apply button appears exactly when a mark exists')
+    })
+
+    await test('search dropdown css: ~15 rows then scroll, capped by the panel, with the marks visually distinct', () => {
+        // Tall enough to work through, never taller than the panel - the same shape as #notebookMenu's cap, with a
+        // larger offset because this menu hangs off the third control row.
+        assert.ok(/#searchSuggestions \{[^}]*max-height:\s*min\(calc\(15 \* [^)]*\)[^)]*\), calc\(100vh - \d+px\)\)/.test(panelCssSource),
+            'the list must target ~15 rows and stay inside the panel height')
+        assert.ok(/#searchSuggestions \{[^}]*overflow:\s*hidden/.test(panelCssSource),
+            'the MENU must not scroll - only .suggest-list inside it, so the filter box and hint stay put')
+        assert.ok(/\.suggest-list \{[^}]*overflow-y:\s*auto/.test(panelCssSource), 'the rows are what scrolls')
+        // The mark reads differently from the keyboard highlight, because a row can be both at once.
+        assert.ok(/\.dropdown-item\.-marked \{[^}]*box-shadow:\s*inset/.test(panelCssSource),
+            'a marked row must be distinguishable from the -current keyboard highlight')
+        // User custom CSS must be able to win, and the panel's public variables are what everything is built from.
+        const suggestRules = (panelCssSource.match(/\.suggest-[a-z]+[^{]*\{[^}]*\}/g) || []).join('\n')
+        assert.ok(suggestRules.length > 0, 'the suggestion rules must exist')
+        assert.ok(!/!important/.test(suggestRules), 'no !important - a user stylesheet has to be able to override these')
+        assert.ok(/--cockpit-/.test(suggestRules), 'colours come from the public --cockpit-* variables')
+        // Touch targets, gated on the mobile class so the desktop panel is untouched.
+        assert.ok(/\.cockpit-mobile \.suggest-filter-input \{[^}]*min-height:\s*40px/.test(panelCssSource),
+            'the filter box is a 40px tap target on mobile')
+        assert.ok(/\.cockpit-mobile \.suggest-apply \{[^}]*40px/.test(panelCssSource),
+            'so is the apply button - it commits a selection built by long press')
+    })
+
+    await test('search dropdown: the title: round-trip offers enough rows to mark, at no extra request', () => {
+        // tag:/notebook: read the embedded island, but title: round-trips to the host, whose cap used to be 10 -
+        // fewer than the list now shows, let alone what a multi-select needs to reach.
+        const joplinSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'joplin.ts'), 'utf8')
+        assert.ok(/const titleSuggestionLimit = 50/.test(joplinSource), 'the title: cap must clear the visible rows')
+        assert.ok(!/limit: 10,/.test(joplinSource.slice(joplinSource.indexOf('searchTitleSuggestions'), joplinSource.indexOf('/** getNotes'))),
+            'no hard-coded 10 may survive in the title: path')
+        // Still ONE request per suggestion round, on both branches - a bigger page, not more calls.
+        const titleBody = joplinSource.slice(joplinSource.indexOf('export async function searchTitleSuggestions'), joplinSource.indexOf('/** getNotes'))
+        assert.strictEqual((titleBody.match(/await joplin\.data\.get\(/g) || []).length, 2,
+            'exactly two data.get sites (the empty-partial branch and the search branch), one of which runs per call')
+    })
+
+    await test('search dropdown (host): a title: suggestion round-trip still costs exactly one data.get', async () => {
+        // Driven for real against the stubbed API: the raised cap must not turn one request into several.
+        const before = desktop.gets.length
+        const answered = await desktop.panelMessageHandler(['searchTitleSuggestions', 'buy'])
+        assert.ok(Array.isArray(answered), 'the webview must get an array back')
+        assert.strictEqual(desktop.gets.length - before, 1, 'one suggestion round-trip must issue exactly one data.get')
+        assert.strictEqual(desktop.gets[desktop.gets.length - 1].query.limit, 50, 'and ask for the raised page size')
     })
 
     await fs.remove(tmp)
