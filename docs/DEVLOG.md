@@ -248,3 +248,56 @@ Desktop is provably unaffected: the same commit rendered with and without the fl
 render count and **byte-identical markup**.
 
 Suite: 265 harness checks + 58 Playwright tests (57 run, 1 opt-in showcase skipped).
+
+## 2026-08-24 — v2.0.0: multi-select token search, and mobile search parity
+
+The public jump is **1.9.4 → 2.0.0**: 1.9.6–1.9.11 were internal steps, never published, and the entries
+above are their development detail. This is the user-facing sum.
+
+**Multi-select in the search field's token dropdowns** — the headline, and the reason for the major bump.
+`tag:`, `notebook:` and `title:` all gained it. The list is ~15 rows tall and scrolls, with its own filter
+box pinned above the rows and a muted hint below them. Rows are MARKED and inserted together: Ctrl/Cmd+click
+on desktop, and on touch a 500 ms long press marks the first row and enters selection mode, after which a
+plain tap toggles. An apply button appears beside the filter box whenever anything is marked, doubling as
+the selection-mode indicator. Marks are held by value, so filtering the list, clearing the filter and typing
+past the last match all leave them intact, and a background re-render carries an in-progress selection
+across. Escape unwinds one step at a time — marks, then filter text, then the list.
+
+Insertion is a pure, tested module (`src/ui/panel/searchTokens.js`): it replaces ONLY the incomplete token
+being completed and returns everything either side byte-identical, so other tokens, free text, `any:1` and
+negations all survive. Quoting, spacing and a quote-aware duplicate skip live there too.
+
+**Search that behaves**, from four bugs found across desktop review and three Pixel sessions:
+
+- `any:1` listed everything. Cockpit concatenates its own narrowing (`type:todo`, `iscompleted:0`, `due:`)
+  onto the user's query, and Joplin's `any:1` ORs every term — so `type:todo` alone matched every to-do and
+  the filter collapsed. The user's string is now sent verbatim and the narrowing applied to the results.
+- Clearing the field returns the panel to "all" by itself, however it was emptied. This was unreachable on
+  mobile, where the soft keyboard has no committing Enter and Android renders no clear button.
+- On mobile, a committed search never painted: every commit path keeps the field focused so the keyboard
+  stays up, and the render hold swallowed the paint. Every explicit commit now renders.
+- Reaching into the dropdown no longer breaks the search: clicking its filter box used to commit the
+  half-typed query and tear the list down, and clicking back into the field destroyed the marks.
+
+**Mobile long press**, which took three device rounds. The gesture was a faithful copy of the proven to-do
+row adapter — except for its CSS, so Android's native long press won and took the pointer. It now carries
+the same `-webkit-touch-callout`/`user-select` suppression (plus `touch-action: pan-y`, so the list still
+scrolls), cancels the touch pointerdown's default action, and swallows the synthetic click the way the
+to-do adapter always has. A default-off "Gesture trace" setting can replace the list's hint line with the
+last few touch events, so a touch problem can be reported instead of guessed at.
+
+**Also shipping, from the unpublished 1.9.6–1.9.7 steps**: the panel's menus and dropdowns now dismiss on a
+click anywhere outside the panel iframe, not just inside it; the row highlight follows the note the main
+editor is showing, wherever it was opened from, without ever joining a drag or batch selection; Escape on a
+multi-selection collapses it to the last row selected rather than clearing it; the create buttons measure
+themselves and degrade in two stages instead of wrapping; and the "New to-do" glyph is a ring with a
+checkmark, matching the panel's own language, instead of the note icon with a tick on it.
+
+Suite: 265 harness checks + 58 Playwright tests (57 run, 1 opt-in showcase skipped).
+
+Process notes from this batch, worth keeping: the device is the only oracle for touch — two desktop E2E
+rounds, a fuzzed pure module and an adversarial review all passed over a bug a single hold on a real Pixel
+exposed in seconds, and the fix was a stylesheet. Diagnose before fixing: the `any:1` and mobile-render bugs
+were both found by logging what was actually sent and counting renders, and in both cases the layer everyone
+suspected was innocent. And pin behaviour by matching the CALL, never the word — several review rounds were
+spent on assertions that matched `preventDefault` inside the comment explaining its absence.
