@@ -301,3 +301,146 @@ exposed in seconds, and the fix was a stylesheet. Diagnose before fixing: the `a
 were both found by logging what was actually sent and counting renders, and in both cases the layer everyone
 suspected was innocent. And pin behaviour by matching the CALL, never the word — several review rounds were
 spent on assertions that matched `preventDefault` inside the comment explaining its absence.
+
+## 2026-08-24 — v2.1.0: notes join the selection, and the search survives what interrupts it
+
+Five items, triaged by Slava. The headline is a **capability**, not a regression, and that is what set the
+minor bump: note rows have never taken part in the panel's multi-selection. Established from the code and
+from git history rather than assumed — the very commit that introduced row selection (`71c435a`, 1.0.3)
+already had `onNoteRowMouseDown` **clear** `selectedTodoIDs` and set the highlight-only `pickedNoteID`
+instead, and every later change (1.8.1 row-wide open, 1.9.1 multi-drag preserve, 1.9.4 batch context menu,
+1.9.6 editor highlight, 1.9.7 Escape collapse) left that asymmetry in place. So: a gap since 1.0.3 → 2.1.0.
+
+**A. Note rows select, and a mixed selection is ordinary.** The two row handlers became ONE path. A new pure
+module `src/ui/panel/rowSelection.js` (`window.RowSelection`, UMD like `editorNote.js` / `noteMenu.js` /
+`searchTokens.js`, `addScript`ed before `panelWebview.js`) holds the three decisions — `pressSelection`
+(plain / Ctrl / Shift, both anchors), `clickSelection` (the collapse a drag-less click makes, with a
+`changed` flag so a single click never repaints), `schedulableIDs` — and `onTodoRowMouseDown` /
+`onNoteRowMouseDown` are now two-line wrappers over `onRowPressed`, `onTodoRowClicked` /
+`onNoteRowClicked` over `onRowClicked`. The store is renamed `selectedTodoIDs` → `selectedRowIDs` (and
+`lastClickedTodoID` → `lastClickedRowID`): the old name would now actively mislead. Every invariant extends
+by construction rather than by copying — mousedown-on-selected preserves, click collapses, Escape collapses
+to the last SELECTING press, and the editor-tracking highlight still never joins a batch. A note row also
+gained the modifier guard its to-do twin always had: Ctrl-clicking a tenth row into a batch must not also move
+the editor.
+
+**The read-only peek stays out, and adversarial review found that it did not.** `allSelectableRows()` excludes
+`.outside-results` from the Shift range and the Escape collapse, and `formats.ts` drops the selection
+`onmousedown` from every peek row (`renderTodoRowHtml(draggable:false)` / `renderNoteRowHtml(selectable:false)`)
+— but those rows still emit `onclick` unconditionally, because click-to-open is what the peek is FOR. So the
+new shared `onRowClicked` collapse wrote a peek row straight into `selectedRowIDs`, where it persisted across
+renders; and since a selection now drives the batch menu, that made Delete / Move / Tags / Duplicate /
+Switch-type reachable on rows the user was deliberately shown read-only, from outside their own filters and
+even from excluded notebooks. The to-do half of the hole predated this release; making the selection
+batch-capable is what turned it into a data-loss path. `onRowClicked` now refuses a row inside
+`.outside-results` — the same selector `allSelectableRows()` uses — and skips only the selection half, so the
+peek still opens.
+
+A second, pre-existing writer turned up in the same audit and is closed with it: the **tick circle's right
+click** (`onTodoContextMenu`). `draggable:false` suppresses neither `oncontextmenu` nor the `.todo-checkbox`
+element, so right-clicking a peek to-do's circle seeded `selectedRowIDs` with the peek row, opened the due-date
+picker for it, and left that id sitting in the selection where Ctrl+adding an ordinary row afterwards made the
+batch menu act on both. The branch now bails on `.outside-results` before it seeds anything — the peek is not a
+drag-reschedule source, so it must not be a right-click-reschedule source either. The row's other right-click
+zones are untouched: they open the single-note menu, which is what a peeked note is for.
+
+Three checks pin all of it. The two on the HANDLERS — the click guard sitting before the collapse with the open
+still happening, and the tick-circle guard sitting before the seed and before `requestAlarm` — both fail against
+the pre-fix source. The third, on the rendered markup (peek rows carry `onclick`, never `onmousedown`), does
+**not**: `formats.ts` was never the broken half, so it passes either way. It is kept deliberately, as a
+regression pin on the assumption the handler guards rely on — if a peek row ever gains a selection `onmousedown`
+the guards above stop being sufficient — but it is not evidence the bug existed, and should not be counted as
+such.
+
+The lesson: an exclusion asserted on the ORDER helper is not an exclusion on the SELECTION. `allSelectableRows()`
+excluded the peek from day one and its test passed throughout, while two other paths wrote peek ids straight
+into the store. Pin the writers, not the reader.
+
+Batch actions needed **no host change at all** — Joplin has one note store, `runNoteMenuActionMulti` already
+took an id array, and `toggleType` already flipped each note's own type — which a new mixed-kind host test
+now pins so nothing later starts filtering on `is_todo`. The menu labels are deliberately unchanged:
+"Delete 3 notes" is true of a mixed set (a to-do IS a note), and "Switch type of 3 items" already read for
+both.
+
+**Where the kind does matter is TIME.** Only a to-do carries `todo_due`, so the drag payload, the
+between-drop and the set-alarm call now go through `schedulableSelection()` — the to-dos within the
+selection, in selection order, notes silently dropped. The empty case is expressed the way the drag code
+naturally does: `onTodoDragStart` calls `event.preventDefault()` and starts no drag. It is unreachable in
+practice (only a to-do row is `draggable`, and the pressed row is in the selection by then), so this is a
+guard rather than a behaviour.
+
+**B. The dropdown's filter box survives a background re-render** ("Sync is a very often thing here"). The
+marks already rode across a reconcile; the embedded filter text did not, so a sync landing mid-selection
+widened the list back out and threw the caret back to the search field. The box lives in the markup the host
+replaces, so by the time `reconcile` runs its node is gone — the text and caret are therefore mirrored into
+module state as they are typed (`applySuggestFilter`, which Escape's clear also routes through), alongside a
+`searchFocusTarget` of `field` / `filter` / `apply`. `reconcile` now carries an OPEN LIST across (not merely
+"marks exist"), and the restore is applied by whichever list is built next — a `pendingSuggestRestore`
+consumed once by `renderSearchSuggestions` — which is what makes it work for `title:`, whose list arrives a
+debounced round-trip later rather than synchronously.
+
+**C. Mobile renderer-kill survival for the search draft and its marks** (the 1.9.8 "accepted gap", now
+closed — Option B). The host holds a `searchState` `{ draft, caret, marks, filter, filterCaret, focus }`,
+posted throttled at 300 ms mirroring `queueOverlayState`, embedded as a `<script id="cockpitSearchState">`
+island beside `#cockpitOverlayState`, and restored by `reconcile` on a fresh webview: the draft goes back,
+the field is refocused (which re-arms the host's hold — without it the next refresh wipes the restore), and
+`onSearchInput` is re-run so the list and the marks come back. `dialogGuardReset` grew a third argument, the
+same non-looping handshake the overlay uses, and one render serves both islands. **No `dialogGuard`
+involvement**, deliberately: the dropdown opens and closes on every keystroke, whereas an overlay has two
+call sites, so bracketing it is a leak hazard whose failure mode is refreshes frozen forever — and the focus
+hold already pauses them. This also closes the pre-existing "typed query lost on an Android renderer kill",
+which predates the dropdown entirely. The trap that had to be designed around: `onSearchInput` runs
+`maybeAutoResetSearch`, which reads "still filtered" off `input.defaultValue` — untouched by a restore — so
+an empty restored draft would have looked exactly like the user emptying the field and committed a reset
+nobody asked for. The restore arms `searchResetPosted`; the first keystroke clears it again.
+
+**D. Post-commit keystrokes.** The mechanism, stated honestly: a commit nulls `searchDraft`, so a render
+landing afterwards repaints the freshly rendered field from its *server-rendered* value. Reading the code, a
+character typed after the commit fires `input` and re-establishes the draft before any render can land — so
+the pure "lost keystrokes" path could not be reproduced from the source. What IS reachable, and is the same
+window, is a render built BEFORE the commit reaching the host (a background refresh already in flight):
+`searchDraft` is null, the server value lags, and the field is repainted back to the previous query with the
+user's text on top of it — the "corrupts the free text" the e2e comments already describe. The fix closes the
+window at the only point where ground truth exists: the blur of the OUTGOING field, which this build fires
+with the node still connected and still holding what the user typed. That snapshot is the restore's
+**fallback**, never its first choice (a live draft always wins), and it is cleared by every commit and by a
+genuine departure, so it can never repaint a value the user has superseded — the case that would otherwise
+undo an apply. Proved behaviourally in e2e: Enter, then three characters typed with no settle at all.
+
+**E. The × double-post.** Pressing the clear button fires `input` (on which the empty-field auto-reset
+commits `""`) and then `change` and `search` (which reach the deferred commit with the same `""`), so the
+host absorbed one or two duplicates on its equality guard. That equality *is* the no-op case, so the
+deferred commit now drops itself when its value equals what this webview last asked the host to hold. The
+"last committed" anchor is re-read from `input.defaultValue` on every render, because the host can move the
+filter without the webview committing anything — a profile switch applies the profile's own `panelSearch` —
+and comparing against a stale anchor would drop a commit that was not a no-op. The explicit commits (Enter, a
+pick, an apply, the auto-reset) are untouched, so re-running the same query from the keyboard still renders.
+
+**F. E2E lock, in lockstep with HARPER** (harper only — ridgeline still runs the older protocol and is being
+brought across separately; nothing here should be read as "all three repos agree"). The earlier "harper
+doesn't take the lock" note was wrong: harper has had the identical `~/.cache/joplin-plugin-e2e.lock` mkdir
+protocol since its `29e31b4`. The real gap was that BOTH repos failed fast when the lock was held, so the
+second session had to poll by hand. Ported from harper's `866b825`: `acquireLock()` is now async and queues
+behind a live run (2 s poll, progress every 30 s, `E2E_LOCK_WAIT_MS` budget defaulting to 10 minutes, `0`
+restores fail-fast), the lock directory gains an advisory `owner` file (repo path + start time) so a waiter can
+name WHICH repo holds it, and two protocol races cockpit still carried are fixed — a lock whose `pid` file has
+not been written yet is presumed LIVE for 30 s (otherwise a second acquirer breaks a live lock), and a stale
+lock is broken by an atomic rename-aside rather than `rm -rf` + `mkdir` (so exactly one racer can win).
+`releaseLock()` refuses to remove a lock whose pid is no longer ours, and `globalSetup` releases it when the
+sweep or the RAM gate throws — Playwright skips `globalTeardown` on a `globalSetup` throw, so a failed gate
+would otherwise leave the lock standing until the exit handler happened to fire, and a lock nobody owns is
+exactly what makes the next run wait out its whole budget. `globalTimeout` covers `globalSetup`, so the wait
+budget is added on top LOCALLY only — CI keeps its budget exactly where the job's 20-minute cap needs it.
+
+Deferred to a follow-up (reviewed, none of them reachable in this harness's own flow): the pid-write
+`try/catch` swallows a failure that would leave a pid-less lock; `readProc` EACCES noise; no SIGHUP handler;
+`Number.isFinite` vs `Number.isInteger` on the pid read; `mtimeMs` rather than `birthtimeMs` for the lock age;
+and the rename-aside debris (`…lock.stale-*`) is removed immediately but never swept if that removal fails.
+
+Suite: 276 harness checks + 65 Playwright tests (64 run, 1 opt-in showcase skipped).
+
+Process note: three of the new checks failed first on MY OWN premise, not on the product — the sharpest one
+being an e2e that seeded a mixed selection with a plain press and inherited the previous test's selection,
+because a plain press on a row already inside a multi-selection deliberately PRESERVES the set. The rule
+being exercised was the rule that broke the fixture. Seed a selection with press + CLICK (the collapse half
+of that same rule), never with a press alone.

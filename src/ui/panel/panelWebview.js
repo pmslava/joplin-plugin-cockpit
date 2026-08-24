@@ -6,20 +6,25 @@ async function onTodoClicked(todoID){
 }
 
 /** Selection ***************************************************************************************************************************************
- * Which to-dos are selected, so that several can be dragged together. Ctrl+click (or Cmd+click) toggles a to-do, Shift+click selects the range from *
- * the previous click, and a plain click on a row opens the to-do (title too). The panel markup is replaced on every refresh, so the selection is    *
- * kept here and painted back on whenever the document changes.                                                                                     *
+ * Which ROWS are selected - to-do rows and regular note rows alike, in ONE store, so a mixed selection is ordinary. Ctrl+click (or Cmd+click)       *
+ * toggles a row, Shift+click selects the range from the previous click, and a plain click on a row opens it. The panel markup is replaced on every  *
+ * refresh, so the selection is kept here and painted back on whenever the document changes.                                                        *
+ *                                                                                                                                                   *
+ * The RULES live in the shared, DOM-free window.RowSelection (rowSelection.js), so the to-do and the note handlers below are ONE path rather than    *
+ * two drifting copies, and every case is covered by behavioural tests. Everything a selection drives takes an id array of either kind - delete,      *
+ * move, tags, duplicate, switch type, copy - EXCEPT the TIME operations: only a to-do has a due date, so drag-to-date, drop-between and set-alarm    *
+ * act on RowSelection.schedulableIDs(...), the to-dos WITHIN the selection, and silently leave the notes out of the payload.                         *
  ***************************************************************************************************************************************************/
-var selectedTodoIDs = new Set()
-var lastClickedTodoID = null
+var selectedRowIDs = new Set()
+var lastClickedRowID = null
 // The row of the most recent press that SELECTED something: a plain press, a Ctrl+press that added a row, or
-// the far end of a Shift range. It is deliberately NOT the same thing as lastClickedTodoID, which is the
+// the far end of a Shift range. It is deliberately NOT the same thing as lastClickedRowID, which is the
 // Shift-range anchor and must stay put while a range is resized; this one always follows the last thing the
 // user selected, which is the row an Escape collapses a multi-selection onto (see collapseMultiSelection).
 var lastSelectionInteractionID = null
-// The item that is highlighted WITHOUT being part of the panel's own selection: a picked regular note
-// row, or the note the main editor is showing (see applyEditorNoteSelection). It takes no part in drag or
-// set-alarm operations, so an item the user has not picked in the panel can never ride along in a batch.
+// The item that is highlighted WITHOUT being part of the panel's own selection: the note the main editor is
+// showing (see applyEditorNoteSelection). It takes no part in drag or set-alarm operations, so an item the
+// user has not picked in the panel can never ride along in a batch.
 var pickedNoteID = null
 
 /** Scroll preservation *********************************************************************************************************************************
@@ -73,14 +78,45 @@ function allTodoRows(){
     return Array.from(document.querySelectorAll('.todo[data-todo-id]'))
 }
 
+// The id a row carries, whichever kind it is.
+function rowIDOf(row){
+    return (row && row.dataset) ? (row.dataset.todoId || row.dataset.noteId || '') : ''
+}
+
+// Every row on screen, of both kinds, in document order. The highlight is painted over all of them - including
+// the read-only peek's, which the editor-tracking highlight has always marked - while only the selectable ones
+// below can ever be IN the selection.
+function allRows(){
+    return Array.from(document.querySelectorAll('.todo[data-todo-id], .todo[data-note-id]'))
+}
+
+/** allSelectableRows *******************************************************************************************************************************
+ * Every row the user may select, of BOTH kinds, in the list's own document order - which is what a Shift range is measured along and what an Escape *
+ * collapse falls back to. The read-only "results outside current filters" peek is excluded: its rows are rendered without a selection handler on     *
+ * purpose (renderTodoRowHtml draggable:false / renderNoteRowHtml selectable:false), so they can never enter the selection, and a range measured      *
+ * along them would span rows that cannot be part of it.                                                                                              *
+ ***************************************************************************************************************************************************/
+function allSelectableRows(){
+    return allRows().filter(row => !(row.closest && row.closest('.outside-results')))
+}
+
+// The ids of the to-do rows on screen, i.e. what a time operation may act on (see RowSelection.schedulableIDs).
+function listedTodoIDs(){
+    return allTodoRows().map(row => row.dataset.todoId)
+}
+
+// The to-dos within the current selection, in the selection's own order. Notes carry no due date, so they are
+// dropped from every drag-to-date / drop-between / set-alarm payload rather than blocking it for the to-dos.
+function schedulableSelection(){
+    return window.RowSelection.schedulableIDs([...selectedRowIDs], listedTodoIDs())
+}
+
 function paintTodoSelection(){
-    for (var row of allTodoRows()){
-        // A to-do row is highlighted when it is in the panel's own selection, or when it is the item the
-        // editor is showing (pickedNoteID) - which highlights without joining any batch.
-        row.classList.toggle('-selected', selectedTodoIDs.has(row.dataset.todoId) || row.dataset.todoId === pickedNoteID)
-    }
-    for (var noteRow of document.querySelectorAll('.todo[data-note-id]')){
-        noteRow.classList.toggle('-selected', noteRow.dataset.noteId === pickedNoteID)
+    for (var row of allRows()){
+        // A row is highlighted when it is in the panel's own selection, or when it is the item the editor is
+        // showing (pickedNoteID) - which highlights without joining any batch.
+        var id = rowIDOf(row)
+        row.classList.toggle('-selected', selectedRowIDs.has(id) || id === pickedNoteID)
     }
 }
 
@@ -96,14 +132,14 @@ function paintTodoSelection(){
  * and it can stand aside; each of them then closes on its own handler exactly as before. A press inside the search field is the field's own.          *
  ***************************************************************************************************************************************************/
 function collapseMultiSelection(){
-    if (selectedTodoIDs.size <= 1) return
-    var kept = window.EditorNote.collapseSelection([...selectedTodoIDs], lastSelectionInteractionID, allTodoRows().map(row => row.dataset.todoId))
-    selectedTodoIDs.clear()
-    for (var id of kept) selectedTodoIDs.add(id)
+    if (selectedRowIDs.size <= 1) return
+    var kept = window.EditorNote.collapseSelection([...selectedRowIDs], lastSelectionInteractionID, allSelectableRows().map(rowIDOf))
+    selectedRowIDs.clear()
+    for (var id of kept) selectedRowIDs.add(id)
     // The surviving row becomes both the range anchor and the last interaction, so a Shift+press after an
     // Escape measures from what is actually still selected.
-    lastClickedTodoID = kept.length ? kept[0] : null
-    lastSelectionInteractionID = lastClickedTodoID
+    lastClickedRowID = kept.length ? kept[0] : null
+    lastSelectionInteractionID = lastClickedRowID
     paintTodoSelection()
 }
 
@@ -167,14 +203,14 @@ function acceptsEditorNote(){
 // hold matches no row, so the highlight simply goes, and a render that later brings that row in picks it up.
 function applyEditorNoteSelection(noteID){
     var next = window.EditorNote.nextSelection({
-        selected: [...selectedTodoIDs],
+        selected: [...selectedRowIDs],
         picked: pickedNoteID,
-        lastClicked: lastClickedTodoID,
+        lastClicked: lastClickedRowID,
     }, noteID)
-    selectedTodoIDs.clear()
-    for (var id of next.selected) selectedTodoIDs.add(id)
+    selectedRowIDs.clear()
+    for (var id of next.selected) selectedRowIDs.add(id)
     pickedNoteID = next.picked
-    lastClickedTodoID = next.lastClicked
+    lastClickedRowID = next.lastClicked
     paintTodoSelection()
 }
 
@@ -404,20 +440,36 @@ function reconcile(){
         // re-measure which stage fits. Done here (a real re-render) rather than on every mutation, so the
         // class it sets - itself a mutation - cannot drive the observer round again.
         applyCreateButtonStage()
-        // The suggestion menu was in the replaced markup; drop its now-stale state (closing on a
-        // re-render is fine - only the typed text must survive, which restoreSearchDraft handles).
-        // A multi-select IN PROGRESS is the exception: the marks are user-owned state, and a background
-        // refresh (a sync landing, a note changing) must not silently destroy a half-built selection of ten
-        // tags. They are carried across the render and the list is re-opened from the restored draft below.
-        var keptMarks = searchFocused ? searchMarks : null
+        // The suggestion menu was in the replaced markup, so its DOM is gone before this runs. An OPEN list is
+        // user-owned state, and a background refresh - a sync landing, a note changing, and sync is a very
+        // frequent thing - must not silently destroy what the user is halfway through building. Everything the
+        // list held that cannot be recomputed is therefore carried across the render and put back: the marks,
+        // the embedded filter box's text and caret, and which control had the focus. The rows themselves are
+        // rebuilt from the restored draft (reopenSearchSuggestions -> onSearchInput), so they reflect whatever
+        // is now in the field.
+        var keptSuggest = (searchFocused && searchSuggestion)
+            ? { marks: searchMarks, filter: suggestFilterText, caret: suggestFilterCaret, focus: searchFocusTarget }
+            : null
         searchSuggestion = null
         searchMarks = null
+        // Re-anchor "what the host is holding" on the value it just RENDERED. input.defaultValue is the
+        // server-rendered value attribute, i.e. the committed filter, so this is ground truth - and it must be
+        // re-read because the host can change the filter without this webview committing anything (a profile
+        // switch applies the profile's own panelSearch). Without it the deferred-commit duplicate guard would
+        // eventually compare against a value the host has moved off, and drop a commit that was not a no-op.
+        var renderedSearch = getSearchInput()
+        if (renderedSearch) lastCommittedSearch = renderedSearch.defaultValue
         restoreSearchDraft()
-        if (keptMarks && keptMarks.values.length) reopenSearchSuggestions(keptMarks)
+        if (keptSuggest) reopenSearchSuggestions(keptSuggest)
         // Overlay reload-survival: when this render carries the overlay descriptor island (the host's
         // reconstruct render after a mid-overlay reload) and no overlay is open in this webview yet, rebuild
         // it from the descriptor. Mobile only; the island is never emitted on desktop.
         if (IS_MOBILE && !overlayOpen) reopenOverlayFromEmbeddedState()
+        // Search reload-survival (mobile): the same idea one layer down. On a FRESH webview no module state
+        // survived, so searchFocused is false and restoreSearchDraft above returned at its first line; the
+        // host-held { draft, caret, marks, filter, focus } island is what puts the in-progress search back.
+        // Guarded on searchFocused so this only ever runs on a reload, never over a live interaction.
+        if (IS_MOBILE && !searchFocused) restoreSearchFromEmbeddedState()
     }
 }
 
@@ -437,8 +489,13 @@ function startPanelObserver(){
         // re-served the stale pre-overlay snapshot), the host re-renders once with the descriptor embedded.
         // Posted BEFORE reconcile() so the leaked guard is zeroed first and reconcile's rebuild re-arms it
         // cleanly afterwards. A no-op on an ordinary fresh load (no descriptor, no leaked guard).
+        //
+        // message[2] is the same handshake for the SEARCH state island: true when this document already carries
+        // it (reconcile below restores the search itself), false when the host holds a search state the loaded
+        // document does not carry - the classic renderer kill that re-served a stale snapshot - which makes the
+        // host re-render once with it embedded. Same non-looping shape as the overlay's, on its own channel.
         var stateText = readEmbeddedOverlayStateText()
-        void webviewApi.postMessage(['dialogGuardReset', !!stateText]);
+        void webviewApi.postMessage(['dialogGuardReset', !!stateText, !!readEmbeddedSearchStateText()]);
     }
     // The host pushes the main editor's note here whenever it changes (see applyEditorNoteSelection).
     // Registered once per document load, because Joplin allows a single onMessage handler per view. It is
@@ -474,58 +531,41 @@ window.addEventListener('popstate', function(){ if (overlayOpen) closeOverlay() 
 // overlay is on screen and the guard is armed, so closing it never posts dialogGuard(false) and refreshes
 // stay frozen. Deferring the call to the end of the script guarantees every initializer has already run.
 
-/** onTodoRowMouseDown ******************************************************************************************************************************
+/** onRowPressed ************************************************************************************************************************************
  * Selection happens on press, like in a list: a plain press selects the row (replacing the selection), Ctrl+press toggles it, Shift+press selects   *
  * the range from the last plainly- or Ctrl-pressed row (the anchor). The anchor stays put, so a further Shift+press resizes the range rather than   *
  * chaining from its end. Opening happens separately, on click.                                                                                     *
+ *                                                                                                                                                   *
+ * ONE handler for BOTH row kinds. A regular note row is selected exactly like a to-do row - the whole point of the mixed selection - so the two      *
+ * inline handlers below are thin wrappers over this, and the decisions themselves are made by the shared, DOM-free window.RowSelection. What        *
+ * differs between the kinds is not selection but TIME: see schedulableSelection().                                                                   *
  ***************************************************************************************************************************************************/
-function onTodoRowMouseDown(event, todoID){
+function onRowPressed(event, rowID){
     if (event.button !== 0) return
+    // The tick circle does its own thing (toggle / due-date) and takes no part in selection.
     if (event.target.classList.contains('todo-checkbox')) return
     // A press on the notebook pill filters by that notebook on the following click; it takes no part in
-    // selection, so leave the current selection untouched (like the checkbox above).
+    // selection either, so leave the current selection untouched (like the checkbox above).
     if (event.target.classList.contains('todo-notebook')) return
     // The selection is about to change, so an editor-note read-back still in flight now describes an older
     // state: bump the generation to discard its answer rather than let it drop this press's selection.
     editorNoteSeq++
     pickedNoteID = null
-    if (event.shiftKey){
-        var ids = allTodoRows().map(row => row.dataset.todoId)
-        var anchor = lastClickedTodoID !== null && ids.indexOf(lastClickedTodoID) >= 0 ? lastClickedTodoID : todoID
-        var from = ids.indexOf(anchor)
-        var to = ids.indexOf(todoID)
-        selectedTodoIDs.clear()
-        for (var index = Math.min(from, to); index <= Math.max(from, to); index++){
-            selectedTodoIDs.add(ids[index])
-        }
-        // The range's far end is the row just pressed, NOT the anchor the range was measured from (which
-        // deliberately stays put so a further Shift+press resizes the range).
-        lastSelectionInteractionID = todoID
-    } else if (event.ctrlKey || event.metaKey){
-        if (selectedTodoIDs.has(todoID)){
-            // A Ctrl+press that DESELECTS points at a row that is no longer in the selection, so it is not
-            // recorded: the last row the user actually selected stays the one an Escape collapses onto.
-            selectedTodoIDs.delete(todoID)
-        } else {
-            selectedTodoIDs.add(todoID)
-            lastSelectionInteractionID = todoID
-        }
-        lastClickedTodoID = todoID
-    } else if (selectedTodoIDs.has(todoID) && selectedTodoIDs.size > 1){
-        // A plain press on a row that is ALREADY part of a multi-selection PRESERVES the whole set, so a
-        // drag that follows sweeps every selected to-do (the file-manager rule). The browser fires this
-        // mousedown BEFORE dragstart, so collapsing to just this row here would strand the rest -
-        // onTodoDragStart would then see a single id and only one to-do would move. The collapse-to-single
-        // instead happens on a plain CLICK with no drag (onTodoRowClicked), which since 1.8.1 opens the row.
-        lastClickedTodoID = todoID
-        lastSelectionInteractionID = todoID
-    } else {
-        selectedTodoIDs.clear()
-        selectedTodoIDs.add(todoID)
-        lastClickedTodoID = todoID
-        lastSelectionInteractionID = todoID
-    }
+    var next = window.RowSelection.pressSelection(
+        { selected: [...selectedRowIDs], lastClicked: lastClickedRowID, lastInteraction: lastSelectionInteractionID },
+        rowID,
+        { shift: !!event.shiftKey, ctrl: !!(event.ctrlKey || event.metaKey) },
+        allSelectableRows().map(rowIDOf)
+    )
+    selectedRowIDs.clear()
+    for (var id of next.selected) selectedRowIDs.add(id)
+    lastClickedRowID = next.lastClicked
+    lastSelectionInteractionID = next.lastInteraction
     paintTodoSelection()
+}
+
+function onTodoRowMouseDown(event, todoID){
+    onRowPressed(event, todoID)
 }
 
 /** applyNotebookFilterFromPill *********************************************************************************************************************
@@ -542,6 +582,38 @@ function applyNotebookFilterFromPill(pill){
     void webviewApi.postMessage(['notebookFilterChanged', notebookID]);
 }
 
+/** onRowClicked ************************************************************************************************************************************
+ * The plain-click half of the row interaction, shared by both kinds. A real drag fires no click, so a click reaching here is a press that produced  *
+ * NO drag: it collapses the selection onto this row - the single-select half of the file-manager rule whose drag half onRowPressed defers (it       *
+ * PRESERVES a multi-selection on the press so a drag can sweep the whole set) - and then opens the item. A no-op collapse when the row is already   *
+ * the sole selection, so a plain single click never repaints needlessly.                                                                            *
+ *                                                                                                                                                   *
+ * Any plain left click that reaches here opens the item: the tick circle and the notebook pill return in the callers (they do their own thing), and *
+ * a modifier click returns at the top (selection only), so what is left is the title OR the row's own dead zones - its padding, the gap beside a    *
+ * short title, the strip below it. Opening on all of them makes a click that selects a row also show it in the editor, matching the title.          *
+ *                                                                                                                                                   *
+ * THE READ-ONLY PEEK OPENS BUT NEVER SELECTS. The "results outside current filters" rows are rendered without the selection onmousedown on purpose  *
+ * (renderTodoRowHtml draggable:false / renderNoteRowHtml selectable:false), but their ONCLICK is emitted unconditionally - click-to-open is what the *
+ * peek is for. So the press path is suppressed at the markup level and the CLICK path has to be suppressed here, or this collapse would write a peek *
+ * row into the selection: persisted module state that survives every render, and - since the selection drives the batch context menu - one that      *
+ * would let Delete / Move / Tags / Duplicate / Switch-type act on rows the user was deliberately shown read-only, from OUTSIDE their filters and     *
+ * even from excluded notebooks. Opening still happens: only the selection half is skipped. The selector is the one allSelectableRows() already uses.  *
+ ***************************************************************************************************************************************************/
+function onRowClicked(event, rowID){
+    if (event && event.target && event.target.closest && event.target.closest('.outside-results')){
+        void onTodoClicked(rowID)
+        return
+    }
+    var next = window.RowSelection.clickSelection({ selected: [...selectedRowIDs], lastClicked: lastClickedRowID }, rowID)
+    if (next.changed){
+        selectedRowIDs.clear()
+        for (var id of next.selected) selectedRowIDs.add(id)
+        lastClickedRowID = next.lastClicked
+        paintTodoSelection()
+    }
+    void onTodoClicked(rowID)
+}
+
 function onTodoRowClicked(event, todoID){
     if (event.ctrlKey || event.metaKey || event.shiftKey) return
     if (event.target.classList.contains('todo-checkbox')) return
@@ -549,39 +621,33 @@ function onTodoRowClicked(event, todoID){
         applyNotebookFilterFromPill(event.target)
         return
     }
-    // A plain click reaching here is a press that produced NO drag (a real drag fires no click), so it
-    // collapses the selection to just this row - the single-select half of the file-manager rule whose
-    // drag half onTodoRowMouseDown now defers (it PRESERVES a multi-selection on the press so a drag can
-    // sweep the whole set). A no-op when the row is already the sole selection, so a plain single click
-    // never repaints needlessly.
-    if (!(selectedTodoIDs.size === 1 && selectedTodoIDs.has(todoID))){
-        selectedTodoIDs.clear()
-        selectedTodoIDs.add(todoID)
-        lastClickedTodoID = todoID
-        paintTodoSelection()
-    }
-    // Any plain left click that reaches here opens the to-do: the tick circle and the notebook pill
-    // returned above (they do their own thing), and a modifier click returned at the top (selection
-    // only), so what is left is the title OR the row's own dead zones - its padding, the gap beside a
-    // short title, the strip below it. Opening on all of them makes a click that selects a row also show
-    // it in the editor, matching the title. onTodoRowMouseDown has already maintained the selection.
-    void onTodoClicked(todoID)
+    onRowClicked(event, todoID)
 }
 
 /** onTodoContextMenu ********************************************************************************************************************************
  * Right click (or long press) on a to-do, dispatched by which part of the row was pressed: the circle opens the due date picker for the selection,  *
  * the notebook label opens Joplin's "Move to notebook" dialog, and anywhere else opens the context menu.                                            *
+ *                                                                                                                                                   *
+ * The tick-circle branch is the LAST writer into selectedRowIDs that could still admit a read-only peek row, and it is guarded for two reasons. The *
+ * peek's rows are deliberately not drag-reschedule sources (renderTodoRowHtml draggable:false), so this right click - which is the same operation by *
+ * another route - must not reschedule them either; and because the selection now drives the BATCH menu, a peek id written here would afterwards be   *
+ * reachable by Ctrl+adding an ordinary row and running Delete / Move / Tags / Duplicate / Switch-type on the pair. draggable:false suppresses        *
+ * neither oncontextmenu nor the .todo-checkbox element (see formats.ts), so the guard has to live here. The row's OTHER right-click zones are        *
+ * untouched: they open the single-note menu for the pressed row, which is what a peeked note is for.                                                 *
  ***************************************************************************************************************************************************/
 function onTodoContextMenu(event, todoID){
     event.preventDefault()
     if (event.target.classList.contains('todo-checkbox')){
-        if (!selectedTodoIDs.has(todoID)){
-            selectedTodoIDs.clear()
-            selectedTodoIDs.add(todoID)
-            lastClickedTodoID = todoID
+        if (event.target.closest && event.target.closest('.outside-results')) return
+        if (!selectedRowIDs.has(todoID)){
+            selectedRowIDs.clear()
+            selectedRowIDs.add(todoID)
+            lastClickedRowID = todoID
             paintTodoSelection()
         }
-        requestAlarm([...selectedTodoIDs])
+        // Only the to-dos in the selection get a due date: a mixed selection sets the alarm on its to-dos and
+        // silently leaves its notes out (the pressed row is itself a to-do, so this is never empty).
+        requestAlarm(schedulableSelection())
     } else if (event.target.classList.contains('todo-notebook')){
         // Desktop opens Joplin's native "Move to notebook" dialog; mobile opens the in-panel notebook
         // overlay instead (a native dialog would open behind the panel there).
@@ -593,30 +659,28 @@ function onTodoContextMenu(event, todoID){
 }
 
 /** Note rows ***************************************************************************************************************************************
- * Regular notes have no checkbox or due date: a click on the title opens them, and the right click zones are the notebook label ("Move to           *
- * notebook") and everything else (context menu).                                                                                                   *
+ * Regular notes have no checkbox and no due date, so the tick circle and the date pickers do not apply to them - but SELECTION does: a note row is  *
+ * pressed, Ctrl-toggled and Shift-ranged exactly like a to-do row, and joins the same selectedRowIDs. Up to 2.0.0 a press on a note row CLEARED the *
+ * selection and lit the highlight-only pickedNoteID instead, so a note could never take part in a batch; that asymmetry is what this fixes.          *
+ *                                                                                                                                                   *
+ * The right-click zones are unchanged: the notebook label ("Move to notebook") and everything else (context menu).                                   *
  ***************************************************************************************************************************************************/
 function onNoteRowMouseDown(event, noteID){
-    if (event.button !== 0) return
-    // A press on the notebook pill filters by that notebook on the following click and takes no part in
-    // selection, so leave the current pick untouched.
-    if (event.target.classList.contains('todo-notebook')) return
-    // Discard an editor-note read-back still in flight, as the to-do row press does.
-    editorNoteSeq++
-    selectedTodoIDs.clear()
-    pickedNoteID = noteID
-    paintTodoSelection()
+    onRowPressed(event, noteID)
 }
 
 function onNoteRowClicked(event, noteID){
+    // A modifier click is selection only, exactly as on a to-do row: the press has already done the work and
+    // the note must NOT also open (Ctrl-clicking a tenth row to add it to a batch cannot move the editor).
+    if (event.ctrlKey || event.metaKey || event.shiftKey) return
     if (event.target.classList.contains('todo-notebook')){
         applyNotebookFilterFromPill(event.target)
         return
     }
-    // Mirrors onTodoRowClicked: any other left click opens the note - the title, the display-only
-    // progress ring, and the row's dead zones alike. The notebook pill returned above; a note row has no
-    // tickable checkbox, so there is nothing else to guard. onNoteRowMouseDown has already picked the row.
-    void onTodoClicked(noteID)
+    // Mirrors onTodoRowClicked: any other left click collapses the selection onto this row and opens the note -
+    // the title, the display-only progress ring, and the row's dead zones alike. A note row has no tickable
+    // checkbox, so the pill is the only zone to guard.
+    onRowClicked(event, noteID)
 }
 
 /** onRowDoubleClicked ******************************************************************************************************************************
@@ -650,14 +714,18 @@ function onNoteContextMenu(event, noteID){
  * on the WHOLE selection (routed to the host's batch handler) and the single-only actions render greyed out. A right click on a row OUTSIDE the       *
  * selection, or a single selection, keeps today's single-note menu for that one row. Mobile has no multi-select, so IS_MOBILE always takes the        *
  * single path (count 1) and its markup/behaviour are unchanged.                                                                                       *
+ *                                                                                                                                                     *
+ * MIXED KINDS: every action this menu can batch takes an id array of either kind (Joplin has one note store; a to-do IS a note with is_todo set), so  *
+ * a selection of to-dos AND regular notes is routed whole, from a right click on either kind of row. The one kind-specific entry - mobile's "Move to   *
+ * date…" - is added only for a to-do row and is single-note anyway.                                                                                    *
  ***************************************************************************************************************************************************/
 function showNoteContextMenu(event, noteID, isTodo){
     hideNoteContextMenu()
-    // The ids this menu acts on. Only a to-do row that is itself part of a multi-row selection triggers the
-    // batch menu (a regular note row is never in selectedTodoIDs, and mobile has no multi-select); everything
-    // else is the single-note menu for the pressed row.
-    var selectionIDs = (!IS_MOBILE && selectedTodoIDs.has(noteID) && selectedTodoIDs.size > 1)
-        ? [...selectedTodoIDs]
+    // The ids this menu acts on. Any row - to-do or note - that is itself part of a multi-row selection
+    // triggers the batch menu; everything else (a row outside the selection, a selection of one, and mobile,
+    // which has no multi-select) is the single-note menu for the pressed row.
+    var selectionIDs = (!IS_MOBILE && selectedRowIDs.has(noteID) && selectedRowIDs.size > 1)
+        ? [...selectedRowIDs]
         : [noteID]
     var count = selectionIDs.length
     // On mobile the 18px checkbox circle is a hard touch target, so to-do rows get an explicit "Move to date…"
@@ -789,8 +857,8 @@ function onHeadingContextMenu(event){
     event.preventDefault()
     var ids = (event.currentTarget.dataset.todoIds || '').split(',').filter(Boolean)
     if (!ids.length) return
-    selectedTodoIDs.clear()
-    for (var id of ids) selectedTodoIDs.add(id)
+    selectedRowIDs.clear()
+    for (var id of ids) selectedRowIDs.add(id)
     paintTodoSelection()
     requestAlarm(ids)
 }
@@ -994,16 +1062,23 @@ document.addEventListener('pointermove', onPanelSelectionDragProbe, true)
  * calendar days, week planner columns - carry a data-drop attribute with the date the to-dos become due, or "clear".                                *
  ***************************************************************************************************************************************************/
 function onTodoDragStart(event, todoID){
-    if (!selectedTodoIDs.has(todoID)){
-        selectedTodoIDs.clear()
-        selectedTodoIDs.add(todoID)
+    if (!selectedRowIDs.has(todoID)){
+        selectedRowIDs.clear()
+        selectedRowIDs.add(todoID)
         paintTodoSelection()
     }
-    var ids = [...selectedTodoIDs]
+    // The payload is the TO-DOS in the selection: a drop assigns a due date, which a regular note cannot carry,
+    // so the notes of a mixed selection are silently left out rather than written to. Only a to-do row is
+    // draggable (renderNoteRowHtml emits no draggable attribute and no drag handlers), and the dragged row is
+    // itself in the selection by the time this runs, so the list is never empty - but if it somehow were, the
+    // drag is cancelled outright rather than started with nothing to drop.
+    var ids = schedulableSelection()
+    if (!ids.length){ event.preventDefault(); return }
     event.dataTransfer.setData('text/plain', ids.join(','))
     event.dataTransfer.effectAllowed = 'move'
+    var dragged = new Set(ids)
     for (var row of allTodoRows()){
-        if (selectedTodoIDs.has(row.dataset.todoId)) row.classList.add('-dragging')
+        if (dragged.has(row.dataset.todoId)) row.classList.add('-dragging')
     }
 }
 
@@ -1027,7 +1102,7 @@ async function onTodoDropped(event){
     var target = event.currentTarget.dataset.drop
     var ids = (event.dataTransfer.getData('text/plain') || '').split(',').filter(Boolean)
     if (!target || !ids.length) return
-    selectedTodoIDs.clear()
+    selectedRowIDs.clear()
     await webviewApi.postMessage(['todosDropped', ids, target]);
 }
 
@@ -1136,7 +1211,7 @@ async function onBetweenDrop(event){
     var lowerStart = target.before ? target.row : target.row.nextElementSibling
     var prevId = betweenNeighbour(upperStart, -1, draggedSet)
     var nextId = betweenNeighbour(lowerStart, +1, draggedSet)
-    selectedTodoIDs.clear()
+    selectedRowIDs.clear()
     await webviewApi.postMessage(['todosDroppedBetween', ids, prevId, nextId, target.groupDate])
 }
 
@@ -1358,8 +1433,18 @@ async function onSearchFilterChanged(searchString, opts){
     // An explicit commit (Enter, a pick, an apply) supersedes any commit still held pending by
     // onSearchFieldChanged, so the two can never both fire.
     pendingSearchCommit = null
-    // The search is now committed, so any uncommitted draft and the open suggestion list are done.
+    // What this webview has now asked the host to hold. A deferred change/search commit for the SAME string is
+    // the no-op case and is dropped at source rather than left for the host's equality guard (see
+    // onSearchFieldChanged): pressing the field's × posts both, because the × fires `input` (which the
+    // empty-field auto-reset commits on) AND `search`.
+    lastCommittedSearch = String(searchString == null ? '' : searchString)
+    // The search is now committed, so any uncommitted draft and the open suggestion list are done. The
+    // outgoing-field snapshot goes with them: it exists to carry text typed AFTER the last commit across a
+    // render, so a snapshot taken BEFORE this commit would repaint the field back to a superseded value.
     searchDraft = null
+    lastSearchFieldSnapshot = null
+    // The host-held copy (mobile) is about the uncommitted draft, which no longer exists.
+    clearHostSearchState()
     hideSearchSuggestions({ reason: 'commit' })
     // message[2] asks the host to render even while the mobile search-focus hold is armed, and it is the
     // DEFAULT because every caller of this function is an explicit user commit: a picked suggestion, an applied
@@ -1430,6 +1515,29 @@ var searchMarks = null
 // numbers as the list's own long-press adapter, so the two gestures feel identical.
 var SUGGEST_LONG_PRESS_MS = 500
 var SUGGEST_MOVE_SLOP = 10
+// The dropdown's embedded filter box, mirrored into module state as it is typed. The box lives in the markup
+// the host REPLACES on every render, so by the time reconcile runs its node is already gone and cannot be read:
+// holding the text here is what lets a background render put it back (see reopenSearchSuggestions). Same reason
+// the marks are held here rather than read off the rows.
+var suggestFilterText = ''
+var suggestFilterCaret = 0
+// Where the caret sat inside the search REGION when a render landed: 'field', 'filter' (the dropdown's embedded
+// filter box) or 'apply' (its apply button). Without it every restore hands the caret back to the field, which
+// yanks the user out of the box they were narrowing the list with.
+var searchFocusTarget = 'field'
+// The filter text / caret / focus a restore must apply to the NEXT suggestion list this webview builds. Consumed
+// exactly once by renderSearchSuggestions, which is what makes it work for `title:` too: that list is not built
+// synchronously but arrives a debounced round-trip later.
+var pendingSuggestRestore = null
+// The search string this webview most recently asked the host to commit, so a deferred change/search commit for
+// the same string can be recognised as a duplicate and dropped (see onSearchFieldChanged).
+var lastCommittedSearch = null
+// The last value/caret read off the OUTGOING search field, taken on its blur - which is the last instant a field
+// the render is about to replace can still be read. It is the fallback restoreSearchDraft uses when no draft
+// survives, and it exists for exactly one case: text typed AFTER a commit (which nulls the draft) but before the
+// commit's render lands. Cleared by every commit and by a genuine departure, so it can never resurrect
+// superseded text.
+var lastSearchFieldSnapshot = null
 
 function getSearchInput(){
     return document.getElementById('searchFilter')
@@ -1598,6 +1706,41 @@ function renderSearchSuggestions(input){
 
     row.appendChild(menu)
     paintSearchMarks()
+    applyPendingSuggestRestore(menu, input)
+}
+
+/** applyPendingSuggestRestore *********************************************************************************************************************
+ * Puts back the parts of an interrupted multi-select that are NOT the marks: the embedded filter box's text and *
+ * caret, and which control inside the search region held the focus. Consumed once, by whichever list is built    *
+ * next - synchronously for tag:/notebook:, and a debounced round-trip later for title:, which is exactly why     *
+ * this is a pending descriptor rather than a call inside reopenSearchSuggestions.                                 *
+ *                                                                                                                *
+ * Focus moves within the region are not departures: onSearchBlur returns early on a relatedTarget that is still  *
+ * inside it, so handing the caret from the freshly-restored field to the box tears nothing down.                  *
+ ***************************************************************************************************************************************************/
+function applyPendingSuggestRestore(menu, input){
+    var restore = pendingSuggestRestore
+    pendingSuggestRestore = null
+    if (!restore || !menu) return
+    var box = menu.querySelector('.suggest-filter-input')
+    if (box && restore.filter){
+        box.value = restore.filter
+        // Narrows the rows AND re-records the mirrored filter state, so a second render carries it too.
+        applySuggestFilter(menu)
+    }
+    if (restore.focus === 'filter' && box){
+        box.focus()
+        var caret = Math.min(Number(restore.caret) || 0, box.value.length)
+        box.setSelectionRange(caret, caret)
+        return
+    }
+    if (restore.focus === 'apply'){
+        var apply = menu.querySelector('.suggest-apply')
+        // Only when it is actually shown: the marks may have been dropped by the token changing kind, in which
+        // case there is no apply button to focus and the field keeps the caret restoreSearchDraft gave it.
+        if (apply && !apply.hasAttribute('hidden')){ apply.focus(); return }
+    }
+    if (input && document.activeElement !== input) input.focus()
 }
 
 /** buildSuggestFilterRow **************************************************************************************************************************
@@ -1624,6 +1767,9 @@ function buildSuggestFilterRow(input){
     box.setAttribute('spellcheck', 'false')
     box.addEventListener('input', function(){ applySuggestFilter(document.getElementById('searchSuggestions')) })
     box.addEventListener('keydown', function(event){ handleSuggestKey(event, input) })
+    // Which control inside the region holds the caret, so a render that lands mid-narrowing hands it back here
+    // rather than to the field (see applyPendingSuggestRestore).
+    box.addEventListener('focus', function(){ searchFocusTarget = 'filter' })
     // The box is inside the search field's focus region, so leaving it for anything outside that region ends the
     // search interaction exactly as leaving the field itself does.
     box.addEventListener('blur', onSearchBlur)
@@ -1636,6 +1782,7 @@ function buildSuggestFilterRow(input){
     apply.innerHTML = window.SearchTokens.APPLY_ICON
     apply.setAttribute('hidden', '')
     apply.addEventListener('click', function(){ applyMarkedSuggestions(getSearchInput()) })
+    apply.addEventListener('focus', function(){ searchFocusTarget = 'apply' })
     apply.addEventListener('blur', onSearchBlur)
 
     wrap.appendChild(box)
@@ -1888,11 +2035,13 @@ function toggleSearchMark(value){
     else searchMarks.values.push(value)
     if (!searchMarks.values.length) searchMarks = null
     paintSearchMarks()
+    queueSearchState()
 }
 
 function clearSearchMarks(){
     searchMarks = null
     paintSearchMarks()
+    queueSearchState()
 }
 
 // Paint the -marked class onto whichever rows are marked, and show the apply button exactly when at least one
@@ -1919,6 +2068,12 @@ function paintSearchMarks(){
 function applySuggestFilter(menu){
     if (!menu) return
     var box = menu.querySelector('.suggest-filter-input')
+    // Mirror the box into module state on every narrowing - typing, and the Escape step that empties it - so a
+    // render replacing the markup does not take the text with it. Recorded here rather than in the input handler
+    // because Escape clears the box through this function too.
+    suggestFilterText = box ? box.value : ''
+    suggestFilterCaret = box ? (box.selectionStart || 0) : 0
+    queueSearchState()
     // One query for both the narrowing and the highlight fix-up: the list can hold SUGGEST_MAX_ITEMS rows and
     // this runs on every keystroke in the filter box.
     var items = menu.querySelectorAll('.dropdown-item')
@@ -1977,6 +2132,13 @@ function hideSearchSuggestions(options){
     if (menu) traceGesture('list-closed:' + ((options && options.reason) || 'other'))
     if (menu) menu.remove()
     searchSuggestion = null
+    // The box and the apply button went with the list, so the mirrored filter text, the caret target and any
+    // restore still waiting to be applied to a list that will now never be built all go too. A fresh list always
+    // opens with an empty filter box, exactly as before.
+    suggestFilterText = ''
+    suggestFilterCaret = 0
+    searchFocusTarget = 'field'
+    pendingSuggestRestore = null
     // No list, no multi-select: the marks belong to the open list and never outlive it - EXCEPT when the list
     // went away only because the user typed past the last match while still completing the SAME token (see
     // keepMarks below). Every other close - a blur, a commit, Escape, a re-render, the token going away
@@ -2090,10 +2252,14 @@ function onSearchKeyDown(event){
 
 function updateSearchDraft(input){
     searchDraft = { value: input.value, caret: input.selectionStart }
+    // A typed character supersedes the outgoing-field snapshot: the draft is now the fresher record.
+    lastSearchFieldSnapshot = null
+    queueSearchState()
 }
 
 function onSearchFocus(){
     searchFocused = true
+    searchFocusTarget = 'field'
     // Mobile only: hold the host's refreshes while the field is focused, so a setHtml (a full webview
     // reload on mobile) cannot wipe the input, caret, suggestion list or soft keyboard mid-typing. The
     // host releases the hold and runs the held refresh on blur. Desktop keeps its module-state draft
@@ -2154,6 +2320,12 @@ function onSearchFieldChanged(value){
         // narrower than the whole search region - the clear button fires `search` while the FIELD keeps focus,
         // and that has always committed straight away, so testing the region here would strand it.
         if (suggestionsHaveFocus()) return
+        // ALREADY COMMITTED, so this deferred commit has nothing to say. Pressing the field's × fires BOTH
+        // `input` - on which the empty-field auto-reset commits "" - and `search`, which lands here with the
+        // same "": two identical posts, of which the host's equality guard silently absorbed the second. That
+        // equality IS the no-op case, so it is recognised at source instead. A genuinely changed value never
+        // matches (the last commit was some other string), so blur-commits are untouched.
+        if (pendingSearchCommit.value === lastCommittedSearch){ pendingSearchCommit = null; return }
         flushPendingSearchCommit()
     }, 0)
 }
@@ -2187,6 +2359,18 @@ function onSearchBlur(event){
     // cheap early-out for builds that do detach first; what actually covers the render case is the deferred
     // re-check below.
     if (event && event.target && event.target.isConnected === false) return
+    /** The outgoing field's last readable value **************************************************************
+     * A blur of the SEARCH FIELD is the last instant a field the host is about to replace can still be read -
+     * the removal-blur arrives with the node still connected and still holding whatever the user had typed.
+     * Snapshotting it here is what closes the post-commit window: a commit nulls searchDraft, so anything typed
+     * between the commit and the arrival of its render had nothing left to restore from and the freshly
+     * rendered field repainted from the server-rendered (committed) value instead, discarding it. The snapshot
+     * is strictly a FALLBACK - a live draft always wins - and it is cleared by every commit and by a genuine
+     * departure, so it can never repaint superseded text.
+     **********************************************************************************************************/
+    if (event && event.target === getSearchInput()){
+        lastSearchFieldSnapshot = { value: event.target.value, caret: event.target.selectionStart }
+    }
     // Focus moving WITHIN the region (field -> filter box, filter box -> apply button, and back) is not a blur
     // of the search at all.
     var related = event ? event.relatedTarget : null
@@ -2243,7 +2427,11 @@ function leaveSearchField(){
     flushPendingSearchCommit()
     searchFocused = false
     searchDraft = null
+    lastSearchFieldSnapshot = null
     hideSearchSuggestions({ reason: 'field-left' })
+    // The host-held draft (mobile) is dropped on the same signal and BEFORE the hold is released, so the render
+    // the host then runs can never embed a state this webview has just abandoned.
+    clearHostSearchState()
     if (IS_MOBILE) void webviewApi.postMessage(['searchFocusChanged', false]);
 }
 
@@ -2253,23 +2441,29 @@ function leaveSearchField(){
  * build reports with the target still connected and no relatedTarget, so onSearchBlur does not answer it on the spot - it defers the decision one     *
  * tick, by which time this restore (a MutationObserver microtask) has already run and refocused the field, and the deferred check sees focus back     *
  * inside the region and stands down. A genuine departure refocuses nothing, so that same check clears searchFocused and no focus is stolen back       *
- * after the user has left. Two cases:                                                                                                                 *
+ * after the user has left. Three cases:                                                                                                               *
  *  - an uncommitted draft survived the refresh: restore its text and caret;                                                                           *
- *  - the refresh was triggered by a commit-with-focus (Enter, or a picked suggestion, or the clear button): no draft survives a commit, but the user  *
- *    is still in the field, so refocus the freshly rendered input on its server-rendered (committed) value with the caret at the end, so continued    *
- *    typing works. This adds no new webview state - it reuses the existing searchFocused flag - so the mobile reload path is unaffected (there the     *
- *    module state is zeroed by the reload and the host-held search-focus hold drives the refresh instead).                                            *
+ *  - no draft, but the OUTGOING field was snapshotted on its removal-blur and holds something the freshly rendered field does not: restore that. This  *
+ *    is the post-commit keystroke case - a commit nulls the draft, and anything typed between the commit and the arrival of its render used to be      *
+ *    repainted away from the server-rendered (committed) value. The snapshot is cleared by every commit, so it can only ever carry text typed AFTER    *
+ *    the last commit, never a value the user has since superseded;                                                                                     *
+ *  - neither: the refresh was triggered by a commit-with-focus (Enter, or a picked suggestion, or the clear button) with nothing typed since, so the   *
+ *    user is still in the field - refocus the freshly rendered input on its server-rendered (committed) value with the caret at the end, so continued  *
+ *    typing works. This adds no new webview state - it reuses the existing searchFocused flag - so the mobile reload path is unaffected (there the      *
+ *    module state is zeroed by the reload and the host-held search state drives the restore instead; see restoreSearchFromEmbeddedState).              *
  ***************************************************************************************************************************************************/
 /** reopenSearchSuggestions ************************************************************************************************************************
- * Rebuilds the suggestion list after a re-render replaced the panel while a multi-select was in progress, with the marks the user had already made.   *
- * The list itself is rebuilt from the RESTORED draft text (onSearchInput re-parses the token under the caret and re-queries the candidates), so it     *
- * reflects whatever is now in the field; the marks are simply put back first, and onSearchInput drops them itself if the token has become a different  *
- * kind. For title: the list arrives a moment later through its debounced round-trip, and renders marked when it does.                                  *
+ * Rebuilds the suggestion list after a re-render replaced the panel while the user was working in it, with everything the user had already put into   *
+ * it: the marks, the embedded filter box's text and caret, and which control held the focus. The list itself is rebuilt from the RESTORED draft text   *
+ * (onSearchInput re-parses the token under the caret and re-queries the candidates), so it reflects whatever is now in the field; the marks are put    *
+ * back first, and onSearchInput drops them itself if the token has become a different kind. The rest rides in pendingSuggestRestore, applied by         *
+ * whichever list is built next - which is what makes it work for title: too, whose list arrives a debounced round-trip later.                          *
  ***************************************************************************************************************************************************/
-function reopenSearchSuggestions(marks){
+function reopenSearchSuggestions(kept){
     var input = getSearchInput()
     if (!input) return
-    searchMarks = marks
+    searchMarks = (kept && kept.marks) || null
+    pendingSuggestRestore = { filter: (kept && kept.filter) || '', caret: (kept && kept.caret) || 0, focus: (kept && kept.focus) || 'field' }
     onSearchInput(input)
 }
 
@@ -2284,9 +2478,115 @@ function restoreSearchDraft(){
         input.setSelectionRange(caret, caret)
         return
     }
+    var snapshot = lastSearchFieldSnapshot
+    lastSearchFieldSnapshot = null
+    if (snapshot && snapshot.value !== input.value){
+        input.value = snapshot.value
+        input.focus()
+        var typedCaret = Math.min(Number(snapshot.caret) || 0, input.value.length)
+        input.setSelectionRange(typedCaret, typedCaret)
+        return
+    }
     input.focus()
     var end = input.value.length
     input.setSelectionRange(end, end)
+}
+
+/** Search reload-survival (mobile) *****************************************************************************************************************
+ * On mobile the panel WebView can be reloaded by the HOST at any moment - an Android renderer-process kill under sync load remounts it with a fresh  *
+ * document - and that destroys every variable in this file. Until 2.1.0 that lost the whole in-progress search: the uncommitted query text, the      *
+ * caret, an open dropdown and any marks made in it, with no way back (a reloaded document renders the last COMMITTED filter). The fix mirrors the    *
+ * overlay descriptor exactly, one layer down: the HOST holds a small { draft, caret, marks, filter, filterCaret, focus } state, posted from here      *
+ * (throttled, like queueOverlayState), embedded as a JSON island beside #cockpitOverlayState, and read back by reconcile on the fresh webview, which  *
+ * re-runs onSearchInput on the restored draft so the list and the marks come back with it.                                                            *
+ *                                                                                                                                                     *
+ * DELIBERATELY NOT ROUTED THROUGH dialogGuard, and that is the whole point of a separate channel. The dropdown opens and closes on EVERY keystroke,   *
+ * whereas an overlay has exactly two call sites, so bracketing it with the guard would be a leak hazard whose failure mode is frozen refreshes; and   *
+ * the guard would be redundant anyway, because the mobile search-focus hold already blocks every Cockpit setHtml while the field is focused. This      *
+ * posts no guard at all - it is pure state.                                                                                                            *
+ *                                                                                                                                                     *
+ * MOBILE ONLY. Desktop's setHtml keeps this module state alive, so its restore runs entirely from the variables above and nothing is posted - which    *
+ * also keeps the desktop markup byte-identical (the island is emitted on mobile only).                                                                 *
+ *                                                                                                                                                     *
+ * CLEARED ON COMMIT AND ON DEPARTURE (onSearchFilterChanged / leaveSearchField), so a stale draft cannot resurrect over a search the user has since    *
+ * run or abandoned. Accepted, and shared with the overlay descriptor: a webview torn down WITHOUT a blur - the panel tab closed mid-typing - leaves    *
+ * the state held, and the next open restores that draft once (and re-focuses the field). It is the user's own text and one commit or blur clears it.   *
+ ***************************************************************************************************************************************************/
+var searchStateTimer = null
+
+function currentSearchStateDescriptor(){
+    if (!searchFocused) return null
+    var input = getSearchInput()
+    if (!input) return null
+    var draft = searchDraft ? searchDraft : { value: input.value, caret: input.selectionStart }
+    return {
+        draft: String(draft.value == null ? '' : draft.value),
+        caret: Number(draft.caret) || 0,
+        marks: searchMarks ? { kind: searchMarks.kind, values: searchMarks.values.slice() } : null,
+        filter: suggestFilterText,
+        filterCaret: suggestFilterCaret,
+        focus: searchFocusTarget,
+    }
+}
+
+function pushSearchState(){
+    if (!IS_MOBILE) return
+    void webviewApi.postMessage(['searchState', currentSearchStateDescriptor()])
+}
+
+// Trailing-edge throttle for rapid input (every keystroke in the field or the list's filter box, every mark),
+// mirroring queueOverlayState/queueScrollPost so a burst posts at most once every 300ms.
+function queueSearchState(){
+    if (!IS_MOBILE) return
+    if (searchStateTimer) return
+    searchStateTimer = setTimeout(function(){ searchStateTimer = null; pushSearchState() }, 300)
+}
+
+// Drop the host's copy at once, cancelling any throttled post still armed - otherwise a timer fired after a
+// commit would re-post the state the commit has just invalidated.
+function clearHostSearchState(){
+    if (searchStateTimer){ clearTimeout(searchStateTimer); searchStateTimer = null }
+    if (!IS_MOBILE) return
+    void webviewApi.postMessage(['searchState', null])
+}
+
+// The raw text of the embedded search-state island (empty string when absent/null), read by startPanelObserver
+// so the host knows whether this freshly loaded document can restore the search itself.
+function readEmbeddedSearchStateText(){
+    var node = document.getElementById('cockpitSearchState')
+    if (!node) return ''
+    var text = String(node.textContent || '').trim()
+    return text && text !== 'null' ? text : ''
+}
+
+/** restoreSearchFromEmbeddedState ******************************************************************************************************************
+ * Rebuild the in-progress search on a freshly loaded (mobile) webview from the island the host embedded. The field is refocused, which re-arms the   *
+ * host's search-focus hold through onSearchFocus - without it the next refresh would simply wipe the restored state again.                            *
+ *                                                                                                                                                     *
+ * THE EMPTY-DRAFT TRAP. onSearchInput runs maybeAutoResetSearch first, and that reads "still filtered" off input.defaultValue - the server-rendered   *
+ * value ATTRIBUTE, which this restore does not (and must not) touch. So restoring an empty draft over a document rendered with a committed filter      *
+ * would look exactly like the user having just emptied the field and would post a reset nobody asked for. Arming searchResetPosted says "that reset    *
+ * has already been dealt with"; the very first character the user types clears it again (the guard's own first line), so a later genuine emptying      *
+ * still resets the panel.                                                                                                                              *
+ ***************************************************************************************************************************************************/
+function restoreSearchFromEmbeddedState(){
+    var text = readEmbeddedSearchStateText()
+    if (!text) return
+    var state = null
+    try { state = JSON.parse(text) } catch (error){ return }
+    if (!state) return
+    var input = getSearchInput()
+    if (!input) return
+    input.value = String(state.draft == null ? '' : state.draft)
+    if (!input.value.trim()) searchResetPosted = true
+    input.focus()
+    var caret = Math.min(Number(state.caret) || 0, input.value.length)
+    input.setSelectionRange(caret, caret)
+    searchDraft = { value: input.value, caret: caret }
+    var marks = (state.marks && Array.isArray(state.marks.values) && state.marks.values.length)
+        ? { kind: state.marks.kind, values: state.marks.values.slice() }
+        : null
+    reopenSearchSuggestions({ marks: marks, filter: String(state.filter || ''), caret: Number(state.filterCaret) || 0, focus: state.focus || 'field' })
 }
 
 /** onCreateProfileClicked **************************************************************************************************************************

@@ -5,7 +5,7 @@
  *                                                                                                                                                   *
  * WHAT THE HIGHLIGHT IS. `picked` is the highlight-only store (pickedNoteID in the webview): it marks a row without joining the panel's selection,   *
  * so a note the user never picked in the panel can never ride along in a drag or a batch action. `selected` is the panel's OWN selection             *
- * (selectedTodoIDs), built by clicking and Ctrl/Shift-clicking rows, and it is what a drag or a multi-select action acts on.                         *
+ * (selectedRowIDs), built by clicking and Ctrl/Shift-clicking rows - to-do rows and regular note rows alike - and it is what a drag or a batch acts on. *
  *                                                                                                                                                   *
  * WHAT AN EDITOR CHANGE MAY TOUCH. The highlight always moves (or clears). The panel's selection is treated as user-owned state:                     *
  *   - MORE THAN ONE row selected: never touched. A deliberate multi-selection must survive the selection noise Joplin emits for reasons that have    *

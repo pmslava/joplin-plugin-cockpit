@@ -17,7 +17,7 @@ import {
  *
  * The multi-drag bug: with several to-dos Ctrl-selected, pressing one selected row to start a drag fired a
  * PLAIN mousedown first (the browser always fires mousedown before dragstart). onTodoRowMouseDown's plain
- * branch collapsed the whole selection down to that one row, so by the time dragstart read selectedTodoIDs
+ * branch collapsed the whole selection down to that one row, so by the time dragstart read selectedRowIDs
  * only ONE id went into the drag payload and only one to-do moved. The fix preserves an already-multi
  * selection on a plain mousedown (the file-manager rule: a press that becomes a drag keeps the set; the
  * collapse-to-one happens on the CLICK that follows a press with no drag, which also opens the note).
@@ -166,11 +166,11 @@ test.describe('Multi-drag and Overdue between-drop', () => {
           (r) => (r.textContent || '').includes(m)
         );
       const sel = () =>
-        (window as any).selectedTodoIDs ? [...(window as any).selectedTodoIDs] : '(no global)';
+        (window as any).selectedRowIDs ? [...(window as any).selectedRowIDs] : '(no global)';
       const a = rowByMarker(mk.a)!;
       const b = rowByMarker(mk.b)!;
       const anchor = rowByMarker(mk.lo)!;
-      const out: any = { hasGlobal: !!(window as any).selectedTodoIDs };
+      const out: any = { hasGlobal: !!(window as any).selectedRowIDs };
       out.start = sel();
       a.dispatchEvent(new MouseEvent('mousedown', { button: 0, ctrlKey: true, bubbles: true }));
       out.afterCtrlA = sel();
@@ -227,13 +227,13 @@ test.describe('Multi-drag and Overdue between-drop', () => {
           (r) => (r.textContent || '').includes(m)
         );
       const sel = () =>
-        (window as any).selectedTodoIDs ? [...(window as any).selectedTodoIDs] : '(no global)';
+        (window as any).selectedRowIDs ? [...(window as any).selectedRowIDs] : '(no global)';
       const a = rowByMarker(mk.a)!;
       const b = rowByMarker(mk.b)!;
       const heading = (Array.from(document.querySelectorAll('.todos h2[data-drop]')) as HTMLElement[]).find(
         (h) => /Today/.test(h.textContent || '')
       )!;
-      const out: any = { hasGlobal: !!(window as any).selectedTodoIDs };
+      const out: any = { hasGlobal: !!(window as any).selectedRowIDs };
       out.start = sel();
       a.dispatchEvent(new MouseEvent('mousedown', { button: 0, ctrlKey: true, bubbles: true }));
       out.afterCtrlA = sel();

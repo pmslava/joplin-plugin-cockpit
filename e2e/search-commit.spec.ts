@@ -1,6 +1,13 @@
 import { test, expect } from '@playwright/test';
 import { launchJoplin, closeJoplin, JoplinInstance } from './launch';
-import { agendaPanel, createNote, createNotebook, createTodo, PANEL_REFRESH_TIMEOUT } from './helpers';
+import {
+  agendaPanel,
+  createNote,
+  createNotebook,
+  createTodo,
+  selectedNoteId,
+  PANEL_REFRESH_TIMEOUT,
+} from './helpers';
 
 /**
  * Rows of the panel's own list. The read-only "results outside current filters" peek renders inside the same
@@ -70,6 +77,9 @@ test.describe('Search commit on Enter', () => {
   const noteTitle = `${marker} outside-filter note`;
   const filterNotebook = `Cockpit Search Filter A ${Date.now()}`;
   const targetNotebook = `Cockpit Search Target B ${Date.now()}`;
+  // The peeked note's real Joplin id, so the peek-click check below can assert on the app's own selected
+  // note (a click that opens it) and on the panel's selection (which must NOT gain it).
+  let outsideNoteId = '';
 
   test.beforeAll(async () => {
     joplin = await launchJoplin();
@@ -77,7 +87,7 @@ test.describe('Search commit on Enter', () => {
     // Two notebooks: the panel is filtered to the first; the searched-for note lives in the second.
     await createNotebook(win, filterNotebook);
     await createNotebook(win, targetNotebook); // becomes the selected notebook...
-    await createNote(win, noteTitle); // ...so the new note is created inside it.
+    outsideNoteId = await createNote(win, noteTitle); // ...so the new note is created inside it.
   });
 
   test.afterAll(async () => {
@@ -152,6 +162,28 @@ test.describe('Search commit on Enter', () => {
         { timeout: 10_000, intervals: [300, 1000] }
       )
       .toEqual({ start: marker.length, end: marker.length, length: marker.length });
+
+    /** A CLICK on a peek row OPENS it and selects NOTHING (MAJOR-1, 2.1.0). ***************************
+     * The peek's rows are read-only: they are rendered without the selection `onmousedown` on purpose,
+     * but they DO carry `onclick`, because opening them is the whole point of showing them. When the
+     * click path gained a selection collapse (the shared onRowClicked), that collapse wrote a peek row
+     * into `selectedRowIDs` - persisted module state that survives every render - and since a selection
+     * drives the batch context menu, Delete / Move / Tags / Duplicate / Switch-type became reachable on
+     * rows the user was shown read-only, from outside their filters and even from excluded notebooks.
+     *
+     * Proved on the LIVE selection rather than on the `-selected` class: the class is also painted for
+     * the editor-tracking highlight, which a peek row legitimately gets once clicking it opens the note.
+     ***************************************************************************************************/
+    const before = await panel.evaluate(() => [...((window as any).selectedRowIDs || [])]);
+    await peek.locator('.todo-title', { hasText: marker }).first().click();
+    // The click did its real job: the editor moved onto the peeked note.
+    await expect
+      .poll(async () => await selectedNoteId(win), { timeout: 15_000, intervals: [500, 1500] })
+      .toBe(outsideNoteId);
+    // And the selection is untouched - not merely "does not contain the peek row", but unchanged.
+    const after = await panel.evaluate(() => [...((window as any).selectedRowIDs || [])]);
+    expect(after, 'a click on a read-only peek row must not enter the selection').toEqual(before);
+    expect(after, 'and specifically must not have selected the peeked note').not.toContain(outsideNoteId);
   });
 
   /**
@@ -393,6 +425,68 @@ test.describe('Search commit on Enter', () => {
   });
 
   /**
+   * The × posts exactly ONE commit.
+   *
+   * Clicking the field's clear button fires THREE events: `input` (on which the empty-field auto-reset commits
+   * ""), then `change` and `search` (which both reach the deferred commit with the same ""). So the webview
+   * asked the host to commit the identical empty query up to three times, and the host's equality guard quietly
+   * absorbed the extras. That equality IS the no-op case, so the duplicates are now dropped at source.
+   *
+   * Counted by wrapping `webviewApi.postMessage` in the panel - the only way to see posts the host would
+   * otherwise collapse into one indistinguishable render. The counter lives on `window`, which survives the
+   * desktop re-render (setHtml is an innerHTML swap inside the panel iframe).
+   */
+  test('the × asks the host to commit exactly once, not two or three times', async () => {
+    const { win } = joplin;
+    const panel = await agendaPanel(win);
+    const search = panel.locator('#searchFilter');
+
+    await win.waitForTimeout(2_000);
+    await resetToFullList(panel, search);
+
+    // Commit something for the × to clear.
+    await search.click();
+    await search.press('Control+a');
+    await search.press('Delete');
+    await search.pressSequentially('Zzqqxx-clear-once', { delay: 10 });
+    await search.press('Enter');
+    await expect
+      .poll(async () => await search.inputValue(), { timeout: 15_000, intervals: [500, 1500] })
+      .toBe('Zzqqxx-clear-once');
+    await win.waitForTimeout(1_500);
+
+    // Start counting AFTER the commit has settled, so only the × 's own posts are seen.
+    await panel.evaluate(() => {
+      const api = (window as any).webviewApi;
+      (window as any).__cockpitCommits = [];
+      if (!api.__cockpitCounted) {
+        const original = api.postMessage.bind(api);
+        api.postMessage = (message: any) => {
+          if (Array.isArray(message) && message[0] === 'searchFilterChanged') {
+            (window as any).__cockpitCommits.push(String(message[1] ?? ''));
+          }
+          return original(message);
+        };
+        api.__cockpitCounted = true;
+      }
+    });
+
+    // A REAL click on the UA cancel button (~14px in from the right edge - see the test above).
+    await search.click();
+    const box = (await search.boundingBox())!;
+    await win.mouse.click(box.x + box.width - 14, box.y + box.height / 2);
+
+    await expect
+      .poll(async () => await search.inputValue(), { timeout: 10_000, intervals: [300, 1000] })
+      .toBe('');
+    // Give the deferred change/search commits (one tick each) and the render every chance to fire.
+    await win.waitForTimeout(3_000);
+
+    const commits = await panel.evaluate(() => (window as any).__cockpitCommits as string[]);
+    expect(commits, 'the × must ask the host to commit the empty query exactly once').toEqual(['']);
+  });
+
+  /**
    * Emptying the field returns the panel to "all" on its own - no Enter.
    *
    * This is the second Pixel report. The input path never committed: `input` is the only event a backspace
@@ -552,6 +646,121 @@ test.describe('Search commit on Enter', () => {
     // EXACTLY the union, nothing else. The membership check above would still pass if the list also carried
     // unrelated rows, which is precisely the shape the bug had: everything matched.
     expect(await listRowCount(panel)).toBe(2);
+  });
+
+  /**
+   * Keystrokes typed straight after a commit must survive the commit's own re-render.
+   *
+   * A commit nulls the webview's uncommitted draft, so a render landing afterwards repainted the freshly
+   * rendered field from its server-rendered (committed) value - and anything typed in between went with it.
+   * The fix snapshots the OUTGOING field on its removal-blur (the last instant that node can still be read)
+   * and uses it as the restore's fallback. Only the real GUI can decide this: the loss depends on where the
+   * render lands relative to the keystrokes, which no source-shape check can reproduce.
+   *
+   * The suffix is typed with NO wait after Enter, exactly the race the report describes.
+   */
+  test('typing immediately after a commit is not swallowed by the commit’s own re-render', async () => {
+    const { win } = joplin;
+    const panel = await agendaPanel(win);
+    const search = panel.locator('#searchFilter');
+
+    await win.waitForTimeout(2_000);
+    await resetToFullList(panel, search);
+
+    const base = `Zqcommit${Date.now()}`;
+    const suffix = 'xyz';
+
+    await search.click();
+    await search.press('Control+a');
+    await search.press('Delete');
+    await search.pressSequentially(base, { delay: 10 });
+    await search.press('Enter');
+    // No settle: the render is now in flight, and these characters land while it is.
+    await search.pressSequentially(suffix, { delay: 10 });
+
+    // Whatever the render did, every character the user typed is still in the field, in order, once.
+    await expect
+      .poll(async () => await search.inputValue(), { timeout: 15_000, intervals: [300, 1000, 2000] })
+      .toBe(base + suffix);
+    // And the caret is still in the field, so the NEXT keystroke goes somewhere.
+    await expect(search).toBeFocused();
+  });
+
+  /**
+   * A background re-render must not empty the dropdown's own filter box (Slava: "Sync is a very often thing
+   * here"). The marks already rode across such a render; the filter text, its caret and where the focus sat
+   * did not, so a sync landing mid-selection widened the list back out and yanked the caret to the field.
+   *
+   * The render is provoked deterministically by ticking a to-do from the MAIN window - a real note change,
+   * which is what a sync landing looks like to the panel - rather than by waiting for one.
+   */
+  test('a re-render mid-selection keeps the dropdown filter text, its caret and the focus', async () => {
+    const { win } = joplin;
+    const panel = await agendaPanel(win);
+    const search = panel.locator('#searchFilter');
+    const menu = panel.locator('#searchSuggestions');
+
+    await win.waitForTimeout(2_000);
+    await resetToFullList(panel, search);
+
+    // Open a notebook: list (the notebooks this spec created share the "Cockpit" prefix) and narrow it.
+    await expect
+      .poll(
+        async () => {
+          if (await menu.count()) return true;
+          await search.click();
+          await search.press('Control+a');
+          await search.press('Delete');
+          await win.waitForTimeout(1_500);
+          await search.pressSequentially('notebook:Cockpit', { delay: 20 });
+          return (await menu.count()) > 0;
+        },
+        { timeout: 30_000, intervals: [500, 1000, 2000] }
+      )
+      .toBe(true);
+
+    const filterBox = menu.locator('.suggest-filter-input');
+    await filterBox.click();
+    await filterBox.pressSequentially('Filter', { delay: 20 });
+    const narrowed = await panel.locator('#searchSuggestions .dropdown-item:not([hidden])').count();
+    expect(narrowed, 'the filter must actually narrow the list, or the assertion below is vacuous').toBeGreaterThan(0);
+
+    // Force a real re-render the way a landing SYNC does: from the host, with no click and no focus change.
+    // A click anywhere in the panel would run the capture click-closer and shut the list before the render,
+    // and any interaction in the main window would blur the field - neither is what a background refresh is.
+    // Posting the host message directly reproduces exactly the part that matters: setHtml replaces the markup
+    // underneath a live interaction. The render nonce is the panel's own witness that it happened.
+    const nonce = async () => await panel.locator('.todos').first().getAttribute('data-render-nonce');
+    const before = await nonce();
+    await panel.evaluate(() => (window as any).webviewApi.postMessage(['sortDirectionClicked']));
+    await expect
+      .poll(nonce, { timeout: PANEL_REFRESH_TIMEOUT, intervals: [500, 1500, 2500] })
+      .not.toBe(before);
+
+    // The list is back, still narrowed, with the text and the caret where the user left them.
+    await expect(menu).toHaveCount(1);
+    await expect
+      .poll(async () => await panel.locator('#searchSuggestions .suggest-filter-input').inputValue(), {
+        timeout: 15_000,
+        intervals: [300, 1000],
+      })
+      .toBe('Filter');
+    const state = await panel.evaluate(() => {
+      const box = document.querySelector('#searchSuggestions .suggest-filter-input') as HTMLInputElement | null;
+      return {
+        focusedIsBox: document.activeElement === box,
+        caret: box ? box.selectionStart : null,
+        visible: document.querySelectorAll('#searchSuggestions .dropdown-item:not([hidden])').length,
+      };
+    });
+    expect(state.focusedIsBox, 'the caret must stay in the box the user was narrowing with').toBe(true);
+    expect(state.caret).toBe('Filter'.length);
+    expect(state.visible, 'the list must still be narrowed, not widened back out').toBe(narrowed);
+
+    // Leave the field (and put the sort direction back) so the next test starts clean.
+    await panel.locator('#searchSuggestions .suggest-filter-input').press('Escape'); // filter text
+    await panel.locator('#searchFilter').press('Escape'); // the list
+    await panel.evaluate(() => (window as any).webviewApi.postMessage(['sortDirectionClicked']));
   });
 
 });

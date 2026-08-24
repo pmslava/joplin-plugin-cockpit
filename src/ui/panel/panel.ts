@@ -83,6 +83,19 @@ var searchFocused = false
  ***************************************************************************************************************************************************/
 var openOverlayState = null
 
+/** openSearchState (mobile search reload-survival) *************************************************************************************************
+ * The same mechanism as openOverlayState, for the IN-PROGRESS SEARCH: { draft, caret, marks, filter, filterCaret, focus }, or null when the field is *
+ * not being worked in. The webview posts it (throttled) as the user types, marks and narrows, and clears it on every commit and on a genuine         *
+ * departure, so it only ever describes an uncommitted interaction. A host-initiated reload - the Android renderer kill - destroys the webview's own   *
+ * copy of all of that, and a reloaded document renders only the last COMMITTED filter, so without this the typed query, the open dropdown and any     *
+ * marks in it were simply gone.                                                                                                                       *
+ *                                                                                                                                                     *
+ * It rides on its OWN channel, with no dialogGuard involvement: the dropdown opens and closes on every keystroke, so bracketing it with the guard      *
+ * would risk leaving refreshes paused forever, and the guard would be redundant anyway (the search-focus hold above already pauses them). Null on      *
+ * desktop - the webview only posts it on mobile - so the desktop markup is unchanged.                                                                  *
+ ***************************************************************************************************************************************************/
+var openSearchState = null
+
 /** editorNoteID (the row highlight follows the main editor) ****************************************************************************************
  * The id of the note the MAIN window's editor/viewer is showing, or "" when none is - including when Joplin's own note list holds SEVERAL notes      *
  * selected, where no single note is open. The panel highlights that row, so its highlight tracks the editor wherever the note was opened from (a      *
@@ -169,6 +182,9 @@ export async function setupPanel(){
     // The shared editor-note highlight rules (window.EditorNote), loaded before panelWebview.js applies them -
     // the same module the Node unit tests drive through the selection scenarios.
     await joplin.views.panels.addScript(panel, '/ui/panel/editorNote.js')
+    // The shared row-selection rules (window.RowSelection), loaded before panelWebview.js selects anything - the
+    // same module the Node unit tests drive through the press / click / mixed-kind cases.
+    await joplin.views.panels.addScript(panel, '/ui/panel/rowSelection.js')
     // The shared search-token text rules (window.SearchTokens), loaded before panelWebview.js builds the search
     // suggestion dropdown and inserts a picked (or multi-marked) token - the same module the Node unit tests drive
     // through the insertion / quoting / duplicate-skip cases.
@@ -488,6 +504,13 @@ async function eventHandler(message){
         // triggers a refresh of its own (the overlay is up, so refreshes are guarded anyway).
         openOverlayState = message[1] || null
         return
+    } else if (message[0] == 'searchState'){
+        // The webview's descriptor of the search interaction in progress (posted throttled as the user types,
+        // marks and narrows; posted null on every commit and on a genuine departure). Held so a host-initiated
+        // webview reload mid-search can be rebuilt; never triggers a refresh of its own - the search-focus hold
+        // is pausing them anyway, and a render here would be the very thing this exists to survive.
+        openSearchState = message[1] || null
+        return
     } else if (message[0] == 'dialogGuardReset'){
         // Posted once per webview (re)load on mobile: clear any overlay guard leaked by a webview that was
         // torn down mid-overlay, so refreshPanelData is not paused forever. Clear the search-focus hold for
@@ -502,7 +525,14 @@ async function eventHandler(message){
         // embedded so the fresh webview can rebuild it. The webview clears the leaked guard above first and
         // re-arms it when it rebuilds, so this fires exactly once and cannot loop (a document that already
         // carries the descriptor reports message[1] true and is skipped).
-        if (openOverlayState && !message[1]) await refreshPanelData()
+        //
+        // message[2] is the same handshake for the SEARCH state. One re-render serves both islands (they are
+        // embedded together), so the two conditions are OR-ed rather than run twice. searchFocused has just been
+        // cleared above, so this render is not held by the hold - and the restoring webview re-arms the hold
+        // itself by refocusing the field.
+        var needsOverlayRestore = !!openOverlayState && !message[1]
+        var needsSearchRestore = !!openSearchState && !message[2]
+        if (needsOverlayRestore || needsSearchRestore) await refreshPanelData()
     } else if (message[0] == 'getEditorNote'){
         // A two-way round-trip: a freshly loaded webview asks which note the editor is showing, so it can
         // paint the highlight straight away rather than waiting for the next selection change. Reads
@@ -906,6 +936,15 @@ export async function togglePanelVisibility() {
     var overlayStateIsland = (mobile && openOverlayState)
         ? `<script id="cockpitOverlayState" type="application/json">${JSON.stringify(openOverlayState).replace(/</g, "\\u003c")}</script>`
         : ''
+    // Search reload-survival (mobile): the in-progress search state, embedded the same way and for the same
+    // reason. It is non-null only while the user is actually working in the field - and on mobile every render
+    // is held while that field has focus - so an ordinary render embeds nothing and the equality guard below is
+    // untouched; the ONE render where it is non-null is the reconstruct render, whose differing content is
+    // exactly what must get past the guard. "</" is neutralised so a tag/notebook name inside the typed draft
+    // cannot close the script element early. Empty on desktop.
+    var searchStateIsland = (mobile && openSearchState)
+        ? `<script id="cockpitSearchState" type="application/json">${JSON.stringify(openSearchState).replace(/</g, "\\u003c")}</script>`
+        : ''
     var contentHtml = panelTemplate
         .replace("<<THEME_CSS>>", () => themeCss)
         .replace("<<CUSTOM_CSS>>", () => customCss)
@@ -913,6 +952,7 @@ export async function togglePanelVisibility() {
         .replace("<<CONTROLS>>", () => controlsHtml)
         .replace("<<TODOS>>", () => todosHtml)
         .replace("<<OVERLAY_STATE>>", () => overlayStateIsland)
+        .replace("<<SEARCH_STATE>>", () => searchStateIsland)
     // Out-of-order guard: if a newer run has started while this one was awaiting its data, discard this run
     // now - BEFORE touching lastRenderedHtml or painting - so a slow older run cannot overwrite the newer
     // paint (nor corrupt the equality baseline with markup that never reached the panel). The newer run owns

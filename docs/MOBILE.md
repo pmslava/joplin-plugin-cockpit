@@ -188,17 +188,38 @@ All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click
   whenever ≥1 row is marked, and doubles as the selection-mode indicator (mobile has no Ctrl to hint
   at, and the hint line at the list's bottom edge reads "Press and hold - select several" there). The
   marks are held by value, so filtering the list and clearing the filter never loses them.
-- **Accepted gap — marks do not survive a host-initiated reload.** The open dropdown is *already* safe
-  from Cockpit's own renders: the mobile search-focus hold (`searchFocusChanged`) blocks every
-  `setHtml` while the field has focus, and the list cannot outlive that focus. It is **not** safe from
-  an Android renderer-process kill, which reloads the webview and destroys module state. Neither is the
-  uncommitted query text — a reloaded document renders the last *committed* `searchFilter` — so
-  restoring marks without restoring the text they were meant for would be meaningless. The dropdown is
-  therefore deliberately **not** routed through the overlay descriptor / `dialogGuard` machinery: the
-  guard would be redundant (the focus hold already pauses refreshes) and would be a leak hazard (the
-  list opens and closes on every keystroke, whereas an overlay has exactly two call sites). A follow-up
-  could hold a `{ draft, caret, marks }` descriptor on the host in its own channel — no `dialogGuard`
-  involved — which would fix the pre-existing "typed query lost on reload" gap at the same time.
+- **The in-progress search survives a host-initiated reload** (2.1.0; the accepted gap this replaces is
+  described below). The open dropdown was *already* safe from Cockpit's own renders — the mobile
+  search-focus hold (`searchFocusChanged`) blocks every `setHtml` while the field has focus, and the
+  list cannot outlive that focus — but not from an Android renderer-process kill, which reloads the
+  webview and destroys module state. Neither was the uncommitted query text: a reloaded document renders
+  the last *committed* `searchFilter`, so a half-typed query was simply gone (a pre-existing gap that
+  predates the dropdown entirely). The host now holds a **`searchState`** descriptor of its own —
+  `{ draft, caret, marks, filter, filterCaret, focus }` — on the same pattern as the overlay descriptor
+  one layer up:
+  - the webview posts it **throttled** (300 ms, mirroring `queueOverlayState` / `queueScrollPost`) from
+    `updateSearchDraft`, from the mark toggles and from the dropdown's filter box, and posts **null** on
+    every commit and on a genuine departure, so it only ever describes an uncommitted interaction;
+  - `refreshPanelData` embeds it as a `<script id="cockpitSearchState">` island next to
+    `#cockpitOverlayState`; `startPanelObserver` reports whether the loaded document carries it as
+    `message[2]` of `dialogGuardReset`, and a host holding a state the document lacks re-renders **once**
+    with it embedded. Same non-looping handshake as the overlay's; one render serves both islands;
+  - `reconcile` on a fresh webview (mobile, and only when no live search state survived) calls
+    `restoreSearchFromEmbeddedState`: the draft goes back into the field, the field is **refocused**
+    (which re-arms the host's hold — without it the next refresh would wipe the restore), and
+    `onSearchInput` is re-run so the dropdown and its marks come back with it.
+  - **Empty-draft trap**: `onSearchInput` runs `maybeAutoResetSearch` first, and that reads "still
+    filtered" off `input.defaultValue`, which the restore does not touch. Restoring an *empty* draft over
+    a document rendered with a committed filter would therefore look exactly like the user having just
+    emptied the field and would commit a reset nobody asked for. The restore arms `searchResetPosted` in
+    that case; the first character typed clears it again, so a later genuine emptying still resets.
+  - **Explicitly NO `dialogGuard`**, and that is the point of a separate channel: the dropdown opens and
+    closes on *every keystroke*, whereas an overlay has exactly two call sites, so bracketing it with the
+    guard would be a leak hazard whose failure mode is refreshes frozen forever — and the guard would be
+    redundant anyway, since the focus hold already pauses them.
+  - **Accepted, and shared with the overlay descriptor**: a webview torn down *without* a blur (the panel
+    tab closed mid-typing) leaves the state held, so the next open restores that draft once and refocuses
+    the field. It is the user's own text, and one commit or blur clears it.
 - **Viewport**: `#joplin-plugin-content` keeps `height: 100vh` as the base, with a mobile-gated
   `@supports (height: 100dvh)` override to `100dvh` on `.cockpit-mobile`. Inside the plugin-dialog
   iframe `dvh == vh`, so this is a harmless, future-proof line; the real fill guarantee is the flex
@@ -489,13 +510,19 @@ success vs failure looks like. The build to install is
     - Success: the list scrolls; no row is marked, and no suggestion is picked when the finger lifts.
     - Failure: a scroll marks a row or commits a pick.
 
-10f. **Reload while marking (the accepted gap).** With marks made, provoke a panel reload (background
-    the app during a sync).
-    - Success: the dropdown is simply **gone** and the field shows the last committed search; the panel
-      is alive and refreshes normally. This loss is expected and documented — the uncommitted query
-      text is lost the same way, and always has been.
-    - Failure: refreshes stay paused afterwards (a guard leak — which should be impossible, the
-      dropdown posts no `dialogGuard`), or the panel comes back stuck.
+10f. **Reload while marking — now SURVIVED (2.1.0; this step used to document the loss).** Type a partial
+    query, open a `tag:` list, mark two rows, type something into the list's filter box, then provoke a
+    panel reload (background the app during a sync).
+    - Success: the panel comes back with the **typed query still in the field**, the dropdown open, the
+      **same rows still marked**, the filter box still holding its text, and the keyboard up. Committing
+      from there applies exactly what you had built.
+    - Failure: the dropdown is gone and only the last committed search shows (the state never reached the
+      host, or the island was not embedded); the field comes back EMPTY and the panel resets itself to the
+      unfiltered list (the empty-draft trap — a spurious auto-reset); the panel keeps re-rendering in a
+      loop (the handshake is not reporting the island); or refreshes stay paused afterwards (a guard leak
+      — which should be impossible, this channel posts no `dialogGuard` at all).
+    - Also confirm the state does NOT outstay its welcome: commit the search (or tap elsewhere to blur),
+      then provoke another reload — the panel must come back plain, with no dropdown and no draft.
 
 11. **Cold-start feel over a real vault.** Note time-to-first-render and scrolling smoothness on the
     first open over the full vault.

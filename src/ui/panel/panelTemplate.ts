@@ -9,4 +9,5 @@ export var panelTemplate = `
     <<CONTROLS>>
     <section class="todos" data-scroll-top="<<SCROLL_TOP>>" data-render-nonce="<<RENDER_NONCE>>"><<TODOS>></section>
     <<OVERLAY_STATE>>
+    <<SEARCH_STATE>>
 `

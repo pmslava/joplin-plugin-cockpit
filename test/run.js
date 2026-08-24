@@ -1742,6 +1742,11 @@ async function main() {
     // webview loads, so these tests exercise what ships. Used by the notebook-filter pin (which shares the
     // narrowing rule) and by the multi-select suite near the end of this file.
     const SearchTokens = require('../src/ui/panel/searchTokens.js')
+    // The shared row-selection rules, required the same way: the very file the webview loads, so the checks below
+    // exercise what ships rather than a paraphrase of it.
+    const RowSelection = require('../src/ui/panel/rowSelection.js')
+    // Realistic 32-char note ids for the pure selection checks (the later suites have their own id32).
+    const rowId = (prefix) => (prefix + '0'.repeat(32)).slice(0, 32)
     const handlerBody = (name) => {
         const start = webviewSource.indexOf('function ' + name + '(')
         assert.ok(start >= 0, name + ' not found in panelWebview.js')
@@ -1758,14 +1763,18 @@ async function main() {
         assert.ok(body.includes("classList.contains('todo-checkbox')"), 'the tick-circle guard must stay (a checkbox click must not open)')
         assert.ok(body.includes("classList.contains('todo-notebook')"), 'the notebook-pill guard must stay (a pill click filters, not opens)')
         assert.ok(/event\.(ctrlKey|metaKey|shiftKey)/.test(body), 'the modifier (multi-select) guard must stay')
-        assert.ok(body.includes('onTodoClicked(todoID)'), 'the row must still open the to-do')
+        assert.ok(body.includes('onRowClicked(event, todoID)'), 'the row must still reach the shared open path')
+        assert.ok(handlerBody('onRowClicked').includes('onTodoClicked(rowID)'), 'which must still open the item')
         assert.ok(!body.includes("classList.contains('todo-title')"), 'opening must NOT be gated on the title zone - a dead-zone click must open too')
     })
     await test('row click: onNoteRowClicked opens beyond the title (a note row has no checkbox to guard)', () => {
         const body = handlerBody('onNoteRowClicked')
         assert.ok(body.includes("classList.contains('todo-notebook')"), 'the notebook-pill guard must stay')
-        assert.ok(body.includes('onTodoClicked(noteID)'), 'the row must still open the note')
+        assert.ok(body.includes('onRowClicked(event, noteID)'), 'the row must still reach the shared open path')
         assert.ok(!body.includes("classList.contains('todo-title')"), 'opening must NOT be gated on the title zone')
+        // A note row is now selectable, so a modifier click on one is selection-only exactly as on a to-do row:
+        // Ctrl-clicking a tenth row into a batch must not also move the editor.
+        assert.ok(/event\.(ctrlKey|metaKey|shiftKey)/.test(body), 'a modifier click on a note row must not open it')
     })
     await test('row dblclick: onRowDoubleClicked stays title-scoped and desktop-only', () => {
         // Double-click-to-new-window is a title-only, desktop-only affordance; the dead-zone open fix must not
@@ -1782,25 +1791,53 @@ async function main() {
     // saw a single id and only ONE to-do moved. The fix PRESERVES a multi-selection on the plain press so a drag sweeps
     // the set; the collapse-to-single moves to the plain CLICK (no drag). These pin the shape; pre-fix source fails them.
     await test('multi-drag: a plain press on an already-multi-selected row PRESERVES the whole set (drag sweeps it)', () => {
-        const body = handlerBody('onTodoRowMouseDown')
-        // The preserve guard: the plain branch keeps the set when the pressed row is already in a multi-selection.
-        assert.ok(/selectedTodoIDs\.has\(todoID\)\s*&&\s*selectedTodoIDs\.size\s*>\s*1/.test(body),
+        // The rule itself now lives in the shared pure module, so it is exercised BEHAVIOURALLY here rather than
+        // pattern-matched: a plain press on a row already inside a multi-selection returns the set unchanged.
+        const ids = [rowId('r1'), rowId('r2'), rowId('r3')]
+        const kept = RowSelection.pressSelection({ selected: ids, lastClicked: ids[0], lastInteraction: ids[2] }, ids[1], {}, ids)
+        assert.deepStrictEqual(kept.selected, ids,
             'a plain press on an already-multi-selected row must PRESERVE the selection (not collapse it before dragstart)')
-        // The Ctrl and Shift selection semantics stay intact.
-        assert.ok(body.includes('event.shiftKey'), 'Shift range-select must stay')
-        assert.ok(/event\.(ctrlKey|metaKey)/.test(body), 'Ctrl/Cmd toggle-select must stay')
+        // And the press that is NOT on a multi-selection still replaces it, which is what makes the preserve a
+        // narrow exception rather than "a plain press never collapses".
+        assert.deepStrictEqual(RowSelection.pressSelection({ selected: ids, lastClicked: ids[0] }, rowId('r9'), {}, ids.concat([rowId('r9')])).selected,
+            [rowId('r9')], 'a plain press elsewhere still replaces the selection')
+        assert.deepStrictEqual(RowSelection.pressSelection({ selected: [ids[0]], lastClicked: ids[0] }, ids[0], {}, ids).selected,
+            [ids[0]], 'and a plain press on a SINGLE selection is not a multi-selection to preserve')
+        // The webview delegates, rather than carrying a second copy of the rule.
+        const body = handlerBody('onRowPressed')
+        assert.ok(body.includes('window.RowSelection.pressSelection('), 'the press must be decided by the shared rule')
+        assert.ok(/shift: !!event\.shiftKey/.test(body), 'Shift range-select must stay')
+        assert.ok(/ctrl: !!\(event\.ctrlKey \|\| event\.metaKey\)/.test(body), 'Ctrl/Cmd toggle-select must stay')
     })
     await test('multi-drag: a plain click with no drag collapses the selection to just the clicked row', () => {
-        const body = handlerBody('onTodoRowClicked')
-        // The single-select half now lives on the CLICK: a plain click (no drag) replaces the selection with this row.
-        assert.ok(/selectedTodoIDs\.clear\(\)/.test(body) && /selectedTodoIDs\.add\(todoID\)/.test(body),
-            'a plain click must collapse the selection to the clicked row')
-        assert.ok(body.includes('onTodoClicked(todoID)'), 'the plain click must still open the row')
+        const ids = [rowId('r1'), rowId('r2'), rowId('r3')]
+        const collapsed = RowSelection.clickSelection({ selected: ids, lastClicked: ids[0] }, ids[1])
+        assert.deepStrictEqual(collapsed.selected, [ids[1]], 'a plain click must collapse the selection to the clicked row')
+        assert.strictEqual(collapsed.lastClicked, ids[1], 'and the clicked row becomes the range anchor')
+        assert.strictEqual(collapsed.changed, true, 'a real collapse reports itself, so the caller repaints')
+        // Already the sole selection: a no-op, so a plain single click never repaints needlessly.
+        assert.strictEqual(RowSelection.clickSelection({ selected: [ids[1]], lastClicked: ids[1] }, ids[1]).changed, false,
+            'clicking the row that is already the sole selection must change nothing')
+        const body = handlerBody('onRowClicked')
+        assert.ok(body.includes('window.RowSelection.clickSelection('), 'the click must be decided by the shared rule')
+        assert.ok(body.includes('onTodoClicked(rowID)'), 'the plain click must still open the row')
     })
-    await test('multi-drag: onTodoDragStart still sends the WHOLE selection as the drag payload', () => {
+    await test('multi-drag: onTodoDragStart sends the whole selection MINUS the notes (only a to-do has a due date)', () => {
         const body = handlerBody('onTodoDragStart')
-        assert.ok(/\[\.\.\.selectedTodoIDs\]/.test(body), 'the drag payload must be built from the whole selection')
-        assert.ok(/setData\('text\/plain', ids\.join\(','\)\)/.test(body), 'every selected id must go into the dataTransfer, comma-joined')
+        assert.ok(body.includes('var ids = schedulableSelection()'),
+            'the drag payload must be the to-dos within the selection, not the raw selection')
+        assert.ok(/setData\('text\/plain', ids\.join\(','\)\)/.test(body), 'every dragged id must go into the dataTransfer, comma-joined')
+        // A drag with nothing schedulable in it is cancelled outright rather than started with an empty payload.
+        assert.ok(body.includes('if (!ids.length){ event.preventDefault(); return }'),
+            'a payload with no to-dos in it must cancel the drag')
+        // The filtering rule itself, behaviourally: selection order is kept and the notes simply are not in it.
+        const todo1 = rowId('t1'), todo2 = rowId('t2'), note1 = rowId('n1')
+        assert.deepStrictEqual(RowSelection.schedulableIDs([todo1, note1, todo2], [todo1, todo2]), [todo1, todo2],
+            'the notes of a mixed selection must be dropped from a time payload, in selection order')
+        assert.deepStrictEqual(RowSelection.schedulableIDs([note1], [todo1, todo2]), [],
+            'a selection with no to-dos in it has nothing to schedule')
+        assert.ok(handlerBody('schedulableSelection').includes('window.RowSelection.schedulableIDs('),
+            'and the webview must use the shared rule for it')
     })
 
     // (b) Every row surface carries the row-level open handler on its ROOT element. One interval render supplies
@@ -2751,13 +2788,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 2.0.0', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 2.1.0', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '2.0.0'
+        const expected = '2.1.0'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
@@ -2927,6 +2964,23 @@ async function main() {
         const puts = m.notePuts.filter(p => ids.includes(p.id))
         assert.strictEqual(puts.length, 2, 'one parent_id PUT per selected note')
         for (const p of puts) assert.strictEqual(p.fields.parent_id, 'dest', 'every selected note re-parents to the picked notebook')
+    })
+    await test('multi host glue (mixed kinds): a batch of to-dos AND notes is applied to every id, unfiltered', async () => {
+        // The 2.1.0 headline reaches the host as an ordinary id array: Joplin has ONE note store, so nothing here
+        // may look at is_todo to decide whether an id belongs in the batch. Proved on the two actions that could
+        // plausibly have been written to assume to-dos - the per-id delete and the per-id type flip.
+        const todoID = id32('mx1'), noteID = id32('mx2')
+        const notes = { [todoID]: { id: todoID, title: 'a to-do', is_todo: 1 }, [noteID]: { id: noteID, title: 'a note', is_todo: 0 } }
+        const del = await desktopRun({ notes: JSON.parse(JSON.stringify(notes)) })
+        await del.panelMessageHandler(['noteMenuActionMulti', 'delete', [todoID, noteID]])
+        assert.deepStrictEqual(del.dataDeletes.map(p => p[1]), [todoID, noteID],
+            'a mixed selection must delete BOTH kinds, in the order given')
+        const flip = await desktopRun({ notes: JSON.parse(JSON.stringify(notes)) })
+        await flip.panelMessageHandler(['noteMenuActionMulti', 'toggleType', [todoID, noteID]])
+        const flips = flip.notePuts.filter(p => p.id === todoID || p.id === noteID)
+        assert.strictEqual(flips.length, 2, 'both kinds are flipped')
+        assert.strictEqual(flips.find(p => p.id === todoID).fields.is_todo, 0, 'the to-do becomes a note')
+        assert.strictEqual(flips.find(p => p.id === noteID).fields.is_todo, 1, 'and the note becomes a to-do - each flips its OWN type')
     })
     await test('multi host glue (copyMarkdownLink): reads each title for the list, mutates nothing', async () => {
         const ids = [id32('c1'), id32('c2')]
@@ -3192,24 +3246,148 @@ async function main() {
     })
 
     await test('escape collapse (webview): the last SELECTING press is recorded, and it is not the range anchor', () => {
-        const body = handlerBody('onTodoRowMouseDown')
-        // The Shift branch records the row just pressed - the far end of the range - while lastClickedTodoID,
-        // the range anchor, deliberately stays put so a further Shift+press still resizes the range.
-        assert.ok(/for \(var index[\s\S]*lastSelectionInteractionID = todoID/.test(body),
-            'a Shift range must record the row just pressed as the last selection')
-        assert.ok(!/shiftKey\)\{[\s\S]*lastClickedTodoID = todoID[\s\S]*\} else if \(event\.ctrlKey/.test(body),
-            'the Shift branch must NOT move the range anchor')
+        // Behavioural now that the rule is a pure module: the two anchors move independently, and only a press
+        // that actually SELECTS moves the one an Escape collapses onto.
+        const order = [rowId('a'), rowId('b'), rowId('c'), rowId('d')]
+        // A Shift range records the row just pressed - the far end - while the anchor deliberately stays put so a
+        // further Shift+press resizes the range instead of chaining from its end.
+        const ranged = RowSelection.pressSelection({ selected: [order[0]], lastClicked: order[0], lastInteraction: order[0] }, order[2], { shift: true }, order)
+        assert.deepStrictEqual(ranged.selected, [order[0], order[1], order[2]], 'the Shift range must run anchor -> pressed row')
+        assert.strictEqual(ranged.lastInteraction, order[2], 'a Shift range must record the row just pressed as the last selection')
+        assert.strictEqual(ranged.lastClicked, order[0], 'the Shift branch must NOT move the range anchor')
         // A Ctrl+press records only when it ADDS: a press that deselects points at a row that is no longer in
         // the selection, so the last row actually selected stays the one an Escape collapses onto.
-        assert.ok(/selectedTodoIDs\.delete\(todoID\)[\s\S]{0,120}\} else \{[\s\S]{0,120}selectedTodoIDs\.add\(todoID\)[\s\S]{0,120}lastSelectionInteractionID = todoID/.test(body),
-            'a Ctrl+press must record the row only when it adds it to the selection')
+        const added = RowSelection.pressSelection({ selected: [order[0]], lastClicked: order[0], lastInteraction: order[0] }, order[3], { ctrl: true }, order)
+        assert.deepStrictEqual(added.selected, [order[0], order[3]], 'a Ctrl+press must add the row')
+        assert.strictEqual(added.lastInteraction, order[3], 'and record it as the last selection')
+        const removed = RowSelection.pressSelection({ selected: [order[0], order[3]], lastClicked: order[3], lastInteraction: order[3] }, order[3], { ctrl: true }, order)
+        assert.deepStrictEqual(removed.selected, [order[0]], 'a Ctrl+press on a selected row must deselect it')
+        assert.strictEqual(removed.lastInteraction, order[3], 'a deselecting press must not record a new last selection')
+        assert.strictEqual(removed.lastClicked, order[3], 'but it still moves the range anchor')
+        // The webview writes both back, and the collapse is driven by the last SELECTING press.
+        const body = handlerBody('onRowPressed')
+        assert.ok(body.includes('lastClickedRowID = next.lastClicked') && body.includes('lastSelectionInteractionID = next.lastInteraction'),
+            'the webview must write both anchors back from the shared decision')
         assert.ok(handlerBody('collapseMultiSelection').includes('lastSelectionInteractionID'),
             'the collapse must be driven by the last selecting press, not by the range anchor')
     })
 
+    await test('mixed selection: a NOTE row selects exactly like a to-do row, and the collapse order spans both', () => {
+        // The 2.1.0 headline. Up to 2.0.0 a press on a note row CLEARED the selection and only lit the
+        // highlight-only pickedNoteID; the two row handlers are now one path, so a note row Ctrl/Shift-selects
+        // and a mixed selection is ordinary.
+        const pressBody = handlerBody('onRowPressed')
+        assert.ok(handlerBody('onNoteRowMouseDown').includes('onRowPressed(event, noteID)'),
+            'a note row press must go through the SAME handler a to-do row press does')
+        assert.ok(handlerBody('onTodoRowMouseDown').includes('onRowPressed(event, todoID)'),
+            'and so must a to-do row press')
+        assert.ok(!handlerBody('onNoteRowMouseDown').includes('pickedNoteID = noteID'),
+            'pressing a note row must no longer set the highlight-only store instead of selecting')
+        assert.ok(pressBody.includes('pickedNoteID = null'), 'a press of either kind drops the editor-tracking highlight')
+        // The order a Shift range and an Escape collapse are measured along holds BOTH kinds, and leaves the
+        // read-only peek out (its rows carry no selection handler at all).
+        // The CLICK path must refuse the peek too - see the dedicated check below for why the range-order
+        // exclusion is not enough on its own.
+        assert.ok(handlerBody('onRowClicked').includes("event.target.closest('.outside-results')"),
+            'the click path must refuse to select a read-only peek row')
+        const rowsBody = handlerBody('allSelectableRows')
+        assert.ok(handlerBody('allRows').includes("'.todo[data-todo-id], .todo[data-note-id]'"),
+            'both row kinds must be in the row query')
+        assert.ok(rowsBody.includes(".closest('.outside-results')"), 'the read-only peek must stay out of the selectable order')
+        assert.ok(handlerBody('onRowPressed').includes('allSelectableRows().map(rowIDOf)'),
+            'the Shift range must be measured along the selectable rows of both kinds')
+        assert.ok(handlerBody('collapseMultiSelection').includes('allSelectableRows().map(rowIDOf)'),
+            'and so must the Escape collapse fallback')
+        // A mixed selection is nothing special to the rules: ids are ids.
+        const mixed = [rowId('t1'), rowId('n1'), rowId('t2')]
+        assert.deepStrictEqual(RowSelection.pressSelection({ selected: [mixed[0]], lastClicked: mixed[0] }, mixed[2], { shift: true }, mixed).selected,
+            mixed, 'a Shift range across a note row must take the note with it')
+        // The context menu batches whatever is selected, of either kind - the host handler already takes an id
+        // array and the labels are kind-neutral (see noteMenu.js).
+        const menuBody = handlerBody('showNoteContextMenu')
+        assert.ok(/selectedRowIDs\.has\(noteID\) && selectedRowIDs\.size > 1/.test(menuBody),
+            'any row inside a multi-row selection must open the batch menu, whichever kind it is')
+    })
+
+    await test('read-only peek: a CLICK on a peek row opens it and selects NOTHING (MAJOR-1)', () => {
+        // The peek's rows are suppressed at the MARKUP level for the press only: renderTodoRowHtml(draggable:false)
+        // and renderNoteRowHtml(selectable:false) drop the selection onmousedown, but BOTH still emit onclick -
+        // click-to-open is exactly what the peek is for. Before this guard the click's collapse wrote a peek row
+        // into selectedRowIDs, where it persisted across renders; and since a selection now drives the BATCH
+        // context menu, that made Delete / Move / Tags / Duplicate / Switch-type reachable on rows the user was
+        // deliberately shown READ-ONLY - from outside their own filters, and from excluded notebooks.
+        //
+        // Checked on the rendered markup as well as the handler, because "the markup suppresses it" is precisely
+        // the assumption that was wrong: the pin below fails if a peek row ever gains an onmousedown, AND if the
+        // click handler ever stops refusing it.
+        const clickBody = handlerBody('onRowClicked')
+        assert.ok(clickBody.includes("event.target.closest('.outside-results')"),
+            'the click path must recognise a peek row')
+        const guardAt = clickBody.indexOf("closest('.outside-results')")
+        const collapseAt = clickBody.indexOf('window.RowSelection.clickSelection(')
+        assert.ok(guardAt >= 0 && collapseAt > guardAt,
+            'and it must refuse BEFORE the collapse writes the row into the selection')
+        assert.ok(/closest\('\.outside-results'\)\)\{\s*\n\s*void onTodoClicked\(rowID\)\s*\n\s*return/.test(clickBody),
+            'a peek row must still OPEN - only the selection half is skipped')
+        // The OTHER path that writes a peek row into the selection: a right click (or mobile long press) on a
+        // peek to-do's TICK CIRCLE. draggable:false suppresses neither the oncontextmenu nor the .todo-checkbox
+        // element, so the branch that seeds the selection for the due-date picker had to be guarded too -
+        // otherwise the peek id lands in selectedRowIDs, gets an alarm written to it, and is then reachable by
+        // the batch menu after Ctrl+adding an ordinary row.
+        const menuByZone = handlerBody('onTodoContextMenu')
+        const circleAt = menuByZone.indexOf("classList.contains('todo-checkbox')")
+        const peekBailAt = menuByZone.indexOf("closest('.outside-results')")
+        const seedAt = menuByZone.indexOf('selectedRowIDs.add(todoID)')
+        assert.ok(circleAt >= 0 && peekBailAt > circleAt && seedAt > peekBailAt,
+            'the tick-circle branch must refuse a peek row BEFORE it seeds the selection')
+        assert.ok(menuByZone.indexOf('requestAlarm(') > peekBailAt,
+            'and therefore before it opens the due-date picker for it')
+        // Narrow: the row's other right-click zones still work on a peek row (the single-note menu is what a
+        // peeked note is for), so the bail must NOT sit at the top of the function.
+        assert.ok(peekBailAt > menuByZone.indexOf('event.preventDefault()'),
+            'the guard is scoped to the tick circle, not to the whole context menu')
+        assert.ok(menuByZone.includes('showNoteContextMenu(event, todoID, true)'),
+            'a right click elsewhere on a peek row must still open its single-note menu')
+        // The formats side of the same rule: neither peek row kind may carry a selection handler.
+        const formatsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'formats.ts'), 'utf8')
+        assert.ok(/var selectHandler = draggable \? `[\s\S]{0,120}onmousedown="onTodoRowMouseDown/.test(formatsSource),
+            'a non-draggable (peek) to-do row must carry no selection onmousedown')
+        assert.ok(/var selectHandler = selectable \? `[\s\S]{0,120}onmousedown="onNoteRowMouseDown/.test(formatsSource),
+            'a non-selectable (peek) note row must carry no selection onmousedown')
+    })
+
+    await test('read-only peek: the rendered peek rows carry onclick but no onmousedown', async () => {
+        // Rendered for real: a committed search that matches nothing in the filtered view, with the match living
+        // outside it, is the only thing that produces the peek - so this is the markup the user actually gets.
+        const peekTodo = id32('pk1'), peekNote = id32('pk2')
+        const peek = await run({
+            dataDir: path.join(tmp, 'peek-select-data'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos: [],
+            searchNotes: [],
+            outsideResults: [
+                { id: peekTodo, title: 'Peek to-do', is_todo: 1, todo_completed: 0, parent_id: 'f', user_updated_time: 1 },
+                { id: peekNote, title: 'Peek note', is_todo: 0, parent_id: 'f', user_updated_time: 2 },
+            ],
+            folders: [{ id: 'f', title: 'Inbox', parent_id: '', updated_time: 1 }],
+        })
+        await peek.panelMessageHandler(['searchFilterChanged', 'zzqqxx'])
+        const html = peek.panelHtml['panel-panel']
+        assert.ok(html.includes('outside-results'), 'the peek section must have rendered')
+        for (const [id, kind] of [[peekTodo, 'to-do'], [peekNote, 'note']]){
+            const at = html.indexOf(id)
+            assert.ok(at >= 0, `the peek ${kind} row must be present`)
+            const tag = html.slice(html.lastIndexOf('<div', at), html.indexOf('>', at) + 1)
+            assert.ok(/onclick="on(Todo|Note)RowClicked/.test(tag), `the peek ${kind} row must still open on click`)
+            assert.ok(!/onmousedown/.test(tag), `the peek ${kind} row must carry NO selection onmousedown`)
+        }
+    })
+
     await test('escape collapse (webview): only a BARE Escape reaches the selection, and it never opens anything', () => {
         const body = handlerBody('collapseMultiSelection')
-        assert.ok(body.includes('if (selectedTodoIDs.size <= 1) return'), 'it must only act on a real multi-selection')
+        assert.ok(body.includes('if (selectedRowIDs.size <= 1) return'), 'it must only act on a real multi-selection')
         assert.ok(body.includes('window.EditorNote.collapseSelection('), 'the kept row must come from the shared rule')
         assert.ok(body.includes('paintTodoSelection()'), 'the collapse must repaint')
         assert.ok(!body.includes('pickedNoteID') && !body.includes('onTodoClicked'),
@@ -3245,9 +3423,13 @@ async function main() {
         assert.ok(body.includes('pickedNoteID = next.picked') && body.includes('paintTodoSelection()'),
             'and write the decision back into the highlight store, repainting at once')
         // The paint must honour the highlight-only store on TO-DO rows too (it used to key those off
-        // selectedTodoIDs alone, so a to-do open in the editor would not have highlighted).
-        assert.ok(/selectedTodoIDs\.has\(row\.dataset\.todoId\) \|\| row\.dataset\.todoId === pickedNoteID/.test(handlerBody('paintTodoSelection')),
-            'a to-do row must highlight from the selection OR the editor note')
+        // selectedRowIDs alone, so a to-do open in the editor would not have highlighted).
+        assert.ok(/selectedRowIDs\.has\(id\) \|\| id === pickedNoteID/.test(handlerBody('paintTodoSelection')),
+            'a row must highlight from the selection OR the editor note')
+        // And BOTH kinds go through that one rule: a note row used to be painted from pickedNoteID alone, so a
+        // selected note could never have shown as selected.
+        assert.ok(handlerBody('paintTodoSelection').includes('for (var row of allRows())'),
+            'the paint must run over both row kinds through the same rule')
         // Both inbound paths - the push and the read-back - are filtered through the same acceptance rule.
         const acceptBody = handlerBody('acceptsEditorNote')
         assert.ok(acceptBody.includes('window.EditorNote.acceptsPush(') && acceptBody.includes('panelWindowIsFocused()'),
@@ -3265,8 +3447,11 @@ async function main() {
         // Both things that move the panel's selection bump that generation: an accepted push, and a row press.
         assert.ok(/editorNoteSeq\+\+[\s\S]{0,120}applyEditorNoteSelection\(message\[1\]\)/.test(webviewSource),
             'an accepted push must bump the selection generation')
+        // Both row kinds now press through the ONE shared handler, so the bump lives there - and reaches both.
         for (const handler of ['onTodoRowMouseDown', 'onNoteRowMouseDown']){
-            assert.ok(handlerBody(handler).includes('editorNoteSeq++'),
+            assert.ok(handlerBody(handler).includes('onRowPressed(event, '),
+                `${handler} must go through the shared press handler`)
+            assert.ok(handlerBody('onRowPressed').includes('editorNoteSeq++'),
                 `${handler} must bump the generation, so an in-flight read-back cannot drop the selection the press just made`)
         }
         // The resync itself: a regained window focus re-reads, because every push that arrived unfocused was
@@ -3755,12 +3940,54 @@ async function main() {
         // ten-tag selection to a sync landing would be expensive, so the marks ride across and the list re-opens
         // from the restored draft.
         const body = handlerBody('reconcile')
-        assert.ok(/var keptMarks = searchFocused \? searchMarks : null/.test(body), 'the marks are kept across the render')
+        assert.ok(/var keptSuggest = \(searchFocused && searchSuggestion\)/.test(body),
+            'an OPEN list, not merely the marks, is what rides across the render')
+        assert.ok(/marks: searchMarks, filter: suggestFilterText, caret: suggestFilterCaret, focus: searchFocusTarget/.test(body),
+            'the marks are kept across the render, and so are the filter text, its caret and where the focus was')
         const restoreAt = body.indexOf('restoreSearchDraft()')
-        const reopenAt = body.indexOf('reopenSearchSuggestions(keptMarks)')
+        const reopenAt = body.indexOf('reopenSearchSuggestions(keptSuggest)')
         assert.ok(restoreAt >= 0 && reopenAt > restoreAt, 'the list is rebuilt AFTER the draft text is back')
         assert.ok(handlerBody('reopenSearchSuggestions').includes('onSearchInput(input)'),
             'the rebuild goes through the normal path, so the candidates match whatever is now in the field')
+    })
+
+    await test('search dropdown: the re-render also carries the embedded FILTER text, its caret and the focus', () => {
+        // Slava: "Sync is a very often thing here". A sync-triggered reconcile used to re-open the list with the
+        // marks intact but the filter box emptied - so the list snapped back to full width and the caret jumped
+        // out to the search field, mid-selection.
+        //
+        // The box is inside the markup the host REPLACES, so by the time reconcile runs its node is gone: the text
+        // has to be mirrored into module state as it is typed, which is what makes carrying it possible at all.
+        const filter = handlerBody('applySuggestFilter')
+        assert.ok(/suggestFilterText = box \? box\.value : ''/.test(filter),
+            'the filter box must be mirrored into module state on every narrowing')
+        assert.ok(/suggestFilterCaret = box \? \(box\.selectionStart \|\| 0\) : 0/.test(filter), 'and so must its caret')
+        // Where the focus was: the field, the box, or the apply button.
+        const row = handlerBody('buildSuggestFilterRow')
+        assert.ok(/box\.addEventListener\('focus', function\(\)\{ searchFocusTarget = 'filter' \}\)/.test(row),
+            'reaching into the filter box must be recorded')
+        assert.ok(/apply\.addEventListener\('focus', function\(\)\{ searchFocusTarget = 'apply' \}\)/.test(row),
+            'and so must reaching for the apply button')
+        assert.ok(handlerBody('onSearchFocus').includes("searchFocusTarget = 'field'"), 'and the field itself')
+        // The restore is applied to whichever list is built NEXT, which is what makes it work for title: too -
+        // that list arrives a debounced round-trip later rather than synchronously.
+        assert.ok(handlerBody('reopenSearchSuggestions').includes('pendingSuggestRestore = {'),
+            'the re-open must arm a pending restore rather than touching a list that does not exist yet')
+        assert.ok(handlerBody('renderSearchSuggestions').includes('applyPendingSuggestRestore(menu, input)'),
+            'and every built list must consume it')
+        const apply = handlerBody('applyPendingSuggestRestore')
+        assert.ok(apply.includes('pendingSuggestRestore = null'), 'consumed exactly once')
+        assert.ok(apply.includes('box.value = restore.filter') && apply.includes('applySuggestFilter(menu)'),
+            'the text must go back AND re-narrow the rows')
+        assert.ok(/restore\.focus === 'filter'[\s\S]{0,200}box\.setSelectionRange\(caret, caret\)/.test(apply),
+            'the caret must go back into the box it came from')
+        assert.ok(/restore\.focus === 'apply'[\s\S]{0,400}apply\.focus\(\)/.test(apply),
+            'and the apply button must be able to keep it too')
+        // A list that closes for real takes the mirrored state with it, so a FRESH list always opens with an
+        // empty box - the behaviour before this change.
+        const hide = handlerBody('hideSearchSuggestions')
+        assert.ok(hide.includes("suggestFilterText = ''") && hide.includes('pendingSuggestRestore = null'),
+            'closing the list must drop the mirrored filter text and any unconsumed restore')
     })
 
     await test('search dropdown: touch marks with a long press, and the pick moved off pointerdown', () => {
@@ -4143,6 +4370,178 @@ async function main() {
         assert.strictEqual(focused.setHtmlCalls - beforeReopen, 0, 'a fresh webview bootstrap renders nothing by itself')
         assert.ok(/id="searchFilter"[\s\S]*?value="tag:foo"/.test(focused.panelHtml['panel-panel']),
             'and it must not revert the committed filter - no path may commit "" the user did not ask for')
+    })
+
+    await test('search reload-survival (host): the host holds the in-progress search and re-serves it ONCE', async () => {
+        // Mobile only, and the same non-looping handshake the overlay descriptor uses. A renderer kill remounts
+        // the webview with a fresh document that carries only the last COMMITTED filter, so the draft, the open
+        // dropdown and its marks are gone unless the HOST is holding them.
+        const held = await run({
+            dataDir: path.join(tmp, 'search-state-data'),
+            installationDir: path.join(tmp, 'mobile-install'),
+            require: mobileRequire,
+            versionInfo: { version: '3.7.0', platform: 'mobile' },
+            todos,
+        })
+        await held.panelMessageHandler(['searchFocusChanged', true])
+        const beforeState = held.setHtmlCalls
+        await held.panelMessageHandler(['searchState', { draft: 'milk tag:pro', caret: 12, marks: { kind: 'tag', values: ['project'] }, filter: 'pr', filterCaret: 2, focus: 'filter' }])
+        assert.strictEqual(held.setHtmlCalls - beforeState, 0, 'holding the state must never render by itself')
+
+        // The reloaded webview reports that its document does NOT carry the island: the host re-renders once WITH it.
+        const beforeReload = held.setHtmlCalls
+        await held.panelMessageHandler(['dialogGuardReset', false, false])
+        assert.strictEqual(held.setHtmlCalls - beforeReload, 1, 'a document without the island must be re-served with it')
+        const html = held.panelHtml['panel-panel']
+        assert.ok(html.includes('id="cockpitSearchState"'), 'the reconstruct render must embed the search state island')
+        const island = JSON.parse(html.slice(html.indexOf('id="cockpitSearchState" type="application/json">') + 'id="cockpitSearchState" type="application/json">'.length, html.indexOf('</script>', html.indexOf('id="cockpitSearchState"'))))
+        assert.strictEqual(island.draft, 'milk tag:pro', 'with the uncommitted draft')
+        assert.deepStrictEqual(island.marks, { kind: 'tag', values: ['project'] }, 'the marks')
+        assert.strictEqual(island.filter, 'pr', 'the dropdown filter text')
+        assert.strictEqual(island.focus, 'filter', 'and where the caret was')
+
+        // A document that ALREADY carries it reconstructs itself, so the host stands down - the flow cannot loop.
+        const beforeCarrying = held.setHtmlCalls
+        await held.panelMessageHandler(['dialogGuardReset', false, true])
+        assert.strictEqual(held.setHtmlCalls - beforeCarrying, 0, 'a document that carries the island must not be re-served')
+
+        // Cleared on commit/departure: the webview posts null, and the next render carries no island at all.
+        await held.panelMessageHandler(['searchState', null])
+        await held.panelMessageHandler(['searchFilterChanged', 'milk', true])
+        assert.ok(!held.panelHtml['panel-panel'].includes('id="cockpitSearchState"'),
+            'a cleared state must leave no island behind, so nothing can resurrect an abandoned draft')
+    })
+
+    await test('search reload-survival (host): nothing is embedded on desktop, and a name cannot close the island', async () => {
+        const desk = await run({
+            dataDir: path.join(tmp, 'search-state-desktop'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos,
+        })
+        const before = desk.panelHtml['panel-panel']
+        await desk.panelMessageHandler(['searchState', { draft: 'x', caret: 1, marks: null, filter: '', filterCaret: 0, focus: 'field' }])
+        await desk.panelMessageHandler(['searchFilterChanged', 'x'])
+        assert.ok(!desk.panelHtml['panel-panel'].includes('cockpitSearchState'),
+            'desktop keeps its module state, so it must embed no island and stay byte-comparable to before')
+        assert.ok(before.length > 0)
+        // The draft is user text, so "</" is neutralised exactly as in the other two islands.
+        const evil = await run({
+            dataDir: path.join(tmp, 'search-state-evil'),
+            installationDir: path.join(tmp, 'mobile-install'),
+            require: mobileRequire,
+            versionInfo: { version: '3.7.0', platform: 'mobile' },
+            todos,
+        })
+        await evil.panelMessageHandler(['searchState', { draft: 'title:"</script><img src=x>"', caret: 0, marks: null, filter: '', filterCaret: 0, focus: 'field' }])
+        await evil.panelMessageHandler(['dialogGuardReset', false, false])
+        const evilHtml = evil.panelHtml['panel-panel']
+        const islandAt = evilHtml.indexOf('id="cockpitSearchState"')
+        assert.ok(islandAt >= 0, 'the island must be there')
+        assert.ok(!evilHtml.slice(islandAt, evilHtml.indexOf('</script>', islandAt)).includes('</script'),
+            'a draft cannot close the script element early')
+    })
+
+    await test('search reload-survival (webview): posted throttled on mobile only, cleared on commit and departure', () => {
+        const queue = handlerBody('queueSearchState')
+        assert.ok(queue.includes('if (!IS_MOBILE) return'), 'desktop keeps its module state and posts nothing')
+        assert.ok(/searchStateTimer = setTimeout\(function\(\)\{ searchStateTimer = null; pushSearchState\(\) \}, 300\)/.test(queue),
+            'a burst of keystrokes must post at most once every 300ms, like queueOverlayState')
+        // Every input that can change the state queues a post.
+        for (const [handler, why] of [
+            ['updateSearchDraft', 'typing in the field'],
+            ['toggleSearchMark', 'marking a row'],
+            ['clearSearchMarks', 'clearing the marks'],
+            ['applySuggestFilter', 'narrowing the list'],
+        ]) assert.ok(handlerBody(handler).includes('queueSearchState()'), `${why} must update the held state`)
+        // Cleared at source on a commit and on a genuine departure, so a stale draft cannot resurrect.
+        const clear = handlerBody('clearHostSearchState')
+        assert.ok(clear.includes('clearTimeout(searchStateTimer)'),
+            'the clear must cancel a throttled post still armed, or it would re-post what it just cleared')
+        assert.ok(clear.includes("postMessage(['searchState', null])"), 'and tell the host')
+        assert.ok(handlerBody('onSearchFilterChanged').includes('clearHostSearchState()'), 'a commit clears it')
+        assert.ok(handlerBody('leaveSearchField').includes('clearHostSearchState()'), 'and so does leaving the field')
+        // ORDER on departure: the state is dropped BEFORE the focus hold is released, so the render the host then
+        // runs cannot embed a state this webview has just abandoned.
+        const leave = handlerBody('leaveSearchField')
+        assert.ok(leave.indexOf('clearHostSearchState()') < leave.indexOf("postMessage(['searchFocusChanged', false])"),
+            'the clear must land before the hold is released')
+        // Explicitly NO dialogGuard: the dropdown opens and closes on every keystroke, so bracketing it with the
+        // guard would be a leak hazard whose failure mode is refreshes frozen forever.
+        for (const handler of ['queueSearchState', 'pushSearchState', 'clearHostSearchState', 'restoreSearchFromEmbeddedState']){
+            assert.ok(!/dialogGuard/.test(handlerBody(handler)), `${handler} must not touch the dialog guard`)
+        }
+    })
+
+    await test('search reload-survival (webview): the restore re-runs the search path and cannot fire a spurious reset', () => {
+        const restore = handlerBody('restoreSearchFromEmbeddedState')
+        assert.ok(restore.includes('input.focus()'),
+            'the restore must refocus the field, which re-arms the host hold - without it the next refresh wipes it again')
+        assert.ok(restore.includes('reopenSearchSuggestions({ marks:'),
+            'the list, the marks and the dropdown filter all come back through the shared re-open path')
+        // THE TRAP: onSearchInput runs maybeAutoResetSearch first, and that reads "still filtered" off
+        // input.defaultValue - the server-rendered attribute this restore does not touch. An empty restored draft
+        // over a document rendered with a committed filter would therefore look exactly like the user having just
+        // emptied the field, and would commit a reset nobody asked for.
+        assert.ok(restore.includes("if (!input.value.trim()) searchResetPosted = true"),
+            'an empty restored draft must arm the posted-guard so no reset is fired for it')
+        assert.ok(handlerBody('maybeAutoResetSearch').includes("if (input.value.trim()){ searchResetPosted = false; return false }"),
+            'and the very first character the user types must clear that guard again')
+        // Only on a FRESH webview: guarded on searchFocused, so it can never run over a live interaction.
+        const reconcileBody = handlerBody('reconcile')
+        assert.ok(reconcileBody.includes('if (IS_MOBILE && !searchFocused) restoreSearchFromEmbeddedState()'),
+            'the restore is mobile-only and only ever runs when no live search state survived')
+        // The bootstrap handshake tells the host whether this document already carries the island.
+        assert.ok(webviewSource.includes("postMessage(['dialogGuardReset', !!stateText, !!readEmbeddedSearchStateText()])"),
+            'the reset post must report the search island too, so the host re-serves it exactly once')
+    })
+
+    await test('post-commit keystrokes (webview): a render landing after a commit cannot repaint typed text away', () => {
+        // A commit nulls searchDraft, so a render arriving afterwards repainted the field from its
+        // server-rendered (committed) value - discarding anything typed in between. The blur of the OUTGOING
+        // field is the last instant that field can still be read, so its value is snapshotted there and used as
+        // the restore's fallback.
+        const blur = handlerBody('onSearchBlur')
+        assert.ok(/if \(event && event\.target === getSearchInput\(\)\)\{[\s\S]{0,200}lastSearchFieldSnapshot = \{ value: event\.target\.value, caret: event\.target\.selectionStart \}/.test(blur),
+            'the outgoing field must be snapshotted on its blur')
+        const restore = handlerBody('restoreSearchDraft')
+        const draftAt = restore.indexOf('if (searchDraft){')
+        const snapAt = restore.indexOf('var snapshot = lastSearchFieldSnapshot')
+        assert.ok(draftAt >= 0 && snapAt > draftAt, 'a live draft must still win; the snapshot is only the fallback')
+        assert.ok(restore.includes('if (snapshot && snapshot.value !== input.value)'),
+            'and it is only applied when it actually differs from what was rendered')
+        assert.ok(restore.includes('lastSearchFieldSnapshot = null'), 'consumed once')
+        // It can only ever carry text typed AFTER the last commit: a commit and a genuine departure both drop it,
+        // and a typed character supersedes it with the fresher draft.
+        assert.ok(handlerBody('onSearchFilterChanged').includes('lastSearchFieldSnapshot = null'),
+            'a commit must drop the snapshot, or an apply could be undone by a pre-apply value')
+        assert.ok(handlerBody('leaveSearchField').includes('lastSearchFieldSnapshot = null'), 'so must a genuine departure')
+        assert.ok(handlerBody('updateSearchDraft').includes('lastSearchFieldSnapshot = null'), 'and a keystroke supersedes it')
+    })
+
+    await test('clear button: the deferred commit no longer double-posts the empty reset', () => {
+        // Pressing the field's × fires BOTH `input` - on which the empty-field auto-reset commits "" - and
+        // `search`, which arrives at the deferred commit with the same "". The host's equality guard absorbed the
+        // second post; the duplicate is now recognised at source, because that equality IS the no-op case.
+        const changed = handlerBody('onSearchFieldChanged')
+        assert.ok(changed.includes('if (pendingSearchCommit.value === lastCommittedSearch){ pendingSearchCommit = null; return }'),
+            'a deferred commit equal to what is already committed must be dropped')
+        assert.ok(handlerBody('onSearchFilterChanged').includes('lastCommittedSearch = String(searchString == null ? \'\' : searchString)'),
+            'every commit must record what it asked the host to hold')
+        // The guard is on the DEFERRED path only, so the explicit commits (Enter, a pick, an apply, the auto-reset)
+        // are untouched - re-committing the same query from the keyboard still renders.
+        assert.ok(!handlerBody('onSearchFilterChanged').includes('lastCommittedSearch)'),
+            'the explicit commit path must not gate itself on the last committed value')
+        // And it is narrower than "never commit twice": a genuinely changed value still commits on blur.
+        assert.ok(changed.includes('flushPendingSearchCommit()'), 'a changed value still commits')
+        assert.ok(handlerBody('flushPendingSearchCommit').includes('onSearchFilterChanged(pending.value)'),
+            'through the one commit path')
+        // The guard is re-anchored on every render from the value the host actually SERVED, because the host can
+        // move the filter without this webview committing (a profile switch applies the profile's panelSearch).
+        // Comparing against a stale value would drop a commit that was not a no-op.
+        assert.ok(handlerBody('reconcile').includes('lastCommittedSearch = renderedSearch.defaultValue'),
+            'every render must re-anchor what the host is holding')
     })
 
     await test('committed search (host): the exemption is inert on desktop, byte for byte', async () => {

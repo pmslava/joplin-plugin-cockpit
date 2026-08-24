@@ -35,6 +35,8 @@ Save any set-up as a profile — its view, filters, search, and what counts as d
 - Overview notes: the same list written into a regular note, readable in any Joplin client.
 - A synchronise button that reports the last sync time, duration, and any errors.
 - A context menu on every row: open, switch type, tags, move, duplicate, copy link, delete.
+- Select several rows with Ctrl+click or Shift+click — to-dos and notes together — and the menu applies
+  to the whole set at once. Dragging such a selection onto a date moves only the to-dos in it.
 - New note and New to-do buttons that create in the notebook you have filtered to.
 
 ## Install

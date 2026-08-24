@@ -8,6 +8,11 @@
  * hidden, so the user still sees them - and gives every multi-capable action a label carrying the count ("Delete 6 notes"), so a mistaken batch is    *
  * visible before the click. `extraItems` (mobile's "Move to date…") are prepended verbatim and are always single-note (mobile has no multi-select).   *
  *                                                                                                                                                    *
+ * MIXED SELECTIONS: since 2.1.0 a selection may hold to-do rows AND regular note rows at once, and every action here already takes an id array of     *
+ * either kind - Joplin has one note store, and a to-do IS a note with is_todo set. The wording needs no split either: "Delete 3 notes" is true of a   *
+ * mixed set for the same reason, and "Switch type of 3 items" already reads for both. So the labels below are deliberately UNCHANGED by the mixed     *
+ * selection; only the time-based operations (drag-to-date, set alarm), which live outside this menu, care which kind a row is.                        *
+ *                                                                                                                                                    *
  * The labels are static literals (no user text), so nothing here is HTML-escaped - matching the inline template this replaced.                        *
  ***************************************************************************************************************************************************/
 ;(function(root, factory){

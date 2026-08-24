@@ -196,7 +196,7 @@ test.describe('Multi-select context menu (desktop)', () => {
     // editor-tracking highlight (the note the plain click opened), which is not part of the selection.
     const selectionMarkers = () =>
       panel.evaluate((markers: string[]) => {
-        const ids: string[] = [...((window as any).selectedTodoIDs || [])];
+        const ids: string[] = [...((window as any).selectedRowIDs || [])];
         const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
         return ids
           .map((id) => rows.find((r) => r.dataset.todoId === id))
@@ -228,7 +228,7 @@ test.describe('Multi-select context menu (desktop)', () => {
 
     const selectionMarkers = () =>
       panel.evaluate((markers: string[]) => {
-        const ids: string[] = [...((window as any).selectedTodoIDs || [])];
+        const ids: string[] = [...((window as any).selectedRowIDs || [])];
         const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
         return ids
           .map((id) => rows.find((r) => r.dataset.todoId === id))
