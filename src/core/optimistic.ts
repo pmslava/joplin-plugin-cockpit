@@ -17,6 +17,12 @@
  *    viewKey it was evaluated for, and a merge applies an entry ONLY when the consuming query is that same view. This is what stops an insert/remove     *
  *    computed for profile A from leaking into profile B's panel or into another profile's overview note (the overview path consumes no item overlay at   *
  *    all - it passes a null viewKey - since overviews are eventually consistent via the reconcile/overview lanes and the periodic backstop).             *
+ *                                                                                                                                                    *
+ * An item-overlay entry asserts the id's CURRENT TYPE for its view, not merely its membership of one list: the panel renders the to-dos and the notes  *
+ * from two SEPARATE searches of the same index, so while that index lags a type flip both of them can carry the id at once. An entry therefore inserts *
+ * into the list of the type it holds AND suppresses the id from the other one, which is what keeps a flipped item from rendering twice (once in a       *
+ * to-do section, once under NOTES). Because the two lists are merged one after the other, a suppress cannot be retired by either merge alone; the       *
+ * render closes its overlay cycle with finalizeOverlay, which retires it once both lists agree.                                                         *
  ***************************************************************************************************************************************************/
 
 /** overrideTTL *************************************************************************************************************************************
@@ -32,10 +38,14 @@ const overrideTTL = 60000
 var completionOverrides = new Map()
 
 /** itemOverlay *************************************************************************************************************************************
- * noteID -> { record, isTodo, viewKey, appliedAt, removed }. A non-removed entry carries a full item record to insert; a removed entry suppresses the *
- * id from results (its isTodo says which list it belongs to, or is undefined when unknown - e.g. a hard delete - in which case it is suppressed from   *
- * either list and retired only by the timeout). viewKey is the view the entry was computed against (see viewKeyFor); a merge applies the entry only    *
- * to a query for that same view, so an overlay computed for one profile/notebook-filter never leaks into another's results.                            *
+ * noteID -> { record, isTodo, viewKey, appliedAt, removed, viewMiss, seenTodo, seenNote }. A non-removed entry carries a full item record to           *
+ * insert; a removed one suppresses the id from results, and carries a record (marked viewMiss) only when it was written because the item fell          *
+ * outside the VIEW rather than because the item is gone - see removeOptimisticItem. isTodo is the id's type as the entry asserts it: it names the      *
+ * list the entry inserts into (or the list a suppress belongs to), while the OTHER list is suppressed either way, since the index may still be         *
+ * serving the id under its pre-flip type. It is undefined only when the type is unknown (a hard delete), in which case the entry suppresses from       *
+ * either list and is retired only by the timeout. viewKey is the view the entry was computed against (see viewKeyFor); a merge applies the entry       *
+ * only to a query for that same view, so an overlay computed for one profile/notebook-filter never leaks into another's results. seenTodo and          *
+ * seenNote are the current render's per-list verdicts ("present" / "absent"), written by each merge and consumed - then cleared - by finalizeOverlay.  *
  ***************************************************************************************************************************************************/
 var itemOverlay = new Map()
 
@@ -127,14 +137,24 @@ export function upsertOptimisticItem(record, viewKey){
 }
 
 /** removeOptimisticItem ****************************************************************************************************************************
- * Suppresses an id from the current view before the search index stops returning it (a trashed note, or one moved out of the filtered notebook).      *
- * isTodo says which list it was in so reconciliation can retire the entry once that list no longer returns it; pass it undefined only when the type is *
- * unknown (a hard delete), in which case the entry is retired by the timeout. viewKey scopes the suppression to the view it was computed for, so a     *
- * remove computed for one profile never hides an item from a query that legitimately returns it under a different view.                                *
+ * Suppresses an id from the current view before the search index stops returning it (a trashed note, one moved out of the filtered notebook, or one    *
+ * whose type flipped into a section this view hides). isTodo is the id's type NOW, so reconciliation can retire the entry once its own list no longer  *
+ * returns it; the suppression itself covers both lists, since the lagging index may still be serving the id under its previous type. Pass it undefined *
+ * only when the type is unknown (a hard delete), in which case the entry is retired by the timeout. viewKey scopes the suppression to the view it was  *
+ * computed for, so a remove computed for one profile never hides an item from a query that legitimately returns it under a different view.             *
+ *                                                                                                                                                    *
+ * record is passed ONLY when the reason for the suppression is that the item does not belong to this VIEW (its type, due date or completion falls      *
+ * outside the profile's switches, or its notebook outside the filter) - never when the item is gone (trashed, hard-deleted). That distinction matters  *
+ * because only the first kind can be re-judged: the caller's noteMatchesView cannot see a trash flag, so re-judging a trash suppress would resurrect    *
+ * the row. A judgeable suppress is marked viewMiss so revalidateOptimisticInserts can take it back once the view would show the item again.            *
  ***************************************************************************************************************************************************/
-export function removeOptimisticItem(noteID, isTodo?, viewKey?){
+export function removeOptimisticItem(noteID, isTodo?, viewKey?, record?){
     if (!noteID) return
-    itemOverlay.set(noteID, { record: { id: noteID }, isTodo: (isTodo === undefined ? undefined : !!isTodo), viewKey: viewKey, appliedAt: Date.now(), removed: true })
+    itemOverlay.set(noteID, {
+        record: record ? { ...record, id: noteID } : { id: noteID },
+        isTodo: (isTodo === undefined ? undefined : !!isTodo),
+        viewKey: viewKey, appliedAt: Date.now(), removed: true, viewMiss: !!record,
+    })
 }
 
 /** clearOptimisticItem *****************************************************************************************************************************
@@ -153,16 +173,26 @@ export function clearOptimisticItem(noteID){
  * "undated to-do in a hide-undated profile" regression). Re-running the predicate here, at consumption time, retires exactly those stale inserts,     *
  * while a still-matching entry is kept so a profile that still shows the item goes on showing it promptly (no over-fix). A predicate of () => false    *
  * (passed when the view is no longer locally evaluable - the profile gained searchCriteria, or the user typed search text) drops every insert, making *
- * the search the sole authority. Suppress entries carry only an id, not a full record, so they cannot be re-judged and are left untouched (they retire *
- * against their own view's search or the TTL as before). Only entries of the given view are considered, so one view's re-validation never disturbs     *
- * another's overlay.                                                                                                                                   *
+ * the search the sole authority. Only entries of the given view are considered, so one view's re-validation never disturbs another's overlay.          *
+ *                                                                                                                                                    *
+ * The mirror case is a viewMiss SUPPRESS - one written because the item fell outside the view's switches (a flip into a hidden type, most of all).      *
+ * Editing the switch back ON leaves the viewKey unchanged, so without this the suppression would go on hiding the item from BOTH lists while its own    *
+ * search legitimately returns it (so no verdict can ever retire it) - the item would stay invisible until the TTL, hidden by the very switch the user   *
+ * turned on to see it. Such an entry is therefore DROPPED the moment the predicate says the item belongs to the view again, handing it back to the      *
+ * search that is now returning it. Dropped rather than turned into an insert: an insert asserts the item exists, and this record was captured earlier   *
+ * - if the item has since been trashed, no search could ever retire that insert (search never returns trashed notes) and it would pin a trashed row     *
+ * for the whole TTL. A suppress carrying no judgeable record (trashed, moved away, hard-deleted) is left untouched either way, because the predicate     *
+ * cannot see the reason it was written for.                                                                                                            *
  ***************************************************************************************************************************************************/
 export function revalidateOptimisticInserts(viewKey, matches){
     if (!itemOverlay.size) return
     for (var pair of itemOverlay){
         var entry = pair[1]
-        if (entry.removed) continue                 // a suppress carries no record to re-judge
-        if (entry.viewKey !== viewKey) continue      // only this view's inserts
+        if (entry.viewKey !== viewKey) continue      // only this view's entries
+        if (entry.removed){
+            if (entry.viewMiss && matches(entry.record)) itemOverlay.delete(pair[0])   // the view shows it again; search rules
+            continue
+        }
         if (!matches(entry.record)) itemOverlay.delete(pair[0])
     }
 }
@@ -170,10 +200,14 @@ export function revalidateOptimisticInserts(viewKey, matches){
 /** mergeOverlay ************************************************************************************************************************************
  * Folds the overlay for one list (to-dos when wantTodo is true, notes otherwise) into a freshly fetched (or cached) result array, in place, applying   *
  * ONLY the entries that belong to the consuming view (entry.viewKey === viewKey):                                                                      *
- *  - an insert whose id the search already returns is retired, and the real item kept (search caught up)                                              *
- *  - an insert whose id the search does not return yet is appended                                                                                    *
- *  - a suppress whose id the search still returns is spliced out; once the search no longer returns it (and its type is known) the entry is retired    *
- * A suppress of unknown type is applied to whichever list currently holds the id and left for the timeout to retire.                                  *
+ *  - an insert of THIS list's type whose id the search already returns is retired, and the real item kept (search caught up)                           *
+ *  - an insert of THIS list's type whose id the search does not return yet is appended                                                                 *
+ *  - an insert of the OTHER type whose id this list's (lagging) search still returns is spliced out of it, so an id whose type just flipped renders in  *
+ *    exactly one section instead of both                                                                                                               *
+ *  - a suppress whose id the search still returns is spliced out - of EITHER list, for the same reason: while the index lags, the id may still be       *
+ *    served under its pre-flip type                                                                                                                    *
+ * Retiring a suppress needs both lists' verdicts, so no merge retires one: each records its own verdict on the entry and finalizeOverlay closes the     *
+ * cycle. An insert still retires against its OWN list here, where the search returning it is proof enough on its own.                                   *
  * A null viewKey (the overview-note path) consumes NOTHING - overviews are eventually consistent via the lanes and the periodic backstop. Because an   *
  * entry is only ever touched by its own view, a suppress never hides an item another view legitimately returns, and an entry retires against its own   *
  * view's search alone (never a foreign one), with the TTL as the sole backstop for a view whose search can no longer carry the item.                   *
@@ -189,26 +223,58 @@ function mergeOverlay(items, wantTodo, viewKey){
         var entry = pair[1]
         // View scope: an entry only ever applies to (and retires against) the exact view it was computed for.
         if (entry.viewKey !== viewKey) continue
+        var hit = present.get(id)
         if (entry.removed){
-            if (entry.isTodo !== undefined && entry.isTodo !== wantTodo) continue
-            var hit = present.get(id)
-            if (hit){
-                var at = items.indexOf(hit)
-                if (at >= 0) items.splice(at, 1)
-                present.delete(id)
-            } else if (entry.isTodo !== undefined){
-                itemOverlay.delete(id)          // the search no longer returns it either; done
-            }
+            if (hit) spliceOut(items, present, id, hit)
+            // This list's verdict for finalizeOverlay: the suppress may only retire once NEITHER list returns it.
+            if (wantTodo) entry.seenTodo = hit ? "present" : "absent"
+            else entry.seenNote = hit ? "present" : "absent"
             continue
         }
-        if (entry.isTodo !== wantTodo) continue
-        if (present.has(id)){
+        if (entry.isTodo !== wantTodo){
+            // The entry asserts the id is of the other type, so a row this list's search still carries is stale.
+            if (hit) spliceOut(items, present, id, hit)
+            continue
+        }
+        if (hit){
             itemOverlay.delete(id)              // the search now returns the created/changed item; keep the real one
         } else {
             items.push({ ...entry.record })
         }
     }
     return items
+}
+
+/** spliceOut ***************************************************************************************************************************************/
+function spliceOut(items, present, id, hit){
+    var at = items.indexOf(hit)
+    if (at >= 0) items.splice(at, 1)
+    present.delete(id)
+}
+
+/** finalizeOverlay *********************************************************************************************************************************
+ * Closes one render's overlay cycle for a view, once BOTH of its lists have been merged. A suppress asserts the id is gone from the whole view, and a  *
+ * single merge can only ever see half of it: the to-dos are merged before the notes, so retiring inside a merge would either destroy the entry before  *
+ * the second list could be corrected (the id's stale row would then be unremovable) or keep it past the point the index caught up. So each merge only   *
+ * records its verdict and this retires the entry when neither list returns the id any more - and only for a suppress of KNOWN type, an unknown-type     *
+ * one (a hard delete) staying on the TTL exactly as before. notesRendered is false when the profile shows no notes section: that list is then never     *
+ * merged and nothing can render the id from it, so its verdict counts as "absent" and the entry still retires promptly instead of leaking to the TTL.   *
+ ***************************************************************************************************************************************************/
+export function finalizeOverlay(viewKey, notesRendered?){
+    if (!itemOverlay.size || viewKey == null) return
+    for (var pair of itemOverlay){
+        var entry = pair[1]
+        if (entry.viewKey !== viewKey) continue
+        if (entry.removed && entry.isTodo !== undefined){
+            var noteAbsent = notesRendered === false || entry.seenNote === "absent"
+            if (entry.seenTodo === "absent" && noteAbsent){
+                itemOverlay.delete(pair[0])     // neither list returns it any more; done
+                continue
+            }
+        }
+        entry.seenTodo = undefined
+        entry.seenNote = undefined
+    }
 }
 
 /** mergeOptimisticTodos / mergeOptimisticNotes *************************************************************************************************

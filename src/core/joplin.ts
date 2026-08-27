@@ -173,6 +173,10 @@ export function applyNoteNarrowing(items){
     // fetched before the rest of the (body-fetch-capped) set.
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
+    // A view that keeps mistyped rows caches a DIFFERENT list under the same query as one that drops them, so
+    // the flag belongs in the key - the same reason the any-mode key carries the narrowing it applied.
+    var keepMistypedRows = !!(opts && opts.keepMistypedRows)
+    if (keepMistypedRows) cacheKey += "|keepmistyped"
     var allTodos;
     if ((useCache || fillCounts) && todosResultCache.has(cacheKey)){
         // Optimistic / fill re-render: reuse the last search for this query instead of searching again.
@@ -204,6 +208,15 @@ export function applyNoteNarrowing(items){
         // The any:1 path asked for none of Cockpit's narrowing in the query, so it is applied here - in the
         // same place, and before the same body fetch and cache write, as the query terms it replaces.
         if (anyMode) allTodos = applyTodoNarrowing(allTodos, showCompleted, showNoDue)
+        // The index answers `type:todo` from a row it may not have re-indexed since the item's is_todo changed,
+        // so a note that was a to-do seconds ago still comes back here - and the notes query returns it too,
+        // which is how one item rendered in two sections at once. The returned row carries the current is_todo
+        // (it is a fetched field, not the index's own predicate), so it is asked directly and the contradicting
+        // rows are dropped. Cheap, and on the settled index a no-op. The completed/no-due narrowing above stays
+        // any-mode-only: those ARE query terms on the ordinary path. opts.keepMistypedRows switches the drop off
+        // for the one caller that must not have it - a view no overlay entry can cover, where the row this drops
+        // is the only trace of the item until the index catches up (see refreshPanelData).
+        if (!keepMistypedRows) allTodos = allTodos.filter(item => !!item.is_todo)
         // Excluded rows are dropped BEFORE the checkbox-body fetch, so an excluded note never costs a body
         // GET, and BEFORE the cache is written, so the cache holds only kept rows.
         allTodos = filterExcluded(allTodos, excluded.set)
@@ -317,6 +330,9 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var cacheKey = anyMode ? `any|x${excluded.clauses}|${query}` : query
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
+    // Keyed by the flag for the reason given in getTodos.
+    var keepMistypedRows = !!(opts && opts.keepMistypedRows)
+    if (keepMistypedRows) cacheKey += "|keepmistyped"
     var allNotes;
     if ((useCache || fillCounts) && notesResultCache.has(cacheKey)){
         allNotes = cloneItems(notesResultCache.get(cacheKey))
@@ -339,6 +355,10 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
         } while (response.has_more)
         // The any:1 path applies `type:note` itself, for the same reason getTodos does.
         if (anyMode) allNotes = applyNoteNarrowing(allNotes)
+        // The mirror of getTodos' re-check, with the same opts.keepMistypedRows escape: while the index lags a
+        // type flip, `type:note` still returns a row that is now a to-do (and the to-do query returns it as
+        // well). The row's own is_todo is current, so it decides, and the section keeps only genuine notes.
+        if (!keepMistypedRows) allNotes = allNotes.filter(item => !item.is_todo)
         allNotes = filterExcluded(allNotes, excluded.set)
         await attachCheckboxCounts(allNotes, fast, priorityStart)
         cacheResult(notesResultCache, cacheKey, allNotes)

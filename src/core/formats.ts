@@ -233,7 +233,11 @@ abstract class BaseFormat {
         // keyed by the current profile and notebook filter. The overview-note markdown consumes NONE (null),
         // so an insert/remove computed for one profile's panel never leaks into another profile's note.
         var viewKey = isMarkdown ? null : viewKeyFor(this.profile.id, notebookFilter)
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey })
+        // Whether a row whose own is_todo contradicts this list may be kept: only on a panel view no overlay can
+        // cover (see refreshPanelData), where dropping it would leave the item in neither section. The overview
+        // markdown carries no such view state, so it keeps the ordinary drop.
+        var keepMistypedRows = this.viewState ? !!(this.viewState as any).keepMistypedRows : false
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows })
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -789,7 +793,7 @@ export async function renderNotesSection(profile, viewState){
     var notesViewKey = viewKeyFor(profile.id, viewState ? viewState.notebookFilter : null)
     // The notes section renders after the to-dos, so it inherits no separate viewport estimate; its bodies
     // are fetched in list order (0), while the to-dos above it get the viewport-first ordering.
-    var notes = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey })
+    var notes = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false })
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
         note.notebookTitle = notebook ? notebook.title : ""

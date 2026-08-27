@@ -5,6 +5,26 @@ const path = require('path')
 
 const bundlePath = path.resolve(__dirname, '../dist/index.js')
 
+// A single-note read returns only the fields the caller asked for, as the real API does - so a code path that
+// forgets a field sees undefined rather than the fixture's value, and a test can pin the field list it depends
+// on. A field the fixture does not carry comes back absent.
+function projectFields(note, fields) {
+    if (!Array.isArray(fields) || !fields.length) return note
+    const projected = {}
+    for (const field of fields) {
+        if (field in note) projected[field] = note[field]
+    }
+    return projected
+}
+
+// The real API returns every field it was asked for, and both list queries ask for is_todo - so a row served to
+// the "type:todo" query carries is_todo 1 and one served to "type:note" carries 0. A fixture that leaves the
+// field out gets it filled in here; one that SETS it (a stale index row still filed under its pre-flip type) is
+// served exactly as written, which is what lets a test model the index lag a type change lives in.
+function typedItems(items, isTodo) {
+    return (items || []).map(item => (item.is_todo === undefined ? { ...item, is_todo: isTodo ? 1 : 0 } : item))
+}
+
 function makeJoplin(options) {
     const settings = Object.assign({}, options.initialSettings)
     const state = {
@@ -107,7 +127,14 @@ function makeJoplin(options) {
                     if (!(key in settings)) settings[key] = defs[key].value
                 }
             },
-            value: async (key) => settings[key],
+            value: async (key) => {
+                // A one-shot hook a test can set (state.onSettingRead) to interleave a user action into the exact
+                // await a refresh is suspended on. The excluded-notebook read every revalidation pass makes is a
+                // real host round-trip in the app too, which is what makes a "the view changed mid-render" race
+                // reproducible here rather than only in theory.
+                if (state.onSettingRead) await state.onSettingRead(key)
+                return settings[key]
+            },
             setValue: async (key, value) => {
                 state.settingWrites.push({ key, value })
                 settings[key] = value
@@ -180,10 +207,14 @@ function makeJoplin(options) {
                         const gate = state.searchGate
                         if (gate.onEnter) gate.onEnter()
                         await gate.promise
-                        return { items: (isNoteQuery ? (gate.searchNotes || []) : (gate.todos || [])), has_more: false }
+                        return { items: typedItems(isNoteQuery ? (gate.searchNotes || []) : (gate.todos || []), !isNoteQuery), has_more: false }
                     }
                     if (isNoteQuery) {
-                        return { items: options.searchNotes || [], has_more: false }
+                        // options.searchNotes may be a function of the query too (like options.todos below), so a
+                        // test can flip what the simulated index returns between renders - the index lag a type
+                        // change lives in.
+                        const noteItems = typeof options.searchNotes === 'function' ? (options.searchNotes(q) || []) : (options.searchNotes || [])
+                        return { items: typedItems(noteItems, false), has_more: false }
                     }
                     // An any:1 search is ALSO type-less: the plugin deliberately keeps its own type:/iscompleted:/
                     // due: terms out of such a query, because Joplin's any:1 would turn each of them into an OR
@@ -206,7 +237,7 @@ function makeJoplin(options) {
                     // options.todos may be a function of the query, so a test can give different profiles
                     // different to-do sets (e.g. distinct ids, so a switch hits uncached checkbox bodies).
                     const todoItems = typeof options.todos === 'function' ? (options.todos(q) || []) : (options.todos || [])
-                    return { items: todoItems, has_more: false }
+                    return { items: typedItems(todoItems, true), has_more: false }
                 }
                 // The notebook map and the tag autocomplete page through these endpoints.
                 if (pathParts[0] === 'folders') {
@@ -222,7 +253,10 @@ function makeJoplin(options) {
                     if (!note) throw new Error('Not Found')
                     // ['notes', id, 'tags'] lists the tags currently on a note (tag picker).
                     if (pathParts[2] === 'tags') return { items: note.tags || [] }
-                    return note
+                    // The real API answers with EXACTLY the fields asked for, so a caller that forgets one gets
+                    // undefined rather than the fixture's value. Projecting here is what lets a test pin the
+                    // field list a code path depends on; an unfielded read still returns the whole note.
+                    return projectFields(note, query && query.fields)
                 }
                 throw new Error(`Unexpected data.get: ${pathParts}`)
             },

@@ -2993,6 +2993,411 @@ async function main() {
         assert.strictEqual(m.dataDeletes.length, 0, 'a copy must not delete any note')
     })
 
+    // ============================================================ TYPE FLIP: instant, and exactly one row
+    // Switching an item between note and to-do type used to reach the panel only when the search index caught up
+    // (the 7s reconcile rung), and until then the item rendered TWICE - once under a to-do heading, once under
+    // NOTES. The two sections are two searches over the SAME lagging index, and an overlay entry spoke for only
+    // one of the two lists, so an entry written for the new type could not correct the other list (worse: a
+    // suppress destroyed itself against the to-dos, which are merged first, before the notes merge could use it).
+    // Three layers are pinned here: an entry is now authoritative about the id's TYPE (it inserts into that type's
+    // list and suppresses the id from the other, retiring only once BOTH agree), Cockpit's own toggle captures the
+    // flip and repaints from the overlay at once, and a search row whose own is_todo contradicts its list is dropped.
+    const flipFolder = 'n'.repeat(32)
+    const flipSoon = Date.now() + 3600000
+    const flipProfile = (extra) => ({ ...baseProfile, id: 1, name: 'Flip', searchCriteria: '', showNotes: true, showNoDue: true, sortOrder: 0, noteID: '', ...extra })
+    const flipProfileData = (extra) => JSON.stringify({ nextID: 2, profiles: [flipProfile(extra)] })
+    let flipRunSeq = 0
+    // The defaults are written INTO the caller's options object (not a copy), so a test can go on changing what
+    // the simulated index returns after the run has started - the index catching up is half of what is measured.
+    const flipRun = (opts) => {
+        opts.dataDir = path.join(tmp, 'flip-' + (++flipRunSeq))
+        opts.installationDir = path.join(tmp, 'desktop-install')
+        opts.require = desktopRequire
+        opts.versionInfo = { version: '3.7.0', platform: 'desktop' }
+        if (!opts.folders) opts.folders = [{ id: flipFolder, title: 'Inbox', parent_id: '', updated_time: 1 }]
+        if (!opts.initialSettings) opts.initialSettings = { profileData: flipProfileData(), currentProfileID: 1 }
+        return run(opts)
+    }
+    // A rendered row is counted by its wrapper's id attribute - the to-do sections stamp data-todo-id, the NOTES
+    // section data-note-id - so "once, in the right section" is exactly one of the two across the whole panel.
+    const rowCount = (state, id, kind) =>
+        (String(state.panelHtml['panel-panel'] || '').match(new RegExp('data-' + kind + '-id="' + id + '"', 'g')) || []).length
+    // The fields the post-flip record is judged (noteMatchesView + the trash guard) and rendered from. The harness
+    // projects a single-note GET to exactly the fields asked for, as the real API does, so a narrowed list here
+    // shows up as an undefined title, a mis-judged notebook, or a resurrected trashed note - never as a pass.
+    const FLIP_GET_FIELDS = ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time']
+
+    // (1) The duplicate, exactly as reported: an external note -> to-do flip while the index still files the item
+    // under type:note. Its stale row carries is_todo 0, so nothing but the overlay can take it out of NOTES.
+    const extTodoId = 'a'.repeat(32)
+    const extTodo = await flipRun({
+        todos: [],
+        searchNotes: [{ id: extTodoId, title: 'FlippedItem', is_todo: 0, parent_id: flipFolder, user_updated_time: 1 }],
+        notes: { [extTodoId]: { id: extTodoId, title: 'FlippedItem', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: 0, user_updated_time: 2 } },
+    })
+    await test('type flip (external, note -> to-do): the item renders ONCE, in the to-do section, while the index still lists it as a note', async () => {
+        assert.strictEqual(rowCount(extTodo, extTodoId, 'note'), 1, 'precondition: the stale index renders it under NOTES')
+        await extTodo.noteChangeHandler({ id: extTodoId })
+        assert.strictEqual(rowCount(extTodo, extTodoId, 'todo'), 1, 'the flipped item shows in the to-do section at once')
+        assert.strictEqual(rowCount(extTodo, extTodoId, 'note'), 0, 'and its stale NOTES row is gone - never both at once')
+    })
+
+    // (2) The mirror: an external to-do -> note flip while the index still files it under type:todo.
+    const extNoteId = 'b'.repeat(32)
+    const extNote = await flipRun({
+        todos: [{ id: extNoteId, title: 'FlippedBack', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }],
+        searchNotes: [],
+        notes: { [extNoteId]: { id: extNoteId, title: 'FlippedBack', parent_id: flipFolder, is_todo: 0, todo_completed: 0, todo_due: 0, deleted_time: 0, user_updated_time: 2 } },
+    })
+    await test('type flip (external, to-do -> note): the item renders ONCE, under NOTES, while the index still lists it as a to-do', async () => {
+        assert.strictEqual(rowCount(extNote, extNoteId, 'todo'), 1, 'precondition: the stale index renders it as a to-do')
+        await extNote.noteChangeHandler({ id: extNoteId })
+        assert.strictEqual(rowCount(extNote, extNoteId, 'note'), 1, 'the flipped item shows under NOTES at once')
+        assert.strictEqual(rowCount(extNote, extNoteId, 'todo'), 0, 'and its stale to-do row is gone')
+    })
+
+    // (3) Flip into a type the view HIDES (undated to-do, showNoDue off): the suppress belongs to the to-do list,
+    // which is merged FIRST and never held the id - so it must not retire there, or the stale NOTES row below it
+    // could never be taken out (and would come back on every later render until the TTL).
+    const hiddenFlipId = 'c'.repeat(32)
+    const hiddenFlip = await flipRun({
+        todos: [],
+        searchNotes: [{ id: hiddenFlipId, title: 'GoesHidden', is_todo: 0, parent_id: flipFolder, user_updated_time: 1 }],
+        notes: { [hiddenFlipId]: { id: hiddenFlipId, title: 'GoesHidden', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: 0, deleted_time: 0, user_updated_time: 2 } },
+        initialSettings: { profileData: flipProfileData({ showNoDue: false }), currentProfileID: 1 },
+    })
+    await test('type flip (external, into a hidden type): the NOTES row goes and stays gone - the suppress survives the to-dos-first merge', async () => {
+        assert.strictEqual(rowCount(hiddenFlip, hiddenFlipId, 'note'), 1, 'precondition: it is listed as a note')
+        await hiddenFlip.noteChangeHandler({ id: hiddenFlipId })
+        assert.strictEqual(rowCount(hiddenFlip, hiddenFlipId, 'note'), 0, 'the stale NOTES row is removed on the optimistic paint')
+        assert.strictEqual(rowCount(hiddenFlip, hiddenFlipId, 'todo'), 0, 'and the undated to-do is not shown either (the view hides it)')
+        await hiddenFlip.panelMessageHandler(['sortDirectionClicked'])          // a real, search-based render
+        assert.strictEqual(rowCount(hiddenFlip, hiddenFlipId, 'note'), 0, 'the entry is still held, so the stale row cannot come back')
+    })
+
+    // (4) Cockpit's own toggle: instant, from the overlay, with no search and an early-stoppable arm.
+    const ownFlipId = 'd'.repeat(32)
+    const ownFlipOptions = {
+        todos: [{ id: ownFlipId, title: 'OwnFlip', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }],
+        searchNotes: [],
+        notes: { [ownFlipId]: { id: ownFlipId, title: 'OwnFlip', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: 0, user_updated_time: 1 } },
+    }
+    const ownFlip = await flipRun(ownFlipOptions)
+    await test('type flip (Cockpit toggle): the row changes section on the spot - unchanged PUT, no search, no fired timer', async () => {
+        assert.strictEqual(rowCount(ownFlip, ownFlipId, 'todo'), 1, 'precondition: it starts in the to-do section')
+        const searchesBefore = countSearches(ownFlip)
+        const paintsBefore = ownFlip.setHtmlCalls
+        const mark = ownFlip.timeouts.length
+        const getMark = ownFlip.gets.length
+        await ownFlip.panelMessageHandler(['noteMenuAction', 'toggleType', ownFlipId])
+        // (a) the write is exactly what it always was
+        const puts = ownFlip.notePuts.filter(p => p.id === ownFlipId)
+        assert.strictEqual(puts.length, 1, 'exactly one PUT for the flip')
+        assert.deepStrictEqual(puts[0].fields, { is_todo: 0 }, 'and it writes only the flipped is_todo')
+        // ...and it is still ONE read, but a wide one: every field the post-flip record is judged and rendered
+        // by must be asked for, since the API answers with exactly the fields requested and nothing else.
+        const flipGets = ownFlip.gets.slice(getMark).filter(g =>
+            g.path[0] === 'notes' && g.path.length === 2 && g.path[1] === ownFlipId &&
+            !(g.query.fields.length === 1 && g.query.fields[0] === 'body'))
+        assert.strictEqual(flipGets.length, 1, 'the flip still costs a single note read (checkbox bodies aside)')
+        assert.deepStrictEqual(flipGets[0].query.fields.slice().sort(), FLIP_GET_FIELDS.slice().sort(),
+            'the toggleType GET must ask for exactly the fields the overlay record needs')
+        // (b) the paint that follows already shows the new section - no reconcile timeout has been fired
+        assert.ok(ownFlip.setHtmlCalls > paintsBefore, 'the flip repaints immediately')
+        assert.strictEqual(rowCount(ownFlip, ownFlipId, 'note'), 1, 'the item is under NOTES on that very paint')
+        assert.strictEqual(rowCount(ownFlip, ownFlipId, 'todo'), 0, 'and out of the to-do section - never both')
+        // (c) it costs no round-trip: the overlay is layered onto the warm result caches
+        assert.strictEqual(countSearches(ownFlip) - searchesBefore, 0, 'the optimistic repaint issues no search')
+        // (d) the arm is optimistic, so the burst stops as soon as the index agrees
+        const rec = armedSince(ownFlip, mark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        assert.strictEqual(rec.length, 5, 'one reconcile job of five offsets')
+        ownFlipOptions.todos = []
+        ownFlipOptions.searchNotes = [{ id: ownFlipId, title: 'OwnFlip', is_todo: 0, parent_id: flipFolder, user_updated_time: 2 }]
+        await ownFlip.fireTimeout(rec[0])
+        assert.strictEqual(ownFlip.pendingTimeouts(3000).length, 0, 'the index having caught up, the remaining offsets are cancelled')
+    })
+
+    // (5) The batch toggle: a mixed selection lands in BOTH new sections on ONE paint.
+    const batchTodoId = id32('bt'), batchNoteId = id32('bn')
+    const batchFlip = await flipRun({
+        todos: [{ id: batchTodoId, title: 'BatchTodo', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }],
+        searchNotes: [{ id: batchNoteId, title: 'BatchNote', is_todo: 0, parent_id: flipFolder, user_updated_time: 1 }],
+        notes: {
+            [batchTodoId]: { id: batchTodoId, title: 'BatchTodo', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: 0, user_updated_time: 1 },
+            [batchNoteId]: { id: batchNoteId, title: 'BatchNote', parent_id: flipFolder, is_todo: 0, todo_completed: 0, todo_due: 0, deleted_time: 0, user_updated_time: 1 },
+        },
+    })
+    await test('type flip (batch toggle): both rows land in their NEW sections on ONE paint', async () => {
+        assert.strictEqual(rowCount(batchFlip, batchTodoId, 'todo'), 1, 'precondition: the to-do is a to-do')
+        assert.strictEqual(rowCount(batchFlip, batchNoteId, 'note'), 1, 'precondition: the note is a note')
+        const paintsBefore = batchFlip.setHtmlCalls
+        await batchFlip.panelMessageHandler(['noteMenuActionMulti', 'toggleType', [batchTodoId, batchNoteId]])
+        assert.strictEqual(batchFlip.setHtmlCalls - paintsBefore, 1, 'the batch paints ONCE, not once per note')
+        for (const id of [batchTodoId, batchNoteId]){
+            const batchGet = batchFlip.gets.filter(g => g.path[0] === 'notes' && g.path.length === 2 && g.path[1] === id).pop()
+            assert.deepStrictEqual(batchGet.query.fields.slice().sort(), FLIP_GET_FIELDS.slice().sort(),
+                'each id in the batch is read with the same wide field list as the single flip')
+        }
+        assert.strictEqual(rowCount(batchFlip, batchTodoId, 'note'), 1, 'the to-do is now under NOTES')
+        assert.strictEqual(rowCount(batchFlip, batchTodoId, 'todo'), 0, 'and gone from the to-do section')
+        assert.strictEqual(rowCount(batchFlip, batchNoteId, 'todo'), 1, 'the note is now a to-do row')
+        assert.strictEqual(rowCount(batchFlip, batchNoteId, 'note'), 0, 'and gone from NOTES')
+    })
+
+    // (6a) Non-regression: a tick is still instant and still retires against its own list.
+    const tickPinId = 'e'.repeat(32)
+    const tickPinOptions = {
+        todos: [{ id: tickPinId, title: 'TickPin', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }],
+        searchNotes: [],
+    }
+    const tickPin = await flipRun(tickPinOptions)
+    await test('type flip (pin): a checkbox tick is unaffected - instant, no search, and it still retires when the index agrees', async () => {
+        const searchesBefore = countSearches(tickPin)
+        const mark = tickPin.timeouts.length
+        await tickPin.panelMessageHandler(['todoChecked', tickPinId, true])
+        assert.strictEqual(countSearches(tickPin) - searchesBefore, 0, 'the tick repaints from the cache, with no search')
+        const html = tickPin.panelHtml['panel-panel']
+        const at = html.indexOf('data-todo-id="' + tickPinId + '"')
+        assert.ok(html.slice(html.lastIndexOf('<div', at), at).includes('-completed'), 'the row renders completed at once')
+        const rec = armedSince(tickPin, mark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        tickPinOptions.todos = [{ id: tickPinId, title: 'TickPin', is_todo: 1, todo_completed: Date.now(), todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 2 }]
+        await tickPin.fireTimeout(rec[0])
+        assert.strictEqual(tickPin.pendingTimeouts(3000).length, 0, 'the override retires once the search agrees, and the burst stops')
+    })
+
+    // (6b) Non-regression: a created note's insert must splice nothing out of the to-do list.
+    const createPinTodoId = 'f'.repeat(32)
+    const createPin = await flipRun({
+        todos: [{ id: createPinTodoId, title: 'BystanderTodo', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }],
+        searchNotes: [],
+    })
+    await test('type flip (pin): a created note inserts under NOTES and splices nothing out of the to-do list', async () => {
+        createPin.dialogResult = { id: 'ok', formData: { picker: { folderId: flipFolder } } }   // the desktop "create in notebook" picker
+        await createPin.panelMessageHandler(['newNoteClicked'])
+        assert.strictEqual(rowCount(createPin, 'created-1', 'note'), 1, 'the created note shows under NOTES')
+        assert.strictEqual(rowCount(createPin, 'created-1', 'todo'), 0, 'and nowhere in the to-do section')
+        assert.strictEqual(rowCount(createPin, createPinTodoId, 'todo'), 1, 'the unrelated to-do row is untouched')
+    })
+
+    // (6c) Non-regression: a trash suppress still hides the row and still retires against its own list.
+    const trashPinId = '1'.repeat(32)
+    const trashPinOptions = {
+        todos: [{ id: trashPinId, title: 'TrashPin', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }],
+        searchNotes: [],
+        notes: { [trashPinId]: { id: trashPinId, title: 'TrashPin', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: Date.now(), user_updated_time: 2 } },
+    }
+    const trashPin = await flipRun(trashPinOptions)
+    await test('type flip (pin): a trashed to-do is still suppressed at once, and the entry still retires when the index drops it', async () => {
+        assert.strictEqual(rowCount(trashPin, trashPinId, 'todo'), 1, 'precondition: the stale index still lists it')
+        const mark = trashPin.timeouts.length
+        await trashPin.noteChangeHandler({ id: trashPinId })
+        assert.strictEqual(rowCount(trashPin, trashPinId, 'todo'), 0, 'the trashed to-do disappears at once')
+        const rec = armedSince(trashPin, mark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        trashPinOptions.todos = []                                              // the index drops it too
+        await trashPin.fireTimeout(rec[0])
+        assert.strictEqual(trashPin.pendingTimeouts(3000).length, 0, 'the suppress retires once neither list returns it, and the burst stops')
+    })
+
+    // (6d) A view only a search can decide (the profile carries searchCriteria) writes NO overlay entry - the flip
+    // falls back to the full refresh and a blind arm, exactly as every other context-menu action does - and the row
+    // must therefore KEEP its old section rather than vanish from both: nothing else can draw the item until the
+    // index catches up. The fixture models Joplin as measured: the index picks the ROWS from a table it re-syncs on
+    // a timer of its own (so type:todo still returns the id) while the fields come from the live note (so the
+    // payload's is_todo is already the flipped one) - which is why the to-do list is a function of the fixture the
+    // PUT mutates rather than a frozen row.
+    const criteriaFlipId = '2'.repeat(32)
+    const criteriaFlipNote = { id: criteriaFlipId, title: 'CriteriaFlip', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: 0, user_updated_time: 1 }
+    const criteriaFlipOptions = {
+        todos: () => [{ ...criteriaFlipNote }],
+        searchNotes: [],
+        notes: { [criteriaFlipId]: criteriaFlipNote },
+        initialSettings: { profileData: flipProfileData({ searchCriteria: 'tag:work' }), currentProfileID: 1 },
+    }
+    const criteriaFlip = await flipRun(criteriaFlipOptions)
+    await test('type flip (pin): on a searchCriteria profile the flip writes no overlay entry, arms the lane blind, and never blanks the row', async () => {
+        assert.strictEqual(rowCount(criteriaFlip, criteriaFlipId, 'todo'), 1, 'precondition: the item is listed as a to-do')
+        const mark = criteriaFlip.timeouts.length
+        await criteriaFlip.panelMessageHandler(['noteMenuAction', 'toggleType', criteriaFlipId])
+        // No optimistic move: the search is the sole authority there, so the row stays where the index has it -
+        // and it stays SOMEWHERE. The two lists can never both hold it: one stale index value answers both queries.
+        assert.strictEqual(rowCount(criteriaFlip, criteriaFlipId, 'todo'), 1, 'the stale placement stands until a search says otherwise')
+        assert.strictEqual(rowCount(criteriaFlip, criteriaFlipId, 'note'), 0, 'and nothing was inserted into NOTES')
+        const rec = armedSince(criteriaFlip, mark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        await criteriaFlip.fireTimeout(rec[0])
+        assert.strictEqual(rowCount(criteriaFlip, criteriaFlipId, 'todo') + rowCount(criteriaFlip, criteriaFlipId, 'note'), 1,
+            'a real search-based render still draws the item exactly once - an explicit flip must never look like a delete')
+        assert.strictEqual(criteriaFlip.pendingTimeouts(3000).length, 1, 'a blind arm runs its bounded offsets out - nothing optimistic to retire')
+        // Once the index has caught up the item is a note like any other, and lands under NOTES.
+        criteriaFlipOptions.todos = () => []
+        criteriaFlipOptions.searchNotes = [{ id: criteriaFlipId, title: 'CriteriaFlip', is_todo: 0, parent_id: flipFolder, user_updated_time: 2 }]
+        await criteriaFlip.fireTimeout(rec[1])
+        assert.strictEqual(rowCount(criteriaFlip, criteriaFlipId, 'note'), 1, 'the search eventually moves it to NOTES')
+        assert.strictEqual(rowCount(criteriaFlip, criteriaFlipId, 'todo'), 0, 'and out of the to-do section')
+    })
+
+    // (7) The last layer: whatever the query asked for, a returned row's own is_todo decides which list it may
+    // appear in - on the ordinary path, not only under any:1 (whose narrowing is pinned by its own section).
+    const contradict = await flipRun({
+        todos: [
+            { id: '3'.repeat(32), title: 'RealTodo', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 },
+            { id: '4'.repeat(32), title: 'NotATodoAnyMore', is_todo: 0, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 },
+        ],
+        searchNotes: [
+            { id: '5'.repeat(32), title: 'RealNote', is_todo: 0, parent_id: flipFolder, user_updated_time: 1 },
+            { id: '6'.repeat(32), title: 'NotANoteAnyMore', is_todo: 1, parent_id: flipFolder, user_updated_time: 1 },
+        ],
+    })
+    // (8) A flip made on the STALE row of a note that has since been trashed. Reachable because a trash arriving
+    // during a sync is deliberately not reconciled per note (timer.ts skips it while syncing), so the pre-trash
+    // row can still be on screen. Search never returns a trashed note, so an INSERT for one could only be retired
+    // by the 60s TTL - the flip must recognise the trash and suppress instead, exactly as the external reconcile
+    // does. This also pins deleted_time in the flip's field list: without it the trashed note is inserted.
+    const trashFlipId = '7'.repeat(32)
+    const trashFlipOptions = {
+        todos: [{ id: trashFlipId, title: 'TrashedStale', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }],
+        searchNotes: [],
+        notes: { [trashFlipId]: { id: trashFlipId, title: 'TrashedStale', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: Date.now(), user_updated_time: 1 } },
+    }
+    const trashFlip = await flipRun(trashFlipOptions)
+    await test('type flip (trashed row): flipping the stale row of a trashed note never puts that note back on screen', async () => {
+        assert.strictEqual(rowCount(trashFlip, trashFlipId, 'todo'), 1, 'precondition: the stale row is on screen')
+        const mark = trashFlip.timeouts.length
+        await trashFlip.panelMessageHandler(['noteMenuAction', 'toggleType', trashFlipId])
+        assert.strictEqual(trashFlip.notePuts.filter(p => p.id === trashFlipId).length, 1, 'the flip itself is still written')
+        assert.strictEqual(rowCount(trashFlip, trashFlipId, 'note'), 0, 'a trashed note must NOT be inserted under NOTES')
+        assert.strictEqual(rowCount(trashFlip, trashFlipId, 'todo'), 0, 'and its stale to-do row goes with it')
+        // A suppress retires against the first search that no longer lists the id, which is what lets the burst
+        // stop early; an insert for a trashed note could never be retired by any search at all.
+        const rec = armedSince(trashFlip, mark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        trashFlipOptions.todos = []
+        await trashFlip.fireTimeout(rec[0])
+        assert.strictEqual(rowCount(trashFlip, trashFlipId, 'todo') + rowCount(trashFlip, trashFlipId, 'note'), 0, 'still gone after a real search')
+        assert.strictEqual(trashFlip.pendingTimeouts(3000).length, 0, 'the suppress retires, so the burst stops early')
+    })
+
+    // (9) The suppress a flip-to-hidden writes must not outlive the switch that justified it. The viewKey carries
+    // the profile id and the notebook filter only, so turning the switch back ON leaves the entry matching - and
+    // its own list now legitimately returns the item, so its verdict pins "present" and no merge can ever retire
+    // it. Re-validation takes such an entry back instead, and the item returns in its own section, once.
+    const hiddenBackId = '8'.repeat(32)
+    const hiddenBackRow = { id: hiddenBackId, title: 'BackAgain', is_todo: 1, todo_completed: 0, todo_due: 0, parent_id: flipFolder, user_updated_time: 2 }
+    const hiddenBackOptions = {
+        // A hide-undated profile's own query (due:19700201) can never return an undated to-do, whatever the index
+        // knows; the show-undated query returns it once the index has caught up with the flip.
+        todos: (q) => q.includes('due:19700201') ? [] : [{ ...hiddenBackRow }],
+        searchNotes: [{ id: hiddenBackId, title: 'BackAgain', is_todo: 0, parent_id: flipFolder, user_updated_time: 1 }],
+        notes: { [hiddenBackId]: { id: hiddenBackId, title: 'BackAgain', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: 0, deleted_time: 0, user_updated_time: 2 } },
+        initialSettings: { profileData: flipProfileData({ showNoDue: false }), currentProfileID: 1 },
+    }
+    const hiddenBack = await flipRun(hiddenBackOptions)
+    await test('type flip (suppress vs its own switch): re-enabling the switch that hid the flipped item brings it back, once', async () => {
+        await hiddenBack.noteChangeHandler({ id: hiddenBackId })                    // flipped into a type this view hides
+        assert.strictEqual(rowCount(hiddenBack, hiddenBackId, 'note'), 0, 'precondition: hidden from NOTES')
+        assert.strictEqual(rowCount(hiddenBack, hiddenBackId, 'todo'), 0, 'precondition: and hidden from the to-dos')
+        hiddenBackOptions.searchNotes = []                                          // the index catches up with the flip
+        await hiddenBack.panelMessageHandler(['profileSaved', 1, flipProfile({ showNoDue: true })])
+        assert.strictEqual(rowCount(hiddenBack, hiddenBackId, 'todo'), 1, 'the item is back in the to-do section, exactly once')
+        assert.strictEqual(rowCount(hiddenBack, hiddenBackId, 'note'), 0, 'and not under NOTES as well')
+        await hiddenBack.panelMessageHandler(['sortDirectionClicked'])              // a further, search-based render
+        assert.strictEqual(rowCount(hiddenBack, hiddenBackId, 'todo'), 1, 'and it keeps showing on the next render')
+    })
+
+    // (11) An external to-do -> note conversion (the Joplin editor, another plugin's PUT) must drop any pending
+    // tick of that id. Once the item is not a to-do, no search can produce the row that would retire the
+    // completion override - getTodos drops it on the is_todo re-check before the overrides are applied - so a
+    // leftover override holds the optimistic layer "pending" for its whole TTL (the reconcile burst then runs
+    // every rung) and re-applies the stale tick if the item is converted back inside that window.
+    const overrideFlipId = '9'.repeat(32)
+    // The row the index serves. Its fields are moved by hand below, so each step models one real state: the tick
+    // not yet indexed, the conversion indexed, the conversion undone with the to-do left un-ticked in Joplin.
+    const overrideRow = { id: overrideFlipId, title: 'TickThenFlip', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }
+    const overrideFlipOptions = {
+        todos: () => [{ ...overrideRow }],
+        searchNotes: [],
+        notes: { [overrideFlipId]: { id: overrideFlipId, title: 'TickThenFlip', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: 0, user_updated_time: 1 } },
+    }
+    const overrideFlip = await flipRun(overrideFlipOptions)
+    await test('type flip (external, ticked to-do): converting a ticked to-do elsewhere drops the tick override instead of orphaning it', async () => {
+        await overrideFlip.panelMessageHandler(['todoChecked', overrideFlipId, true])       // optimistic tick, index lagging
+        const mark = overrideFlip.timeouts.length
+        overrideFlipOptions.notes[overrideFlipId].is_todo = 0                                // converted in the Joplin editor
+        overrideRow.is_todo = 0                                                              // the row's own is_todo is live
+        await overrideFlip.noteChangeHandler({ id: overrideFlipId })
+        // The index catches up with the conversion, so the item-overlay insert retires at the first poll. If the
+        // completion override were still held, the layer would stay pending and the burst could not stop early.
+        overrideFlipOptions.searchNotes = [{ id: overrideFlipId, title: 'TickThenFlip', is_todo: 0, parent_id: flipFolder, user_updated_time: 2 }]
+        const rec = armedSince(overrideFlip, mark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        await overrideFlip.fireTimeout(rec[0])
+        assert.strictEqual(overrideFlip.pendingTimeouts(3000).length, 0, 'nothing optimistic is left pending, so the burst stops early')
+        // ...and the user-visible half: converted back to an UN-ticked to-do, the panel must not re-apply the tick.
+        overrideFlipOptions.notes[overrideFlipId].is_todo = 1
+        overrideFlipOptions.notes[overrideFlipId].todo_completed = 0
+        overrideRow.is_todo = 1
+        overrideRow.user_updated_time = 3
+        overrideFlipOptions.searchNotes = []
+        await overrideFlip.panelMessageHandler(['sortDirectionClicked'])                     // a real, search-based render
+        const html = overrideFlip.panelHtml['panel-panel']
+        const at = html.indexOf('data-todo-id="' + overrideFlipId + '"')
+        assert.ok(at >= 0, 'the item is a to-do again')
+        assert.ok(!html.slice(html.lastIndexOf('<div', at), at).includes('-completed'),
+            'the row renders un-ticked, as Joplin has it - no stale override may be re-applied')
+    })
+
+    // (12) One render, one view. The revalidation pass keys its entries by the notebook filter and then awaits a
+    // settings read before judging them; reading the filter live in the predicate would let a notebook chip
+    // clicked inside that await judge THIS view's entries by the NEXT view's filter and delete a legitimate
+    // insert. The harness hook fires the chip click inside that very read.
+    const driftId = 'd'.repeat(32)
+    const driftOther = 'e'.repeat(32)
+    const drift = await flipRun({
+        todos: [],                                                                          // only the overlay can show it
+        searchNotes: [],
+        folders: [{ id: flipFolder, title: 'Inbox', parent_id: '', updated_time: 1 }, { id: driftOther, title: 'Other', parent_id: '', updated_time: 1 }],
+        notes: { [driftId]: { id: driftId, title: 'DriftItem', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: 0, user_updated_time: 1 } },
+    })
+    await test('type flip (one view per render): a notebook chip clicked mid-render cannot delete the unfiltered view\'s own insert', async () => {
+        await drift.noteChangeHandler({ id: driftId })                                      // insert for the unfiltered view
+        assert.strictEqual(rowCount(drift, driftId, 'todo'), 1, 'precondition: the unfiltered view shows it')
+        // The next render suspends on the excluded-notebook read; the chip click lands exactly there.
+        drift.onSettingRead = async (key) => {
+            if (key !== 'excludedNotebookIds') return
+            drift.onSettingRead = null
+            await drift.panelMessageHandler(['notebookFilterChanged', driftOther])
+        }
+        await drift.panelMessageHandler(['sortDirectionClicked'])
+        await drift.panelMessageHandler(['notebookFilterChanged', ''])                       // back to the unfiltered view
+        assert.strictEqual(rowCount(drift, driftId, 'todo'), 1, 'the entry keyed for this view survives another view\'s filter')
+    })
+
+    // (10) The three overlay calls of one render must agree on ONE view key. The merges take theirs from the view
+    // state captured before the render's awaits; finalizeOverlay has to use that same snapshot, or a notebook chip
+    // clicked mid-render leaves the render's verdicts unconsumed (and wipes another view's). Pinned at the source,
+    // since the harness cannot change the filter inside an awaited render.
+    await test('type flip (one view key per render): every overlay call of a render keys off the render snapshot, not the live filter', () => {
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        assert.ok(panelSource.includes('var viewNotebookFilter = notebookFilter'),
+            'the render must take ONE snapshot of the notebook filter')
+        assert.ok(panelSource.includes('var revalidationKey = viewKeyFor(profileID, viewNotebookFilter)'),
+            'the re-validation key must come from that snapshot')
+        assert.ok(panelSource.includes('notebookFilter: viewNotebookFilter'),
+            'and so must the view state the two merges consume')
+        assert.ok(panelSource.includes('finalizeOverlay(viewKeyFor(profileID, panelViewState.notebookFilter)'),
+            'finalizeOverlay must key off panelViewState.notebookFilter - the value the two merges used')
+        // The judgement itself takes the filter as a parameter, so no caller can accidentally judge one view's
+        // entries by another view's filter across an await.
+        assert.ok(panelSource.includes('function noteMatchesView(record, profile, notebooks, excludedSet, filter){'),
+            'noteMatchesView must take the notebook filter, not read the module-level one')
+        assert.ok(!/^\s*if \(notebookFilter\)\{/m.test(panelSource),
+            'and nothing in the judgement may read the live notebookFilter')
+    })
+
+    await test('type flip (stale index row): a search row whose own is_todo contradicts its list is dropped, on the ordinary path too', () => {
+        const html = contradict.panelHtml['panel-panel']
+        assert.ok(html.includes('RealTodo') && html.includes('RealNote'), 'the rows that agree with their list are kept')
+        assert.ok(!html.includes('NotATodoAnyMore'), 'a type:todo row that is no longer a to-do is dropped')
+        assert.ok(!html.includes('NotANoteAnyMore'), 'a type:note row that is no longer a note is dropped')
+    })
+
     // ============================================================ notebook picker UX (taller menu, ESC-close, embedded filter)
     // Three additions to the custom notebook-filter dropdown: it opens at least two-thirds tall, Escape closes it, and a
     // filter box pinned at its top narrows the notebook rows live. The harness renders the panel markup but never runs the

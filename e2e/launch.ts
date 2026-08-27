@@ -54,8 +54,14 @@ export function assertE2EReady(): void {
   }
 }
 
-/** Create a fresh, isolated Joplin profile. Loads this plugin from ./dist unless loadPlugin=false. */
-export function createProfile(loadPlugin = true): string {
+/**
+ * Create a fresh, isolated Joplin profile. Loads this plugin from ./dist unless loadPlugin=false.
+ *
+ * `extraSettings` are merged into the profile's settings.json, so a spec can preset any File-storage
+ * setting Joplin reads at startup - e.g. the data-API server (`clipperServer.autoStart` + `api.token`),
+ * which is how a spec makes a change through JOPLIN's own API rather than through the plugin.
+ */
+export function createProfile(loadPlugin = true, extraSettings: Record<string, unknown> = {}): string {
   const profilesRoot = path.join(REPO_ROOT, 'e2e', '.profiles');
   fs.mkdirSync(profilesRoot, { recursive: true });
   const profileDir = fs.mkdtempSync(path.join(profilesRoot, 'profile-'));
@@ -69,6 +75,7 @@ export function createProfile(loadPlugin = true): string {
     'sync.target': 0,
   };
   if (loadPlugin) settings['plugins.devPluginPaths'] = PLUGIN_DIST;
+  Object.assign(settings, extraSettings);
   fs.writeFileSync(
     path.join(profileDir, 'settings.json'),
     JSON.stringify(settings, null, 2),
@@ -130,11 +137,11 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
  * sometimes starts, answers the debugging endpoint and then quits again over the profile lock.
  */
 export async function launchJoplin(
-  opts: { loadPlugin?: boolean; profileDir?: string } = {}
+  opts: { loadPlugin?: boolean; profileDir?: string; settings?: Record<string, unknown> } = {}
 ): Promise<JoplinInstance> {
   const { loadPlugin = true } = opts;
   assertE2EReady();
-  const profileDir = opts.profileDir ?? createProfile(loadPlugin);
+  const profileDir = opts.profileDir ?? createProfile(loadPlugin, opts.settings);
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt++) {

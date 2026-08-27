@@ -6,7 +6,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates, setTodoDuesPerId } from "../../core/joplin";
-import { clearOptimisticItem, clearTodoCompletionOverride, hasPendingItemOverlay, removeOptimisticItem, revalidateOptimisticInserts, setTodoCompletionOverride, upsertOptimisticItem, viewKeyFor } from "../../core/optimistic";
+import { clearOptimisticItem, clearTodoCompletionOverride, finalizeOverlay, hasPendingItemOverlay, removeOptimisticItem, revalidateOptimisticInserts, setTodoCompletionOverride, upsertOptimisticItem, viewKeyFor } from "../../core/optimistic";
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
 import { logRefresh, snapshot } from "../../core/instrument";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
@@ -684,13 +684,18 @@ function isLocallyEvaluableView(profile){
  * Whether a note/to-do record belongs in the active view, judged only by the locally-evaluable constraints: the notebook filter (including its sub-   *
  * notebooks), whether the profile lists notes, the no-due switch, and the completed-period switches. The caller must have confirmed the view is        *
  * locally evaluable (no search text) first.                                                                                                          *
+ *                                                                                                                                                    *
+ * filter is the notebook filter to judge against, and is a PARAMETER rather than a read of the module-level notebookFilter on purpose: every caller    *
+ * decides membership for a view it has already keyed an overlay entry with (viewKeyFor(profileID, filter)), and each of them awaits at least one host  *
+ * round-trip in between. Reading the live global here would let a notebook chip clicked during that await judge one view's entries by another view's    *
+ * filter - deleting an insert the keyed view legitimately shows. The snapshot the caller keyed with is therefore the only correct answer.              *
  ***************************************************************************************************************************************************/
-function noteMatchesView(record, profile, notebooks, excludedSet?){
+function noteMatchesView(record, profile, notebooks, excludedSet, filter){
     // An excluded notebook's notes must never surface, not even optimistically, so a create/change inside one
     // is treated as not belonging to the view (which suppresses it, matching the search-side filtering).
     if (excludedSet && excludedSet.has(record.parent_id)) return false
-    if (notebookFilter){
-        var allowed = notebookWithDescendants(notebooks, notebookFilter)
+    if (filter){
+        var allowed = notebookWithDescendants(notebooks, filter)
         if (!allowed.has(record.parent_id)) return false
     }
     if (record.is_todo){
@@ -718,6 +723,9 @@ async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
     // the lane runs its offsets out until the search finds the created item.
     try {
         var profileID = await getCurrentProfileID()
+        // One snapshot of the notebook filter for the whole judgement, so the view this is decided for is the
+        // view the entry is keyed with even if a chip is clicked during the awaits below.
+        var viewFilter = notebookFilter
         var profile = await getProfile(profileID)
         if (!profile || !isLocallyEvaluableView(profile)) return false
         var record = {
@@ -731,10 +739,10 @@ async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
             user_created_time: Date.now(),
         }
         var notebooks = await getNotebookMap()
-        if (!noteMatchesView(record, profile, notebooks, await getExcludedNotebookIdSet())) return false
+        if (!noteMatchesView(record, profile, notebooks, await getExcludedNotebookIdSet(), viewFilter)) return false
         // Scope the entry to the view it was evaluated against, so it shows in THIS profile/notebook view
         // only and never leaks into another profile's panel or overview note.
-        upsertOptimisticItem(record, viewKeyFor(profileID, notebookFilter))
+        upsertOptimisticItem(record, viewKeyFor(profileID, viewFilter))
         await refreshPanelData({ optimistic: true })
         return true
     } catch (error) {
@@ -757,7 +765,8 @@ export async function reconcileExternalNoteChange(noteID){
     // overlay entry this function writes is scoped to the CURRENT view, so an external change judged against
     // this profile never suppresses or inserts the note in another profile's panel or overview note.
     var profileID = await getCurrentProfileID()
-    var viewKey = viewKeyFor(profileID, notebookFilter)
+    var viewFilter = notebookFilter
+    var viewKey = viewKeyFor(profileID, viewFilter)
     try {
         var profile = await getProfile(profileID)
         if (!profile) return false
@@ -769,11 +778,22 @@ export async function reconcileExternalNoteChange(noteID){
         var note = await joplin.data.get(['notes', noteID], {
             fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'],
         })
-        if (!note){ removeOptimisticItem(noteID, undefined, viewKey); return true }
+        if (!note){ clearTodoCompletionOverride(noteID); removeOptimisticItem(noteID, undefined, viewKey); return true }
+        // The mirror of applyTypeFlipOptimistically's clear, for a conversion made ANYWHERE ELSE (the Joplin
+        // editor, another plugin's PUT): a note has no completion, and once the id is no longer a to-do no
+        // search can produce the row that would retire a pending tick of it - getTodos drops the row on the
+        // is_todo re-check before the overrides are applied. Left behind, the override outlives its 60s TTL
+        // holding the optimistic layer "pending" (so the reconcile burst runs every rung instead of stopping
+        // when the index agrees) and re-applies a stale tick if the item is converted back within the window.
+        if (!note.is_todo) clearTodoCompletionOverride(noteID)
         var trashed = note.deleted_time && note.deleted_time > 0
         var notebooks = await getNotebookMap()
-        if (trashed || !noteMatchesView(note, profile, notebooks, await getExcludedNotebookIdSet())){
+        if (trashed){
+            // Gone, not merely out of view: the record is deliberately NOT carried, since noteMatchesView cannot
+            // see a trash flag and re-judging the entry by it would put the trashed row back on screen.
             removeOptimisticItem(noteID, !!note.is_todo, viewKey)
+        } else if (!noteMatchesView(note, profile, notebooks, await getExcludedNotebookIdSet(), viewFilter)){
+            removeOptimisticItem(noteID, !!note.is_todo, viewKey, note)
         } else {
             upsertOptimisticItem(note, viewKey)
         }
@@ -783,10 +803,52 @@ export async function reconcileExternalNoteChange(noteID){
         return true
     } catch (error) {
         if (error && error.message === "Not Found"){
+            clearTodoCompletionOverride(noteID)   // the note is gone; a pending tick of it can never be confirmed
             removeOptimisticItem(noteID, undefined, viewKey)
             return true
         }
         console.warn("Cockpit: could not reconcile the changed note", error)
+        return false
+    }
+}
+
+/** applyTypeFlipOptimistically *********************************************************************************************************************
+ * Captures a type flip Cockpit itself just wrote (note <-> to-do) into the host-held overlay, so the item moves to its new section on the next paint   *
+ * instead of waiting for the search index: the panel's two sections are two separate searches, and until the index catches up the to-do search still   *
+ * lists a fresh note (and vice versa). The record is the POST-flip one, built from the GET the action already made, so this costs no round-trip. It     *
+ * asks the same questions of it as an external change does (reconcileExternalNoteChange: trashed first, then noteMatchesView, on a locally-evaluable    *
+ * view) and writes the same kinds of entry, so the onNoteChange Joplin fires for our own PUT re-derives an identical entry - the two are idempotent.    *
+ * The trash question is not academic here: the flipped row may be the stale row of a note trashed elsewhere (a trash arriving mid-sync is deliberately  *
+ * not reconciled per note), and no search can ever retire an insert for a trashed id, since search never returns one. Returns whether an entry was      *
+ * written, so the caller can pick the optimistic repaint and tell the reconcile lane its arm may stop early.                                            *
+ ***************************************************************************************************************************************************/
+async function applyTypeFlipOptimistically(record){
+    if (!record || !record.id) return false
+    // A note has no completion, so a tick this id may still be holding is now meaningless - and being global by
+    // id, nothing else would ever retire it (no to-do search can carry it any more), which would keep the
+    // optimistic layer "pending" and cost the reconcile burst its early stop for the whole TTL.
+    if (!record.is_todo) clearTodoCompletionOverride(record.id)
+    try {
+        var profileID = await getCurrentProfileID()
+        var viewFilter = notebookFilter
+        var viewKey = viewKeyFor(profileID, viewFilter)
+        var profile = await getProfile(profileID)
+        if (!profile || !isLocallyEvaluableView(profile)) return false
+        if (record.deleted_time && record.deleted_time > 0){
+            // The row was the stale row of an already-trashed note: suppress it (with no record to re-judge by,
+            // for the reason given in removeOptimisticItem) rather than pinning a trashed note in the panel.
+            removeOptimisticItem(record.id, !!record.is_todo, viewKey)
+        } else if (noteMatchesView(record, profile, await getNotebookMap(), await getExcludedNotebookIdSet(), viewFilter)){
+            upsertOptimisticItem(record, viewKey)
+        } else {
+            // The item's new type puts it outside this view (a note in a to-dos-only profile, an undated to-do
+            // in a hide-undated one), so it is suppressed - from BOTH lists, since the stale index still has it.
+            // The record rides along so re-enabling that very switch can take the suppression back again.
+            removeOptimisticItem(record.id, !!record.is_todo, viewKey, record)
+        }
+        return true
+    } catch (error) {
+        console.warn("Cockpit: could not optimistically apply the type change", error)
         return false
     }
 }
@@ -880,14 +942,22 @@ export async function togglePanelVisibility() {
     // hide-undated profile" regression. Re-running noteMatchesView here drops exactly those stale inserts; a
     // still-matching entry is kept so a profile that still shows the item goes on showing it promptly (no
     // over-fix). When the view can no longer be decided locally (the profile gained searchCriteria, or the user
-    // typed search text) no insert may be carried at all, so they are all dropped and the search rules. Gated on a
-    // pending overlay, so an ordinary render (nothing overlaid) pays only a size check.
+    // typed search text) no insert may be carried at all, so they are all dropped and the search rules. The same
+    // pass takes back a suppress the view now contradicts - one written because a flip pushed the item out of a
+    // switch the user has since turned back ON, which nothing else could ever retire. Gated on a pending overlay,
+    // so an ordinary render (nothing overlaid) pays only a size check.
+    var locallyEvaluable = isLocallyEvaluableView(profile)
+    // ONE snapshot of the notebook filter for this whole render: the key below, the predicate that judges the
+    // entries against it, the view state the two merges consume, and the finalize that closes the cycle all use
+    // it. Read live, they could disagree - the excluded-notebook read alone is a host round-trip a chip click can
+    // land inside - and an entry keyed for this view would be judged by the next view's filter and dropped.
+    var viewNotebookFilter = notebookFilter
     if (hasPendingItemOverlay()){
-        var revalidationKey = viewKeyFor(profileID, notebookFilter)
-        if (isLocallyEvaluableView(profile)){
+        var revalidationKey = viewKeyFor(profileID, viewNotebookFilter)
+        if (locallyEvaluable){
             var revalidationNotebooks = await getNotebookMap()
             var revalidationExcluded = await getExcludedNotebookIdSet()
-            revalidateOptimisticInserts(revalidationKey, record => noteMatchesView(record, profile, revalidationNotebooks, revalidationExcluded))
+            revalidateOptimisticInserts(revalidationKey, record => noteMatchesView(record, profile, revalidationNotebooks, revalidationExcluded, viewNotebookFilter))
         } else {
             revalidateOptimisticInserts(revalidationKey, () => false)
         }
@@ -895,7 +965,12 @@ export async function togglePanelVisibility() {
     // isMobile is carried into the view state so the row HTML generators (renderTodoRow / renderNotesSection)
     // can omit the desktop-only action tooltips on mobile, where hover does not exist and the row already has
     // its long-press flows. Every other platform branch in those generators keys off the same flag.
-    var panelViewState = { ...calendarViewState, notebookFilter: notebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile }
+    // keepMistypedRows: on a view whose membership only a search can decide, the overlay carries nothing, so a
+    // search row whose is_todo contradicts its list is all the panel has of that item - dropping it would blank
+    // the row from BOTH sections for the whole index lag (the user's own type flip would look like a delete).
+    // Such a view therefore keeps the row where the index still files it, exactly as before the re-check existed;
+    // the two lists can never both hold it, since the index answers type:todo and type:note from one stale value.
+    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     var notesHtml = ""
@@ -903,6 +978,13 @@ export async function togglePanelVisibility() {
         notesHtml = await renderNotesSection(profile, panelViewState)
         todosHtml = profile.notesPosition === "before" ? notesHtml + todosHtml : todosHtml + notesHtml
     }
+    // Both of the view's lists have now consulted the overlay, so a suppress can be judged against the pair of
+    // them and retired once neither returns the id (a single merge only ever sees half the answer). The profile's
+    // own showNotes is passed on: with no notes section there is no second merge, and nothing that list could
+    // render, so its verdict counts as absent rather than leaving the entry to the TTL. The key comes from the
+    // SNAPSHOT the two merges used, never the live notebookFilter: a chip clicked mid-render would otherwise
+    // finalize a different view than the one just merged, leaving this render's verdicts unconsumed.
+    finalizeOverlay(viewKeyFor(profileID, panelViewState.notebookFilter), !!profile.showNotes)
     // Results outside current filters (read-only peek). Trigger: the search box holds non-empty text AND the
     // fully-filtered view - the to-dos the formatter just rendered (getRenderedTodoCount, recorded by its own
     // fetchTodos) plus the notes section when the profile shows one - came out with zero rows. renderNotesSection
@@ -1475,12 +1557,19 @@ async function copyToClipboard(text){
  ***************************************************************************************************************************************************/
 async function runNoteMenuAction(action, noteID){
     if (!action || !noteID) return
+    // Whether the type flip below was captured optimistically, which decides the post-mutation refresh: see the trio.
+    var flipCaptured = false
     if (action == 'open'){
         await openTodo(noteID)
         return
     } else if (action == 'toggleType'){
-        var note = await joplin.data.get(['notes', noteID], { fields: ['is_todo'] })
-        await joplin.data.put(['notes', noteID], null, { is_todo: note.is_todo ? 0 : 1 })
+        // The same fields the external reconcile reads - deleted_time included, since the row may be the stale
+        // row of a note trashed elsewhere - so the post-flip record can be judged against the view without a
+        // second GET; this is the one round-trip the action always made, only wider.
+        var note = await joplin.data.get(['notes', noteID], { fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'] })
+        var flipped = note.is_todo ? 0 : 1
+        await joplin.data.put(['notes', noteID], null, { is_todo: flipped })
+        flipCaptured = await applyTypeFlipOptimistically({ ...note, id: noteID, is_todo: flipped })
     } else if (action == 'tags'){
         // Desktop opens its native tag-autocomplete dialog; mobile (no such command) falls back to a
         // comma-separated tag input applied through the data API.
@@ -1506,8 +1595,17 @@ async function runNoteMenuAction(action, noteID){
     } else {
         return
     }
-    await refreshInterfaces()
-    scheduleReconcile()
+    // A captured type flip repaints from the overlay at once (the index still has the item in its old section,
+    // so the full refresh would only repaint that stale placement) and arms the lane as optimistic, so the burst
+    // stops the moment the index agrees. Everything else - and a flip on a view only a search can decide - keeps
+    // the full refresh and a blind arm.
+    if (flipCaptured){
+        await refreshPanelData({ optimistic: true })
+        scheduleReconcile(true)
+    } else {
+        await refreshInterfaces()
+        scheduleReconcile()
+    }
     scheduleOverview()
 }
 
@@ -1526,11 +1624,18 @@ async function runNoteMenuAction(action, noteID){
  ***************************************************************************************************************************************************/
 async function runNoteMenuActionMulti(action, ids){
     if (!action || !Array.isArray(ids) || !ids.length) return
+    // Whether EVERY flipped id was captured optimistically; only then can the batch repaint from the overlay alone.
+    var flipCaptured = false
     if (action == 'toggleType'){
+        var flipsCaptured = 0
         for (var toggleID of ids){
-            var toggleNote = await joplin.data.get(['notes', toggleID], { fields: ['is_todo'] })
-            await joplin.data.put(['notes', toggleID], null, { is_todo: toggleNote.is_todo ? 0 : 1 })
+            var toggleNote = await joplin.data.get(['notes', toggleID], { fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'] })
+            var toggleFlipped = toggleNote.is_todo ? 0 : 1
+            await joplin.data.put(['notes', toggleID], null, { is_todo: toggleFlipped })
+            // Overlay only - the single paint happens after the loop, so a batch still repaints once, not N times.
+            if (await applyTypeFlipOptimistically({ ...toggleNote, id: toggleID, is_todo: toggleFlipped })) flipsCaptured++
         }
+        flipCaptured = flipsCaptured === ids.length
     } else if (action == 'tags'){
         // Desktop's setTags natively takes an id array (common-tags picker + per-note add/remove delta).
         await runAppCommand('setTags', ids)
@@ -1557,8 +1662,15 @@ async function runNoteMenuActionMulti(action, ids){
     } else {
         return
     }
-    await refreshInterfaces()
-    scheduleReconcile()
+    // One paint for the whole batch either way; a fully captured type flip takes the overlay repaint and the
+    // optimistic arm, for the reasons given in runNoteMenuAction.
+    if (flipCaptured){
+        await refreshPanelData({ optimistic: true })
+        scheduleReconcile(true)
+    } else {
+        await refreshInterfaces()
+        scheduleReconcile()
+    }
     scheduleOverview()
 }
 
