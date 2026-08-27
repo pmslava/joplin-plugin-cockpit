@@ -3343,6 +3343,44 @@ async function main() {
             'the row renders un-ticked, as Joplin has it - no stale override may be re-applied')
     })
 
+    // (11b) The same orphaned-tick hazard, reached by a TRASH rather than a conversion. Joplin's search never returns
+    // a trashed note - in either list - so once the note is in the trash no getTodos result can carry the row whose
+    // todo_completed would retire the override. Left behind it sits out its whole 60s TTL holding the optimistic layer
+    // "pending" (the reconcile burst then runs every rung instead of stopping when the index agrees) and re-applies the
+    // stale tick if the note is restored from the trash inside that window.
+    const overrideTrashId = '8'.repeat(32)
+    // As in (11): the fields are moved by hand between the steps, so each one models a real state of the same note.
+    const overrideTrashRow = { id: overrideTrashId, title: 'TickThenTrash', is_todo: 1, todo_completed: 0, todo_due: flipSoon, parent_id: flipFolder, user_updated_time: 1 }
+    const overrideTrashOptions = {
+        todos: () => [{ ...overrideTrashRow }],
+        searchNotes: [],
+        notes: { [overrideTrashId]: { id: overrideTrashId, title: 'TickThenTrash', parent_id: flipFolder, is_todo: 1, todo_completed: 0, todo_due: flipSoon, deleted_time: 0, user_updated_time: 1 } },
+    }
+    const overrideTrash = await flipRun(overrideTrashOptions)
+    await test('trash (external, ticked to-do): trashing a ticked to-do elsewhere drops the tick override instead of orphaning it', async () => {
+        await overrideTrash.panelMessageHandler(['todoChecked', overrideTrashId, true])     // optimistic tick, index lagging
+        const mark = overrideTrash.timeouts.length
+        overrideTrashOptions.notes[overrideTrashId].deleted_time = Date.now()               // trashed in the Joplin app
+        await overrideTrash.noteChangeHandler({ id: overrideTrashId })
+        assert.strictEqual(rowCount(overrideTrash, overrideTrashId, 'todo'), 0, 'the trashed to-do disappears at once')
+        // The index drops the trashed note from both lists, so the suppress retires at the first poll. If the
+        // completion override were still held, the layer would stay pending and the burst could not stop early.
+        overrideTrashOptions.todos = () => []
+        const rec = armedSince(overrideTrash, mark).filter(t => RECONCILE_OFFSETS.includes(t.ms))
+        await overrideTrash.fireTimeout(rec[0])
+        assert.strictEqual(overrideTrash.pendingTimeouts(3000).length, 0, 'nothing optimistic is left pending, so the burst stops early')
+        // ...and the user-visible half: restored from the trash still un-ticked, the panel must not re-apply the tick.
+        overrideTrashOptions.notes[overrideTrashId].deleted_time = 0
+        overrideTrashRow.user_updated_time = 3
+        overrideTrashOptions.todos = () => [{ ...overrideTrashRow }]
+        await overrideTrash.panelMessageHandler(['sortDirectionClicked'])                   // a real, search-based render
+        const html = overrideTrash.panelHtml['panel-panel']
+        const at = html.indexOf('data-todo-id="' + overrideTrashId + '"')
+        assert.ok(at >= 0, 'the to-do is back from the trash')
+        assert.ok(!html.slice(html.lastIndexOf('<div', at), at).includes('-completed'),
+            'the row renders un-ticked, as Joplin has it - no stale override may be re-applied')
+    })
+
     // (12) One render, one view. The revalidation pass keys its entries by the notebook filter and then awaits a
     // settings read before judging them; reading the filter live in the predicate would let a notebook chip
     // clicked inside that await judge THIS view's entries by the NEXT view's filter and delete a legitimate

@@ -779,14 +779,15 @@ export async function reconcileExternalNoteChange(noteID){
             fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'],
         })
         if (!note){ clearTodoCompletionOverride(noteID); removeOptimisticItem(noteID, undefined, viewKey); return true }
-        // The mirror of applyTypeFlipOptimistically's clear, for a conversion made ANYWHERE ELSE (the Joplin
-        // editor, another plugin's PUT): a note has no completion, and once the id is no longer a to-do no
-        // search can produce the row that would retire a pending tick of it - getTodos drops the row on the
-        // is_todo re-check before the overrides are applied. Left behind, the override outlives its 60s TTL
-        // holding the optimistic layer "pending" (so the reconcile burst runs every rung instead of stopping
-        // when the index agrees) and re-applies a stale tick if the item is converted back within the window.
-        if (!note.is_todo) clearTodoCompletionOverride(noteID)
         var trashed = note.deleted_time && note.deleted_time > 0
+        // The mirror of applyTypeFlipOptimistically's clear, for a change made ANYWHERE ELSE (the Joplin editor,
+        // another plugin's PUT): two states leave a pending tick with no row that could ever retire it - the id
+        // stopped being a to-do (a note has no completion, and getTodos drops the row on the is_todo re-check
+        // before the overrides are applied), and the note was TRASHED (search never returns a trashed note at
+        // all, in either list). Left behind, the override outlives its 60s TTL holding the optimistic layer
+        // "pending" (so the reconcile burst runs every rung instead of stopping when the index agrees) and
+        // re-applies a stale tick if the item is converted back - or restored from the trash - inside the window.
+        if (trashed || !note.is_todo) clearTodoCompletionOverride(noteID)
         var notebooks = await getNotebookMap()
         if (trashed){
             // Gone, not merely out of view: the record is deliberately NOT carried, since noteMatchesView cannot
