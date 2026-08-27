@@ -444,3 +444,53 @@ being an e2e that seeded a mixed selection with a plain press and inherited the 
 because a plain press on a row already inside a multi-selection deliberately PRESERVES the set. The rule
 being exercised was the rule that broke the fixture. Seed a selection with press + CLICK (the collapse half
 of that same rule), never with a press alone.
+
+## 2026-08-27 — v2.1.1: the type flip paints on the click, not on the index
+
+One user report carrying two symptoms: switching an item between note and to-do type reached the panel only
+after ~5 seconds, and for a while the item rendered TWICE — once in a to-do section, once under NOTES. Both
+fall out of the same architectural fact: the panel's two areas are two SEPARATE searches (`type:todo` /
+`type:note`) against Joplin's FTS index, and that index lags an `is_todo` write — `notes_normalized` is
+refreshed by `scheduleSyncTables` on a 10-second `setTimeout`, with no sync inside `search()` itself. The only
+correction was the reconcile ladder (1/3/7/15/30s); the index usually settles between the 3s and 7s rungs, so
+the corrected placement first painted at 7s. The double rendering was the optimistic overlay's data model: one
+`isTodo` boolean per entry can say "insert me here" but not "and remove me THERE", so while the index lagged,
+both queries served the id at once. Cockpit's own toggle was the worst producer — it wrote nothing optimistic
+and immediately repainted the stale placement with a blind reconcile arm.
+
+The fix, three independent parts. (1) The overlay is now authoritative about an id's TYPE: an entry inserts
+into its type's list AND splices the id out of the other; suppresses cover both lists and retire only via
+`finalizeOverlay`, which closes each render's per-list verdicts once both merges have run (a single merge only
+ever sees half the answer — retiring inside one was exactly the old self-destruct that left stale NOTES rows
+unremovable). (2) `toggleType` widens the GET it already made to the full reconcile field list, builds the
+post-flip record locally, and captures it through `applyTypeFlipOptimistically` — same questions as the
+external reconcile (trash first, then `noteMatchesView`), so the `onNoteChange` our own PUT fires re-derives
+an identical entry. Captured flips repaint from the overlay (`optimistic: true`) with an early-stoppable arm.
+(3) `getTodos`/`getNotes` drop rows whose own `is_todo` contradicts their list — the payload's fields are read
+from the LIVE notes table even when the match set is stale, which is why this works and why the any:1
+client-side narrowing always worked. Measured on the real app: 54–283ms to the new section, never both.
+
+Two review rounds earned their keep. Round one upheld seven findings, the sharpest three: flipping the stale
+row of a note already TRASHED elsewhere resurrected it for the overlay TTL (the GET lacked `deleted_time`;
+search never returns trashed notes, so nothing could retire the insert); the whole suite stayed green with the
+widened GET reverted to `['is_todo']` — the harness handed back full fixtures regardless of `query.fields`, so
+the load-bearing field list was pinned by nothing (harness now projects fields, like the real API); and on
+views only a search can decide (searchCriteria / typed text) the new filter made the flipped row VANISH from
+both sections — an explicit user action reading as a delete — hence `keepMistypedRows`: those views keep the
+row where the index still files it, exactly the pre-fix behavior, never blanked and never doubled. Round two
+caught a regression before it shipped (a flip-to-hidden suppress outliving the very switch the user re-enabled
+— view-miss suppresses now carry their record so revalidation can take them back; DROPPED, not promoted to
+inserts, or the trash mechanism above returns) and the finalize view-key race (one notebook-filter snapshot
+per render, threaded through key, predicate, merges, and finalize — `noteMatchesView` takes the filter as a
+parameter now, so no judgement can read the live global mid-await). A follow-up closed the sibling orphan the
+review flagged: trashing a TICKED to-do left its completion override pending for the full TTL, blocking the
+lane's early stop; the external-reconcile clear now covers `trashed || !is_todo`, and Cockpit's own delete
+paths were audited as covered (they write nothing optimistic; our own writes reach the same reconcile).
+
+Joplin facts settled empirically along the way: a data-API change to a note that is NOT selected/open fires NO
+`onNoteChange` to plugins at all (the e2e spec selects the note before the API flip); menu accelerators and
+the command palette are handled outside the renderer, so a CDP-driven Ctrl+Shift+P does nothing — the data API
+is the only GUI-independent path to "Joplin's own" mutations.
+
+Suite: 292 harness checks + 68 Playwright tests (67 run, 1 opt-in showcase skipped). Every fix in both rounds
+was mutation-verified — the fix line reverted, the build re-run, exactly its pin failing, the fix restored.
