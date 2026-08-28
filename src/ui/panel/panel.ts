@@ -112,6 +112,15 @@ var editorNoteID = ""
  * Handles workspace.onNoteSelectionChange: records which note the editor now holds and pushes it to the panel webview. An unchanged selection is     *
  * dropped rather than pushed - Joplin re-emits the selection whenever the focused window changes, and the push collapses the panel's multi-selection *
  * onto the open note, which must only happen when the editor genuinely moved to another note.                                                        *
+ *                                                                                                                                                    *
+ * The push is FIRE AND FORGET, so a rejected one has to be caught off what the call RETURNS - an ordinary promise, not the sandbox proxy, so         *
+ * reading .catch off it is safe; the proxy rule binds the joplin.* chain, and that stays one uninterrupted read-and-call. The try/catch below        *
+ * can only ever see a synchronous throw, so without that the rejection escapes as an unhandled rejection. The API types the call as void even        *
+ * though the proxy always answers with a promise, hence the any (see notifyPanel).                                                                   *
+ *                                                                                                                                                    *
+ * The rejection this site actually meets is benign and expected: the webview registers its message handler only once its script has run, so a        *
+ * selection change during panel startup is pushed into a view that cannot receive it yet - the host logs that itself, and the fresh webview          *
+ * asks for the id back (getEditorNote) anyway, so it is swallowed rather than logged a second time.                                                  *
  ***************************************************************************************************************************************************/
 export function trackEditorNoteSelection(noteIDs){
     var ids = Array.isArray(noteIDs) ? noteIDs : []
@@ -120,7 +129,8 @@ export function trackEditorNoteSelection(noteIDs){
     editorNoteID = id
     if (!panel) return
     try {
-        joplin.views.panels.postMessage(panel, ['editorNoteChanged', id])
+        var posted: any = joplin.views.panels.postMessage(panel, ['editorNoteChanged', id])
+        if (posted && posted.catch) posted.catch(function(){})
     } catch (error) {
         console.warn("Cockpit: could not tell the panel which note is open", error)
     }
