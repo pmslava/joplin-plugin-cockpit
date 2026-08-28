@@ -1537,18 +1537,47 @@ async function setNoteTagsFromCsv(noteID, csv){
     if (createdAny) invalidateTagsCache()
 }
 
+/** notifyPanel *************************************************************************************************************************************
+ * Surfaces a short message in the panel's own toast rather than a plugin dialog, for the reasons given in copyToClipboard. Fire and forget: the      *
+ * webview cannot answer, and nothing here depends on the notice being seen. Safe before the panel exists.                                            *
+ *                                                                                                                                                   *
+ * postMessage is asynchronous, so the try/catch below can only ever see a synchronous throw: a REJECTED push would escape it and surface as an       *
+ * unhandled rejection. Hence the .catch on what the call RETURNS - an ordinary promise, not the sandbox proxy, so reading .catch off it is safe;     *
+ * the proxy rule binds the joplin.* chain, and that stays one uninterrupted read-and-call. The API types the call as void even though the proxy      *
+ * always answers with a promise, so the result is taken as any and guarded rather than trusted.                                                      *
+ ***************************************************************************************************************************************************/
+function notifyPanel(text){
+    if (!panel) return
+    try {
+        var posted: any = joplin.views.panels.postMessage(panel, ['panelToast', String(text)])
+        if (posted && posted.catch) posted.catch(function(){})
+    } catch (error){}
+}
+
+/** markdownNoteLink ********************************************************************************************************************************
+ * Builds the Markdown link for a note, byte-identical to Joplin's own Note.markdownTag: the title's square brackets are backslash-escaped, or a      *
+ * title containing ] closes the label early and the link stops parsing. Parentheses need no escaping - they sit inside the label, and the URL is     *
+ * ":/" plus a 32-character hex id, so the app's escapeLinkUrl (which %-encodes parens and spaces) would be a no-op here.                             *
+ ***************************************************************************************************************************************************/
+function markdownNoteLink(title, noteID){
+    return `[${String(title || "").replace(/(\[|\])/g, '\\$1')}](:/${noteID})`
+}
+
 /** copyToClipboard *********************************************************************************************************************************
- * Writes text to the clipboard. joplin.clipboard is Electron-backed, and whether it is wired on the mobile runtime is unknown, so an absent or       *
- * failing clipboard degrades to the same "not available here" message the app commands use rather than throwing an unhandled rejection.             *
+ * Writes text to the clipboard. `joplin` is a sandbox PROXY, not an object: every member read is recorded on the pending call path and only the      *
+ * call itself unwinds one segment, so probing `typeof joplin.clipboard.writeText` leaves the path at clipboard.writeText and the real call then      *
+ * arrives at the host as clipboard.writeText.writeText, which it rejects. The API can never be inspected, only called and caught - which is also     *
+ * the only way to learn that a runtime has no clipboard at all (iOS refuses one by App Store rule). Hence one uninterrupted expression, no guard.    *
+ *                                                                                                                                                    *
+ * The failure notice is the panel's own toast on BOTH platforms, never a plugin dialog: on mobile a dialog renders BEHIND the panel overlay, and on   *
+ * desktop showMessageBox is showMessageBoxSync, a native modal that blocks the whole app until dismissed - a hostile price for a failed copy.        *
  ***************************************************************************************************************************************************/
 async function copyToClipboard(text){
     try {
-        var clipboard = (joplin as any).clipboard
-        if (!clipboard || typeof clipboard.writeText !== 'function') throw new Error('clipboard unavailable')
-        await clipboard.writeText(text)
+        await (joplin as any).clipboard.writeText(text)
     } catch (error) {
-        console.warn('Cockpit: could not write to the clipboard', error)
-        await joplin.views.dialogs.showMessageBox('Cockpit: the clipboard is not available here.')
+        console.warn("Cockpit: could not write to the clipboard", error)
+        notifyPanel("Cockpit: could not copy to the clipboard.")
     }
 }
 
@@ -1581,7 +1610,7 @@ async function runNoteMenuAction(action, noteID){
         await tryAppCommandWithFallback('duplicateNote', [noteID], () => duplicateNoteFallback(noteID))
     } else if (action == 'copyMarkdownLink'){
         var linkNote = await joplin.data.get(['notes', noteID], { fields: ['title'] })
-        await copyToClipboard(`[${linkNote.title}](:/${noteID})`)
+        await copyToClipboard(markdownNoteLink(linkNote.title, noteID))
         return
     } else if (action == 'copyNoteID'){
         await copyToClipboard(noteID)
@@ -1650,7 +1679,7 @@ async function runNoteMenuActionMulti(action, ids){
         var links = []
         for (var linkID of ids){
             var linkNote = await joplin.data.get(['notes', linkID], { fields: ['title'] })
-            links.push(`[${linkNote.title}](:/${linkID})`)
+            links.push(markdownNoteLink(linkNote.title, linkID))
         }
         await copyToClipboard(links.join("\n"))
         return

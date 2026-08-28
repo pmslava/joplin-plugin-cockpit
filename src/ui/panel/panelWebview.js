@@ -509,6 +509,13 @@ function startPanelObserver(){
                 if (!acceptsEditorNote()) return
                 editorNoteSeq++
                 applyEditorNoteSelection(message[1])
+            } else if (message[0] === 'panelToast'){
+                // The host has no toast of its own and must not raise a plugin dialog for a failed copy (see
+                // copyToClipboard in panel.ts), so it pushes the notice here instead. Nothing answers it. The copy
+                // path cannot outrun its own render - both copy branches return before the post-mutation refresh
+                // trio - but an UNRELATED background render can still reload the mobile webview out from under the
+                // notice and swallow it. A toast lost that way is the accepted price of never blocking the app.
+                showToast(String(message[1] || ""))
             }
         })
     } catch (error){}

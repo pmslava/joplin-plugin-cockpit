@@ -444,6 +444,58 @@ export async function weekPlannerDays(win: Page): Promise<string[]> {
 }
 
 /** ----------------------------------------------------------------------------------------------
+ * The system clipboard
+ * ------------------------------------------------------------------------------------------- */
+
+/**
+ * The clipboard is read and written through the MAIN renderer's own Electron binding: Joplin runs its main
+ * window with nodeIntegration on, so `require('electron').clipboard` is the very object the plugin host ends
+ * up writing to - no external tool, no second process.
+ *
+ * Never shell out to `xclip -selection clipboard -i` from a spec instead. That process stays alive to own the
+ * X selection, so a synchronous exec blocks the worker's event loop and Playwright's own timeout can never
+ * fire; the run hangs rather than fails. `timeout 5 xclip -o` is safe, but these helpers make it unnecessary.
+ *
+ * Every probe is bounded, because the failure this suite guards against is precisely a NATIVE MODAL on the
+ * main process (showMessageBoxSync): with one open, evaluate() never returns. A bounded probe turns that into
+ * a named failure in seconds instead of a worker that sits on the machine-wide e2e lock until the suite dies.
+ */
+const CLIPBOARD_PROBE_MS = 5000;
+
+function bounded<T>(work: Promise<T>, label: string, ms = CLIPBOARD_PROBE_MS): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const alarm = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}_TIMEOUT`)), ms);
+  });
+  return Promise.race([work, alarm]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/** Put `text` on the system clipboard (used to seed a sentinel a real copy must overwrite). */
+export async function writeClipboard(win: Page, text: string): Promise<void> {
+  await bounded(
+    win.evaluate((t) => (window as any).require('electron').clipboard.writeText(t), text),
+    'CLIPBOARD_PROBE'
+  );
+}
+
+/** Read the system clipboard's text. */
+export async function readClipboard(win: Page): Promise<string> {
+  return bounded(
+    win.evaluate(() => (window as any).require('electron').clipboard.readText()),
+    'CLIPBOARD_PROBE'
+  );
+}
+
+/** Whether the panel is currently showing its own toast (the copy path's only failure notice). */
+export async function panelToastVisible(win: Page): Promise<boolean> {
+  const panel = await agendaPanel(win);
+  return bounded(
+    panel.evaluate(() => !!document.querySelector('#cockpitToast.-show')),
+    'PANEL_TOAST_PROBE'
+  );
+}
+
+/** ----------------------------------------------------------------------------------------------
  * Commands and note content
  * ------------------------------------------------------------------------------------------- */
 

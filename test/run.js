@@ -5133,6 +5133,173 @@ async function main() {
         assert.strictEqual(desktop.gets[desktop.gets.length - 1].query.limit, 50, 'and ask for the raised page size')
     })
 
+    await test('clipboard copy (host): one uninterrupted call, no proxy probe, no blocking dialog', () => {
+        // `joplin` is a sandbox PROXY: handler.get RECORDS each member on the pending call path and only
+        // handler.apply pops one segment back off, so an uncalled read is permanent corruption. The old guard
+        // read clipboard, then read writeText for a typeof, then read writeText again to call it - the host got
+        // joplin.clipboard.writeText.writeText and threw. The guard could never have worked anyway: a Proxy over
+        // a function is always truthy and always typeof 'function'.
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const copyAt = panelSource.indexOf('async function copyToClipboard(')
+        assert.ok(copyAt > 0, 'copyToClipboard must exist')
+        const copyBody = panelSource.slice(copyAt, panelSource.indexOf('\n}', copyAt))
+        assert.ok(copyBody.includes('await (joplin as any).clipboard.writeText(text)'),
+            'the write must be ONE expression: every member read before the call is appended to the proxy path')
+        assert.ok(!/typeof/.test(copyBody),
+            'no typeof probe of a joplin member - inspecting the API is exactly what breaks the call')
+        assert.ok(!/showMessageBox/.test(copyBody),
+            'a failed copy must never raise a plugin dialog (desktop: a blocking native modal; mobile: it opens behind the panel)')
+        assert.ok(copyBody.includes('notifyPanel('), 'the failure notice goes to the panel toast instead')
+        const notifyAt = panelSource.indexOf('function notifyPanel(')
+        assert.ok(notifyAt > 0, 'notifyPanel must exist')
+        const notifyBody = panelSource.slice(notifyAt, panelSource.indexOf('\n}', notifyAt))
+        assert.ok(notifyBody.includes("postMessage(panel, ['panelToast'"), 'and it travels as the panelToast message')
+    })
+
+    await test('clipboard copy (host): the Markdown link is built once, with Joplin\'s own bracket escaping', () => {
+        // Byte-identical to Note.markdownTag: an unescaped ] in the title closes the label early and the rest of
+        // the link stops parsing. Parentheses are deliberately left alone - they sit inside the label, and the
+        // URL is ":/" plus a hex id, so Joplin's escapeLinkUrl would be a no-op on it.
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const linkAt = panelSource.indexOf('function markdownNoteLink(')
+        assert.ok(linkAt > 0, 'markdownNoteLink must exist')
+        const linkBody = panelSource.slice(linkAt, panelSource.indexOf('\n}', linkAt))
+        assert.ok(linkBody.includes(String.raw`.replace(/(\[|\])/g, '\\$1')`),
+            'both square brackets must be backslash-escaped, and nothing else')
+        assert.ok(linkBody.includes('](:/${noteID})'), 'the URL is ":/" plus the raw id')
+        // BOTH copy branches go through it - the single-note one and the batch one.
+        assert.ok(panelSource.includes('await copyToClipboard(markdownNoteLink(linkNote.title, noteID))'),
+            'runNoteMenuAction must build its link through markdownNoteLink')
+        assert.ok(panelSource.includes('links.push(markdownNoteLink(linkNote.title, linkID))'),
+            'and so must runNoteMenuActionMulti')
+        assert.ok(!/copyToClipboard\(`\[\$\{/.test(panelSource) && !/links\.push\(`\[\$\{/.test(panelSource),
+            'no branch may still assemble the link inline, unescaped')
+        // The batch join stays a newline: Joplin joins with a space, Cockpit deliberately does not.
+        assert.ok(panelSource.includes('await copyToClipboard(links.join("\\n"))'), 'the batch link list stays newline-joined')
+        assert.ok(panelSource.includes('await copyToClipboard(ids.join("\\n"))'), 'and so does the batch id list')
+    })
+
+    await test('clipboard copy (webview): the toast arrives on the single existing onMessage chain', () => {
+        // Joplin allows ONE onMessage handler per view, so the notice has to extend the handler that already
+        // carries editorNoteChanged rather than register a second one that would silently replace it.
+        assert.strictEqual((webviewSource.match(/webviewApi\.onMessage\(/g) || []).length, 1,
+            'the panel must register exactly one onMessage handler')
+        const chainAt = webviewSource.indexOf('webviewApi.onMessage(')
+        const chain = webviewSource.slice(chainAt, webviewSource.indexOf('\n    reconcile()', chainAt))
+        assert.ok(/else if \(message\[0\] === 'panelToast'\)/.test(chain),
+            'the toast branch must live inside that handler')
+        assert.ok(chain.includes('showToast(String(message[1] || ""))'), 'and show the pushed text in the panel toast')
+        assert.ok(/#cockpitToast \{/.test(panelCssSource) && !/\.cockpit-mobile #cockpitToast/.test(panelCssSource),
+            'the toast is not gated on the mobile class, so the desktop panel can show it too')
+    })
+
+    await test('sandbox proxy: no joplin.* member is ever read without being called in the same expression', () => {
+        // THE golden rule, enforced over the whole source tree. `joplin` is sandboxProxy(wrappedTarget): its
+        // handler.get pushes the property onto a SHARED __joplinNamespace array and only handler.apply pops one
+        // segment, so any member read that is not immediately called leaves that path permanently one segment
+        // too long and every later call on it is rejected by the host. The plugin API cannot be feature-detected
+        // by inspection - only called and caught. This is what broke the clipboard copy actions.
+        const roots = [path.join(__dirname, '..', 'src')]
+        const files = []
+        const walk = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })){
+                const full = path.join(dir, entry.name)
+                if (entry.isDirectory()) walk(full)
+                else if (/\.(ts|js)$/.test(entry.name)) files.push(full)
+            }
+        }
+        for (const root of roots) walk(root)
+        assert.ok(files.length > 10, 'the audit must actually have found the source tree')
+
+        // Comments, string/template literals and regex literals are blanked out first (newlines preserved so the
+        // reported line numbers stay true): several banner comments and a few strings mention "joplin." as prose.
+        // A ${...} interpolation is re-entered as code, so a call inside a template is still audited.
+        const blankNonCode = (source) => {
+            let out = ''
+            let i = 0
+            const n = source.length
+            let prev = ''
+            while (i < n){
+                const c = source[i], next = source[i + 1]
+                if (c === '/' && next === '/'){ while (i < n && source[i] !== '\n'){ out += ' '; i++ } continue }
+                if (c === '/' && next === '*'){
+                    while (i < n && !(source[i] === '*' && source[i + 1] === '/')){ out += source[i] === '\n' ? '\n' : ' '; i++ }
+                    out += '  '; i += 2; continue
+                }
+                if (c === '"' || c === "'"){
+                    out += ' '; i++
+                    while (i < n && source[i] !== c){
+                        if (source[i] === '\\'){ out += '  '; i += 2; continue }
+                        out += source[i] === '\n' ? '\n' : ' '; i++
+                    }
+                    out += ' '; i++; prev = 'x'; continue
+                }
+                if (c === '`'){
+                    out += ' '; i++
+                    while (i < n){
+                        if (source[i] === '\\'){ out += '  '; i += 2; continue }
+                        if (source[i] === '`'){ out += ' '; i++; break }
+                        if (source[i] === '$' && source[i + 1] === '{'){
+                            out += '  '; i += 2
+                            let depth = 1
+                            const start = i
+                            while (i < n && depth){
+                                if (source[i] === '{') depth++
+                                else if (source[i] === '}') depth--
+                                if (!depth) break
+                                i++
+                            }
+                            out += blankNonCode(source.slice(start, i))
+                            out += ' '; i++; continue
+                        }
+                        out += source[i] === '\n' ? '\n' : ' '; i++
+                    }
+                    prev = 'x'; continue
+                }
+                if (c === '/' && /[=(,:[!&|?{};+\-*%^~<>]/.test(prev || '(')){
+                    out += ' '; i++
+                    let inClass = false
+                    while (i < n){
+                        if (source[i] === '\\'){ out += '  '; i += 2; continue }
+                        if (source[i] === '[') inClass = true
+                        else if (source[i] === ']') inClass = false
+                        else if (source[i] === '/' && !inClass) break
+                        else if (source[i] === '\n') break
+                        out += ' '; i++
+                    }
+                    out += ' '; i++
+                    while (i < n && /[a-z]/.test(source[i])){ out += ' '; i++ }
+                    prev = 'x'; continue
+                }
+                out += c
+                if (!/\s/.test(c)) prev = c
+                i++
+            }
+            return out
+        }
+
+        const offenders = []
+        for (const file of files){
+            // `(joplin as any).x()` is the same one-get-then-call shape, so the cast is normalised away rather
+            // than left to hide the expression from the audit.
+            const code = blankNonCode(fs.readFileSync(file, 'utf8')).replace(/\(\s*joplin\s+as\s+any\s*\)/g, ' joplin        ')
+            // A bare `joplin` identifier (the import) is not a member read and never matches: the group is +.
+            // A COMPUTED member that is called at once - joplin.workspace[eventName](handler) in core/timer.ts -
+            // is one get plus one apply and is correct, so the rule is about the next character, not the syntax.
+            const re = /\bjoplin\s*(?:\.\s*[A-Za-z_$][\w$]*|\[[^\]]+\])+/g
+            let match
+            while ((match = re.exec(code)) !== null){
+                const after = (code.slice(match.index + match[0].length).match(/^\s*(\S)/) || [])[1]
+                if (after === '(') continue
+                const line = code.slice(0, match.index).split('\n').length
+                offenders.push(`${path.relative(path.join(__dirname, '..'), file)}:${line} -> ${match[0].replace(/\s+/g, '')}`)
+            }
+        }
+        assert.strictEqual(offenders.length, 0,
+            'a joplin.* member was read without being called in the same expression, which corrupts the sandbox ' +
+            'proxy path for every later call on it:\n        ' + offenders.join('\n        '))
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

@@ -1438,8 +1438,10 @@ table {
 
 .cockpit-mobile .calendar-title { min-height: 40px; }
 
-/* The sync-status toast (mobile long-press on the sync button). It is appended to <body>, so it is not
- * torn down by the panel's setHtml re-renders, and is fixed to the bottom of the viewport. */
+/* The panel's transient toast, on BOTH platforms: the sync status (mobile long-press on the sync button)
+ * and the copy-failure notice the host pushes as panelToast, since a failed copy must never raise a plugin
+ * dialog. It is appended to <body>, so it is not torn down by the panel's setHtml re-renders, and is fixed
+ * to the bottom of the viewport. */
 #cockpitToast {
     position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 200;
     padding: 8px 12px; border-radius: 6px;
