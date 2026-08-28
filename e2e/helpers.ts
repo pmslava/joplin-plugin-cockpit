@@ -514,3 +514,198 @@ export async function noteViewerText(win: Page): Promise<string> {
   }
   return '';
 }
+
+/** ----------------------------------------------------------------------------------------------
+ * Joplin's own application menu, settings screen and dialogs
+ *
+ * These exist for the (opt-in) README capture spec, which has to reach parts of JOPLIN that the rest
+ * of the suite never touches: the Options screen, where Cockpit's own settings live, and the window
+ * layout. They are additive - no existing helper changes behaviour.
+ * ------------------------------------------------------------------------------------------- */
+
+/**
+ * Activate an item of Joplin's application menu by label.
+ *
+ * Joplin's menu bar is a native Electron menu, not DOM, so it cannot be clicked with Playwright.
+ * Joplin's own integration tests reach it from the MAIN process (`Menu.getApplicationMenu()`); this
+ * harness attaches over CDP and has no main-process handle, so it goes through `@electron/remote`
+ * instead, which Joplin enables for its main window (ElectronAppWrapper calls
+ * `require('@electron/remote/main').enable(...)`). Same menu object, reached from the renderer.
+ *
+ * Returns false when the item could not be found or remote is unavailable, so a caller can fall back
+ * to a keyboard shortcut rather than fail.
+ */
+export async function activateJoplinMenuItem(win: Page, label: RegExp): Promise<boolean> {
+  const pattern = { source: label.source, flags: label.flags };
+  try {
+    return await win.evaluate((spec) => {
+      const remote = (window as any).require('@electron/remote');
+      if (!remote || !remote.Menu) return false;
+      const wanted = new RegExp(spec.source, spec.flags);
+      const walk = (items: any[]): boolean => {
+        for (const item of items) {
+          if (item.visible !== false && wanted.test(String(item.label || ''))) {
+            item.click();
+            return true;
+          }
+          if (item.submenu && walk(item.submenu.items)) return true;
+        }
+        return false;
+      };
+      const menu = remote.Menu.getApplicationMenu();
+      return !!menu && walk(menu.items);
+    }, pattern);
+  } catch {
+    return false;
+  }
+}
+
+/** Resize the Joplin window itself, so a capture has a known frame. */
+export async function setJoplinWindowSize(win: Page, width: number, height: number): Promise<void> {
+  await win
+    .evaluate(
+      (size) => {
+        const remote = (window as any).require('@electron/remote');
+        remote.getCurrentWindow().setBounds({ x: 0, y: 0, width: size.width, height: size.height });
+      },
+      { width, height }
+    )
+    .catch(() => undefined);
+  await win.waitForTimeout(SETTLE);
+}
+
+/** Whether Joplin's own settings screen is currently on screen. */
+async function configScreenOpen(win: Page): Promise<boolean> {
+  return win
+    .locator('.config-screen')
+    .isVisible()
+    .catch(() => false);
+}
+
+/**
+ * Set one of Cockpit's own settings through Joplin's Options screen.
+ *
+ * Cockpit registers its settings without `storage`, so they live in Joplin's database rather than in
+ * the profile's settings.json - which means they cannot be preset the way `launchJoplin({ settings })`
+ * presets Joplin's own File-storage settings. The Options screen is the only route a user has, so it
+ * is the route the capture takes.
+ *
+ * `label` is the setting's label exactly as registered (e.g. "Cockpit panel theme"); Joplin renders it
+ * as a `<label for>` tied to the control. `value` is the enum KEY (e.g. "nord"), with the visible
+ * option text accepted as a fallback.
+ */
+export async function setCockpitSetting(win: Page, label: string, value: string): Promise<void> {
+  const opened = await activateJoplinMenuItem(win, /^(Options|Preferences\.\.\.)$/);
+  if (!opened) throw new Error('Could not open Joplin\'s Options screen from the application menu');
+  const screen = win.locator('.config-screen');
+  await screen.waitFor({ state: 'visible', timeout: 60_000 });
+  await screen.getByRole('tab', { name: 'Cockpit' }).first().click();
+  const control = win.getByLabel(label, { exact: true }).first();
+  await control.waitFor({ state: 'visible', timeout: 30_000 });
+  try {
+    await control.selectOption(value);
+  } catch {
+    await control.selectOption({ label: value });
+  }
+  await win.waitForTimeout(500);
+  // Joplin disables OK/Apply while there is nothing to save, so asking for the value a setting already
+  // has has to leave by the Back button instead - clicking a disabled OK just waits until the test dies.
+  const ok = screen.locator('.button-bar button', { hasText: 'OK' }).first();
+  if (await ok.isEnabled()) await ok.click();
+  else await screen.locator('.button-bar button', { hasText: 'Back' }).first().click();
+  await expect.poll(async () => configScreenOpen(win), { timeout: 30_000 }).toBe(false);
+  await win.waitForTimeout(SETTLE);
+}
+
+/** One press of the "Move left" arrow on the named pane in "Change application layout". */
+async function pressMoveLeft(win: Page, paneLabel: string): Promise<boolean> {
+  const opened = await activateJoplinMenuItem(win, /Change application layout/);
+  if (!opened) return false;
+  const dialog = win.locator('.change-app-layout-dialog').first();
+  await dialog.waitFor({ state: 'visible', timeout: 30_000 });
+  // Each pane gets an arrow pad (role=group) whose only text is the pane's label; the arrows themselves
+  // are icon-only buttons that carry their name on the icon.
+  const pad = dialog.locator('[role="group"]').filter({ hasText: paneLabel }).first();
+  let moveLeft = pad.locator('button:has(.fa-arrow-left)').first();
+  if (!(await moveLeft.count())) moveLeft = pad.getByRole('button', { name: 'Move left' }).first();
+  const enabled = await moveLeft.isEnabled().catch(() => false);
+  if (enabled) await moveLeft.click();
+  await win.waitForTimeout(1200);
+  await win.keyboard.press('Escape');
+  await expect.poll(async () => dialog.isVisible().catch(() => false), { timeout: 15_000 }).toBe(false);
+  await win.waitForTimeout(SETTLE);
+  return enabled;
+}
+
+/**
+ * Put the Cockpit panel against the left edge of the window, full height.
+ *
+ * Joplin docks a plugin panel to the RIGHT of the editor, so with the notebook sidebar and the note
+ * list hidden the panel starts out on the right half. Reordering goes through "Change application
+ * layout", and one press of its Move-left arrow does NOT simply swap two panes: Joplin's layout is a
+ * root ROW of columns, and moving an item left inside the root row wraps it and its new neighbour in a
+ * new COLUMN - which stacks the panel UNDER the editor. A second press then moves it out of that
+ * column and into the root row, to the left of the editor, which is the arrangement wanted. Rather
+ * than hard-code "press twice", this presses until the panel really is at the left edge and full
+ * height, so it is right whatever layout the profile started from.
+ */
+export async function dockCockpitPanelLeft(win: Page, panelSelector: string, paneLabel = 'Cockpit'): Promise<boolean> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const box = await win.locator(panelSelector).boundingBox().catch(() => null);
+    const viewport = await win.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+    if (box && box.x < 8 && box.height > viewport.height * 0.8 && box.width < viewport.width * 0.9) return true;
+    if (!(await pressMoveLeft(win, paneLabel))) return false;
+  }
+  return false;
+}
+
+/**
+ * Screenshot a plugin dialog together with the OK / Cancel footer.
+ *
+ * Joplin renders a plugin dialog as its own webview iframe with the button bar OUTSIDE it, both
+ * inside one `.user-webview-dialog` element, so an iframe screenshot silently loses the footer. The
+ * clip is padded so a little of the dimmed application shows behind the dialog.
+ */
+export async function screenshotDialog(
+  win: Page,
+  filePath: string,
+  opts: { pad?: number; frameMarker?: string; fromLeftEdge?: boolean } = {}
+): Promise<void> {
+  const { pad = 36, frameMarker = '#alarmForm', fromLeftEdge = false } = opts;
+  const viewport = await win.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+
+  // The `.user-webview-dialog` element is a native <dialog> that fills the viewport and centres the
+  // card inside it, so its own box is useless as a clip. The card is the union of the plugin's webview
+  // iframe and Joplin's button row, which is rendered as the iframe's sibling.
+  const boxes: Array<{ x: number; y: number; width: number; height: number }> = [];
+  for (const frame of win.frames()) {
+    if (await frame.locator(frameMarker).count().catch(() => 0)) {
+      const frameBox = await (await frame.frameElement()).boundingBox();
+      if (frameBox) boxes.push(frameBox);
+    }
+  }
+  for (const label of ['OK', 'Cancel']) {
+    const buttonBox = await win
+      .locator(`.user-webview-dialog button:has-text("${label}")`)
+      .last()
+      .boundingBox()
+      .catch(() => null);
+    if (buttonBox) boxes.push(buttonBox);
+  }
+  if (!boxes.length) throw new Error('No dialog found to screenshot');
+
+  const left = Math.min(...boxes.map((b) => b.x));
+  const top = Math.min(...boxes.map((b) => b.y));
+  const right = Math.max(...boxes.map((b) => b.x + b.width));
+  const bottom = Math.max(...boxes.map((b) => b.y + b.height));
+
+  const x = fromLeftEdge ? 0 : Math.max(0, Math.floor(left - pad));
+  const y = Math.max(0, Math.floor(top - pad));
+  const clip = {
+    x,
+    y,
+    width: Math.min(viewport.width - x, Math.ceil(right + pad) - x),
+    height: Math.min(viewport.height - y, Math.ceil(bottom + pad) - y),
+  };
+  await win.screenshot({ path: filePath, clip });
+}
