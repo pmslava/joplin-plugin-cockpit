@@ -494,3 +494,48 @@ is the only GUI-independent path to "Joplin's own" mutations.
 
 Suite: 292 harness checks + 68 Playwright tests (67 run, 1 opt-in showcase skipped). Every fix in both rounds
 was mutation-verified — the fix line reverted, the build re-run, exactly its pin failing, the fix restored.
+
+## 2026-08-28 — v2.1.2: "Copy Markdown link" and "Copy note ID" copy again
+
+Both clipboard entries in the panel's row context menu copied nothing and raised a plugin dialog,
+"Cockpit: the clipboard is not available here." — single row and multi-selection alike, on a live desktop
+Joplin 3.7.10. It looked like a 3.7 regression in `joplin.clipboard`. It was Cockpit's own defensive guard,
+it was never version-specific, and `joplin.clipboard` is neither absent nor broken.
+
+**The root cause is that `joplin` is not an object.** `plugin_index.js` ends with
+`globalObject.joplin = sandboxProxy(wrappedTarget)`, and `sandboxProxy`'s `handler.get` records the call path
+by MUTATING a shared array on the target it creates: the first member read seeds `__joplinNamespace = [prop]`,
+every later read `push`es, and ONLY `handler.apply` pops. A member that is read but never called therefore
+leaks a permanent segment onto that chain. The old guard read `joplin.clipboard` (path `clipboard`), then read
+`clipboard.writeText` for a `typeof` (path `clipboard.writeText`, never called, never popped), then read it
+again to call it — so the host received `joplin.clipboard.writeText.writeText`, `executeSandboxCall` walked it
+into `undefined`, and threw `Property or method "writeText" does not exist in ...`. The guard could never have
+worked in the first place: a Proxy over a function is always truthy and always `typeof 'function'`, so it can
+neither detect an absent API nor pass information — it can only corrupt the path it was inspecting. The damage
+is scoped to the target that one `joplin.clipboard` read created, which is exactly why only these two menu
+items broke while the rest of the plugin was untouched. Same class as laurent22/joplin#4569
+(`joplin.views.dialogs.open.setHtml`); no upstream clipboard issue exists, and
+`sandboxProxy.js`/`plugin_index.js` are byte-identical between the 3.6.14 e2e fixture and the live 3.7.10 asar.
+
+The fix, three parts. (1) `copyToClipboard` is now **one uninterrupted expression**,
+`await (joplin as any).clipboard.writeText(text)` inside the try — a plugin cannot inspect the API, only call
+it and catch, which is also the only way to learn that a runtime has no clipboard at all (iOS refuses one by
+App Store rule). (2) The failure notice is the panel's **own toast** on both platforms, never a plugin dialog:
+on desktop `showMessageBox` is `showMessageBoxSync`, a native modal that blocks the whole app until dismissed
+— a hostile price for a failed copy — and on mobile a dialog opens behind the panel overlay. It travels as a
+`panelToast` message on the single existing `onMessage` chain (Joplin allows one handler per view), and every
+copy branch returns before the post-mutation refresh trio, so no `setHtml` can be in flight when it lands.
+(3) The link text is built once by `markdownNoteLink`, byte-identical to Joplin's `Note.markdownTag`: square
+brackets in the title are backslash-escaped, or a `]` closes the label early and the link stops parsing.
+Parentheses are deliberately left alone — they sit inside the label, and the URL is `:/` plus a 32-character
+hex id, so the app's `escapeLinkUrl` would be a no-op. Both branches use it; the batch join stays a newline,
+where Joplin joins with a space.
+
+The harness gained a **structural pin against the whole class of bug**: no `joplin.*` member may be read
+without being called in the same expression. That is the rule the old guard broke, and grepping for `typeof`
+on a proxy member catches the next one before a device does.
+
+Suite: 296 harness checks + 73 Playwright tests (five new in `e2e/clipboard-copy.spec.ts`, reading the real
+system clipboard through the main renderer's own `require('electron').clipboard` — never `xclip -i`, which
+stays alive to own the X selection and would hang the worker; every probe is bounded, because the failure
+being guarded against is precisely a native modal, and with one open `evaluate()` never returns).

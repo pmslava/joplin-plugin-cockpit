@@ -369,9 +369,10 @@ success vs failure looks like. The build to install is
      - Failure: "not available here", tags not applied, or a duplicate tag created for an existing
        name (case mismatch).
    - **Copy Markdown link / Copy note ID**: run each, paste into the note body.
-     - Success: the link / id pastes.
-     - Failure: the "clipboard is not available here" message → clipboard is unimplemented on this
-       runtime (expected-possible; not a regression).
+     - Success: the link / id pastes, and no dialog appears at all.
+     - Failure: the panel's own toast at the bottom reads "Cockpit: could not copy to the clipboard."
+       → clipboard is unimplemented on this runtime (expected-possible; not a regression). A message
+       box instead of that toast IS a regression — these actions must never raise a dialog.
 
 6. **Set-alarm / responsive alarm dialog.** Long-press a to-do's checkbox ring (or use "Move to
    date…"). The alarm dialog opens.
