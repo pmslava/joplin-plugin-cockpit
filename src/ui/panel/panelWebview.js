@@ -1070,7 +1070,9 @@ document.addEventListener('pointermove', onPanelSelectionDragProbe, true)
  ***************************************************************************************************************************************************/
 // Whether a to-do drag STARTED IN THIS PANEL is in flight. A foreign drag - text or a file from another window -
 // never raises it, which is what keeps the edge auto-scroll below from moving the list under someone else's drag.
-// Raised at the end of onTodoDragStart (once the payload is known to be non-empty) and dropped by endPanelDrag.
+// Raised at the end of onTodoDragStart (once the payload is known to be non-empty) and dropped by endPanelDrag,
+// which is to say by the drag's own two ends - a drop and a dragend. Leaving the document is deliberately NOT one
+// of them: see onPanelDragLeave.
 var panelDragActive = false
 // The same ownership, carried IN THE DRAG ITSELF as a custom data type. The flag alone is sticky state: its only
 // clears are a drop and a dragend, and a drag whose source row is replaced by a mid-drag re-render (the panel
@@ -1442,34 +1444,56 @@ function paintDropTargetHighlight(target){
     if (target) target.classList.add('-drop-over')
 }
 
-function endPanelDrag(){
-    panelDragActive = false
+// Everything a drag leaves running or lit, taken back down: the scroll loop and both transient paints. Kept apart
+// from the ownership flag on purpose - a drag that has merely left the document needs exactly this and NOT that
+// (see onPanelDragLeave). The paints are swept rather than left to their own dragleave handlers because a gesture
+// can end owing no dragleave at all: a target the list scrolled under a still pointer would otherwise keep its
+// highlight until the next re-render.
+function clearPanelDragEffects(){
     edgeAutoscrollStop()
-    // Both transient paints go too. A gesture can end owing no dragleave at all - a target the list scrolled under a
-    // still pointer would otherwise keep its highlight until the next re-render.
     paintDropTargetHighlight(null)
     clearBetweenIndicator()
 }
 
-// A drag that leaves the panel's document altogether ends the gesture here and now. Without this the loop coasts for
-// the whole AUTOSCROLL_IDLE_MS watchdog - and the overshoot rule makes that the WORST case rather than the mildest
-// one: a pointer carried out through the top or bottom edge is outside the container vertically, which pins the
-// speed at AUTOSCROLL_SPEED_MAX, so the list runs on for ~800ms x 60fps x 16px, most of a thousand pixels, after the
-// drag has visibly left. Both conditions are required:
+// The drag's own two ends, a drop and a dragend: the effects go, and so does ownership.
+function endPanelDrag(){
+    panelDragActive = false
+    clearPanelDragEffects()
+}
+
+// A drag that leaves the panel's document altogether takes its effects down here and now. Without this the loop
+// coasts for the whole AUTOSCROLL_IDLE_MS watchdog - and the overshoot rule makes that the WORST case rather than
+// the mildest one: a pointer carried out through the top or bottom edge is outside the container vertically, which
+// pins the speed at AUTOSCROLL_SPEED_MAX, so the list runs on for ~800ms x 60fps x 16px, most of a thousand pixels,
+// after the drag has visibly left.
+//
+// What it must NOT do is end the OWNERSHIP, and that is the whole reason clearPanelDragEffects is a function of its
+// own. Leaving is not an END: the HTML5 drag OPERATION survives the pointer leaving the iframe, and the same drag
+// brought back over the list delivers its dragovers again - it has to be able to draw an insertion line, scroll and
+// drop exactly as it could before it went. Dropping the flag here would make the departure a one-way door, and a
+// half-silent one: onBetweenDragOver bails on the ownership gate before its own preventDefault, so no insertion
+// line would be drawn and the browser would fire no drop at all, while heading and calendar-day drops - whose
+// handler is not gated - carried on working. The flag stays with its own two ends, a drop and a dragend.
+//
+// Both conditions are required:
 //   - relatedTarget null: the drag moved to no element of THIS document. On its own that is NOT "left the document".
 //     A dragleave also fires when the element under a pointer changes, which is exactly what the auto-scroll does to
 //     a pointer HOLDING STILL - it moves the rows, not the pointer - and Blink does not reliably name the element
 //     the drag moved to. Acting on relatedTarget alone would kill the loop the moment its own scrolling worked.
 //   - the pointer outside the document's own box: which is what leaving through an edge actually looks like, and
-//     what a still pointer inside the list can never be.
-// Missing a real departure costs nothing worse than today's behaviour (the watchdog still ends it); ending a live
-// gesture by mistake would cost the feature, so the test is the strict one.
+//     what a still pointer inside the list can never be. The box test is strict on the near edges (a pointer at
+//     exactly clientX or clientY 0 counts as departed), which is the one assumption left in it: an in-document
+//     dragleave is taken never to arrive with a zeroed coordinate. If that is ever wrong it costs one pixel at the
+//     very top-left corner, and only until the drag's next dragover restarts the loop.
+// Missing a real departure costs nothing worse than the old behaviour (the watchdog still ends it); stopping a live
+// gesture's scrolling by mistake would cost the feature for as long as the pointer then holds still, so the test is
+// the strict one.
 function onPanelDragLeave(event){
     if (IS_MOBILE || !isPanelDragEvent(event)) return
     if (event.relatedTarget !== null) return
     var x = event.clientX, y = event.clientY
     if (x > 0 && y > 0 && x < window.innerWidth && y < window.innerHeight) return
-    endPanelDrag()
+    clearPanelDragEffects()
 }
 
 document.addEventListener('dragover', onDragAutoscroll, false)

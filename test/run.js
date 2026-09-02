@@ -2857,25 +2857,35 @@ async function main() {
         // ...and so does the drag LEAVING the document, which neither of those two covers: a pointer carried out
         // through the top or bottom edge is outside the container vertically, where the overshoot rule pins the speed
         // at maximum, so without this the list runs on for the whole watchdog - the better part of a thousand pixels.
-        assert.ok(webviewSource.includes("document.addEventListener('dragleave', onPanelDragLeave"), 'a drag leaving the document must end the panel drag too')
+        assert.ok(webviewSource.includes("document.addEventListener('dragleave', onPanelDragLeave"), 'a drag leaving the document must stop the scrolling too')
         const leaveBody = handlerBody('onPanelDragLeave')
-        assert.ok(leaveBody.includes('endPanelDrag()'), 'the dragleave handler must end the panel drag')
+        assert.ok(leaveBody.includes('clearPanelDragEffects()'), 'the dragleave handler must take the scroll loop and both paints down')
+        // ...and it must NOT drop the ownership flag with them. Leaving is not an END: the drag OPERATION survives
+        // the pointer leaving the iframe, and the same drag brought back over the list has to be able to draw its
+        // insertion line, scroll and drop exactly as before. Ending ownership here would make the departure a
+        // one-way door - onBetweenDragOver bails on that gate before its own preventDefault, so the browser would
+        // fire no drop at all for the rest of the drag, while the ungated heading drops carried on working.
+        assert.ok(!leaveBody.includes('endPanelDrag(') && !/panelDragActive\s*=/.test(leaveBody),
+            'the dragleave handler must not end the drag itself: a drag that leaves and comes back must still be able to drop')
         // Both halves of "left the document", and the second is the load-bearing one: a dragleave ALSO fires when the
         // element under a HOLDING-STILL pointer changes because the auto-scroll moved the rows under it, and Blink
-        // does not reliably name the element the drag moved to. relatedTarget alone would end the gesture the moment
+        // does not reliably name the element the drag moved to. relatedTarget alone would stop the loop the moment
         // the scrolling it exists for started working.
         assert.ok(leaveBody.includes('if (event.relatedTarget !== null) return'), 'the dragleave handler must ignore a move to another element of this document')
         assert.ok(/clientX < window\.innerWidth && .*clientY < window\.innerHeight|x < window\.innerWidth && y < window\.innerHeight/.test(leaveBody),
             'the dragleave handler must also require the pointer to be outside the document box, so a still pointer the list scrolls under is never mistaken for a departure')
-        // Ending the drag does all four things. Pinned as membership rather than as one regex over the statement
-        // ORDER: the order of these four is not a property anything depends on, and pinning it would fail a harmless
-        // reshuffle. A target the list scrolled out from under a STILL pointer owes no dragleave, so without the two
-        // paint sweeps its highlight would survive the whole gesture.
+        // Ending the drag drops ownership AND everything the drag left running or lit; the effects sweep is its own
+        // function because the departure above needs exactly that half. Pinned as membership rather than as one
+        // regex over the statement ORDER: the order is not a property anything depends on, and pinning it would fail
+        // a harmless reshuffle. A target the list scrolled out from under a STILL pointer owes no dragleave, so
+        // without the two paint sweeps its highlight would survive the whole gesture.
         const endBody = handlerBody('endPanelDrag')
         assert.ok(endBody.includes('panelDragActive = false'), 'ending the drag must drop the ownership flag')
-        assert.ok(endBody.includes('edgeAutoscrollStop()'), 'ending the drag must stop the scroll loop')
-        assert.ok(endBody.includes('paintDropTargetHighlight(null)'), 'ending the drag must clear the whole-row drop highlight')
-        assert.ok(endBody.includes('clearBetweenIndicator()'), 'ending the drag must clear the between-rows insertion line')
+        assert.ok(endBody.includes('clearPanelDragEffects()'), 'ending the drag must take its on-screen effects down too')
+        const effects = handlerBody('clearPanelDragEffects')
+        assert.ok(effects.includes('edgeAutoscrollStop()'), 'clearing the drag effects must stop the scroll loop')
+        assert.ok(effects.includes('paintDropTargetHighlight(null)'), 'clearing the drag effects must clear the whole-row drop highlight')
+        assert.ok(effects.includes('clearBetweenIndicator()'), 'clearing the drag effects must clear the between-rows insertion line')
     })
     await test('webview drag auto-scroll: the watchdog is a safety net, well above any drag event cadence', () => {
         // It must NOT be the thing keeping the loop alive. A pointer holding still in the band is the gesture this
