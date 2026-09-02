@@ -2669,7 +2669,6 @@ async function main() {
             { lo: dueAt(2022, 1, 8, 14, 0), hi: dueAt(2022, 1, 8, 23, 59) }, 'dateless bottom edge unchanged')
     })
 
-
     // ---- HOST GLUE: drive the COMPILED bundle's message paths (the alarm lesson: unit math + real wiring both) ----
     const nb = 'nb'.repeat(16)
     const dup = (a, b) => (a + b).repeat(16)   // a distinct 32-char id from a 2-char seed
@@ -5535,7 +5534,8 @@ async function main() {
     })
 
     // ------------------------------------------------ last day of a period stays in its own horizon (issue #3)
-    // getEndOfThisMonth/getEndOfThisYear used to return their last day at MIDNIGHT, so a to-do due later on that
+    // getEndOfThisMonth/getEndOfThisYear (BaseFormat helpers, removed in 2.2.0 once the pure module replaced them)
+    // used to return their last day at MIDNIGHT, so a to-do due later on that
     // day fell past the boundary: the last day of the month landed in "This Year", and December 31st in "Future"
     // (what Marxsal reported in issue #3). Both periods now end at 23:59:59.999. The fixtures below are built
     // from the REAL clock with local Date constructors - the harness has no fake clock - so every expected
@@ -5545,8 +5545,58 @@ async function main() {
     // same goes for the December 31st check in the closing days of December. They are never wrong, only blind on
     // those days - the mutation verification behind them was run mid-month, where both do discriminate.
     // Since v2.2.0 a period whose slice would be empty is replaced by the NEXT one, so every set below also has to
-    // admit the Next X name wherever the calendar can produce it. The sets are not guessed: they are exactly the
-    // names the pure sweep above reaches for these four fixtures over 2024-2032, both week starts.
+    // admit the Next X name wherever the calendar can produce it. The sets are not guessed and not an offline
+    // computation either: the pure check right below sweeps these four fixtures over 2024-2032 at three times of day
+    // and both week starts, and asserts that every name reachable there is in the set the rendered check uses - the
+    // same constants, so widening the calendar the suite can run on cannot silently outrun them.
+    const horizonFixtureSets = {
+        // The fixture dues, as functions of the moment the suite runs at - exactly how the four to-dos below are built.
+        lastDayOfThisMonth: {
+            due: now => new Date(now.getFullYear(), now.getMonth() + 1, 0, 22, 0, 0, 0),
+            names: ['Today', 'Tomorrow', 'This Week', 'Next Week', 'This Month'],
+        },
+        decemberThirtyFirst: {
+            due: now => new Date(now.getFullYear(), 11, 31, 22, 0, 0, 0),
+            names: ['Today', 'Tomorrow', 'This Week', 'Next Week', 'This Month', 'Next Month', 'This Year'],
+        },
+        firstDayOfNextMonth: {
+            due: now => new Date(now.getFullYear(), now.getMonth() + 1, 1, 12, 0, 0, 0),
+            names: ['Tomorrow', 'This Week', 'Next Week', 'Next Month', 'This Year', 'Next Year'],
+        },
+        januaryFirstNextYear: {
+            due: now => new Date(now.getFullYear() + 1, 0, 1, 12, 0, 0, 0),
+            names: ['Tomorrow', 'This Week', 'Next Week', 'Next Month', 'Next Year', 'Future'],
+        },
+    }
+
+    await test('horizon fixtures: over 2024-2032, both week starts, each of the four fixtures only ever reaches the names its rendered check allows', () => {
+        // The rendered checks below run on the REAL clock, so their allowed sets have to hold on every day the suite
+        // could run. This sweep is where that claim is made good: the same four dues, computed the same way, bucketed
+        // against a plan for every day of nine years at midnight, noon and the last millisecond, for both week starts.
+        // Anything a set does not admit fails HERE, on a named day, instead of flaking once a year on someone's laptop.
+        const reached = {}
+        for (const key of Object.keys(horizonFixtureSets)) reached[key] = new Set()
+        for (let day = new Date(2024, 0, 1); day.getFullYear() < 2033; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
+            for (const clock of [[0, 0, 0, 0], [12, 0, 0, 0], [23, 59, 59, 999]]) {
+                for (const weekStartsOn of [0, 1]) {
+                    const now = new Date(day.getFullYear(), day.getMonth(), day.getDate(), clock[0], clock[1], clock[2], clock[3])
+                    const plan = Horizons.horizonPlan(now.getTime(), weekStartsOn)
+                    for (const [key, fixture] of Object.entries(horizonFixtureSets)) {
+                        const heading = Horizons.horizonOf(fixture.due(now).getTime(), plan)
+                        reached[key].add(heading)
+                        assert.ok(fixture.names.includes(heading),
+                            `${key} landed under ${heading} on ${now.toDateString()} ${clock[0]}:${String(clock[1]).padStart(2, '0')} weekStartsOn=${weekStartsOn}, which its allowed set does not admit`)
+                    }
+                }
+            }
+        }
+        // And no slack the other way: every name in a set is one the calendar really produces, so the sets stay a
+        // statement about the rule rather than a list padded until it passed.
+        for (const [key, fixture] of Object.entries(horizonFixtureSets)) {
+            assert.deepStrictEqual([...reached[key]].sort(), [...fixture.names].sort(),
+                `the allowed set for ${key} must be exactly the names reached`)
+        }
+    })
     const horizonHeadingOf = (html, title) => {
         // Document order: split on the group headings, then report the heading of the first segment whose BODY
         // (the part after </h2>, up to the next heading) carries the title.
@@ -5558,23 +5608,26 @@ async function main() {
         return null
     }
     const horizonNow = new Date()
-    const horizonYear = horizonNow.getFullYear()
-    const horizonMonth = horizonNow.getMonth()
     const horizonDue = (date, title, index) => ({
         id: String(index).repeat(32).slice(0, 32), title, todo_completed: 0,
         parent_id: 'n'.repeat(32), user_updated_time: 1, todo_due: date.getTime(),
     })
+    // Taken BEFORE the run, like the plan on the other side of it: the render below is read against both, so a
+    // midnight crossing between building the fixtures and asserting on them cannot turn into a false failure.
+    const horizonPlanBefore = Horizons.horizonPlan(Date.now(), Number(baseProfile.weekStartsOn))
     const horizonState = await run({
         dataDir: path.join(tmp, 'horizon-data'),
         installationDir: path.join(tmp, 'desktop-install'),
         require: desktopRequire,
         versionInfo: { version: '3.7.0', platform: 'desktop' },
         todos: [
+            // The dues come from horizonFixtureSets, so the four rendered fixtures and the nine-year sweep that
+            // justifies their allowed sets are built by the SAME expressions and cannot drift apart.
             // 22:00 rather than midnight: the whole point is a to-do due LATE on the last day of its period.
-            horizonDue(new Date(horizonYear, horizonMonth + 1, 0, 22, 0, 0, 0), 'Horizon last day of this month', 1),
-            horizonDue(new Date(horizonYear, 11, 31, 22, 0, 0, 0), 'Horizon December thirty first', 2),
-            horizonDue(new Date(horizonYear, horizonMonth + 1, 1, 12, 0, 0, 0), 'Horizon first day of next month', 3),
-            horizonDue(new Date(horizonYear + 1, 0, 1, 12, 0, 0, 0), 'Horizon January first next year', 4),
+            horizonDue(horizonFixtureSets.lastDayOfThisMonth.due(horizonNow), 'Horizon last day of this month', 1),
+            horizonDue(horizonFixtureSets.decemberThirtyFirst.due(horizonNow), 'Horizon December thirty first', 2),
+            horizonDue(horizonFixtureSets.firstDayOfNextMonth.due(horizonNow), 'Horizon first day of next month', 3),
+            horizonDue(horizonFixtureSets.januaryFirstNextYear.due(horizonNow), 'Horizon January first next year', 4),
         ],
         initialSettings: {
             profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Horizons', sortOrder: 0 }] }),
@@ -5582,13 +5635,15 @@ async function main() {
         },
     })
 
+    const horizonPlanAfter = Horizons.horizonPlan(Date.now(), Number(baseProfile.weekStartsOn))
+
     await test('horizons: a to-do due late on the last day of this month never falls past This Month', () => {
         // The due date is in the current month and never before today, so it can only be Today (today IS the last
         // day), Tomorrow, the week slice (This or Next Week - the month ends inside it) or This Month - never
         // This Year or Future. It can never be Next Month either: that slot only exists when this month's end is
         // already covered by the week slice, which is where this fixture then lands.
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon last day of this month')
-        assert.ok(['Today', 'Tomorrow', 'This Week', 'Next Week', 'This Month'].includes(heading),
+        assert.ok(horizonFixtureSets.lastDayOfThisMonth.names.includes(heading),
             `the last day of the month landed under ${heading}`)
     })
 
@@ -5598,7 +5653,7 @@ async function main() {
         // at the end of November, whose Next Month slice runs to December 31st) or This Year - the heading varies
         // with the date, but Future is impossible on every day of every year, leap years included.
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon December thirty first')
-        assert.ok(['Today', 'Tomorrow', 'This Week', 'Next Week', 'This Month', 'Next Month', 'This Year'].includes(heading),
+        assert.ok(horizonFixtureSets.decemberThirtyFirst.names.includes(heading),
             `December 31st landed under ${heading}`)
     })
 
@@ -5609,36 +5664,50 @@ async function main() {
         // slice when the month ends within a day or a week of today - whichever weekday the week starts on. Future
         // is now unreachable: in December the year slot is always Next Year, which covers all of next January.
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon first day of next month')
-        assert.ok(['Tomorrow', 'This Week', 'Next Week', 'Next Month', 'This Year', 'Next Year'].includes(heading),
+        assert.ok(horizonFixtureSets.firstDayOfNextMonth.names.includes(heading),
             `the first day of next month landed under ${heading}`)
     })
 
     await test('horizons: a to-do due on January 1st of next year is never This Month or This Year', () => {
         // It is past both this month's and this year's end on every day of the year, so neither the "This Month"
         // nor the "This Year" slot can hold it. What remains is Future, Next Year (December, where the year slot
-        // rolls over and covers the whole of next year), Next Month (the end of November and of December, whose
-        // Next Month slice reaches into January) and - in the last days of December - Tomorrow / the week slice.
+        // rolls over and covers the whole of next year), Next Month (only the last days of December, whose Next Month
+        // slice runs into January - November's reaches December 31st and no further) and, in those same last days of
+        // December, Tomorrow / the week slice.
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon January first next year')
-        assert.ok(['Tomorrow', 'This Week', 'Next Week', 'Next Month', 'Next Year', 'Future'].includes(heading),
+        assert.ok(horizonFixtureSets.januaryFirstNextYear.names.includes(heading),
             `January 1st of next year landed under ${heading}`)
     })
 
-    await test('horizons: the month and year headings drop onto the FIRST day of their own slice', () => {
-        // Since v2.2.0 a period heading schedules onto the first day of the stretch of time it names, not onto its
-        // last day: dropping on "This Month" means "early next week", not "the 31st". Each heading only renders
-        // when its group is non-empty: near a month's end the fixtures move up into Tomorrow / the week slice, and
-        // in December nothing can be a year slice without also being a month slice, so on those days there is
-        // nothing to look at - on the rest of the calendar this pins the claim instead of arguing it.
+    await test('horizons: every rendered period heading carries the drop day AND the slice end day the plan names', () => {
+        // Panel-to-module agreement, not the first-day rule itself - that rule is pinned by the pure checks above
+        // (the eleven owner calendars and the drop-day sweep). What this adds is that the HTML the panel emits
+        // carries what the plan says: data-drop (the first day of the slice) and, where the slice spans more than a
+        // day, data-drop-end (its last day, which the between-row bottom edge anchors on). Each heading only renders
+        // when its group is non-empty, so near a month's end the fixtures move up into Tomorrow / the week slice and
+        // there is less to look at; whatever DOES render must agree.
         const html = horizonState.panelHtml['panel-panel']
-        const plan = Horizons.horizonPlan(Date.now(), Number(baseProfile.weekStartsOn))
-        const dropOf = heading => {
+        const attrsOf = heading => {
             const found = new RegExp(`<h2([^>]*)>${heading}</h2>`).exec(html)
-            return found ? (/ data-drop="([^"]*)"/.exec(found[1]) || [])[1] : undefined
+            if (!found) return undefined
+            return {
+                drop: (/ data-drop="([^"]*)"/.exec(found[1]) || [])[1],
+                end: (/ data-drop-end="([^"]*)"/.exec(found[1]) || [])[1],
+            }
         }
-        for (const section of plan.sections) {
-            const rendered = dropOf(section.name)
-            if (rendered !== undefined) assert.strictEqual(rendered, section.dropDate,
-                `the ${section.name} heading must drop onto the first day of its slice`)
+        // The clock can cross midnight during the run, so a rendered heading is accepted when it matches the plan on
+        // either side of it. Names that changed slot between the two are simply skipped.
+        for (const plan of [horizonPlanBefore, horizonPlanAfter]) {
+            for (const section of plan.sections) {
+                const rendered = attrsOf(section.name)
+                if (rendered === undefined) continue
+                const other = (plan === horizonPlanBefore ? horizonPlanAfter : horizonPlanBefore).sections.find(s => s.name === section.name)
+                if (other && other.dropDate !== section.dropDate) continue
+                assert.strictEqual(rendered.drop, section.dropDate, `the ${section.name} heading must carry the plan's drop day`)
+                const sliceEnd = Horizons.dropEndDateFor(section.name, plan)
+                assert.strictEqual(rendered.end, sliceEnd === section.dropDate ? undefined : sliceEnd,
+                    `the ${section.name} heading must carry the plan's slice end day (and none when the slice is one day)`)
+            }
         }
     })
 
@@ -5666,6 +5735,10 @@ async function main() {
     const dropPlanAfter = Horizons.horizonPlan(Date.now(), Number(baseProfile.weekStartsOn))
 
     await test('horizons: every rendered period heading matches the plan - its name and its first-day drop date', () => {
+        // If midnight fell DURING the run, the fixtures were placed on the before-plan's days and rendered under the
+        // after-plan's sections (the Today fixture becomes Overdue, adding a heading), so the shape matches neither
+        // plan and there is nothing meaningful to assert. Once a night, on that one run, the check stands down.
+        if (dropPlanBefore.startOfToday !== dropPlanAfter.startOfToday) return
         const rendered = []
         for (const segment of dropState.panelHtml['panel-panel'].split(/<h2\b/).slice(1)) {
             const parts = /^([^>]*)>([\s\S]*?)<\/h2>/.exec(segment)
@@ -5675,6 +5748,37 @@ async function main() {
         const actual = rendered.join(' | ')
         assert.ok(actual === shapeOf(dropPlanBefore) || actual === shapeOf(dropPlanAfter),
             `the rendered headings were ${actual}, the plan is ${shapeOf(dropPlanBefore)}`)
+    })
+
+    await test('horizons: every rendered ROW is labelled by its section KIND - a time under a day, a weekday under a week, a date under a month or year', () => {
+        // Feature item 3, pinned end-to-end rather than only through kindOf: the same run puts one to-do at noon on
+        // each section's drop day, so all five sections render a row, and each row's label prefix is compared with
+        // what the profile's own formatting produces for that kind. Swap the week and month branches in
+        // getFormatTodoString and this fails; kindOf alone would not notice.
+        if (dropPlanBefore.startOfToday !== dropPlanAfter.startOfToday) return
+        const profile = baseProfile
+        const labelFor = (kind, when) => {
+            if (kind === 'day') return when.toLocaleTimeString(undefined, { hour: 'numeric', minute: 'numeric', hour12: profile.timeIs12Hour })
+            if (kind === 'week') return when.toLocaleDateString(undefined, { weekday: profile.weekdayFormat })
+            return when.toLocaleDateString(undefined, { month: profile.monthFormat, day: profile.dayFormat })
+        }
+        // heading -> the labels of the rows under it.
+        const rowsByHeading = new Map()
+        for (const segment of dropState.panelHtml['panel-panel'].split(/<h2\b/).slice(1)) {
+            const parts = /^[^>]*>([\s\S]*?)<\/h2>([\s\S]*)$/.exec(segment)
+            if (!parts) continue
+            rowsByHeading.set(parts[1], [...parts[2].matchAll(/<a class="todo-title"[^>]*>([\s\S]*?)<\/a>/g)].map(m => m[1]))
+        }
+        let checked = 0
+        for (const section of dropPlanBefore.sections) {
+            const rows = rowsByHeading.get(section.name)
+            assert.ok(rows && rows.length === 1, `${section.name} must hold exactly the one fixture placed on its drop day`)
+            const expected = `${labelFor(Horizons.kindOf(section.name), dropDayNoon(section.dropDate))} - `
+            assert.ok(rows[0].startsWith(expected),
+                `the row under ${section.name} (kind ${Horizons.kindOf(section.name)}) must be labelled "${expected}...", was "${rows[0]}"`)
+            checked++
+        }
+        assert.strictEqual(checked, 5, 'all five period sections must have been label-checked')
     })
 
     await fs.remove(tmp)
