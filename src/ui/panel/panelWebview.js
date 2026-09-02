@@ -1760,10 +1760,18 @@ function onTouchDragMove(event){
 }
 
 // After a scrolled frame the boxes are all in new places, so the index is rebuilt before the target is re-asked.
-function onTouchDragScrolled(){
+function onTouchDragScrolled(clientX, clientY){
     if (!touchDrag.active) return
     buildRowIndex()
     updateDragTarget()
+    // ...and RE-AIM at the same point, which is what keeps the loop alive under a finger that is holding still -
+    // the whole gesture an edge scroll exists for. The helper stops itself after AUTOSCROLL_IDLE_MS without an
+    // update(), a watchdog sized for the HTML5 drag (which re-fires dragover every ~350ms even for a stationary
+    // pointer) and explicitly noted there as the net for "a gesture that ended without an event reaching us". A
+    // still FINGER sends no touchmove at all, so without this the list would stop after 800ms and only move again
+    // if the user wiggled. Nothing is lost by it: a touch drag has real ends of its own, and every one of them
+    // calls endTouchDrag, which stops the loop - with the 15s drag watchdog behind them all.
+    edgeAutoscrollUpdate(currentTodosEl || document.querySelector('.todos'), clientX, clientY, onTouchDragScrolled)
 }
 
 /** dropTouchDrag ***********************************************************************************************************************************

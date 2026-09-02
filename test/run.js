@@ -3160,6 +3160,9 @@ async function main() {
         const scrolled = handlerBody('onTouchDragScrolled')
         assert.ok(scrolled.includes('buildRowIndex()'), 'a scrolled frame must rebuild the index - the boxes have all moved')
         assert.ok(scrolled.includes('updateDragTarget()'), '...and re-resolve what the finger is now over')
+        // ...and re-aim at the same point, or the helper's idle watchdog stops the list after 800ms: a still
+        // FINGER sends no touchmove at all, and holding still at the edge is the entire gesture.
+        assert.ok(scrolled.includes('edgeAutoscrollUpdate('), 'a scrolled frame must re-aim the loop, or a still finger would stop it')
         assert.ok(handlerBody('onTouchDragMove').includes('edgeAutoscrollUpdate(currentTodosEl || document.querySelector(\'.todos\'), touchDrag.x, touchDrag.y, onTouchDragScrolled)'),
             'the touch drag must feed the SHARED edge auto-scroll helper, not a second copy of the band maths')
     })

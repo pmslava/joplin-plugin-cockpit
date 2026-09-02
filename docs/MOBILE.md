@@ -365,6 +365,13 @@ Four hazards this was designed around, each of which cost something to get right
   under the very context menu the release had just opened. A hold-and-release therefore never touches
   the guard at all. The cost is that a refresh landing between the lift and the first move ends the drag
   by reloading; nothing is held, so that is the harmless direction.
+- **A still finger sends nothing at all.** The shared edge auto-scroll stops itself after
+  `AUTOSCROLL_IDLE_MS` (800 ms) without an `update()` — a watchdog sized for the HTML5 drag, which
+  re-fires `dragover` every ~350 ms even for a stationary pointer. A finger holding at the edge, which is
+  the entire gesture an edge scroll exists for, emits no `touchmove` whatsoever, so the touch drag
+  re-aims the loop from its own scroll callback (`onTouchDragScrolled`) after rebuilding the index.
+  Nothing is lost: a touch drag has real ends of its own and every one of them calls `endTouchDrag`,
+  which stops the loop, with the 15 s watchdog behind them all.
 - **The gap that is not a target.** A gap with *both* neighbours absent in a *dateless* group
   (Overdue/Future) is not painted and not droppable: `betweenBounds` can form no interval for it and the
   host would write nothing, so an insertion line there would promise a move that never happens.

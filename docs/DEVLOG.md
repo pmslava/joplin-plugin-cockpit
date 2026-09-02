@@ -1021,6 +1021,14 @@ the lift and the first move ends the drag by reloading — nothing is held, so t
 direction. The drop message is posted BEFORE the release, for the same repaint reason in reverse:
 guard-first would reload once for the release and again for the write.
 
+*A still finger sends nothing at all.* The edge auto-scroll helper stops itself after 800 ms without an
+`update()` — a watchdog sized for the HTML5 drag, which re-fires `dragover` every ~350 ms even for a
+stationary pointer, and noted in 2.2.1 as the net for "a gesture that ended without an event reaching
+us". A finger holding at the edge — the entire gesture an edge scroll exists for — emits no `touchmove`
+at all, so the list would have run for 800 ms and then stopped until the user wiggled. The touch drag
+re-aims the loop from its own scroll callback instead; nothing is lost, because every end of a touch
+drag calls `endTouchDrag`, which stops the loop, with the 15 s watchdog behind them all.
+
 *The gap that must not be offered.* Both neighbours absent in a dateless group is the one gap
 `betweenBounds` returns null for — nothing bounds the interval, no group date anchors it — so the host
 would write nothing. It is not painted and not droppable, rather than a line that promises a move that
