@@ -5460,11 +5460,13 @@ async function main() {
         assert.strictEqual(Horizons.dropEndDateFor('This Week', plan), '2026-09-06')
     })
 
-    // The exhaustive sweep: every day of 2026 and 2027, at midnight, noon and the last millisecond of the day, for
-    // both week starts - 4380 plans of pure math, no rendering. The three checks below state the invariants the plan
-    // must satisfy on every one of them, so a rule that only happens to look right in September is caught here.
+    // The exhaustive sweep: every day of 2026, 2027 and 2028, at midnight, noon and the last millisecond of the day,
+    // for both week starts - 6576 plans of pure math, no rendering. The three checks below state the invariants the
+    // plan must satisfy on every one of them, so a rule that only happens to look right in September is caught here.
+    // 2028 is in the range on purpose: it is the nearest leap year, so February 29 and a 29-day February go through
+    // the month arithmetic (new Date(y, m + offset + 1, 0)) that a leap year is exactly the case for.
     const sweepPlans = []
-    for (let day = new Date(2026, 0, 1); day.getFullYear() < 2028; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
+    for (let day = new Date(2026, 0, 1); day.getFullYear() < 2029; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
         for (const clock of [[0, 0, 0, 0], [12, 0, 0, 0], [23, 59, 59, 999]]) {
             for (const weekStartsOn of [0, 1]) {
                 const now = new Date(day.getFullYear(), day.getMonth(), day.getDate(), clock[0], clock[1], clock[2], clock[3])
@@ -5477,7 +5479,7 @@ async function main() {
         }
     }
 
-    await test('horizonPlan sweep (every day of 2026-2027, both week starts): five ordered slices, and a period is replaced by its Next exactly when its own end is already covered', () => {
+    await test('horizonPlan sweep (every day of 2026-2028, both week starts): five ordered slices, and a period is replaced by its Next exactly when its own end is already covered', () => {
         const endOfDay = date => new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999).getTime()
         const periods = [['This Week', 'Next Week'], ['This Month', 'Next Month'], ['This Year', 'Next Year']]
         for (const { now, weekStartsOn, plan, where } of sweepPlans) {
@@ -5508,7 +5510,7 @@ async function main() {
         }
     })
 
-    await test('horizonPlan sweep: every drop day is the FIRST day of its own slice - it buckets there, and the day before it lands in an earlier slice', () => {
+    await test('horizonPlan sweep (2026-2028): every drop day is the FIRST day of its own slice - it buckets there, and the day before it lands in an earlier slice', () => {
         const dayAt = (iso, hour) => { const p = iso.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2], hour, 0, 0, 0).getTime() }
         for (const { plan, where } of sweepPlans) {
             plan.sections.forEach((section, index) => {
@@ -5532,7 +5534,7 @@ async function main() {
         }
     })
 
-    await test('horizonPlan sweep: each slice owns its own last millisecond, the next owns the one after, and anything before today is Overdue', () => {
+    await test('horizonPlan sweep (2026-2028): each slice owns its own last millisecond, the next owns the one after, and anything before today is Overdue', () => {
         for (const { plan, where } of sweepPlans) {
             plan.sections.forEach((section, index) => {
                 // (e) the boundaries are exact in both directions.
@@ -5589,7 +5591,16 @@ async function main() {
         // Anything a set does not admit fails HERE, on a named day, instead of flaking once a year on someone's laptop.
         const reached = {}
         for (const key of Object.keys(horizonFixtureSets)) reached[key] = new Set()
-        for (let day = new Date(2024, 0, 1); day.getFullYear() < 2041; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
+        // The claim only covers the years actually swept, and the rendered checks below run on the REAL clock, so the
+        // suite has to say out loud when the clock has walked past the bound rather than let the sets quietly expire.
+        const sweepFromYear = 2024
+        const sweepUntilYear = 2041
+        const runYear = new Date().getFullYear()
+        assert.ok(runYear >= sweepFromYear && runYear < sweepUntilYear,
+            `this suite is running in ${runYear}, outside the ${sweepFromYear}-${sweepUntilYear - 1} the fixture sweep covers, `
+            + `so the allowed sets of the rendered heading checks below are no longer justified - widen the sweep bound `
+            + `here (and the years in this check's name) to include ${runYear}`)
+        for (let day = new Date(sweepFromYear, 0, 1); day.getFullYear() < sweepUntilYear; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
             for (const clock of [[0, 0, 0, 0], [12, 0, 0, 0], [23, 59, 59, 999]]) {
                 for (const weekStartsOn of [0, 1]) {
                     const now = new Date(day.getFullYear(), day.getMonth(), day.getDate(), clock[0], clock[1], clock[2], clock[3])
@@ -5634,7 +5645,7 @@ async function main() {
         require: desktopRequire,
         versionInfo: { version: '3.7.0', platform: 'desktop' },
         todos: [
-            // The dues come from horizonFixtureSets, so the four rendered fixtures and the nine-year sweep that
+            // The dues come from horizonFixtureSets, so the four rendered fixtures and the seventeen-year sweep that
             // justifies their allowed sets are built by the SAME expressions and cannot drift apart.
             // 22:00 rather than midnight: the whole point is a to-do due LATE on the last day of its period.
             horizonDue(horizonFixtureSets.lastDayOfThisMonth.due(horizonNow), 'Horizon last day of this month', 1),

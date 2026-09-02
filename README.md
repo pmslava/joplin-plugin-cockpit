@@ -21,9 +21,10 @@ Cockpit is a single [Joplin](https://joplinapp.org) panel built to replace the n
      filter + sort + sync, search field), notebook pills on rows, one greyed completed to-do, and
      partly-filled progress rings including on the row whose note is open in the editor — with that
      note's checkboxes visible beside it so the ring and the ticks match. Completed to-dos setting:
-     "Grayed out". Capture midweek and early in the month: a period whose remaining days are already
-     covered by the groups above it is replaced by the next one, and the headings then read Next Week /
-     Next Month / Next Year. -->
+     "Grayed out". Capture midweek, early in the month and not in December: a period whose remaining
+     days are already covered by the groups above it is replaced by the next one, and the headings then
+     read Next Week / Next Month / Next Year - and in December the year slot is ALWAYS Next Year, whose
+     slice runs to the next December 31st, so nothing is left over for a Future group at all. -->
 
 One screen gives you the whole picture. A profile is a whole saved view — its format, filters, search and sorting — so switching profiles switches everything in one step. Narrow the list by notebook, or by anything Joplin's own search understands. Reschedule by dragging a to-do onto a day, or open the date picker for an exact time. The same file runs on Android.
 
