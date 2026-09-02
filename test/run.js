@@ -5306,7 +5306,11 @@ async function main() {
     // day fell past the boundary: the last day of the month landed in "This Year", and December 31st in "Future"
     // (what Marxsal reported in issue #3). Both helpers now end at 23:59:59.999. The fixtures below are built
     // from the REAL clock with local Date constructors - the harness has no fake clock - so every expected
-    // heading set is written to hold on every calendar day and time of day the suite could run.
+    // heading set is written to hold on every calendar day and time of day the suite could run. That breadth has
+    // a cost worth knowing about: in the closing days of a month the two positive checks stop discriminating,
+    // because an earlier horizon (Tomorrow / This Week) then catches the row with or without the fix, and the
+    // same goes for the December 31st check in the closing days of December. They are never wrong, only blind on
+    // those days - the mutation verification behind them was run mid-month, where both do discriminate.
     const horizonHeadingOf = (html, title) => {
         // Document order: split on the group headings, then report the heading of the first segment whose BODY
         // (the part after </h2>, up to the next heading) carries the title.
@@ -5374,6 +5378,28 @@ async function main() {
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon January first next year')
         assert.ok(['Tomorrow', 'This Week', 'Future'].includes(heading),
             `January 1st of next year landed under ${heading}`)
+    })
+
+    await test('horizons: the This Month and This Year headings still drop onto their own last day', () => {
+        // getHeadingDropTarget passes both widened helpers through toISODate(), which reads only year, month and
+        // day, so ending them at 23:59:59.999 must leave the drop date exactly where it was. Each heading only
+        // renders when its group is non-empty: near a month's end the fixtures move up into Tomorrow/This Week,
+        // and in December nothing can be This Year without also being This Month, so on those days there is
+        // nothing to look at - on the rest of the calendar this pins the claim instead of arguing it.
+        const html = horizonState.panelHtml['panel-panel']
+        const pad = value => String(value).padStart(2, '0')
+        const lastOfMonth = new Date(horizonYear, horizonMonth + 1, 0)
+        const dropOf = heading => {
+            const found = new RegExp(`<h2([^>]*)>${heading}</h2>`).exec(html)
+            return found ? (/ data-drop="([^"]*)"/.exec(found[1]) || [])[1] : undefined
+        }
+        const monthDrop = dropOf('This Month')
+        if (monthDrop !== undefined) assert.strictEqual(monthDrop,
+            `${lastOfMonth.getFullYear()}-${pad(lastOfMonth.getMonth() + 1)}-${pad(lastOfMonth.getDate())}`,
+            'the This Month heading no longer drops onto the last day of the month')
+        const yearDrop = dropOf('This Year')
+        if (yearDrop !== undefined) assert.strictEqual(yearDrop, `${horizonYear}-12-31`,
+            'the This Year heading no longer drops onto December 31st')
     })
 
     await fs.remove(tmp)
