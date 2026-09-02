@@ -15,13 +15,10 @@ import {
     buildMonthGrid,
     buildWeek,
     dayState,
-    endOfWeek,
     fromISODate,
     groupTodosByDate,
     renderNavigation,
     renderUndated,
-    startOfDay,
-    startOfWeek,
     toISODate,
     weekdayLabels,
 } from "./calendar";
@@ -425,57 +422,6 @@ abstract class BaseFormat {
         return endOfToday   
     }
 
-    /** getStartOfTomorrow ******************************************************************************************************************************
-     * Gets the date representing the start of the next day. Provided as convenience for use in custom formats.                                         *                                                                    *
-     ***************************************************************************************************************************************************/
-     protected getStartOfTomorrow(){
-        var startOfTomorrow = new Date();
-        startOfTomorrow.setDate(startOfTomorrow.getDate() + 1)
-        startOfTomorrow.setHours(0,0,0,0);
-        return startOfTomorrow;
-    }
-
-    /** getEndOfTomorrow *****************************************************************************************************************************
-     * Gets the date representing the end of the next day. Provided as convenience for use in custom formats.                                        *                                                                    *
-     ************************************************************************************************************************************************/
-     protected getEndOfTomorrow(){
-        var endOfTomorrow = new Date();
-        endOfTomorrow.setDate(endOfTomorrow.getDate() + 1)
-        endOfTomorrow.setHours(23,59,59,999);
-        return endOfTomorrow;
-    }
-
-    /** getEndOfThisWeek ********************************************************************************************************************************
-     * Gets the date representing the end of the current week, according to the profile's first day of the week.                                        *
-     * The previous implementation subtracted the weekday number directly, which on a Sunday returned the Sunday a week later and so let the "This Week" *
-     * group run seven days too long.                                                                                                                   *
-     ***************************************************************************************************************************************************/
-    protected getEndOfThisWeek(){
-        return endOfWeek(new Date(), this.getWeekStartsOn())
-    }
-
-    /** getEndOfThisMonth *******************************************************************************************************************************
-     * Gets the date representing the end of the current month - its LAST MILLISECOND, the last day at 23:59:59.999 local, like getEndOfToday does for  *
-     * the day. Returning that day at midnight instead pushed a to-do due later on the last day of the month out of "This Month". Built from local date *
-     * components so it stays correct across daylight saving. Provided as convenience for use in custom formats.                                        *
-     ***************************************************************************************************************************************************/
-    protected getEndOfThisMonth(){
-        var endOfMonth = new Date()
-        endOfMonth = new Date(endOfMonth.getFullYear(), endOfMonth.getMonth() + 1, 0);
-        endOfMonth.setHours(23,59,59,999);
-        return endOfMonth    
-    }
-
-    /** getEndOfThisYear ********************************************************************************************************************************
-     * Gets the date representing the end of the current year - its LAST MILLISECOND, December 31st at 23:59:59.999 local, like getEndOfToday does for  *
-     * the day. Returning December 31st at midnight instead pushed a to-do due later on that day into "Future" (issue #3). Built from local date        *
-     * components so it stays correct across daylight saving. Provided as convenience for use in custom formats.                                        *
-     ***************************************************************************************************************************************************/
-    protected getEndOfThisYear(){
-        var endOfYear = new Date(new Date().getFullYear(), 11, 31)
-        endOfYear.setHours(23,59,59,999)
-        return endOfYear
-    }
 }
 
 /** BasicFormat **************************************************************************************************************************************
