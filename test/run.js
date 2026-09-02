@@ -2786,6 +2786,33 @@ async function main() {
         }
     })
 
+    // ---- WEBVIEW SOURCE SHAPE: drag auto-scroll at the list edges (same reason - the harness cannot run the webview) ----
+    await test('webview drag auto-scroll: the document dragover feeds the helper, and drop/dragend stop it', () => {
+        // Delegated on the document like the between-rows gesture, so one wiring survives every setHtml re-render.
+        assert.ok(webviewSource.includes("document.addEventListener('dragover', onDragAutoscroll"), 'the dragover path must be delegated on the document')
+        assert.ok(/function onDragAutoscroll\(event\)\{[\s\S]*?edgeAutoscrollUpdate\(container, event\.clientY/.test(webviewSource),
+            'the dragover handler must feed the container and the pointer position to the autoscroll helper')
+        // BOTH ends of a drag stop it: a drop and a dragend. Losing either leaves the list scrolling after the gesture.
+        assert.ok(webviewSource.includes("document.addEventListener('drop', endPanelDrag"), 'a drop must end the panel drag, and with it the scrolling')
+        assert.ok(webviewSource.includes("document.addEventListener('dragend', endPanelDrag"), 'a dragend must end the panel drag, and with it the scrolling')
+        assert.ok(/function endPanelDrag\(\)\{\s*panelDragActive = false\s*edgeAutoscrollStop\(\)/.test(webviewSource),
+            'ending the drag must drop the flag AND stop the loop')
+    })
+    await test('webview drag auto-scroll: a watchdog stops the loop when the dragover stream goes quiet', () => {
+        // A native drag keeps sending dragover while it is over the document; a silence means it left the window (or
+        // ended without an event reaching us), and the list must not keep moving on its own after that.
+        assert.ok(/var AUTOSCROLL_IDLE_MS = \d+/.test(webviewSource), 'the watchdog timeout must be a named, tunable constant')
+        assert.ok(/Date\.now\(\) - autoscrollAt > AUTOSCROLL_IDLE_MS\)\{ edgeAutoscrollStop\(\); return \}/.test(webviewSource),
+            'the loop must stop itself when no update has arrived within the watchdog timeout')
+        assert.ok(/cancelAnimationFrame\(autoscrollFrame\)/.test(webviewSource), 'stopping must cancel the pending frame, so no rAF loop survives a drag')
+    })
+    await test('webview drag auto-scroll: desktop-gated, and only for a drag this panel started', () => {
+        assert.ok(/function onDragAutoscroll\(event\)\{\s*if \(IS_MOBILE \|\| !panelDragActive\) return/.test(webviewSource),
+            'the dragover handler must bail on mobile (no HTML5 drag there) and on a drag this panel did not start')
+        assert.ok(handlerBody('onTodoDragStart').includes('panelDragActive = true'), "the panel's own dragstart must raise the flag")
+        assert.ok(handlerBody('onTodoDragEnd').includes('endPanelDrag()'), "the panel's own dragend must end it")
+    })
+
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
     await test('version: package.json, manifest, and both package-lock fields are all 2.1.3', () => {

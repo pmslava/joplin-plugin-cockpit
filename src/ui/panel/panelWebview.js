@@ -1068,6 +1068,15 @@ document.addEventListener('pointermove', onPanelSelectionDragProbe, true)
  * Dragging a selected to-do takes the whole selection with it; dragging an unselected one drags just that one. The drop targets - group headings,   *
  * calendar days, week planner columns - carry a data-drop attribute with the date the to-dos become due, or "clear".                                *
  ***************************************************************************************************************************************************/
+// Whether a to-do drag STARTED IN THIS PANEL is in flight. A foreign drag - text or a file from another window -
+// never raises it, which is what keeps the edge auto-scroll below from moving the list under someone else's drag.
+// Raised at the end of onTodoDragStart (once the payload is known to be non-empty) and dropped by endPanelDrag.
+var panelDragActive = false
+// The last pointer position a dragover reported, so the scroll loop can re-resolve what is under it (see
+// refreshBetweenIndicatorUnderPointer) while the rows move beneath a pointer that is holding still.
+var lastDragClientX = 0
+var lastDragClientY = 0
+
 function onTodoDragStart(event, todoID){
     if (!selectedRowIDs.has(todoID)){
         selectedRowIDs.clear()
@@ -1087,10 +1096,12 @@ function onTodoDragStart(event, todoID){
     for (var row of allTodoRows()){
         if (dragged.has(row.dataset.todoId)) row.classList.add('-dragging')
     }
+    panelDragActive = true
 }
 
 function onTodoDragEnd(event){
     for (var row of allTodoRows()) row.classList.remove('-dragging')
+    endPanelDrag()
 }
 
 function onDropTargetOver(event){
@@ -1159,17 +1170,33 @@ function betweenGroupInfo(row){
 
 // The eligible between-target under the pointer, or null when the pointer is over a row's inert middle or not over an
 // eligible row at all. `before` is true in the top band (insert above the row), false in the bottom band (insert below).
-function betweenTargetFor(event){
-    var row = (event.target && event.target.closest) ? event.target.closest('.todo[data-todo-id]') : null
+function betweenTargetAt(element, clientY){
+    var row = (element && element.closest) ? element.closest('.todo[data-todo-id]') : null
     if (!row) return null
     var info = betweenGroupInfo(row)
     if (!info) return null
     var rect = row.getBoundingClientRect()
     if (!rect.height) return null
-    var offset = event.clientY - rect.top
+    var offset = clientY - rect.top
     if (offset <= rect.height * BETWEEN_BAND) return { row: row, before: true, groupDate: info.groupDate }
     if (offset >= rect.height * (1 - BETWEEN_BAND)) return { row: row, before: false, groupDate: info.groupDate }
     return null                                                    // the inert middle: keep today's behaviour (nothing)
+}
+
+// The same question asked of a drag event. Split from the form above so the edge auto-scroll can re-ask it from its
+// own loop, at the last known pointer position, while the rows move under a pointer that is holding still.
+function betweenTargetFor(event){
+    return betweenTargetAt(event.target, event.clientY)
+}
+
+// Draw (or clear) the insertion line for a resolved between-target. One painter for both callers - the dragover
+// handler and the scroll loop's refresh - so the two can never drift into painting it differently.
+function paintBetweenIndicator(target){
+    if (!target){ clearBetweenIndicator(); return }
+    if (betweenIndicatorRow !== target.row) clearBetweenIndicator()
+    betweenIndicatorRow = target.row
+    target.row.classList.remove('-drop-before', '-drop-after')
+    target.row.classList.add(target.before ? '-drop-before' : '-drop-after')
 }
 
 function clearBetweenIndicator(){
@@ -1199,10 +1226,7 @@ function onBetweenDragOver(event){
     if (!target){ clearBetweenIndicator(); return }
     event.preventDefault()                                         // enable the drop on the row (rows have no inline handler)
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-    if (betweenIndicatorRow !== target.row) clearBetweenIndicator()
-    betweenIndicatorRow = target.row
-    target.row.classList.remove('-drop-before', '-drop-after')
-    target.row.classList.add(target.before ? '-drop-before' : '-drop-after')
+    paintBetweenIndicator(target)
 }
 
 async function onBetweenDrop(event){
@@ -1227,6 +1251,136 @@ async function onBetweenDrop(event){
 document.addEventListener('dragover', onBetweenDragOver, false)
 document.addEventListener('drop', onBetweenDrop, false)
 document.addEventListener('dragend', clearBetweenIndicator, false)
+
+/** Edge auto-scroll ********************************************************************************************************************************
+ * A native drag can only reach what is already on screen: the pointer belongs to the drag, the wheel does not follow it, and the panel's list is an *
+ * inner scroller (Joplin's webview skeleton sets overflow:hidden on the html element, and .todos is the only thing that scrolls in a list view), so *
+ * a heading or a calendar day above or below the viewport is unreachable. While a drag is in flight and the pointer sits inside a band at the top   *
+ * or bottom edge of the scrolling container, that container scrolls continuously in that direction, and the target under the pointer changes with   *
+ * it.                                                                                                                                               *
+ *                                                                                                                                                   *
+ * The helper is INPUT-AGNOSTIC on purpose: it knows nothing about drag events, only a container and a pointer's clientY. The HTML5 drag wires it up *
+ * below (desktop only); the touch drag being designed for mobile is meant to call the same update()/stop() with its own pointer coordinates rather  *
+ * than growing a second copy of the band and speed maths.                                                                                           *
+ *                                                                                                                                                   *
+ *   update(container, clientY, onScroll)  aim the loop at a container and a pointer position - it starts the loop inside a band, and stops it       *
+ *                                         outside both. onScroll (optional) runs after every frame that actually moved.                             *
+ *   stop()                                end it at once.                                                                                           *
+ *                                                                                                                                                   *
+ * Nothing outlives a drag: stop() cancels the pending frame, the loop ends itself at the scroll limit, and a watchdog ends it when no update() has  *
+ * arrived for AUTOSCROLL_IDLE_MS - a native drag keeps sending dragover while it is over the document, so a silence means the pointer has left the  *
+ * window, or the drag ended without an event reaching us.                                                                                           *
+ ***************************************************************************************************************************************************/
+var AUTOSCROLL_BAND_RATIO = 0.15       // the edge band is this share of the container's client height...
+var AUTOSCROLL_BAND_MIN = 32           // ...but never thinner than this (a short list would otherwise have no band worth hitting)...
+var AUTOSCROLL_BAND_MAX = 72           // ...and never thicker (a tall list must not turn a sixth of itself into a moving floor)
+var AUTOSCROLL_SPEED_MIN = 2           // px per frame at the band's INNER edge - a nudge, for placing a drop precisely
+var AUTOSCROLL_SPEED_MAX = 16          // px per frame at the container's very edge - fast enough to cross a long agenda
+var AUTOSCROLL_IDLE_MS = 150           // watchdog: no update() for this long and the loop stops itself
+
+var autoscrollEl = null                // the container being scrolled, or null when no loop is running
+var autoscrollStep = 0                 // signed px per frame: negative scrolls up, positive down
+var autoscrollFrame = null             // the pending requestAnimationFrame handle, or null
+var autoscrollAt = 0                   // Date.now() of the last update(), which the watchdog measures against
+var autoscrollOnScroll = null          // optional callback, run after each frame that moved the container
+
+// The nearest ancestor of `el` (itself included) that actually scrolls vertically, or null when nothing does.
+function scrollableAncestor(el){
+    var node = el
+    while (node && node.nodeType === 1){
+        var overflowY = window.getComputedStyle(node).overflowY
+        if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) return node
+        node = node.parentElement
+    }
+    return null
+}
+
+// The signed px-per-frame step for a pointer at `clientY` over `el`: zero anywhere outside the two edge bands (and
+// outside the container altogether - a drag that has left the list must not keep it moving), and otherwise a speed
+// rising linearly with how deep into the band the pointer is, from AUTOSCROLL_SPEED_MIN at the band's inner edge to
+// AUTOSCROLL_SPEED_MAX at the container's own edge.
+function edgeAutoscrollStep(el, clientY){
+    var rect = el.getBoundingClientRect()
+    if (!rect.height) return 0
+    if (clientY < rect.top || clientY > rect.bottom) return 0
+    // Also clamped to half the height, so the two bands can never overlap in a very short container.
+    var band = Math.min(rect.height / 2, Math.max(AUTOSCROLL_BAND_MIN, Math.min(AUTOSCROLL_BAND_MAX, rect.height * AUTOSCROLL_BAND_RATIO)))
+    var speedAt = function(depth){
+        var reach = Math.max(0, Math.min(1, depth / band))
+        return AUTOSCROLL_SPEED_MIN + (AUTOSCROLL_SPEED_MAX - AUTOSCROLL_SPEED_MIN) * reach
+    }
+    var fromTop = clientY - rect.top
+    if (fromTop <= band) return -speedAt(band - fromTop)
+    var fromBottom = rect.bottom - clientY
+    if (fromBottom <= band) return speedAt(band - fromBottom)
+    return 0
+}
+
+function edgeAutoscrollTick(){
+    autoscrollFrame = null
+    var el = autoscrollEl
+    if (!el || !autoscrollStep) return
+    // The watchdog. A pointer held still inside the band keeps the stream of dragovers coming, so a silence is
+    // the drag leaving the window (or ending without an event we saw) - either way the list must stop moving.
+    if (Date.now() - autoscrollAt > AUTOSCROLL_IDLE_MS){ edgeAutoscrollStop(); return }
+    var before = el.scrollTop
+    el.scrollTop = before + autoscrollStep
+    if (el.scrollTop === before){ edgeAutoscrollStop(); return }   // at the scroll limit: there is nothing left to give
+    if (autoscrollOnScroll) autoscrollOnScroll()
+    autoscrollFrame = requestAnimationFrame(edgeAutoscrollTick)
+}
+
+function edgeAutoscrollUpdate(container, clientY, onScroll){
+    var step = container ? edgeAutoscrollStep(container, clientY) : 0
+    if (!step){ edgeAutoscrollStop(); return }
+    autoscrollEl = container
+    autoscrollStep = step
+    autoscrollAt = Date.now()
+    autoscrollOnScroll = onScroll || null
+    if (autoscrollFrame === null) autoscrollFrame = requestAnimationFrame(edgeAutoscrollTick)
+}
+
+function edgeAutoscrollStop(){
+    if (autoscrollFrame !== null) cancelAnimationFrame(autoscrollFrame)
+    autoscrollFrame = null
+    autoscrollEl = null
+    autoscrollStep = 0
+    autoscrollOnScroll = null
+}
+
+/** The HTML5 drag's wiring (desktop) ***************************************************************************************************************
+ * Delegated on the document, like the between-rows gesture above, so one wiring survives every setHtml. It runs only for a drag THIS PANEL started  *
+ * (panelDragActive, raised in onTodoDragStart and dropped again by endPanelDrag): text dragged in from another window must never make the list run  *
+ * away under the cursor. Both ends are covered - a drop and a dragend each end the drag - and neither changes what a drop does.                     *
+ ***************************************************************************************************************************************************/
+function onDragAutoscroll(event){
+    if (IS_MOBILE || !panelDragActive) return
+    lastDragClientX = event.clientX
+    lastDragClientY = event.clientY
+    // The scroller under the pointer - in practice always .todos, the only thing that scrolls in a list view. The
+    // fallback keeps a pointer that is over nothing scrollable (a heading, the padding) aimed at the same list.
+    var container = scrollableAncestor(event.target) || currentTodosEl || document.querySelector('.todos')
+    edgeAutoscrollUpdate(container, event.clientY, refreshBetweenIndicatorUnderPointer)
+}
+
+// The rows move under a STILL pointer while the list scrolls, and the browser's own next dragover can be a few
+// hundred milliseconds away, so the insertion line is re-resolved after every scrolled frame from whatever is now at
+// the last known pointer position - the same answer a dragover there would have produced. The whole-row targets
+// (headings, calendar days, week columns) re-highlight on their own next dragover; only this one is banded finely
+// enough to look frozen in between.
+function refreshBetweenIndicatorUnderPointer(){
+    var under = document.elementFromPoint(lastDragClientX, lastDragClientY)
+    paintBetweenIndicator(under ? betweenTargetAt(under, lastDragClientY) : null)
+}
+
+function endPanelDrag(){
+    panelDragActive = false
+    edgeAutoscrollStop()
+}
+
+document.addEventListener('dragover', onDragAutoscroll, false)
+document.addEventListener('drop', endPanelDrag, false)
+document.addEventListener('dragend', endPanelDrag, false)
 
 /** onTodoChecked ***********************************************************************************************************************************
  * When a to-do's checkbox is ticked, this sends the id AND the state the tick just set to the plugin. The browser has already flipped the checkbox   *
