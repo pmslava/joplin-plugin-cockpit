@@ -887,8 +887,12 @@ function requestAlarm(ids){
  * on a non-mouse pointer, so on desktop (and for a desktop mouse) it is inert and the existing click / dblclick / contextmenu paths are untouched.   *
  * A move of more than 10px, a pointer up/cancel, or a scroll of the list aborts the press (a scroll or a drag is not a long press). The click the    *
  * browser synthesises right after the touch is swallowed, so a fired long press does not also open or toggle the item.                               *
+ *                                                                                                                                                    *
+ * ONE OF THE FOUR KINDS NO LONGER OPENS ITS MENU AT ONCE: a hold on the BODY of a to-do row lifts the row into the touch drag below instead, and the  *
+ * menu is handed back by a release that never travelled. Every other kind, and every other zone of a to-do row (the tick circle, the notebook pill,   *
+ * the read-only peek's rows), reaches the same handler it always did on the same 500ms.                                                               *
  ***************************************************************************************************************************************************/
-var longPress = { timer: null, x: 0, y: 0, fired: false, target: null, el: null, kind: null, id: null }
+var longPress = { timer: null, x: 0, y: 0, fired: false, target: null, el: null, kind: null, id: null, pointerId: null }
 
 function cancelLongPress(){
     if (longPress.timer){ clearTimeout(longPress.timer); longPress.timer = null }
@@ -905,6 +909,11 @@ function onLongPressFire(){
     longPress.timer = null
     longPress.fired = true
     if (navigator.vibrate){ try { navigator.vibrate(10) } catch (error){} }
+    // A hold on a to-do row's BODY lifts the row instead of opening its menu (see the touch drag below). The
+    // menu is not lost, it is DEFERRED: a release that never travelled opens it from there, with this same
+    // press point. Every zone the drag refuses - the tick circle, the notebook pill, a read-only peek row -
+    // falls straight through to the handler it has always reached.
+    if (longPress.kind === 'todo' && canLiftRow(longPress.target, longPress.el)){ beginTouchDrag(); return }
     var ev = synthEvent(longPress.target, longPress.x, longPress.y, longPress.el)
     if (longPress.kind === 'todo') onTodoContextMenu(ev, longPress.id)
     else if (longPress.kind === 'note') onNoteContextMenu(ev, longPress.id)
@@ -938,6 +947,9 @@ document.addEventListener('pointerdown', function(event){
     if (!kind) return
     longPress.x = event.clientX; longPress.y = event.clientY
     longPress.target = event.target; longPress.el = el; longPress.kind = kind; longPress.id = id
+    // Which finger this press belongs to, so the drag it may lift can tell its own pointer's move, release and
+    // cancel from a second finger arriving mid-gesture.
+    longPress.pointerId = event.pointerId
     longPress.timer = setTimeout(onLongPressFire, 500)
 }, true)
 
@@ -1248,6 +1260,16 @@ function betweenNeighbour(startEl, direction, draggedSet){
     return null
 }
 
+// The two neighbours of a gap, as ids: the nearest non-dragged to-do rows above and below it within the same group
+// (a heading boundary ends the group, so a null neighbour means a group EDGE). `before` says which side of `row` the
+// gap is on. One resolution for both gestures - the desktop drop below and the touch drop - so the two can never
+// come to different answers about the same gap.
+function betweenNeighboursAt(row, before, draggedSet){
+    var upperStart = before ? row.previousElementSibling : row
+    var lowerStart = before ? row : row.nextElementSibling
+    return { prevId: betweenNeighbour(upperStart, -1, draggedSet), nextId: betweenNeighbour(lowerStart, +1, draggedSet) }
+}
+
 function onBetweenDragOver(event){
     if (IS_MOBILE || !isPanelDragEvent(event)) return              // never for a drag this panel did not start
     var target = betweenTargetFor(event)
@@ -1272,11 +1294,9 @@ async function onBetweenDrop(event){
     event.preventDefault()
     var ids = (event.dataTransfer && event.dataTransfer.getData('text/plain') || '').split(',').filter(Boolean)
     if (!ids.length) return
-    var draggedSet = new Set(ids)
-    var upperStart = target.before ? target.row.previousElementSibling : target.row
-    var lowerStart = target.before ? target.row : target.row.nextElementSibling
-    var prevId = betweenNeighbour(upperStart, -1, draggedSet)
-    var nextId = betweenNeighbour(lowerStart, +1, draggedSet)
+    var neighbours = betweenNeighboursAt(target.row, target.before, new Set(ids))
+    var prevId = neighbours.prevId
+    var nextId = neighbours.nextId
     selectedRowIDs.clear()
     await webviewApi.postMessage(['todosDroppedBetween', ids, prevId, nextId, target.groupDate, target.groupEndDate])
 }
@@ -1506,6 +1526,335 @@ document.addEventListener('dragover', onDragAutoscroll, false)
 document.addEventListener('drop', endPanelDrag, false)
 document.addEventListener('dragend', endPanelDrag, false)
 document.addEventListener('dragleave', onPanelDragLeave, false)
+
+/** Drag to reschedule on touch (mobile) ************************************************************************************************************
+ * The same two drops the desktop drag offers - into the GAP between two rows, and onto a whole-row [data-drop] target (a group heading including "No  *
+ * Due Date", a calendar day, a week column) - reached by a finger. Android's WebView fires no HTML5 drag at all, so none of the machinery above can   *
+ * be used directly; what IS reused, unchanged, is everything below the input layer: betweenGroupInfo's eligibility, the neighbour walk, the two       *
+ * indicator painters, the edge auto-scroll helper, and both message shapes - so a touch drop and a mouse drop are the same operation, and the host    *
+ * cannot tell them apart.                                                                                                                             *
+ *                                                                                                                                                     *
+ * THE GESTURE. The 500ms long press above already exists and already means "this row, deliberately"; a hold on a to-do row's BODY now LIFTS the row   *
+ * rather than opening its menu, and the menu is handed back by a release that never travelled. So one press does both, nothing new has to be          *
+ * discovered, and the zones that already mean something else - the tick circle (the date picker), the notebook pill (move to notebook), the read-only *
+ * peek's rows - keep their behaviour exactly.                                                                                                          *
+ *                                                                                                                                                     *
+ *   armed (the press)  -> lifted (500ms: the row dims, the banner names it)                                                                            *
+ *   lifted             -> moving  (the finger travels past the slop: the refresh guard is taken, the target is resolved on every move)                 *
+ *   lifted             -> menu    (release without travelling: onTodoContextMenu with the press point, exactly as before)                              *
+ *   moving             -> dropped (release over a gap or a [data-drop]: the message, then the guard release)                                           *
+ *   moving/lifted      -> cancelled (release over nothing, a second finger, a pointercancel, the app hiding, a resize/rotation, the watchdog)          *
+ *                                                                                                                                                     *
+ * WHY A NON-PASSIVE touchmove. Preventing the default on touchmove is the ONE thing that stops Android panning the list under the lifted row; a        *
+ * document-level touchmove listener is passive by default in Chrome, and a passive listener's preventDefault() is ignored with a console warning. It   *
+ * is attached only for the duration of a drag, so ordinary flick-scrolling is never routed through it. This is also the part no synthetic test can     *
+ * settle: whether Android's own gesture arbitration lets the panel keep the finger is the make-or-break device question (MOBILE.md, step 2).          *
+ *                                                                                                                                                     *
+ * WHY THE ROW IS FOUND BY GEOMETRY. The mobile checkbox ring is a ~40px box overhanging a ~26px row, so document.elementFromPoint in the left column   *
+ * returns the NEIGHBOUR row about as often as the right one. The rows' boxes are indexed at lift time (and rebuilt after every auto-scrolled frame,    *
+ * since they move), and the finger's y is searched against that index by the pure window.TouchDrag. The big [data-drop] targets are still resolved     *
+ * from the DOM: a heading is a SIBLING of the rows, sitting in the gap where the index would attribute it to the row above, and a sticky heading       *
+ * floating over the list is genuinely what the finger is on (z-index 2 puts it above any ring overhanging from below).                                 *
+ *                                                                                                                                                     *
+ * THE REFRESH GUARD, AND WHY IT IS TAKEN ON THE FIRST MOVE RATHER THAN AT THE LIFT. A mobile refresh is a full webview RELOAD, which would destroy a   *
+ * drag in progress, so a real drag holds ['dialogGuard', true] and releases it on every exit path. It is deliberately NOT taken at the lift, because   *
+ * the host answers the RELEASE by repainting once (panel.ts: the last guard down runs refreshPanelData) - and on the no-travel path that repaint would *
+ * reload the webview out from under the context menu the release had just opened, breaking a gesture that works today. Taking it at the first move     *
+ * keeps the pair inside the drag proper: a hold-and-release never touches the guard at all. The cost is that a refresh landing in the moment between   *
+ * the lift and the first move ends the drag by reloading - silently, with nothing left holding, which is the harmless direction.                       *
+ ***************************************************************************************************************************************************/
+var TOUCH_DRAG_BAND = 0.5              // mobile: the whole row is live - the top half inserts before it, the bottom half after
+var TOUCH_DRAG_SLOP = 10               // px per axis before a lift becomes a move (the long press's own slop)
+var TOUCH_DRAG_WATCHDOG_MS = 15000     // last resort: no gesture lasts this long, and a stuck one must not hold the guard
+
+var touchDrag = {
+    active: false,          // a row is lifted right now
+    guarded: false,         // ...and the refresh guard has been taken for it (first move onwards)
+    pointerId: null,        // the finger that lifted it; a second one cancels
+    ids: [],                // the payload, as schedulableSelection() resolved it at the lift
+    row: null,              // the lifted row element
+    title: '',              // ...and its title, for the banner
+    index: null,            // [{ el, top, bottom, info }] - the rows' boxes, searched by y
+    moved: false,           // has the finger travelled past the slop yet (a lift that never does opens the menu)
+    startX: 0, startY: 0,
+    x: 0, y: 0,             // the finger's last position, which the auto-scroll re-resolves against
+    target: null,           // the resolved drop, or null for the cancel state
+    autoscroll: 0,          // -1 up / +1 down / 0 not scrolling, traced only when it changes
+    watchdog: null,
+}
+
+// Whether a long press on a to-do row may lift it. The three zones that already mean something else keep their
+// meaning, and the read-only peek is never a reschedule source (its rows are rendered draggable:false for exactly
+// that reason, see renderTodoRowHtml) - all of them fall through to the context menu. A press inside an open
+// overlay never gets this far: the adapter's pointerdown returns on #cockpitOverlay before it arms at all.
+function canLiftRow(target, row){
+    if (!row || !row.dataset || !row.dataset.todoId) return false
+    if (!target || !target.classList) return false
+    if (target.classList.contains('todo-checkbox')) return false             // the tick circle opens the date picker
+    if (target.classList.contains('todo-notebook')) return false             // the pill moves the note
+    if (target.closest && target.closest('.outside-results')) return false   // the read-only peek never drags
+    return true
+}
+
+// A label short enough for one line of the banner.
+function shortLabel(text){
+    var value = String(text || '').replace(/\s+/g, ' ').trim()
+    return value.length > 30 ? value.slice(0, 29) + '…' : value
+}
+
+// What to call a row in the banner: its title, which is the only part of a row the user reads.
+function rowLabel(row){
+    var title = row ? row.querySelector('.todo-title') : null
+    return shortLabel(title ? title.textContent : '')
+}
+
+// What to call a whole-row drop target: a heading says itself ("Today", "No Due Date"), and a calendar day or a
+// week column says the date it carries - the one thing every [data-drop] has.
+function dropTargetLabel(el){
+    return shortLabel(el.tagName === 'H2' ? el.textContent : el.getAttribute('data-drop'))
+}
+
+/** buildRowIndex ***********************************************************************************************************************************
+ * The rows' live boxes, in document order, with the between-eligibility each one already resolves to (null for the No-Due group, for a week card and *
+ * for anything outside the .todos list - see betweenGroupInfo). The read-only peek's rows are left out entirely: they are not a target of any kind.  *
+ * Rebuilt at the lift and after every auto-scrolled frame, because the boxes move while the finger holds still.                                      *
+ ***************************************************************************************************************************************************/
+function buildRowIndex(){
+    var rows = []
+    for (var row of allTodoRows()){
+        if (row.closest && row.closest('.outside-results')) continue
+        var rect = row.getBoundingClientRect()
+        if (!rect.height) continue
+        rows.push({ el: row, top: rect.top, bottom: rect.bottom, info: betweenGroupInfo(row) })
+    }
+    touchDrag.index = rows
+}
+
+/** resolveDragTarget *******************************************************************************************************************************
+ * What the finger is over right now: a whole-row [data-drop] target, an insertion gap, or nothing (the cancel state). Never a silent no-op - the     *
+ * caller paints exactly one of the three, so the gesture always says what a release would do.                                                        *
+ *                                                                                                                                                    *
+ * A gap whose BOTH neighbours are absent in a DATELESS group is deliberately not a target: betweenBounds can form no interval from it (no neighbour  *
+ * to bound it, no group date to anchor it) and the host would write nothing, so painting a line there would promise a move that never happens.        *
+ ***************************************************************************************************************************************************/
+function resolveDragTarget(){
+    var under = document.elementFromPoint(touchDrag.x, touchDrag.y)
+    var drop = (under && under.closest) ? under.closest('[data-drop]') : null
+    if (drop) return { kind: 'drop', el: drop }
+    var entry = window.TouchDrag.rowAtY(touchDrag.index, touchDrag.y)
+    if (!entry || !entry.info) return null
+    var before = window.TouchDrag.bandSide(touchDrag.y - entry.top, entry.bottom - entry.top, TOUCH_DRAG_BAND) === 'before'
+    if (entry.info.groupDate == null){
+        var neighbours = betweenNeighboursAt(entry.el, before, new Set(touchDrag.ids))
+        if (!neighbours.prevId && !neighbours.nextId) return null
+    }
+    return { kind: 'between', row: entry.el, before: before, groupDate: entry.info.groupDate, groupEndDate: entry.info.groupEndDate }
+}
+
+// Whether two resolved targets are the same one, so the banner and the trace only speak when the answer CHANGES.
+function sameDragTarget(a, b){
+    if (!a || !b) return a === b
+    if (a.kind !== b.kind) return false
+    return a.kind === 'between' ? (a.row === b.row && a.before === b.before) : a.el === b.el
+}
+
+// Exactly one of the three paints, through the same painters the desktop drag uses.
+function paintDragTarget(target){
+    if (target && target.kind === 'between'){ paintDropTargetHighlight(null); paintBetweenIndicator(target); return }
+    clearBetweenIndicator()
+    paintDropTargetHighlight(target ? target.el : null)
+}
+
+// The banner over the panel: what is moving, and what a release would do with it. It lives on <body> like the
+// toast and the context menu, so it is created once and reused.
+function showDragBanner(text, cancel){
+    var banner = document.getElementById('cockpitDragBanner')
+    if (!banner){ banner = document.createElement('div'); banner.id = 'cockpitDragBanner'; document.body.appendChild(banner) }
+    banner.textContent = text
+    banner.classList.toggle('-cancel', !!cancel)
+}
+
+function hideDragBanner(){
+    var banner = document.getElementById('cockpitDragBanner')
+    if (banner) banner.remove()
+}
+
+function dragBannerText(target){
+    var moving = 'Moving ' + touchDrag.title
+    if (!target) return moving + ' — release to cancel'
+    if (target.kind === 'drop') return moving + ' — onto ' + dropTargetLabel(target.el)
+    return moving + ' — ' + (target.before ? 'before ' : 'after ') + rowLabel(target.row)
+}
+
+// Re-resolve, repaint, and - only when the answer changed - re-label the banner and trace it. A move fires at the
+// touch's own rate, so tracing every one of them would push the rest of the gesture out of the ring buffer.
+function updateDragTarget(){
+    var target = resolveDragTarget()
+    paintDragTarget(target)
+    if (sameDragTarget(touchDrag.target, target)){ touchDrag.target = target; return }
+    touchDrag.target = target
+    showDragBanner(dragBannerText(target), !target)
+    traceGesture('drag-target:' + (!target ? 'none' : target.kind === 'drop' ? 'drop' : target.before ? 'before' : 'after'))
+}
+
+/** beginTouchDrag **********************************************************************************************************************************
+ * The lift. The selection collapses onto the pressed row and the payload is taken the way the desktop dragstart takes it - schedulableSelection(),   *
+ * the to-dos within the selection - so it is this one row today and inherits a mobile multi-select for free if one is ever built. The row is itself  *
+ * a to-do and is in the selection by the time this reads it, so the payload is never empty.                                                          *
+ ***************************************************************************************************************************************************/
+function beginTouchDrag(){
+    var row = longPress.el
+    selectedRowIDs.clear()
+    selectedRowIDs.add(longPress.id)
+    lastClickedRowID = longPress.id
+    lastSelectionInteractionID = longPress.id
+    paintTodoSelection()
+    touchDrag.active = true
+    touchDrag.guarded = false
+    touchDrag.pointerId = longPress.pointerId
+    touchDrag.ids = schedulableSelection()
+    touchDrag.row = row
+    touchDrag.title = rowLabel(row)
+    touchDrag.moved = false
+    touchDrag.target = null
+    touchDrag.autoscroll = 0
+    touchDrag.startX = touchDrag.x = longPress.x
+    touchDrag.startY = touchDrag.y = longPress.y
+    row.classList.add('-dragging')
+    // Non-passive, or the preventDefault() that stops the pan is ignored (see the banner). Capture, like every
+    // other listener in the touch layer, so nothing on the way up can take the gesture away.
+    document.addEventListener('touchmove', onTouchDragMove, { passive: false, capture: true })
+    // Pointer capture keeps this finger's events coming to us even if a re-render detaches the row under it.
+    try { row.setPointerCapture(touchDrag.pointerId) } catch (error){}
+    buildRowIndex()
+    showDragBanner('Moving ' + touchDrag.title + ' — release outside the list to cancel', false)
+    touchDrag.watchdog = setTimeout(function(){ endTouchDrag('watchdog') }, TOUCH_DRAG_WATCHDOG_MS)
+    traceGesture('drag-arm')
+}
+
+function onTouchDragMove(event){
+    if (!touchDrag.active) return
+    // THE line the whole gesture rests on: it tells Android that this panel, not the scroller, owns the finger.
+    event.preventDefault()
+    if (!event.touches || event.touches.length !== 1){ endTouchDrag('multi-touch'); return }
+    touchDrag.x = event.touches[0].clientX
+    touchDrag.y = event.touches[0].clientY
+    if (!touchDrag.moved){
+        // A hand tremor is not a move: below the slop the gesture is still the deferred context menu, nothing is
+        // painted and the refresh guard is not taken.
+        if (!window.TouchDrag.movedBeyond(touchDrag.x, touchDrag.y, touchDrag.startX, touchDrag.startY, TOUCH_DRAG_SLOP)) return
+        touchDrag.moved = true
+        touchDrag.guarded = true
+        void webviewApi.postMessage(['dialogGuard', true]);
+    }
+    // The shared edge auto-scroll, fed the finger's own coordinates: inside a band at the top or bottom of the
+    // list it scrolls, and re-resolves the target after every frame that moved (the rows travel, the finger does
+    // not). Outside both bands the same call stops it.
+    edgeAutoscrollUpdate(currentTodosEl || document.querySelector('.todos'), touchDrag.x, touchDrag.y, onTouchDragScrolled)
+    var direction = edgeAutoscrollRunning() ? (autoscrollStep < 0 ? -1 : 1) : 0
+    if (direction !== touchDrag.autoscroll){
+        touchDrag.autoscroll = direction
+        if (direction) traceGesture('drag-autoscroll:' + (direction < 0 ? 'up' : 'down'))
+    }
+    updateDragTarget()
+}
+
+// After a scrolled frame the boxes are all in new places, so the index is rebuilt before the target is re-asked.
+function onTouchDragScrolled(){
+    if (!touchDrag.active) return
+    buildRowIndex()
+    updateDragTarget()
+}
+
+/** dropTouchDrag ***********************************************************************************************************************************
+ * The release over a target: the same two messages the desktop drop posts, with the same payloads, resolved from the release point. The message goes *
+ * FIRST and the guard release follows it (endTouchDrag), never the other way round: the host answers the guard coming down with a repaint of its own, *
+ * so releasing first would reload the mobile webview once for the release and again for the write - a visible double flash around every drop.        *
+ ***************************************************************************************************************************************************/
+function dropTouchDrag(){
+    var target = touchDrag.target
+    var ids = touchDrag.ids
+    if (target && target.kind === 'between'){
+        var neighbours = betweenNeighboursAt(target.row, target.before, new Set(ids))
+        selectedRowIDs.clear()
+        traceGesture('drag-drop:between')
+        void webviewApi.postMessage(['todosDroppedBetween', ids, neighbours.prevId, neighbours.nextId, target.groupDate, target.groupEndDate]);
+    } else if (target){
+        selectedRowIDs.clear()
+        traceGesture('drag-drop:date')
+        void webviewApi.postMessage(['todosDropped', ids, target.el.dataset.drop]);
+    }
+    endTouchDrag(target ? 'dropped' : 'no-target')
+}
+
+/** endTouchDrag ************************************************************************************************************************************
+ * THE ONE END, for every way a drag can finish: a drop, a cancel over nothing, a second finger, a pointercancel, the app going to the background, a  *
+ * resize or rotation, and the watchdog. Everything the gesture put up comes down here - the touchmove listener, the scroll loop, both indicator      *
+ * paints, the lifted row's dimming, the pointer capture, the banner and the watchdog itself - and the refresh guard is released LAST.                *
+ *                                                                                                                                                    *
+ * There is exactly one early return, before anything has been taken down, and no return between the teardown and the guard release: a leaked         *
+ * ['dialogGuard', true] freezes every mobile refresh for the life of the webview, and the only defences past this point are a fresh load's           *
+ * resetOverlayGuard and the watchdog above. `guarded` is what keeps the pair balanced - a lift that never travelled never took the guard, so it must  *
+ * not post a release either (an unmatched false would decrement someone else's guard).                                                                *
+ ***************************************************************************************************************************************************/
+function endTouchDrag(reason){
+    if (!touchDrag.active) return
+    touchDrag.active = false
+    if (touchDrag.watchdog){ clearTimeout(touchDrag.watchdog); touchDrag.watchdog = null }
+    document.removeEventListener('touchmove', onTouchDragMove, { passive: false, capture: true })
+    edgeAutoscrollStop()
+    clearBetweenIndicator()
+    paintDropTargetHighlight(null)
+    if (touchDrag.row){
+        touchDrag.row.classList.remove('-dragging')
+        try { touchDrag.row.releasePointerCapture(touchDrag.pointerId) } catch (error){}
+    }
+    hideDragBanner()
+    touchDrag.row = null
+    touchDrag.index = null
+    touchDrag.target = null
+    touchDrag.ids = []
+    touchDrag.autoscroll = 0
+    if (reason !== 'dropped' && reason !== 'menu') traceGesture('drag-cancel:' + reason)
+    var guarded = touchDrag.guarded
+    touchDrag.guarded = false
+    if (guarded) void webviewApi.postMessage(['dialogGuard', false]);
+}
+
+/** The touch drag's own listeners **********************************************************************************************************************
+ * Document-level capture, registered once, exactly like the long-press adapter they extend - and inert until a row is actually lifted (endTouchDrag and *
+ * each handler return at once when no drag is in flight), so on desktop, and for every touch that is not a drag, none of this does anything at all.     *
+ ***************************************************************************************************************************************************/
+// The release: a drag that travelled drops, one that did not hands the context menu back. Either way longPress.fired
+// is still set, so the click the browser synthesises next is swallowed by the adapter's own click listener and the
+// note does not open.
+document.addEventListener('pointerup', function(event){
+    if (!touchDrag.active || event.pointerId !== touchDrag.pointerId) return
+    if (touchDrag.moved){ dropTouchDrag(); return }
+    var ev = synthEvent(longPress.target, touchDrag.x, touchDrag.y, touchDrag.row)
+    var todoID = longPress.id
+    endTouchDrag('menu')
+    traceGesture('menu-on-release')
+    onTodoContextMenu(ev, todoID)
+}, true)
+
+document.addEventListener('pointercancel', function(event){
+    if (touchDrag.active && event.pointerId === touchDrag.pointerId) endTouchDrag('pointercancel')
+}, true)
+
+// A second finger while a row is lifted: this is no longer one drag. The press the long-press adapter has just
+// armed for that finger goes with it, or its own 500ms would lift a row out of the cancelled gesture.
+document.addEventListener('pointerdown', function(event){
+    if (!touchDrag.active || event.pointerId === touchDrag.pointerId) return
+    cancelLongPress()
+    endTouchDrag('second-pointer')
+}, true)
+
+// The app going to the background, and a rotation or resize: the boxes the index was built from are gone or about
+// to be, and no drag survives either. Unconditional calls - endTouchDrag returns at once when nothing is lifted.
+document.addEventListener('visibilitychange', function(){ if (document.hidden) endTouchDrag('hidden') })
+window.addEventListener('resize', function(){ endTouchDrag('resize') })
+window.addEventListener('orientationchange', function(){ endTouchDrag('orientation') })
 
 /** onTodoChecked ***********************************************************************************************************************************
  * When a to-do's checkbox is ticked, this sends the id AND the state the tick just set to the plugin. The browser has already flipped the checkbox   *

@@ -1323,6 +1323,43 @@ table {
     touch-action: pan-y;
 }
 
+/* Drag to reschedule on touch. The insertion line is the desktop one, drawn a pixel thicker: it is being aimed
+ * at with a fingertip rather than a cursor, and it is the only thing that says where the to-do will land. Same
+ * inset box-shadow, so it still adds no height and no row moves under the finger. NOTE what is deliberately NOT
+ * here: a touch-action on .todo. The list must keep scrolling by flick, and the drag stops the pan the only way
+ * that can be turned on and off per gesture - preventDefault() on a non-passive touchmove, attached for the
+ * duration of a lift (see panelWebview.js). A touch-action would apply to every touch on every row, always. */
+.cockpit-mobile .todo.-drop-before {
+    box-shadow: inset 0 4px 0 -1px var(--cockpit-url-color, #2D6BDC);
+}
+
+.cockpit-mobile .todo.-drop-after {
+    box-shadow: inset 0 -4px 0 -1px var(--cockpit-url-color, #2D6BDC);
+}
+
+/* The drag banner: what is moving and what a release would do with it, pinned to the top of the panel so the
+ * hand holding the row never covers it. Appended to <body> like the toast, so a stray re-render cannot destroy
+ * it, and pointer-events:none so it can never take the finger the drag needs. The -cancel state is the honest
+ * answer for a finger over nothing droppable - the release will do nothing - and says so by dropping the accent
+ * border and dimming, rather than by going blank. Created only by the touch drag, so these rules never match on
+ * desktop. */
+#cockpitDragBanner {
+    position: fixed; left: 12px; right: 12px; top: 12px; z-index: 200;
+    padding: 8px 12px; border-radius: 6px;
+    background-color: var(--cockpit-background-color, #1D2024);
+    border: 1px solid var(--cockpit-url-color, #2D6BDC);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    color: var(--cockpit-color, inherit);
+    font-size: 0.9em; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    pointer-events: none;
+}
+
+#cockpitDragBanner.-cancel {
+    border-color: var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    opacity: 0.8;
+}
+
 /* Tap-target enlargement. Every rule below grows only the touch/hit area to ~40px; the visible box and
  * the row layout are unchanged (the checkbox cancels its added padding with an equal negative margin,
  * and the ::after overlays add no layout). */
