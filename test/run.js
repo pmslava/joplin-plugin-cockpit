@@ -2804,7 +2804,10 @@ async function main() {
         assert.ok(/getAttribute\('data-drop-end'\)/.test(webviewSource), 'the slice end day must be read from the heading data-drop-end')
         assert.ok(/parentElement\.classList\.contains\('todos'\)/.test(webviewSource), 'eligibility must be limited to rows that are direct children of .todos (list views only)')
         // Desktop-gated: both drag handlers bail immediately on mobile (drag does not exist there anyway).
-        assert.ok(/function onBetweenDragOver\(event\)\{\s*if \(IS_MOBILE\) return/.test(webviewSource), 'onBetweenDragOver must be desktop-gated (IS_MOBILE)')
+        // ...and the dragover is limited to a drag THIS PANEL started, so a foreign drag (text from another window)
+        // draws no insertion line for a payload that could never be dropped.
+        assert.ok(/function onBetweenDragOver\(event\)\{\s*if \(IS_MOBILE \|\| !isPanelDragEvent\(event\)\) return/.test(webviewSource),
+            'onBetweenDragOver must be desktop-gated (IS_MOBILE) and limited to a drag this panel started')
         assert.ok(/async function onBetweenDrop\(event\)\{\s*if \(IS_MOBILE\) return/.test(webviewSource), 'onBetweenDrop must be desktop-gated (IS_MOBILE)')
         // Stateless delegated wiring that survives every setHtml, and a clean-up on both drop and dragend.
         assert.ok(webviewSource.includes("document.addEventListener('dragover', onBetweenDragOver"), 'the dragover listener must be delegated on the document')
@@ -2839,6 +2842,102 @@ async function main() {
             assert.ok(!/(^|;|\s)(height|border|margin|padding):/.test(body), `${selector} must not change box geometry (no layout shift)`)
             assert.ok(!/@media/.test(body), `${selector} must not use @media`)
         }
+    })
+
+    // ---- WEBVIEW SOURCE SHAPE: drag auto-scroll at the list edges (same reason - the harness cannot run the webview) ----
+    await test('webview drag auto-scroll: the document dragover feeds the helper, and drop/dragend stop it', () => {
+        // Delegated on the document like the between-rows gesture, so one wiring survives every setHtml re-render.
+        assert.ok(webviewSource.includes("document.addEventListener('dragover', onDragAutoscroll"), 'the dragover path must be delegated on the document')
+        // Anchored INSIDE the handler (a lazy [\s\S]*? gap would still pass if the call moved to another function).
+        assert.ok(handlerBody('onDragAutoscroll').includes('edgeAutoscrollUpdate(container, event.clientX, event.clientY, refreshDropTargetsUnderPointer)'),
+            'the dragover handler must feed the container and the full pointer position to the autoscroll helper')
+        // BOTH ends of a drag stop it: a drop and a dragend. Losing either leaves the list scrolling after the gesture.
+        assert.ok(webviewSource.includes("document.addEventListener('drop', endPanelDrag"), 'a drop must end the panel drag, and with it the scrolling')
+        assert.ok(webviewSource.includes("document.addEventListener('dragend', endPanelDrag"), 'a dragend must end the panel drag, and with it the scrolling')
+        // Ending the drag does all four things. Pinned as membership rather than as one regex over the statement
+        // ORDER: the order of these four is not a property anything depends on, and pinning it would fail a harmless
+        // reshuffle. A target the list scrolled out from under a STILL pointer owes no dragleave, so without the two
+        // paint sweeps its highlight would survive the whole gesture.
+        const endBody = handlerBody('endPanelDrag')
+        assert.ok(endBody.includes('panelDragActive = false'), 'ending the drag must drop the ownership flag')
+        assert.ok(endBody.includes('edgeAutoscrollStop()'), 'ending the drag must stop the scroll loop')
+        assert.ok(endBody.includes('paintDropTargetHighlight(null)'), 'ending the drag must clear the whole-row drop highlight')
+        assert.ok(endBody.includes('clearBetweenIndicator()'), 'ending the drag must clear the between-rows insertion line')
+    })
+    await test('webview drag auto-scroll: the watchdog is a safety net, well above any drag event cadence', () => {
+        // It must NOT be the thing keeping the loop alive. A pointer holding still in the band is the gesture this
+        // feature exists for, and that is exactly when events dry up: the HTML drag-and-drop model iterates every
+        // 350ms, and the touch drag this helper is meant to be shared with sends nothing at all for a still finger.
+        // Anything at or below that cadence would deliver "wiggle the mouse to keep it scrolling" instead.
+        const idle = /var AUTOSCROLL_IDLE_MS = (\d+)/.exec(webviewSource)
+        assert.ok(idle, 'the watchdog timeout must be a named, tunable constant')
+        assert.ok(Number(idle[1]) >= 500, `the watchdog must sit well above the 350ms drag cadence, not at ${idle[1]}ms`)
+        assert.ok(/Date\.now\(\) - autoscrollAt > AUTOSCROLL_IDLE_MS\)\{ edgeAutoscrollStop\(\); return \}/.test(webviewSource),
+            'the loop must stop itself when no update has arrived within the watchdog timeout')
+        assert.ok(/cancelAnimationFrame\(autoscrollFrame\)/.test(webviewSource), 'stopping must cancel the pending frame, so no rAF loop survives a drag')
+    })
+    await test('webview drag auto-scroll: desktop-gated, and only for a drag this panel started', () => {
+        assert.ok(/function onDragAutoscroll\(event\)\{\s*if \(IS_MOBILE \|\| !isPanelDragEvent\(event\)\) return/.test(webviewSource),
+            'the dragover handler must bail on mobile (no HTML5 drag there) and on a drag this panel did not start')
+        // Ownership is asked of the DRAG, not only of a flag: the flag's only clears are drop and dragend, and a drag
+        // whose source row a mid-drag re-render detached can end without either reaching the document listener.
+        assert.ok(handlerBody('onTodoDragStart').includes('panelDragActive = true'), "the panel's own dragstart must raise the flag")
+        assert.ok(handlerBody('onTodoDragStart').includes("setData(PANEL_DRAG_TYPE, '1')"), "the panel's own dragstart must stamp the drag with the ownership type")
+        const owner = handlerBody('isPanelDragEvent')
+        assert.ok(owner.includes('if (!panelDragActive) return false'), 'ownership must still require a drag of ours to be in flight')
+        assert.ok(/dataTransfer\.types/.test(owner) && owner.includes('PANEL_DRAG_TYPE'),
+            'ownership must also read the type off the drag itself (types is readable in dragover, getData is not)')
+        assert.ok(handlerBody('onTodoDragEnd').includes('endPanelDrag()'), "the panel's own dragend must end it")
+    })
+    await test('webview drag auto-scroll: the loop stops at the limit and re-resolves the targets under a still pointer', () => {
+        const tick = handlerBody('edgeAutoscrollTick')
+        // The scroll limit: a frame that cannot move the container ends the loop rather than spinning to the dragend.
+        assert.ok(tick.includes('if (el.scrollTop === before){ edgeAutoscrollStop(); return }'), 'a frame that did not move the container must end the loop')
+        // Leaving the band ends it too - update() is the only caller that can see the pointer move out.
+        assert.ok(handlerBody('edgeAutoscrollUpdate').includes('if (!step){ edgeAutoscrollStop(); return }'), 'a pointer outside both bands must stop the loop')
+        // The callback runs with the pointer position, AFTER the next frame is booked: a throwing callback must not be
+        // able to leave the loop dead-but-not-stopped (frame null, everything else still set).
+        assert.ok(tick.includes('autoscrollOnScroll(autoscrollClientX, autoscrollClientY)'), 'the scroll callback must be handed the pointer position')
+        assert.ok(tick.indexOf('requestAnimationFrame(edgeAutoscrollTick)') < tick.indexOf('autoscrollOnScroll(autoscroll'),
+            'the next frame must be booked before the callback runs')
+        assert.ok(/try \{ autoscrollOnScroll/.test(tick), 'a throwing callback must not kill the loop')
+        // Both drop affordances are re-resolved from that position, not just the insertion line: the rows AND the
+        // headings move under a still pointer, and -drop-over is otherwise only ever removed by its own dragleave.
+        const refresh = handlerBody('refreshDropTargetsUnderPointer')
+        assert.ok(refresh.includes('document.elementFromPoint(clientX, clientY)'), 'the refresh must re-ask what is under the pointer')
+        assert.ok(refresh.includes('paintBetweenIndicator('), 'the refresh must re-resolve the between-rows insertion line')
+        assert.ok(refresh.includes('paintDropTargetHighlight('), 'the refresh must re-resolve the whole-row drop highlight')
+    })
+    await test('webview drag auto-scroll: a release while the list is moving is accepted, not refused', () => {
+        // The browser decides whether to fire `drop` at all from the LAST dragover it delivered. While the list
+        // scrolls under a still pointer, the target that has just arrived was never asked - so without a document
+        // level acceptance the release is silently refused and the to-do does not move.
+        const body = handlerBody('onDragAutoscroll')
+        assert.ok(body.includes('if (!edgeAutoscrollRunning()) return'), 'the acceptance must be limited to the frames where the list is actually moving')
+        assert.ok(body.indexOf('event.preventDefault()') > body.indexOf('if (!edgeAutoscrollRunning()) return'),
+            'the dragover must accept the drop while the list is moving')
+        // ...and a release that lands on an inert spot must still not let the browser act on the dragged text.
+        assert.ok(handlerBody('onBetweenDrop').includes('if (panelDragActive) event.preventDefault()'),
+            'a drop with no between-target must suppress the default action for a drag of ours')
+    })
+    await test('webview drag auto-scroll: the band and speed curve are named constants, and overshoot pins the speed', () => {
+        // The brief asked for tunable constants at the top of the helper; inlining any of them back into the maths
+        // would leave the feel unfindable.
+        assert.ok(/var AUTOSCROLL_BAND_RATIO = [\d.]+[\s\S]{0,600}var AUTOSCROLL_BAND_MIN = \d+[\s\S]{0,600}var AUTOSCROLL_BAND_MAX = \d+[\s\S]{0,600}var AUTOSCROLL_SPEED_MIN = \d+[\s\S]{0,600}var AUTOSCROLL_SPEED_MAX = \d+/.test(webviewSource),
+            'the band and speed constants must be declared together at the top of the helper')
+        const step = handlerBody('edgeAutoscrollStep')
+        for (const name of ['AUTOSCROLL_BAND_RATIO', 'AUTOSCROLL_BAND_MIN', 'AUTOSCROLL_BAND_MAX', 'AUTOSCROLL_SPEED_MIN', 'AUTOSCROLL_SPEED_MAX']){
+            assert.ok(step.includes(name), `the step maths must read ${name} rather than inline its value`)
+        }
+        // Overshooting the container vertically means "more, faster", not "stop": .todos has the controls block above
+        // it and the panel's padding below, so shoving the pointer to the very edge lands just outside the box.
+        assert.ok(step.includes('if (clientY < rect.top) return -AUTOSCROLL_SPEED_MAX'), 'a pointer above the container must scroll up at full speed')
+        assert.ok(step.includes('if (clientY > rect.bottom) return AUTOSCROLL_SPEED_MAX'), 'a pointer below the container must scroll down at full speed')
+        // ...but off to the SIDE is someone else's gesture.
+        assert.ok(step.includes('if (clientX < rect.left || clientX > rect.right) return 0'), 'a pointer beside the container must not scroll it')
+        // ...and the band is clamped to HALF the height as well, so in a very short container the top and bottom bands
+        // cannot overlap into a list with no inert middle left at all.
+        assert.ok(step.includes('Math.min(rect.height / 2'), 'the band must be clamped to half the container height, so the two bands never overlap')
     })
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
