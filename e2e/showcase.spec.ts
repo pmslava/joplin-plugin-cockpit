@@ -255,12 +255,13 @@ function buildFixtures(now: Date) {
   /**
    * Late in the capture month, but never ON its last day.
    *
-   * IntervalFormat's "This Month" test is `todoDate < getEndOfThisMonth()`, and that end is
-   * `new Date(y, m + 1, 0)` - MIDNIGHT of the last day. So anything due at a normal hour on the last
-   * day of the month falls straight through to "This Year", and the shot then shows a lone This Year
-   * row sitting under This Month with a date one day later, which reads as broken grouping. A fixed
-   * +21 day offset landed there whenever the capture clock picked the 9th of a 30-day month. The
-   * second-to-last day is inside This Month for every month length.
+   * The last day of the month used to fall through to "This Year": getEndOfThisMonth() returned
+   * MIDNIGHT of the last day, so anything due at a normal hour on it sorted past the boundary and the
+   * shot showed a lone This Year row sitting under This Month with a date one day later. A fixed +21
+   * day offset landed there whenever the capture clock picked the 9th of a 30-day month. That grouping
+   * bug is fixed - since v2.1.3 the helper ends at 23:59:59.999, so the last day belongs to This Month
+   * like any other - but the fixture stays off the boundary anyway: the second-to-last day is inside
+   * This Month for every month length, which keeps the captured layout the same from run to run.
    */
   const lateThisMonth = (hour: number, minute: number) => {
     const date = new Date(now.getFullYear(), now.getMonth() + 1, 0);

@@ -443,19 +443,25 @@ abstract class BaseFormat {
     }
 
     /** getEndOfThisMonth *******************************************************************************************************************************
-     * Gets the date representing the end of the current month. Provided as convenience for use in custom formats                                       *                            *
+     * Gets the date representing the end of the current month - its LAST MILLISECOND, the last day at 23:59:59.999 local, like getEndOfToday does for  *
+     * the day. Returning that day at midnight instead pushed a to-do due later on the last day of the month out of "This Month". Built from local date *
+     * components so it stays correct across daylight saving. Provided as convenience for use in custom formats.                                        *
      ***************************************************************************************************************************************************/
     protected getEndOfThisMonth(){
         var endOfMonth = new Date()
         endOfMonth = new Date(endOfMonth.getFullYear(), endOfMonth.getMonth() + 1, 0);
+        endOfMonth.setHours(23,59,59,999);
         return endOfMonth    
     }
 
     /** getEndOfThisYear ********************************************************************************************************************************
-     * Gets the date representing the end of the current year. Provided as convenience for use in custom formats                                        *                            *
+     * Gets the date representing the end of the current year - its LAST MILLISECOND, December 31st at 23:59:59.999 local, like getEndOfToday does for  *
+     * the day. Returning December 31st at midnight instead pushed a to-do due later on that day into "Future" (issue #3). Built from local date        *
+     * components so it stays correct across daylight saving. Provided as convenience for use in custom formats.                                        *
      ***************************************************************************************************************************************************/
     protected getEndOfThisYear(){
-        var endOfYear = new Date(new Date().getFullYear(), 11, 31) 
+        var endOfYear = new Date(new Date().getFullYear(), 11, 31)
+        endOfYear.setHours(23,59,59,999)
         return endOfYear
     }
 }

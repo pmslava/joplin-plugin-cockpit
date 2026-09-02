@@ -5300,6 +5300,82 @@ async function main() {
             'proxy path for every later call on it:\n        ' + offenders.join('\n        '))
     })
 
+
+    // ------------------------------------------------ last day of a period stays in its own horizon (issue #3)
+    // getEndOfThisMonth/getEndOfThisYear used to return their last day at MIDNIGHT, so a to-do due later on that
+    // day fell past the boundary: the last day of the month landed in "This Year", and December 31st in "Future"
+    // (what Marxsal reported in issue #3). Both helpers now end at 23:59:59.999. The fixtures below are built
+    // from the REAL clock with local Date constructors - the harness has no fake clock - so every expected
+    // heading set is written to hold on every calendar day and time of day the suite could run.
+    const horizonHeadingOf = (html, title) => {
+        // Document order: split on the group headings, then report the heading of the first segment whose BODY
+        // (the part after </h2>, up to the next heading) carries the title.
+        const escaped = String(title).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        for (const segment of html.split(/<h2\b/).slice(1)) {
+            const parts = /^[^>]*>([\s\S]*?)<\/h2>([\s\S]*)$/.exec(segment)
+            if (parts && parts[2].includes(escaped)) return parts[1]
+        }
+        return null
+    }
+    const horizonNow = new Date()
+    const horizonYear = horizonNow.getFullYear()
+    const horizonMonth = horizonNow.getMonth()
+    const horizonDue = (date, title, index) => ({
+        id: String(index).repeat(32).slice(0, 32), title, todo_completed: 0,
+        parent_id: 'n'.repeat(32), user_updated_time: 1, todo_due: date.getTime(),
+    })
+    const horizonState = await run({
+        dataDir: path.join(tmp, 'horizon-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [
+            // 22:00 rather than midnight: the whole point is a to-do due LATE on the last day of its period.
+            horizonDue(new Date(horizonYear, horizonMonth + 1, 0, 22, 0, 0, 0), 'Horizon last day of this month', 1),
+            horizonDue(new Date(horizonYear, 11, 31, 22, 0, 0, 0), 'Horizon December thirty first', 2),
+            horizonDue(new Date(horizonYear, horizonMonth + 1, 1, 12, 0, 0, 0), 'Horizon first day of next month', 3),
+            horizonDue(new Date(horizonYear + 1, 0, 1, 12, 0, 0, 0), 'Horizon January first next year', 4),
+        ],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Horizons', sortOrder: 0 }] }),
+            currentProfileID: 1,
+        },
+    })
+
+    await test('horizons: a to-do due late on the last day of this month never falls past This Month', () => {
+        // The due date is in the current month and never before today, so it can only be Today (today IS the last
+        // day), Tomorrow, This Week (the month ends inside this week) or This Month - never This Year or Future.
+        const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon last day of this month')
+        assert.ok(['Today', 'Tomorrow', 'This Week', 'This Month'].includes(heading),
+            `the last day of the month landed under ${heading}`)
+    })
+
+    await test('horizons: a to-do due late on December 31st never falls into Future (issue #3)', () => {
+        // December 31st of the CURRENT year is never before today and never past the end of this year, so it is
+        // Today/Tomorrow/This Week (only in late December), This Month (only in December) or This Year - the
+        // heading varies with the date, but Future is impossible on every day of every year, leap years included.
+        const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon December thirty first')
+        assert.ok(['Today', 'Tomorrow', 'This Week', 'This Month', 'This Year'].includes(heading),
+            `December 31st landed under ${heading}`)
+    })
+
+    await test('horizons: a to-do due on the first day of next month is never This Month', () => {
+        // It is past the end of this month by construction, so only the horizons BEYOND the month remain: This
+        // Year (next month is still this year), Future (next month is January), or the day-level Tomorrow / This
+        // Week when the month ends within a day or a week of today - whichever weekday the week starts on.
+        const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon first day of next month')
+        assert.ok(['Tomorrow', 'This Week', 'This Year', 'Future'].includes(heading),
+            `the first day of next month landed under ${heading}`)
+    })
+
+    await test('horizons: a to-do due on January 1st of next year is never This Month or This Year', () => {
+        // It is past both this month's and this year's end on every day of the year, leaving only Future and -
+        // in the last days of December, for either week start - the day-level Tomorrow / This Week.
+        const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon January first next year')
+        assert.ok(['Tomorrow', 'This Week', 'Future'].includes(heading),
+            `January 1st of next year landed under ${heading}`)
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)
