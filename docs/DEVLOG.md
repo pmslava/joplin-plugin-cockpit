@@ -641,7 +641,10 @@ interval view no longer consults (`getStartOfTomorrow`, `getEndOfTomorrow`, `get
 period ends — nothing in `src/`, `test/` or `e2e/` called them, and their banners still narrated the 2.1.3 fix
 as if they were live. `getStartOfToday` and `getEndOfToday` stay: `getCompletedBucket` uses both. Three
 now-unused calendar imports went with them (`endOfWeek`, and `startOfDay` / `startOfWeek`, which had been dead
-in this file already). The other formats are untouched.
+in this file already), and `endOfWeek` itself followed in the review round: `getEndOfThisWeek` had been its
+only caller anywhere, so the export left behind in `calendar.ts` was a helper nothing could reach. Its sibling
+`startOfWeek` stays — `buildMonthGrid`, `buildWeek` and `groupTodosByDate` still use it. The other formats are
+untouched.
 
 Testing is in three layers. All eleven of the owner's confirmed calendars are pinned check by check — the
 exact ordered names, every drop day, every slice's last day, and both sides of every boundary. Then an
@@ -652,20 +655,24 @@ before it does not, that each slice owns its own last millisecond and the next o
 the Overdue and No Due Date ends of the chain hold. The 2.1.3 heading checks were kept and their allowed sets
 widened to admit the Next names — and the widening is not an offline computation the reader has to take on
 trust, which is exactly what the 2.1.3 entry above was written to avoid: the four fixture dues and their
-allowed sets are one `horizonFixtureSets` table, a pure check sweeps those same dues over 2024-2032 at three
+allowed sets are one `horizonFixtureSets` table, a pure check sweeps those same dues over 2024-2040 at three
 times of day and both week starts, and it asserts both directions — every name the calendar reaches is in the
 set, and every name in the set is one the calendar reaches, so neither a missing name nor a padded one
 survives. Then the rendered panel: one run puts a to-do on the drop day of every section, so all five headings
 render, and it pins each heading's text and `data-drop`, each heading's `data-drop-end` where the slice spans
 more than a day, and each ROW's label against what the profile's own formatting produces for that section's
-kind — the last of these is what pins feature item 3 end-to-end, where `kindOf` alone could not. The plan is
+kind. `data-drop-end` needed one more turn of the screw, which the second review round caught: the rendered
+check compared it against `dropEndDateFor` — the very function that produced it — so any wrong span agreed
+with itself and passed. It is now pinned to literals instead, against the owner's own last-day column in all
+eleven calendars, against each slice's own end across the whole 2026-2027 sweep, and against the null a
+heading that names no span must return — the last of these is what pins feature item 3 end-to-end, where `kindOf` alone could not. The plan is
 taken on both sides of every run and a match against either is accepted; if midnight actually fell DURING a
 run the fixtures and the render belong to different days, so those checks stand down for that one run rather
 than failing.
 
-Seven mutations verified the checks, each run against the full build and then restored byte-identical; the
-first three were re-run in the review round, against the widened suite, so the counts below are the measured
-ones. Making the week flip unconditional (`weekAbsorbed = false`) failed the three Next Week pins, all three
+Nine mutations verified the checks, each run against the full build and then restored byte-identical; the
+first three were re-run in the first review round, against the widened suite, so the counts below are the
+measured ones. Making the week flip unconditional (`weekAbsorbed = false`) failed the three Next Week pins, all three
 sweep checks and the fixture sweep — seven. Reverting every section's drop day to the last day of its own
 period (the pre-2.2.0 rule) failed all eleven pinned calendars, the names check and the drop-day sweep —
 thirteen. Loosening the absorption test to a strict `<` failed exactly the calendars where a period ends ON
@@ -675,7 +682,12 @@ day again (the regression itself) failed the two new `betweenBounds` checks and 
 swapping the week and month branches of `getFormatTodoString` failed the row-label check alone, one — before
 that check existed it passed the whole suite; returning null from `getHeadingDropEnd` failed the
 heading-attribute check, one; and narrowing one published fixture set by a single name failed the fixture
-sweep on a named December day, one. Nothing else failed in any of the seven.
+sweep on a named December day, one. Then the two of the second round, both aimed at `dropEndDateFor` now that
+it is pinned to literals: returning the section's own drop day instead of its slice end — the mutation that
+reinstates the bottom-edge inversion, and that used to survive the whole suite — failed all eleven pinned
+calendars, the names check and the drop-day sweep, thirteen; returning the day before the slice end failed the
+same thirteen. Narrowing a fixture set was re-run against the widened 2024-2040 bound and still fails on a
+named day. Nothing else failed in any of the nine.
 
 README: the interval paragraph and the drag paragraph now state the two rules, the horizon list names the Next
 three, and the hero shot's spec closes with its own sentence saying the capture has to be midweek and early in
