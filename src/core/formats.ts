@@ -25,6 +25,9 @@ import {
     toISODate,
     weekdayLabels,
 } from "./calendar";
+// The pure interval-horizon math (window.CockpitHorizons is unused in this bundle; the require pulls the same UMD file
+// the Node harness unit-tests, so the panel's grouping and the tests share one implementation). Webpack bundles it in.
+const { horizonPlan, horizonOf, kindOf, dropDateFor } = require("./horizons");
 
 export { escapeHtml } from "./html";
 
@@ -527,61 +530,46 @@ class DateFormat extends BaseFormat {
  ***************************************************************************************************************************************************/
 class IntervalFormat extends BaseFormat {
 
+    /** plan ****************************************************************************************************************************************
+     * The horizon plan for this render: which period sections exist, where each one ends and which day it drops onto. Computed once, lazily, from    *
+     * the clock and the profile's first day of the week - a formatter is built fresh for every render (getFormatter in panel.ts and markdown.ts), so *
+     * one plan per instance IS one plan per render, and every heading, row label and drop target of that render agrees with the others.              *
+     ***********************************************************************************************************************************************/
+    private plan = null
+
+    private getPlan(){
+        if (!this.plan) this.plan = horizonPlan(new Date().getTime(), this.getWeekStartsOn())
+        return this.plan
+    }
+
     protected getFormatHeadingString(todo){
-        var heading = ""
-        var todoDate =  new Date(todo.todo_due)
-        if (todo.todo_due == 0){
-            heading = "No Due Date"
-        } else if (todoDate < this.getStartOfToday()){
-            heading = "Overdue"
-        } else if (todoDate < this.getEndOfToday()){
-            heading = "Today"
-        } else if (todoDate < this.getEndOfTomorrow()){
-            heading = "Tomorrow"
-        } else if (todoDate < this.getEndOfThisWeek()){
-            heading = "This Week"
-        } else if (todoDate < this.getEndOfThisMonth()){
-            heading = "This Month"
-        } else if (todoDate < this.getEndOfThisYear()){
-            heading = "This Year"
-        } else {
-            heading = "Future"
-        }
-        return heading
+        return horizonOf(todo.todo_due, this.getPlan())
     }
 
     protected getFormatTodoString(todo, heading){
+        // How much date a row needs is decided by the KIND of its section, not by its name, so "Next Week" reads like
+        // "This Week" (a weekday) and "Next Month" / "Next Year" like their This counterparts (a date).
         var dueDate = ""
-        if (heading == "Overdue") {
+        var kind = kindOf(heading)
+        if (heading == "Overdue" || heading == "Future") {
             dueDate = `${this.getFullDateString(todo.todo_due)} - `
-        } else if (heading == "Today") {
+        } else if (kind == "day") {
             dueDate = `${this.getTimeString(todo.todo_due)} - `
-        } else if (heading == "Tomorrow") {
-            dueDate = `${this.getTimeString(todo.todo_due)} - `
-        } else if (heading == "This Week") {
+        } else if (kind == "week") {
             dueDate = `${this.getWeekdayString(todo.todo_due)} - `
-        } else if (heading == "This Month"){
-            dueDate =  `${this.getDateString(todo.todo_due)} - `
-        } else if (heading == "This Year"){
+        } else if (kind == "month" || kind == "year") {
             dueDate = `${this.getDateString(todo.todo_due)} - `
-        } else if (heading == "Future") {
-            dueDate = `${this.getFullDateString(todo.todo_due)} - `
         }
         return `${dueDate}${todo.title}`
     }
 
     /** getHeadingDropTarget ************************************************************************************************************************
-     * A to-do dropped onto an interval becomes due on that interval's last day - "due by the end of this week/month/year" - except for Today and     *
-     * Tomorrow, which are days already. Overdue and Future have no meaningful date, so they accept no drops.                                        *
+     * A to-do dropped onto a period heading becomes due on the FIRST day of that group's slice - the day after the previous group's last day - so it *
+     * lands at the front of the stretch of time the heading names rather than at its very end, where a plan is already too late. Today and Tomorrow  *
+     * are their own day. Overdue and Future name no date, so they accept no drops.                                                                   *
      ***********************************************************************************************************************************************/
     protected getHeadingDropTarget(heading, todos){
-        if (heading == "No Due Date") return "clear"
-        if (heading == "Today") return toISODate(new Date())
-        if (heading == "Tomorrow") return toISODate(this.getStartOfTomorrow())
-        if (heading == "This Week") return toISODate(this.getEndOfThisWeek())
-        if (heading == "This Month") return toISODate(this.getEndOfThisMonth())
-        if (heading == "This Year") return toISODate(this.getEndOfThisYear())
-        return null
+        return dropDateFor(heading, this.getPlan())
     }
 }
 

@@ -5301,16 +5301,196 @@ async function main() {
     })
 
 
+    // ============================================================ interval horizons (v2.2.0): the pure plan module
+    // The interval view's named horizons are a shared, deterministic core module (src/core/horizons.js) - the SAME UMD
+    // file the host bundles (require in formats.ts) and the harness unit-tests here - so the owner's acceptance
+    // calendars are pinned once and drive the real panel. A section is the SLICE between the previous section's end and
+    // its own end; a period whose slice would be EMPTY (its end already reached by the section above it) is skipped and
+    // the NEXT period takes its slot - "Next Week" on a Saturday, "Next Month" at a month's end, "Next Year" in
+    // December. A section's drop day is the FIRST day of its slice, not the last day of its period.
+    const Horizons = require('../src/core/horizons.js')
+    const isoDayOf = ts => { const d = new Date(ts); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` }
+
+    // The owner's confirmed calendars, Monday-start weeks, the plan taken at noon. Each row carries the exact ordered
+    // section names, each section's drop day (the first day of its slice) and each section's last day.
+    const ownerHorizons = [
+        { label: 'Sat 2026-09-05', on: [2026, 9, 5],
+          names: ['Today', 'Tomorrow', 'Next Week', 'This Month', 'This Year'],
+          drops: ['2026-09-05', '2026-09-06', '2026-09-07', '2026-09-14', '2026-10-01'],
+          lastDays: ['2026-09-05', '2026-09-06', '2026-09-13', '2026-09-30', '2026-12-31'] },
+        { label: 'Sun 2026-09-06', on: [2026, 9, 6],
+          names: ['Today', 'Tomorrow', 'Next Week', 'This Month', 'This Year'],
+          drops: ['2026-09-06', '2026-09-07', '2026-09-08', '2026-09-14', '2026-10-01'],
+          lastDays: ['2026-09-06', '2026-09-07', '2026-09-13', '2026-09-30', '2026-12-31'] },
+        { label: 'Mon 2026-09-07', on: [2026, 9, 7],
+          names: ['Today', 'Tomorrow', 'This Week', 'This Month', 'This Year'],
+          drops: ['2026-09-07', '2026-09-08', '2026-09-09', '2026-09-14', '2026-10-01'],
+          lastDays: ['2026-09-07', '2026-09-08', '2026-09-13', '2026-09-30', '2026-12-31'] },
+        { label: 'Tue 2026-09-29', on: [2026, 9, 29],
+          names: ['Today', 'Tomorrow', 'This Week', 'Next Month', 'This Year'],
+          drops: ['2026-09-29', '2026-09-30', '2026-10-01', '2026-10-05', '2026-11-01'],
+          lastDays: ['2026-09-29', '2026-09-30', '2026-10-04', '2026-10-31', '2026-12-31'] },
+        { label: 'Thu 2026-10-01', on: [2026, 10, 1],
+          names: ['Today', 'Tomorrow', 'This Week', 'This Month', 'This Year'],
+          drops: ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-05', '2026-11-01'],
+          lastDays: ['2026-10-01', '2026-10-02', '2026-10-04', '2026-10-31', '2026-12-31'] },
+        { label: 'Thu 2026-12-10', on: [2026, 12, 10],
+          names: ['Today', 'Tomorrow', 'This Week', 'This Month', 'Next Year'],
+          drops: ['2026-12-10', '2026-12-11', '2026-12-12', '2026-12-14', '2027-01-01'],
+          lastDays: ['2026-12-10', '2026-12-11', '2026-12-13', '2026-12-31', '2027-12-31'] },
+        { label: 'Sat 2026-08-29', on: [2026, 8, 29],
+          names: ['Today', 'Tomorrow', 'Next Week', 'Next Month', 'This Year'],
+          drops: ['2026-08-29', '2026-08-30', '2026-08-31', '2026-09-07', '2026-10-01'],
+          lastDays: ['2026-08-29', '2026-08-30', '2026-09-06', '2026-09-30', '2026-12-31'] },
+        { label: 'Tue 2026-09-01', on: [2026, 9, 1],
+          names: ['Today', 'Tomorrow', 'This Week', 'This Month', 'This Year'],
+          drops: ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-07', '2026-10-01'],
+          lastDays: ['2026-09-01', '2026-09-02', '2026-09-06', '2026-09-30', '2026-12-31'] },
+        { label: 'Thu 2026-12-31', on: [2026, 12, 31],
+          names: ['Today', 'Tomorrow', 'This Week', 'Next Month', 'Next Year'],
+          drops: ['2026-12-31', '2027-01-01', '2027-01-02', '2027-01-04', '2027-02-01'],
+          lastDays: ['2026-12-31', '2027-01-01', '2027-01-03', '2027-01-31', '2027-12-31'] },
+        { label: 'Fri 2027-01-01', on: [2027, 1, 1],
+          names: ['Today', 'Tomorrow', 'This Week', 'This Month', 'This Year'],
+          drops: ['2027-01-01', '2027-01-02', '2027-01-03', '2027-01-04', '2027-02-01'],
+          lastDays: ['2027-01-01', '2027-01-02', '2027-01-03', '2027-01-31', '2027-12-31'] },
+        { label: 'Wed 2026-09-02', on: [2026, 9, 2],
+          names: ['Today', 'Tomorrow', 'This Week', 'This Month', 'This Year'],
+          drops: ['2026-09-02', '2026-09-03', '2026-09-04', '2026-09-07', '2026-10-01'],
+          lastDays: ['2026-09-02', '2026-09-03', '2026-09-06', '2026-09-30', '2026-12-31'] },
+    ]
+
+    for (const owner of ownerHorizons) {
+        await test(`horizonPlan pinned (${owner.label}): ${owner.names.join(' | ')}`, () => {
+            const plan = Horizons.horizonPlan(atDate(owner.on[0], owner.on[1], owner.on[2], 12, 0).getTime(), 1)
+            assert.deepStrictEqual(plan.sections.map(s => s.name), owner.names, 'the ordered section names')
+            assert.deepStrictEqual(plan.sections.map(s => s.dropDate), owner.drops, 'the drop day of each section')
+            assert.deepStrictEqual(plan.sections.map(s => isoDayOf(s.end)), owner.lastDays, 'the last day of each slice')
+            plan.sections.forEach((section, index) => {
+                // Every end is the last MILLISECOND of its day, and every boundary is exact: that millisecond still
+                // belongs to this slice, the one after it opens the next (or Future past the year slice).
+                const end = new Date(section.end)
+                assert.strictEqual(`${end.getHours()}:${end.getMinutes()}:${end.getSeconds()}.${end.getMilliseconds()}`, '23:59:59.999', `${section.name} must end on the last millisecond of its day`)
+                assert.strictEqual(Horizons.horizonOf(section.end, plan), section.name, `the last millisecond of ${section.name}`)
+                const next = index + 1 < plan.sections.length ? plan.sections[index + 1].name : 'Future'
+                assert.strictEqual(Horizons.horizonOf(section.end + 1, plan), next, `the first millisecond after ${section.name}`)
+            })
+        })
+    }
+
+    await test('horizon names: kindOf drives the row label, dropDateFor the drop - "clear" for No Due Date, none for Overdue/Future', () => {
+        // The row label follows the KIND of the section, which is why Next Week reads like This Week (a weekday) and
+        // Next Month / Next Year like their This counterparts (a date).
+        assert.deepStrictEqual(['Today', 'Tomorrow'].map(Horizons.kindOf), ['day', 'day'])
+        assert.deepStrictEqual(['This Week', 'Next Week'].map(Horizons.kindOf), ['week', 'week'])
+        assert.deepStrictEqual(['This Month', 'Next Month'].map(Horizons.kindOf), ['month', 'month'])
+        assert.deepStrictEqual(['This Year', 'Next Year'].map(Horizons.kindOf), ['year', 'year'])
+        assert.deepStrictEqual(['Overdue', 'Future', 'No Due Date', ''].map(Horizons.kindOf), [null, null, null, null])
+        const plan = Horizons.horizonPlan(atDate(2026, 9, 2, 12, 0).getTime(), 1)
+        assert.strictEqual(Horizons.dropDateFor('No Due Date', plan), 'clear')
+        assert.strictEqual(Horizons.dropDateFor('Overdue', plan), null)
+        assert.strictEqual(Horizons.dropDateFor('Future', plan), null)
+        assert.strictEqual(Horizons.dropDateFor('This Week', plan), '2026-09-04')
+        // A name that is not in THIS plan (that Wednesday has no Next Week) is not a drop target either.
+        assert.strictEqual(Horizons.dropDateFor('Next Week', plan), null)
+    })
+
+    // The exhaustive sweep: every day of 2026 and 2027, at midnight, noon and the last millisecond of the day, for
+    // both week starts - 4380 plans of pure math, no rendering. The three checks below state the invariants the plan
+    // must satisfy on every one of them, so a rule that only happens to look right in September is caught here.
+    const sweepPlans = []
+    for (let day = new Date(2026, 0, 1); day.getFullYear() < 2028; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
+        for (const clock of [[0, 0, 0, 0], [12, 0, 0, 0], [23, 59, 59, 999]]) {
+            for (const weekStartsOn of [0, 1]) {
+                const now = new Date(day.getFullYear(), day.getMonth(), day.getDate(), clock[0], clock[1], clock[2], clock[3])
+                sweepPlans.push({
+                    now, weekStartsOn,
+                    plan: Horizons.horizonPlan(now.getTime(), weekStartsOn),
+                    where: `${now.toDateString()} ${clock[0]}:${String(clock[1]).padStart(2, '0')} weekStartsOn=${weekStartsOn}`,
+                })
+            }
+        }
+    }
+
+    await test('horizonPlan sweep (every day of 2026-2027, both week starts): five ordered slices, and a period is replaced by its Next exactly when its own end is already covered', () => {
+        const endOfDay = date => new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999).getTime()
+        const periods = [['This Week', 'Next Week'], ['This Month', 'Next Month'], ['This Year', 'Next Year']]
+        for (const { now, weekStartsOn, plan, where } of sweepPlans) {
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+            assert.strictEqual(plan.startOfToday, today.getTime(), `start of today at ${where}`)
+            assert.strictEqual(plan.sections.length, 5, `five sections at ${where}`)
+            assert.deepStrictEqual(plan.sections.slice(0, 2).map(s => s.name), ['Today', 'Tomorrow'], `the two day slices at ${where}`)
+            // (a) the ends strictly increase, opened by start-of-today < end-of-today < end-of-tomorrow.
+            assert.ok(plan.sections[0].end > plan.startOfToday, `today must end after it starts at ${where}`)
+            for (let index = 1; index < plan.sections.length; index++) {
+                assert.ok(plan.sections[index].end > plan.sections[index - 1].end,
+                    `${plan.sections[index].name} must end after the slice above it at ${where}`)
+            }
+            // (b) exactly one section per period, and it is the Next one IFF this period's own end is already covered
+            // by the section above - in which case the slice must run strictly past that end, so it cannot be empty.
+            const thisEnds = [
+                endOfDay(new Date(today.getFullYear(), today.getMonth(), today.getDate() - ((today.getDay() - weekStartsOn + 7) % 7) + 6)),
+                endOfDay(new Date(today.getFullYear(), today.getMonth() + 1, 0)),
+                endOfDay(new Date(today.getFullYear(), 11, 31)),
+            ]
+            periods.forEach((pair, offset) => {
+                const section = plan.sections[2 + offset]
+                const absorbed = thisEnds[offset] <= plan.sections[1 + offset].end
+                assert.strictEqual(section.name, absorbed ? pair[1] : pair[0], `the ${pair[0]} slot at ${where}`)
+                if (absorbed) assert.ok(section.end > thisEnds[offset], `${pair[1]} must end past ${pair[0]} at ${where}`)
+                else assert.strictEqual(section.end, thisEnds[offset], `${pair[0]} must end with its own period at ${where}`)
+            })
+        }
+    })
+
+    await test('horizonPlan sweep: every drop day is the FIRST day of its own slice - it buckets there, and the day before it lands in an earlier slice', () => {
+        const dayAt = (iso, hour) => { const p = iso.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2], hour, 0, 0, 0).getTime() }
+        for (const { plan, where } of sweepPlans) {
+            plan.sections.forEach((section, index) => {
+                // (d) the drop day is the calendar day AFTER the previous slice's last day (today, for Today itself).
+                const previous = index ? new Date(plan.sections[index - 1].end) : new Date(plan.startOfToday)
+                const firstDay = index ? new Date(previous.getFullYear(), previous.getMonth(), previous.getDate() + 1) : previous
+                assert.strictEqual(section.dropDate, isoDayOf(firstDay.getTime()), `the drop day of ${section.name} at ${where}`)
+                // (c) a to-do dropped there really lands in this slice, and the day before it does not.
+                assert.strictEqual(Horizons.horizonOf(dayAt(section.dropDate, 9), plan), section.name,
+                    `${section.dropDate} 09:00 must bucket into ${section.name} at ${where}`)
+                if (index) {
+                    const before = Horizons.horizonOf(new Date(previous.getFullYear(), previous.getMonth(), previous.getDate(), 12, 0, 0, 0).getTime(), plan)
+                    const beforeIndex = plan.sections.findIndex(s => s.name === before)
+                    assert.ok(beforeIndex >= 0 && beforeIndex < index,
+                        `the day before ${section.name}'s drop day must be an earlier slice, was ${before} at ${where}`)
+                }
+            })
+        }
+    })
+
+    await test('horizonPlan sweep: each slice owns its own last millisecond, the next owns the one after, and anything before today is Overdue', () => {
+        for (const { plan, where } of sweepPlans) {
+            plan.sections.forEach((section, index) => {
+                // (e) the boundaries are exact in both directions.
+                assert.strictEqual(Horizons.horizonOf(section.end, plan), section.name, `the last millisecond of ${section.name} at ${where}`)
+                const next = index + 1 < plan.sections.length ? plan.sections[index + 1].name : 'Future'
+                assert.strictEqual(Horizons.horizonOf(section.end + 1, plan), next, `the millisecond after ${section.name} at ${where}`)
+            })
+            // (f) the two ends of the chain.
+            assert.strictEqual(Horizons.horizonOf(plan.startOfToday - 1, plan), 'Overdue', `the millisecond before today at ${where}`)
+            assert.strictEqual(Horizons.horizonOf(0, plan), 'No Due Date', `a to-do with no due date at ${where}`)
+        }
+    })
+
     // ------------------------------------------------ last day of a period stays in its own horizon (issue #3)
     // getEndOfThisMonth/getEndOfThisYear used to return their last day at MIDNIGHT, so a to-do due later on that
     // day fell past the boundary: the last day of the month landed in "This Year", and December 31st in "Future"
-    // (what Marxsal reported in issue #3). Both helpers now end at 23:59:59.999. The fixtures below are built
+    // (what Marxsal reported in issue #3). Both periods now end at 23:59:59.999. The fixtures below are built
     // from the REAL clock with local Date constructors - the harness has no fake clock - so every expected
     // heading set is written to hold on every calendar day and time of day the suite could run. That breadth has
     // a cost worth knowing about: in the closing days of a month the two positive checks stop discriminating,
-    // because an earlier horizon (Tomorrow / This Week) then catches the row with or without the fix, and the
+    // because an earlier horizon (Tomorrow / the week slice) then catches the row with or without the fix, and the
     // same goes for the December 31st check in the closing days of December. They are never wrong, only blind on
     // those days - the mutation verification behind them was run mid-month, where both do discriminate.
+    // Since v2.2.0 a period whose slice would be empty is replaced by the NEXT one, so every set below also has to
+    // admit the Next X name wherever the calendar can produce it. The sets are not guessed: they are exactly the
+    // names the pure sweep above reaches for these four fixtures over 2024-2032, both week starts.
     const horizonHeadingOf = (html, title) => {
         // Document order: split on the group headings, then report the heading of the first segment whose BODY
         // (the part after </h2>, up to the next heading) carries the title.
@@ -5348,58 +5528,97 @@ async function main() {
 
     await test('horizons: a to-do due late on the last day of this month never falls past This Month', () => {
         // The due date is in the current month and never before today, so it can only be Today (today IS the last
-        // day), Tomorrow, This Week (the month ends inside this week) or This Month - never This Year or Future.
+        // day), Tomorrow, the week slice (This or Next Week - the month ends inside it) or This Month - never
+        // This Year or Future. It can never be Next Month either: that slot only exists when this month's end is
+        // already covered by the week slice, which is where this fixture then lands.
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon last day of this month')
-        assert.ok(['Today', 'Tomorrow', 'This Week', 'This Month'].includes(heading),
+        assert.ok(['Today', 'Tomorrow', 'This Week', 'Next Week', 'This Month'].includes(heading),
             `the last day of the month landed under ${heading}`)
     })
 
     await test('horizons: a to-do due late on December 31st never falls into Future (issue #3)', () => {
         // December 31st of the CURRENT year is never before today and never past the end of this year, so it is
-        // Today/Tomorrow/This Week (only in late December), This Month (only in December) or This Year - the
-        // heading varies with the date, but Future is impossible on every day of every year, leap years included.
+        // Today/Tomorrow/the week slice (only in late December), This Month (only in December), Next Month (only
+        // at the end of November, whose Next Month slice runs to December 31st) or This Year - the heading varies
+        // with the date, but Future is impossible on every day of every year, leap years included.
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon December thirty first')
-        assert.ok(['Today', 'Tomorrow', 'This Week', 'This Month', 'This Year'].includes(heading),
+        assert.ok(['Today', 'Tomorrow', 'This Week', 'Next Week', 'This Month', 'Next Month', 'This Year'].includes(heading),
             `December 31st landed under ${heading}`)
     })
 
     await test('horizons: a to-do due on the first day of next month is never This Month', () => {
-        // It is past the end of this month by construction, so only the horizons BEYOND the month remain: This
-        // Year (next month is still this year), Future (next month is January), or the day-level Tomorrow / This
-        // Week when the month ends within a day or a week of today - whichever weekday the week starts on.
+        // It is past the end of THIS month by construction, so the "This Month" slot can never hold it. What
+        // remains is Next Month (the slot this month's end gives up when the week slice already covers it), This
+        // Year, Next Year (only in December, where the year slot rolls over), or the day-level Tomorrow / the week
+        // slice when the month ends within a day or a week of today - whichever weekday the week starts on. Future
+        // is now unreachable: in December the year slot is always Next Year, which covers all of next January.
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon first day of next month')
-        assert.ok(['Tomorrow', 'This Week', 'This Year', 'Future'].includes(heading),
+        assert.ok(['Tomorrow', 'This Week', 'Next Week', 'Next Month', 'This Year', 'Next Year'].includes(heading),
             `the first day of next month landed under ${heading}`)
     })
 
     await test('horizons: a to-do due on January 1st of next year is never This Month or This Year', () => {
-        // It is past both this month's and this year's end on every day of the year, leaving only Future and -
-        // in the last days of December, for either week start - the day-level Tomorrow / This Week.
+        // It is past both this month's and this year's end on every day of the year, so neither the "This Month"
+        // nor the "This Year" slot can hold it. What remains is Future, Next Year (December, where the year slot
+        // rolls over and covers the whole of next year), Next Month (the end of November and of December, whose
+        // Next Month slice reaches into January) and - in the last days of December - Tomorrow / the week slice.
         const heading = horizonHeadingOf(horizonState.panelHtml['panel-panel'], 'Horizon January first next year')
-        assert.ok(['Tomorrow', 'This Week', 'Future'].includes(heading),
+        assert.ok(['Tomorrow', 'This Week', 'Next Week', 'Next Month', 'Next Year', 'Future'].includes(heading),
             `January 1st of next year landed under ${heading}`)
     })
 
-    await test('horizons: the This Month and This Year headings still drop onto their own last day', () => {
-        // getHeadingDropTarget passes both widened helpers through toISODate(), which reads only year, month and
-        // day, so ending them at 23:59:59.999 must leave the drop date exactly where it was. Each heading only
-        // renders when its group is non-empty: near a month's end the fixtures move up into Tomorrow/This Week,
-        // and in December nothing can be This Year without also being This Month, so on those days there is
+    await test('horizons: the month and year headings drop onto the FIRST day of their own slice', () => {
+        // Since v2.2.0 a period heading schedules onto the first day of the stretch of time it names, not onto its
+        // last day: dropping on "This Month" means "early next week", not "the 31st". Each heading only renders
+        // when its group is non-empty: near a month's end the fixtures move up into Tomorrow / the week slice, and
+        // in December nothing can be a year slice without also being a month slice, so on those days there is
         // nothing to look at - on the rest of the calendar this pins the claim instead of arguing it.
         const html = horizonState.panelHtml['panel-panel']
-        const pad = value => String(value).padStart(2, '0')
-        const lastOfMonth = new Date(horizonYear, horizonMonth + 1, 0)
+        const plan = Horizons.horizonPlan(Date.now(), Number(baseProfile.weekStartsOn))
         const dropOf = heading => {
             const found = new RegExp(`<h2([^>]*)>${heading}</h2>`).exec(html)
             return found ? (/ data-drop="([^"]*)"/.exec(found[1]) || [])[1] : undefined
         }
-        const monthDrop = dropOf('This Month')
-        if (monthDrop !== undefined) assert.strictEqual(monthDrop,
-            `${lastOfMonth.getFullYear()}-${pad(lastOfMonth.getMonth() + 1)}-${pad(lastOfMonth.getDate())}`,
-            'the This Month heading no longer drops onto the last day of the month')
-        const yearDrop = dropOf('This Year')
-        if (yearDrop !== undefined) assert.strictEqual(yearDrop, `${horizonYear}-12-31`,
-            'the This Year heading no longer drops onto December 31st')
+        for (const section of plan.sections) {
+            const rendered = dropOf(section.name)
+            if (rendered !== undefined) assert.strictEqual(rendered, section.dropDate,
+                `the ${section.name} heading must drop onto the first day of its slice`)
+        }
+    })
+
+    // ------------------------------------------------ the rendered panel agrees with the plan, section by section
+    // The checks above look at four fixtures and can only see the headings those happen to produce. This one puts a
+    // to-do on the drop day of EVERY section of the current plan, so all five period headings render, and pins each
+    // rendered heading's text AND its data-drop against the plan computed here in the test. It is the end-to-end
+    // statement that the panel's grouping, its drop targets and the pure module are one thing. The clock can cross
+    // midnight between building the fixtures and reading the html, so the plan is taken on both sides of the run and
+    // a match against either is accepted.
+    const dropPlanBefore = Horizons.horizonPlan(Date.now(), Number(baseProfile.weekStartsOn))
+    const dropDayNoon = iso => { const parts = iso.split('-').map(Number); return new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0, 0) }
+    const dropState = await run({
+        dataDir: path.join(tmp, 'horizon-drop-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: dropPlanBefore.sections.map((section, index) =>
+            horizonDue(dropDayNoon(section.dropDate), `Horizon slice fixture ${index}`, index + 1)),
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Horizon slices', sortOrder: 0 }] }),
+            currentProfileID: 1,
+        },
+    })
+    const dropPlanAfter = Horizons.horizonPlan(Date.now(), Number(baseProfile.weekStartsOn))
+
+    await test('horizons: every rendered period heading matches the plan - its name and its first-day drop date', () => {
+        const rendered = []
+        for (const segment of dropState.panelHtml['panel-panel'].split(/<h2\b/).slice(1)) {
+            const parts = /^([^>]*)>([\s\S]*?)<\/h2>/.exec(segment)
+            if (parts) rendered.push(`${parts[2]}@${(/ data-drop="([^"]*)"/.exec(parts[1]) || [])[1]}`)
+        }
+        const shapeOf = plan => plan.sections.map(section => `${section.name}@${section.dropDate}`).join(' | ')
+        const actual = rendered.join(' | ')
+        assert.ok(actual === shapeOf(dropPlanBefore) || actual === shapeOf(dropPlanAfter),
+            `the rendered headings were ${actual}, the plan is ${shapeOf(dropPlanBefore)}`)
     })
 
     await fs.remove(tmp)
