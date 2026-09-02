@@ -25,9 +25,22 @@ import { agendaPanel, createNotebook, waitForPanelTodo, PANEL_REFRESH_TIMEOUT } 
  * pointer, and holding the pointer still in the band is the entire gesture. A probe that keeps its own 50ms
  * stream running proves the loop scrolls; only the silent one proves it does not need to be fed.
  *
- * To have anything to scroll, the list must overflow: 60 undated to-dos are seeded through Joplin's own data API
- * (the GUI's "New to-do" costs seconds each, and 60 of them would not fit in a beforeAll), and the suite refuses
- * to start until the panel actually reports scrollHeight > clientHeight.
+ * To have anything to scroll, the list must overflow: 90 undated to-dos are seeded through Joplin's own data API
+ * (the GUI's "New to-do" costs seconds each, and 90 of them would not fit in a beforeAll), and the suite refuses to
+ * start until the panel reports a scroll range wider than the longest coast any case below asks for.
+ *
+ * A small DATED group is seeded alongside them, which is what gives the last case something to arrive AT. The default
+ * profile moves "No Due Date" to the END of the list, so the DATED group is the first one and its heading is what sits
+ * above the fold: the scroll that reaches it runs UPWARDS. The direction is the fixture's, not the report's, and the
+ * gesture is the same either way - a still pointer in a band, and a target the list carries to it.
+ * That last case is the only one that finishes the gesture rather than stopping at the scrolling: it holds the pointer
+ * in the top band until a DATED heading has arrived under it, releases there, and requires the to-do to actually be
+ * rescheduled onto that day - read back from Joplin's own record of the note, and then seen in the panel under that
+ * group's heading.
+ *
+ * What no spec here can prove is the document-level ACCEPTANCE that a release mid-scroll depends on: a dispatched
+ * `drop` event fires whether or not any dragover called preventDefault(), so whether a real browser would have offered
+ * the drop at all is invisible from here. That half rests on the source pin in test/run.js and on a manual in-app drag.
  */
 test.describe('Drag auto-scroll at the list edges (desktop)', () => {
   let joplin: JoplinInstance;
@@ -40,12 +53,24 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
   const API_TOKEN = `cockpit-e2e-${stamp}`;
   const API_PORT = 41198;
 
-  // Enough undated rows that the list overflows any panel height this harness can produce.
-  const ROWS = 60;
+  // Enough undated rows that the list overflows any panel height this harness can produce, by more than the longest
+  // coast any case asks for (see MIN_SCROLL_RANGE).
+  const ROWS = 90;
   const marker = (i: number) => `as-row-${String(i).padStart(2, '0')}-${stamp}`;
   const FIRST = marker(0);
   const LAST = marker(ROWS - 1);
 
+  // ...and a DATED group above them, all due on the SAME day, so exactly one dated heading exists and its data-drop is
+  // unambiguous. Several rows rather than one, so the heading stays under a still pointer for a stretch of frames
+  // while the list is still moving, instead of only once the list has come to rest at the top.
+  const DATED_ROWS = 8;
+  const datedMarker = (i: number) => `as-day-${String(i).padStart(2, '0')}-${stamp}`;
+  const DUE_AT = tomorrowNoon();
+  const DUE_DATE = isoDate(DUE_AT);
+
+  // PANEL_DRAG_TYPE in src/ui/panel/panelWebview.js: the custom type the panel's own dragstart stamps on the drag,
+  // and the thing the dragover handler reads back off dataTransfer.types to recognise a drag of its own.
+  const PANEL_DRAG_TYPE = 'application/x-cockpit-todos';
   // A drag that does not move the list must not move it AT ALL; a few pixels of tolerance only absorbs the
   // sub-pixel scrollTop a fractional device pixel ratio can produce.
   const STILL_TOL = 4;
@@ -56,6 +81,10 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
   // before killing the loop, so a run that coasts past this can only have come from a watchdog well above the
   // drag's own cadence - which is the property the still-pointer gesture depends on.
   const COASTED_MIN = 200;
+  // The scroll range the fixture must have. The silent case claims the WATCHDOG ended its coast, which is only a
+  // distinguishable claim while the list still has somewhere to go: 800ms of watchdog at 60fps x 16 px/frame is about
+  // 770px, so the range has to sit comfortably past that or the bottom of the list could be the real explanation.
+  const MIN_SCROLL_RANGE = 1200;
   // AUTOSCROLL_SPEED_MAX in src/ui/panel/panelWebview.js. The helper moves the container at most once per animation
   // frame, so a phase can never move further than the frames it was given x this - which is what keeps the speed
   // constants honest: a helper scrolling at 200 px/frame passes every direction-only assertion. Two frames of
@@ -63,8 +92,8 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
   const SPEED_MAX = 16;
 
   test.beforeAll(async () => {
-    // Launch + API wait + 60 seeded to-dos + two panel waits + a metrics poll do not fit the shared 240s budget on
-    // a slow machine, and a hook timeout hides which step actually went wrong.
+    // Launch + API wait + ROWS + DATED_ROWS seeded to-dos + three panel waits + a metrics poll do not fit the shared
+    // 240s budget on a slow machine, and a hook timeout hides which step actually went wrong.
     test.setTimeout(420_000);
     joplin = await launchJoplin({
       settings: { 'clipperServer.autoStart': true, 'api.token': API_TOKEN, 'api.port': API_PORT },
@@ -76,8 +105,11 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     // No alarms: the default profile lists undated to-dos (under "No Due Date"), so every seeded row is on
     // screen without a single GUI step per to-do.
     for (let i = 0; i < ROWS; i++) await createTodoViaApi(marker(i), folderId);
+    // The dated group, which the default profile sorts ABOVE the undated one ("No Due Date" is moved to the end).
+    for (let i = 0; i < DATED_ROWS; i++) await createTodoViaApi(datedMarker(i), folderId, DUE_AT);
     await waitForPanelTodo(win, FIRST);
     await waitForPanelTodo(win, LAST);
+    await waitForPanelTodo(win, datedMarker(0));
     // The precondition every measurement below rests on: the list really does overflow its container, by more than
     // the longest single coast any case asks for.
     await expect
@@ -85,7 +117,7 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
         timeout: PANEL_REFRESH_TIMEOUT,
         intervals: [1000, 2000, 4000],
       })
-      .toBeGreaterThan(400);
+      .toBeGreaterThan(MIN_SCROLL_RANGE);
     const fixture = await listMetrics();
     console.log('AUTOSCROLL FIXTURE', JSON.stringify(fixture));
     // ...and it is tall enough that the two edge bands are nowhere near each other, so the MIDDLE case really is
@@ -149,14 +181,37 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     return found.id;
   }
 
-  /** One undated to-do, straight into the notebook. */
-  async function createTodoViaApi(title: string, folderId: string): Promise<void> {
+  /** One to-do, straight into the notebook. `dueMs` (epoch ms) dates it; omitted leaves it undated. */
+  async function createTodoViaApi(title: string, folderId: string, dueMs?: number): Promise<void> {
     const made = await apiRequest('POST', `/notes?token=${API_TOKEN}`, {
       title,
       is_todo: 1,
       parent_id: folderId,
+      ...(dueMs === undefined ? {} : { todo_due: dueMs }),
     });
     if (made.status !== 200) throw new Error(`the data API refused a to-do: ${made.status} ${made.text}`);
+  }
+
+  /** What Joplin itself has stored as a to-do's due datetime (epoch ms; 0 when undated). */
+  async function todoDueById(id: string): Promise<number> {
+    const got = await apiRequest('GET', `/notes/${id}?token=${API_TOKEN}&fields=id,todo_due`);
+    if (got.status !== 200) throw new Error(`the data API refused a note read: ${got.status} ${got.text}`);
+    return Number(JSON.parse(got.text).todo_due || 0);
+  }
+
+  /** Tomorrow at noon, local time - squarely inside the panel's "Tomorrow" group whatever the hour of the run. */
+  function tomorrowNoon(): number {
+    const day = new Date();
+    day.setDate(day.getDate() + 1);
+    day.setHours(12, 0, 0, 0);
+    return day.getTime();
+  }
+
+  /** A local calendar date spelled the way a heading's data-drop spells it: YYYY-MM-DD. */
+  function isoDate(ms: number): string {
+    const day = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`;
   }
 
   /** ------------------------------------------------------------------------------------------
@@ -231,6 +286,9 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
             : Math.round(rect.top + rect.height / 2);
 
       const dt = new DataTransfer();
+      // A foreign drag is not an EMPTY drag: text dragged in from another window carries text/plain. The panel has to
+      // reject it on the ownership type it does not find, not on there being no types at all.
+      if (!o.drag) dt.setData('text/plain', 'text dragged in from another window');
       const out: any = {
         dragStarted: false,
         clientHeight: todos.clientHeight,
@@ -253,7 +311,11 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
         // The plain mousedown a browser always fires before dragstart (it is what selects the row).
         row.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
         row.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
-        out.dragStarted = (dt.getData('text/plain') || '').length > 0;
+        // Both halves of what the panel's dragstart puts on the drag: the id payload a drop reads, and the ownership
+        // type every handler gates on.
+        out.dragStarted =
+          (dt.getData('text/plain') || '').length > 0 &&
+          Array.prototype.indexOf.call(dt.types, o.ownType) !== -1;
       }
 
       for (const phase of o.phases) {
@@ -306,7 +368,154 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
       out.settled = todos.scrollTop;
       out.rerendered = document.querySelector('.todos') !== todos;
       return out;
-    }, { ...opts, marker: FIRST });
+    }, { ...opts, marker: FIRST, ownType: PANEL_DRAG_TYPE });
+  }
+
+  /** What the arrival probe below reports back. */
+  interface Arrival {
+    dragStarted: boolean;
+    draggedId: string;
+    clientHeight: number;
+    maxScroll: number;
+    /** The one pointer position the whole gesture is held at - it is never moved again after the dragstart. */
+    pointer: { x: number; y: number };
+    /** The data-drop under that pointer when the drag began, and the one the release actually landed on. */
+    startDrop: string | null;
+    droppedOn: string | null;
+    from: number;
+    atDrop: number;
+    travelled: number;
+    arrived: boolean;
+    rerendered: boolean;
+  }
+
+  /**
+   * The whole gesture, end to end: grab a row at the BOTTOM of the list, park the pointer in the top band and never
+   * move it again, and let the auto-scroll bring the dated heading up to it - then release there.
+   *
+   * The direction is upwards because the fixture puts it that way: the default profile moves "No Due Date" to the end
+   * of the list, so the dated group is the FIRST one and the heading that has to be reached is above the fold. The
+   * gesture is the same either way - a still pointer in a band, and a target that arrives under it.
+   *
+   * Headings are `position: sticky; top: 0` (panel.css), so the heading of the group being scrolled through is what
+   * sits under a pointer in the top band; arrival is the moment the dated one takes that spot over from "No Due Date".
+   */
+  async function dropOntoDatedHeading(rowMarker: string): Promise<Arrival> {
+    const panel = await agendaPanel(joplin.win);
+    return panel.evaluate(
+      async (o: any) => {
+        const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+        const listEl = () => document.querySelector('.todos') as HTMLElement | null;
+        const todos = listEl();
+        if (!todos) throw new Error('the panel has no .todos container');
+        const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
+        const row = rows.find((r) => (r.textContent || '').includes(o.marker));
+        if (!row) throw new Error('no panel row carrying ' + o.marker);
+
+        // Park the list at its very bottom, which is as far from the dated group as this fixture can put the pointer.
+        todos.scrollTop = todos.scrollHeight;
+        await sleep(150);
+
+        const rect = todos.getBoundingClientRect();
+        const x = Math.round(rect.left + rect.width / 2);
+        const y = Math.round(rect.top + 6); // in the top band, and never moved again
+        const dropUnderPointer = () => {
+          const under = document.elementFromPoint(x, y) as HTMLElement | null;
+          return under && under.closest ? (under.closest('[data-drop]') as HTMLElement | null) : null;
+        };
+
+        const dt = new DataTransfer();
+        const out: any = {
+          dragStarted: false,
+          draggedId: row.dataset.todoId || '',
+          clientHeight: todos.clientHeight,
+          maxScroll: todos.scrollHeight - todos.clientHeight,
+          pointer: { x, y },
+          startDrop: null,
+          droppedOn: null,
+          from: todos.scrollTop,
+          atDrop: todos.scrollTop,
+          travelled: 0,
+          arrived: false,
+          rerendered: false,
+        };
+
+        row.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
+        row.dispatchEvent(new DragEvent('dragstart', { dataTransfer: dt, bubbles: true }));
+        out.dragStarted =
+          (dt.getData('text/plain') || '').length > 0 &&
+          Array.prototype.indexOf.call(dt.types, o.ownType) !== -1;
+
+        const startTarget = dropUnderPointer();
+        out.startDrop = startTarget ? startTarget.getAttribute('data-drop') : null;
+
+        // Feed the drag the way a browser does while the pointer holds perfectly still, and watch for the dated
+        // heading to arrive under it.
+        let target: HTMLElement | null = null;
+        const until = Date.now() + o.ms;
+        while (Date.now() < until) {
+          const under = (document.elementFromPoint(x, y) as HTMLElement) || listEl() || todos;
+          under.dispatchEvent(
+            new DragEvent('dragover', {
+              dataTransfer: dt,
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y,
+            })
+          );
+          const now = dropUnderPointer();
+          if (now && now.getAttribute('data-drop') === o.dueDate) {
+            target = now;
+            break;
+          }
+          await sleep(50);
+        }
+
+        // Read BEFORE the release: a re-render after the drop is the point of the drop, while one during the
+        // journey is what would invalidate the numbers above.
+        out.rerendered = listEl() !== todos;
+        out.atDrop = todos.scrollTop;
+        out.travelled = out.from - out.atDrop;
+        out.arrived = !!target;
+        if (target) {
+          out.droppedOn = target.getAttribute('data-drop');
+          // Released on whatever is genuinely under the still pointer, mid-scroll, exactly as a mouse-up would be.
+          target.dispatchEvent(
+            new DragEvent('drop', {
+              dataTransfer: dt,
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y,
+            })
+          );
+        }
+        // Whatever happened, the gesture ends here: no loop and no flag is left standing. A row the drop's own
+        // re-render has already detached cannot bubble a dragend to the document, so the body stands in for it.
+        (row.isConnected ? row : document.body).dispatchEvent(
+          new DragEvent('dragend', { dataTransfer: dt, bubbles: true })
+        );
+        await sleep(200);
+        return out;
+      },
+      { marker: rowMarker, ownType: PANEL_DRAG_TYPE, dueDate: DUE_DATE, ms: 20_000 }
+    );
+  }
+
+  /** The data-drop of the group heading a to-do row currently sits under, or null when it is not on the panel. */
+  async function panelGroupOf(todoId: string): Promise<string | null> {
+    const panel = await agendaPanel(joplin.win);
+    return panel.evaluate((id: string) => {
+      const row = document.querySelector('.todo[data-todo-id="' + id + '"]');
+      if (!row) return null;
+      let el = row.previousElementSibling;
+      while (el) {
+        if (el.tagName === 'H2') return el.getAttribute('data-drop');
+        el = el.previousElementSibling;
+      }
+      return null;
+    }, todoId);
   }
 
   /** ------------------------------------------------------------------------------------------
@@ -393,6 +602,9 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
       Math.abs(last!.phases[1].delta),
       'after dragend the list must stand still even with the pointer in the band'
     ).toBeLessThanOrEqual(STILL_TOL);
+    expect(last!.phases[0].delta, 'the list must not outrun AUTOSCROLL_SPEED_MAX per frame').toBeLessThanOrEqual(
+      (last!.phases[0].frames + 2) * SPEED_MAX + STILL_TOL
+    );
   });
 
   test('one dragover keeps the list scrolling through a silence, and the watchdog then stops it', async () => {
@@ -426,6 +638,15 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
       Math.abs(last!.phases[1].delta),
       'the loop must have ended itself during the silence, with no drop and no dragend'
     ).toBeLessThanOrEqual(STILL_TOL);
+    // An unbounded coast would let a helper scrolling at 200 px/frame with no watchdog at all pass the floor above.
+    expect(last!.phases[0].delta, 'the list must not outrun AUTOSCROLL_SPEED_MAX per frame').toBeLessThanOrEqual(
+      (last!.phases[0].frames + 2) * SPEED_MAX + STILL_TOL
+    );
+    // ...and it was the WATCHDOG that ended the coast, not the bottom of the list. This is where MIN_SCROLL_RANGE is
+    // cashed: the fixture guarantees more range than the watchdog's own window can ever spend.
+    expect(last!.phases[0].to, 'the coast must have ended with list left to scroll').toBeLessThan(
+      last!.maxScroll - 1
+    );
   });
 
   test('a FOREIGN drag (no dragstart from a row) never scrolls the list', async () => {
@@ -447,5 +668,43 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     expect(Math.abs(result.phases[1].delta), 'the top band is inert for a foreign drag').toBeLessThanOrEqual(
       STILL_TOL
     );
+  });
+
+  test('a to-do released after the auto-scroll is rescheduled onto the group that arrived', async () => {
+    // The only case here that finishes the gesture instead of stopping at the scrolling, and so the only one that
+    // speaks to the second half of the report: not "the list would not move" but "the to-do does not reach the date".
+    // The pointer is placed once, in the top band, and never moved again; the auto-scroll brings a dated heading up
+    // to it; the release happens there, mid-scroll. What must then be true is not a pixel count but a RESCHEDULE.
+    //
+    // Three attempts, each dragging a DIFFERENT undated row from the bottom, because a successful run dates the row
+    // it dragged: a retry with the same one would no longer start where this case needs it to.
+    test.setTimeout(180_000);
+    let last: Arrival | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      last = await dropOntoDatedHeading(marker(ROWS - 1 - attempt));
+      if (last.arrived && !last.rerendered) break;
+    }
+    console.log('ARRIVAL DIAG', JSON.stringify(last));
+    expect(last!.rerendered, 'the reported run must be one no background refresh invalidated').toBe(false);
+    expect(last!.dragStarted, 'the dragstart must have produced a payload and the ownership type').toBe(true);
+    // The target really was out of reach when the gesture began, which is the owner's complaint in one assertion.
+    expect(last!.startDrop, 'the dated heading must not already have been under the pointer').not.toBe(DUE_DATE);
+    expect(last!.arrived, 'the dated heading must have arrived under a pointer that never moved').toBe(true);
+    expect(last!.travelled, 'the list must have carried it a real distance to get there').toBeGreaterThan(MOVED_MIN);
+    expect(last!.droppedOn, 'the release must have landed on the dated heading').toBe(DUE_DATE);
+    // ...and the release DID something: Joplin's own record of the note now carries a due on that day.
+    await expect
+      .poll(async () => isoDate(await todoDueById(last!.draggedId)), {
+        timeout: PANEL_REFRESH_TIMEOUT,
+        intervals: [500, 1000, 2000],
+      })
+      .toBe(DUE_DATE);
+    // ...and the panel has moved the row into that group, under the very heading it was dropped on.
+    await expect
+      .poll(() => panelGroupOf(last!.draggedId), {
+        timeout: PANEL_REFRESH_TIMEOUT,
+        intervals: [500, 1000, 2000],
+      })
+      .toBe(DUE_DATE);
   });
 });
