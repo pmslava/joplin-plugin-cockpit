@@ -38,6 +38,12 @@ import { agendaPanel, createNotebook, waitForPanelTodo, PANEL_REFRESH_TIMEOUT } 
  * rescheduled onto that day - read back from Joplin's own record of the note, and then seen in the panel under that
  * group's heading.
  *
+ * Ownership - the thing that keeps a drag from another window from making the list run away under the cursor - is two
+ * conditions, and there is a case for each: one with no drag of the panel's own in flight (rejected on the FLAG, which
+ * returns before the types are ever read), and one where a drag of ours IS in flight and the dragover carries a foreign
+ * DataTransfer instead (rejected on the ownership TYPE). Only the second reaches that branch, and it carries its own
+ * control phase - the same band, the same instant, the drag's own payload - so its stillness cannot be a dead panel.
+ *
  * What no spec here can prove is the document-level ACCEPTANCE that a release mid-scroll depends on: a dispatched
  * `drop` event fires whether or not any dragover called preventDefault(), so whether a real browser would have offered
  * the drop at all is invisible from here. That half rests on the source pin in test/run.js and on a manual in-app drag.
@@ -239,6 +245,13 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     endDragFirst?: boolean;
     /** 'stream' (default) keeps dispatching dragover; 'once' sends one and goes quiet; 'none' sends nothing. */
     feed?: 'stream' | 'once' | 'none';
+    /**
+     * Which DataTransfer this phase's dragover events carry: the drag's OWN one (default), or a SECOND, foreign one
+     * holding nothing but text/plain. The foreign form is how a drag from another window looks to a panel that
+     * happens to have a drag of its own in flight, and it is the only way to reach the ownership-TYPE half of
+     * isPanelDragEvent: with the flag down the function returns on the flag and never looks at the types at all.
+     */
+    dt?: 'own' | 'foreign';
   }
 
   interface Probe {
@@ -249,13 +262,27 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     /** True when a background refresh replaced the .todos node mid-probe, which invalidates the numbers. */
     rerendered: boolean;
     /** `frames` is the animation frames the phase spanned - the ceiling on how far the loop could have moved. */
-    phases: { at: string; endedFirst: boolean; from: number; to: number; delta: number; frames: number }[];
+    phases: {
+      at: string;
+      dt: string;
+      endedFirst: boolean;
+      from: number;
+      to: number;
+      delta: number;
+      frames: number;
+    }[];
   }
 
   /**
-   * Run one drag probe inside the panel. `drag` false omits the dragstart entirely, which is what a FOREIGN drag
-   * (text from another window) looks like to the panel. Every probe ends its own gesture, so no loop and no flag
-   * is left standing for the next spec.
+   * Run one drag probe inside the panel. Every probe ends its own gesture, so no loop and no flag is left standing
+   * for the next spec.
+   *
+   * Ownership is two conditions, and a probe can put either one of them in the dock:
+   *   `drag: false`          omits the dragstart entirely - no drag of the panel's own is in flight, so the FLAG
+   *                          rejects the events and the ownership type is never even read.
+   *   a phase's `dt: 'foreign'`  keeps the panel's own drag in flight and hands that phase's dragover events a
+   *                          second DataTransfer holding only text/plain - the flag is raised, so it is the TYPE
+   *                          that has to do the rejecting. This is the only way to reach that branch.
    */
   async function probe(opts: {
     drag: boolean;
@@ -286,9 +313,16 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
             : Math.round(rect.top + rect.height / 2);
 
       const dt = new DataTransfer();
-      // A foreign drag is not an EMPTY drag: text dragged in from another window carries text/plain. The panel has to
-      // reject it on the ownership type it does not find, not on there being no types at all.
+      // A foreign drag is not an EMPTY drag: text dragged in from another window carries text/plain. With no
+      // dragstart of ours this probe is rejected by the FLAG - isPanelDragEvent returns on `!panelDragActive` and
+      // never reaches the types - so what the payload holds does not decide the outcome here; it is set so the
+      // fixture is a realistic foreign drag rather than a bare event. The type half is reached by the phases that
+      // ask for `dt: 'foreign'` below, which run while a drag of the panel's own IS in flight.
       if (!o.drag) dt.setData('text/plain', 'text dragged in from another window');
+      // That second, foreign DataTransfer: text/plain and nothing else, so the panel's dragover handler finds the
+      // flag raised and the ownership type absent - the branch no flag-down probe can exercise.
+      const foreignDt = new DataTransfer();
+      foreignDt.setData('text/plain', 'text dragged in from another window');
       const out: any = {
         dragStarted: false,
         clientHeight: todos.clientHeight,
@@ -326,13 +360,14 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
         const from = todos.scrollTop;
         const framesFrom = frames;
         const feed = phase.feed || 'stream';
+        const phaseDt = phase.dt === 'foreign' ? foreignDt : dt;
         // Dispatched on whatever is genuinely under the point, so the handler resolves the same scroll container
         // from event.target that a real dragover would.
         const dragover = () => {
           const under = (document.elementFromPoint(x, y) as HTMLElement) || todos;
           under.dispatchEvent(
             new DragEvent('dragover', {
-              dataTransfer: dt,
+              dataTransfer: phaseDt,
               bubbles: true,
               cancelable: true,
               clientX: x,
@@ -353,6 +388,7 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
         const to = todos.scrollTop;
         out.phases.push({
           at: phase.at,
+          dt: phase.dt || 'own',
           endedFirst: !!phase.endDragFirst,
           from,
           to,
@@ -369,6 +405,24 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
       out.rerendered = document.querySelector('.todos') !== todos;
       return out;
     }, { ...opts, marker: FIRST, ownType: PANEL_DRAG_TYPE });
+  }
+
+  /**
+   * One probe run the panel did not invalidate under it, for the cases whose claim is a NEGATIVE (the list did not
+   * move). Those cannot be wrapped in an `expect.poll`: polling a negative retries until a run happens to hold
+   * still, which is the very failure they exist to catch. But a background refresh that replaces `.todos` mid-probe
+   * leaves the numbers measured on a detached node, and reporting one of those is a failure with nothing behind it.
+   * So the run is repeated up to `tries` times, discarding only the invalidated ones, and the FIRST valid run is
+   * what gets asserted on - it is never chosen for what it measured. When every attempt is invalidated the last one
+   * is returned with its `rerendered` still true, so the caller's own assertion says so out loud.
+   */
+  async function validProbe(
+    opts: { drag: boolean; preScroll: 'top' | 'middle'; phases: Phase[] },
+    tries = 3
+  ): Promise<Probe> {
+    let result = await probe(opts);
+    for (let attempt = 1; attempt < tries && result.rerendered; attempt++) result = await probe(opts);
+    return result;
   }
 
   /** What the arrival probe below reports back. */
@@ -546,9 +600,10 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
   });
 
   test('a drag held in the MIDDLE of the list does not scroll it', async () => {
-    // Measured ONCE on purpose: expect.poll would retry until a run happened to hold still, which is exactly
-    // the failure this case exists to catch.
-    const result = await probe({ drag: true, preScroll: 'middle', phases: [{ at: 'middle', ms: 400 }] });
+    // Never polled on the measurement: expect.poll would retry until a run happened to hold still, which is exactly
+    // the failure this case exists to catch. A run the panel re-rendered under is discarded all the same - its
+    // numbers came off a detached node - and the first valid run is the one asserted on, chosen before it is read.
+    const result = await validProbe({ drag: true, preScroll: 'middle', phases: [{ at: 'middle', ms: 400 }] });
     console.log('MIDDLE DIAG', JSON.stringify(result));
     expect(result.rerendered, 'a background refresh mid-probe would invalidate the numbers').toBe(false);
     expect(result.dragStarted).toBe(true);
@@ -649,9 +704,13 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     );
   });
 
-  test('a FOREIGN drag (no dragstart from a row) never scrolls the list', async () => {
-    // Measured once, for the same reason as the middle case: a retried negative proves nothing.
-    const result = await probe({
+  test('a FOREIGN drag with no drag of ours in flight never scrolls the list', async () => {
+    // Never polled on the measurement, for the same reason as the middle case: a retried negative proves nothing.
+    //
+    // What this case proves is the FLAG half of the gate: no dragstart of the panel's own has run, so
+    // panelDragActive is false and isPanelDragEvent returns on that first line without ever reading the drag's
+    // types. It cannot speak for the ownership TYPE - the case below is the one that reaches that branch.
+    const result = await validProbe({
       drag: false,
       preScroll: 'middle',
       phases: [
@@ -668,6 +727,41 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     expect(Math.abs(result.phases[1].delta), 'the top band is inert for a foreign drag').toBeLessThanOrEqual(
       STILL_TOL
     );
+  });
+
+  test('a foreign drag is refused on the ownership TYPE while a drag of ours is in flight', async () => {
+    // The branch the case above cannot reach. Ownership is two things - the in-flight flag AND the custom type the
+    // panel's own dragstart stamps on the drag - and the flag exists precisely because it can go stale: a drag whose
+    // source row a mid-drag re-render detached can end without a dragend reaching the document, leaving the flag
+    // raised for whatever drag comes next. The type is what covers that, and it is only ever consulted with the flag
+    // already up.
+    //
+    // So: a real dragstart from a row (the flag goes up), and then a dragover stream in the bottom band carrying a
+    // SECOND DataTransfer that holds nothing but text/plain. The list must not move.
+    //
+    // The second phase is the control, at the same point in the same band with the drag's OWN payload: it proves the
+    // drag really was live and the band really was live throughout, so the first phase's stillness can only be the
+    // type check. It runs second on purpose - the foreign phase arms no loop, so there is no coast to carry into it,
+    // whereas the reverse order would need the loop to be stopped in between.
+    const result = await validProbe({
+      drag: true,
+      preScroll: 'middle',
+      phases: [
+        { at: 'bottom', ms: 500, dt: 'foreign' },
+        { at: 'bottom', ms: 600 },
+      ],
+    });
+    console.log('FOREIGN-TYPE DIAG', JSON.stringify(result));
+    expect(result.rerendered, 'a background refresh mid-probe would invalidate the numbers').toBe(false);
+    expect(result.dragStarted, 'a drag of ours must have been in flight, flag and all').toBe(true);
+    expect(
+      Math.abs(result.phases[0].delta),
+      'a dragover without the ownership type must not scroll the list, even with our flag raised'
+    ).toBeLessThanOrEqual(STILL_TOL);
+    expect(
+      result.phases[1].delta,
+      'the same band with the drag OWN payload must scroll, or the phase above proved nothing'
+    ).toBeGreaterThan(MOVED_MIN);
   });
 
   test('a to-do released after the auto-scroll is rescheduled onto the group that arrived', async () => {
