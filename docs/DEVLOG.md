@@ -698,23 +698,43 @@ edge and above it, −2 just inside the band's inner edge, 0 through the middle 
 50px container, where the half-height clamp bites — an exactly inert midpoint with the two bands touching but not
 overlapping.
 
-`e2e/drag-autoscroll.spec.ts` is new: six cases driving the real handlers with the HTML5 sequence a browser
+`e2e/drag-autoscroll.spec.ts` is new: seven cases driving the real handlers with the HTML5 sequence a browser
 fires, measuring `.todos.scrollTop` around each phase — the bottom band scrolls down, the middle is inert, the
 top band scrolls up, a `dragend` stops the scrolling while the pointer stays in the band and the events keep
-arriving (so only the drag's end can explain it), and a foreign drag with no `dragstart` moves nothing. The sixth
-is the one that matters most, and it is there because the first draft of this suite could not have failed for the
-assumption the feature rested on: every case drove its own 50ms `dragover` stream, a cadence no real drag
-produces. That case sends a SINGLE `dragover` and then goes quiet for 1200ms, and requires the list to have
-coasted more than 200px — more than a 150ms watchdog could ever have contributed — before a second, equally
-silent phase requires it to have stopped, with no `drop` and no `dragend` anywhere in sight. The three positive
-cases also bound the distance from above, at the animation frames the phase actually spanned × 16 px, so a
-helper with the wrong speed constants can no longer pass a direction-only assertion; and every polled case now
+arriving (so only the drag's end can explain it), and a foreign drag with no `dragstart` moves nothing (carrying
+`text/plain`, as a real one does, so it is the ownership type it fails on and not the absence of any type at all).
+The silent case is there because the first draft of this suite could not have failed for the assumption the
+feature rested on: every case drove its own 50ms `dragover` stream, a cadence no real drag produces. That case
+sends a SINGLE `dragover` and then goes quiet for 1200ms, and requires the list to have coasted more than 200px
+— more than a 150ms watchdog could ever have contributed — before a second, equally silent phase requires it to
+have stopped, with no `drop` and no `dragend` anywhere in sight; and it requires the coast to have ended with
+list still left to scroll, so the claim in its name is the watchdog and not the bottom of the list. All four
+scrolling cases bound the distance from above as well, at the animation frames the phase actually spanned ×
+16 px, so a helper with the wrong speed constants can no longer pass a direction-only assertion — an unbounded
+floor would have let a helper scrolling at 200 px/frame with no watchdog at all through. Every polled case
 retries a run whose `.todos` was replaced mid-probe rather than reporting its numbers. The whole timed sequence
 runs inside one `frame.evaluate`, because a dragover dispatched per tick over CDP would put the round-trip into
-the very interval being measured. To have something to scroll, 60 undated to-dos are seeded through Joplin's data
-API rather than the GUI (60 × "New to-do" would not fit in a `beforeAll`), and the suite refuses to start until
-the panel itself reports more than 400px of scroll and a container taller than two bands. The two negative cases
-are measured ONCE rather than polled: an `expect.poll` around a negative retries until a run happens to hold
-still, which is the failure they exist to catch.
+the very interval being measured.
 
-Suite: 307 harness checks (six new), all passing. e2e: 6 new tests, not run in this pass.
+The seventh case is the only one that finishes the gesture instead of stopping at the scrolling, and so the only
+one that speaks to the second half of the report — not "the list would not move" but "the to-do does not reach
+the date". A row is grabbed at the bottom of the list, the pointer is placed once in the top band and never moved
+again, the auto-scroll carries a DATED heading up to it, and the release happens there, mid-scroll; what must
+then be true is not a pixel count but a reschedule, read back from Joplin's own record of the note and then seen
+in the panel under that heading. It needed a fixture change to be possible at all: every seeded to-do had been
+undated, and the one heading that produced was "No Due Date", whose `data-drop` is `clear` — excluded from
+between-drops and not a date to arrive at. A small dated group is now seeded alongside them through the same data
+API, and since the default profile moves "No Due Date" to the end of the list, that group is the first one and
+its heading is what sits above the fold: the journey runs upwards. What the case cannot prove is the document-
+level ACCEPTANCE the release depends on — a dispatched `drop` fires whether or not any `dragover` called
+`preventDefault()`, so that half still rests on the source pin and on a manual in-app drag.
+
+To have something to scroll, 90 undated to-dos plus that dated group are seeded through Joplin's data API rather
+than the GUI (90 × "New to-do" would not fit in a `beforeAll`), and the suite refuses to start until the panel
+itself reports more than 1200px of scroll and a container taller than two bands. The range grew with the
+watchdog's own reach: 800ms at 60fps × 16 px/frame is about 770px, and the silent case's "the watchdog stopped
+it" is only a distinguishable claim while the list still has somewhere to go. The two negative cases are measured
+ONCE rather than polled: an `expect.poll` around a negative retries until a run happens to hold still, which is
+the failure they exist to catch.
+
+Suite: 307 harness checks (six new), all passing. e2e: 7 new tests, not run in this pass.
