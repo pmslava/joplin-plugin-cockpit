@@ -938,3 +938,134 @@ alternative failing, and then the split passing. The merge round before it ran t
 `drag-autoscroll`, `multi-drag`, `selection-crossing` and `panel-todos`, the four that touch the drag paths the
 merge rewired — and this round re-ran `drag-autoscroll` alone, since nothing outside it moved; the full suite is
 the verifier's run, not this one's.
+
+## 2026-09-03 — v2.3.0: drag to reschedule on mobile
+
+The one thing the mobile panel could not do that the desktop one could. Rescheduling on touch has been
+possible since the mobile phase — a long press opens the to-do menu, "Move to date…" opens the alarm
+overlay — but that is the *precise* route, three taps deep, and the desktop's own gesture (pick a to-do
+up, put it where it belongs) had no equivalent. MOBILE.md had carried "full touch drag-to-reschedule"
+as optional work since the phase began. This makes it real, and the whole feature is an INPUT layer:
+everything under it — `betweenGroupInfo`'s eligibility, the neighbour walk, the two indicator painters,
+the edge auto-scroll helper from 2.2.1, and both message shapes — is the desktop drag's own machinery,
+reused unchanged, so the host cannot tell a finger from a mouse and `panel.ts` gained exactly one line
+(the new module's `addScript`).
+
+**Four decisions, and what each one turned down.**
+
+*Targets: the gaps AND every existing `[data-drop]`.* The alternative was gaps only, on the argument
+that between-drops are the interesting half. Rejected because the headings are the coarse, forgiving
+target a finger actually wants — "sometime tomorrow" is most of what rescheduling means — and because
+they already exist in the markup with the highlight already written. So a touch drop reaches everything
+a mouse drop reaches: the gaps, the group headings including No Due Date, the calendar days and the
+week columns.
+
+*Gesture: the long press already there.* The alternative was a per-row drag handle — a grip column on
+every row, unmissable, immune to Android's gesture arbitration. Rejected because it is permanent chrome
+on every row of a list whose whole point is density, for a gesture that should be discoverable by
+holding, and because the 500 ms press is already the panel's "this row, deliberately" on mobile. It is
+kept, explicitly, as the documented fallback: if the device round shows Android taking the gesture, the
+handle is what ships instead. The press is now *speculative*: it lifts the row, and a release that
+never travelled hands the context menu back exactly as before, so nothing was taken away to add this.
+
+*Payload: `schedulableSelection()` after collapsing onto the dragged row.* Which is `[thatOneRow]`
+today — mobile has no multi-select — but it is the same call the desktop `dragstart` makes, so a mobile
+multi-select would inherit dragging for free rather than needing this path rewritten.
+
+*Feedback: the lifted row, one indicator, and a banner. No ghost clone.* A cloned row under the finger
+is a second thing to keep in sync with the gesture and says nothing the insertion line does not already
+say; the banner says it in words instead — "before X", "after X", "onto Today", "release to cancel" —
+and it is never silent: exactly one of the three states is painted at every moment, so a finger over
+nothing droppable is *told* so rather than left to guess.
+
+**The hazards, which is where the work actually was.**
+
+*The passive-listener trap.* `preventDefault()` on a `touchmove` is the only thing that stops Android
+panning the list under the lifted row — and a document-level `touchmove` listener is passive by default
+in Chrome, where `preventDefault()` does nothing at all and merely logs. So the drag's listener is
+registered `{ passive: false, capture: true }` and removed with the same options; a mismatch there
+would leave a listener cancelling every touchmove for ever, which is the list's scrolling gone for the
+life of the webview. What is deliberately NOT used is `touch-action` on `.todo`: it would apply to
+every touch on every row, always, and the rows must still flick-scroll. This is also the one thing no
+test here can settle — whether Android's compositor honours the cancel rather than starting a fling is
+a device fact, and it is the make-or-break step of the Pixel round.
+
+*The checkbox ring overhangs its own row.* The mobile tap-target rules grow the 18 px ring to a 40 px
+content box and cancel the growth with an equal negative margin, so the box sticks out of a ~26 px row
+without moving anything on screen. `elementFromPoint` anywhere in the left column therefore returns the
+NEIGHBOUR row about as often as the right one — a gesture that would have rescheduled the wrong to-do
+roughly half the time it was aimed near a circle. Rows are found geometrically instead: an index of the
+rows' boxes, built at the lift and rebuilt after every auto-scrolled frame, searched by y. That search
+is the part that would be wrong on a device and invisible in review, so it lives in a pure module
+(`src/ui/panel/touchDrag.js`, `window.TouchDrag`, the `between.js` pattern) the harness requires
+directly. The big `[data-drop]` targets are still asked of the DOM, and asked FIRST, for a reason that
+took a second look to see: a heading is a *sibling* of the rows, so it sits in the very gap the row
+index would attribute to the row above it — resolve the gaps first and a drop on "Tomorrow" becomes a
+between-drop under the last Overdue row.
+
+*The guard, and where it is taken.* Every in-panel overlay brackets itself with `['dialogGuard', true/
+false]`, and a leaked `true` freezes every mobile refresh for the life of the webview. A drag needs
+that guard — a mobile refresh is a full webview reload, which would destroy a drag in progress — so
+there is exactly ONE end, `endTouchDrag(reason)`, that every exit calls: a drop, a release over
+nothing, a second finger, a `pointercancel`, `visibilitychange`, a resize, an orientation change and a
+15 s watchdog. It has a single `return`, the not-active guard on its first line, which is what makes
+"every exit releases the guard" a property of the shape rather than of a reviewer's attention.
+
+The one deviation from the approved design is *when* the guard is taken: on the first MOVE, not at the
+lift. The host answers the last guard coming down by repainting (`panel.ts`'s `dialogGuard` branch runs
+`refreshPanelData`), and a mobile repaint is a webview reload — so on the no-travel path the release
+would have reloaded the panel out from under the very context menu it had just opened, breaking a
+gesture that works today. Taking it on the first move keeps the pair strictly inside the drag proper: a
+hold-and-release never touches the guard at all. The price is that a refresh landing in the gap between
+the lift and the first move ends the drag by reloading — nothing is held, so that is the harmless
+direction. The drop message is posted BEFORE the release, for the same repaint reason in reverse:
+guard-first would reload once for the release and again for the write.
+
+*The gap that must not be offered.* Both neighbours absent in a dateless group is the one gap
+`betweenBounds` returns null for — nothing bounds the interval, no group date anchors it — so the host
+would write nothing. It is not painted and not droppable, rather than a line that promises a move that
+never happens.
+
+**The trace had to be fixed first**, as its own commit, and the reason is a small lesson: it wrote only
+into the search suggestion list's hint line, and every gesture on a to-do row happens with that list
+closed. The one diagnostic built for exactly this kind of device question was blind to the gesture it
+was needed for. It now falls back to the toast in a sticky mode when there is no hint line, the ring
+buffer holds 10 rather than 6 (a drag arms, retargets, scrolls and drops), and the drag speaks in
+`drag-arm`, `drag-target:before|after|drop|none`, `drag-autoscroll:up|down`, `drag-drop:between|date`,
+`drag-cancel:<reason>` and `menu-on-release` — target and scroll traced on a CHANGE only, or one move
+would flood the buffer it is meant to fill.
+
+**Tests.** The pure module is driven directly: the midline (which goes *before*, so the split is total),
+a zero-height row, the gap that belongs to the row above, both ends of the list, an empty index, and the
+binary search compared against a linear scan at every pixel of a sixty-row list. The gesture is webview
+source this harness renders but never executes, so its load-bearing shapes are pinned — and four of them
+are proved by mutation rather than asserted: adding a second `return` to `endTouchDrag` before the guard
+release fails "endTouchDrag is ONE end that cannot return before releasing the refresh guard"; making the
+`touchmove` listener passive fails "the touchmove listener is NON-PASSIVE"; moving the guard release
+above the drop message fails "the drop message is posted BEFORE the guard release"; and letting the arm
+path accept a `.todo-checkbox` press fails "the lift refuses the tick circle, the notebook pill and the
+read-only peek". Each fails exactly one check, with the message that names it.
+
+`e2e/mobile-drag.spec.ts` runs the MOBILE panel under the desktop app — `forceMobilePanel` injects the
+`#cockpitPlatform` marker onto `<body>` (so it survives every `setHtml`) and re-runs the panel's own
+`applyPlatformClass`, which is the whole switch, no code path faked — and drives it with REAL CDP touch
+(`Input.dispatchTouchEvent` on a session of its own), never synthetic `PointerEvent`s: only the
+browser's own input layer produces the compatibility mouse events, the synthetic click the swallower has
+to eat, and a pan the drag has to stop. A third helper wraps `webviewApi.postMessage` and records what
+the panel posted, which is what makes the negatives real — "nothing was written" is otherwise
+indistinguishable from "the write has not landed yet", and the guard pair is invisible from outside the
+webview entirely, since the desktop host consults the guard only when `mobile`. Ten cases: a gap drop
+read back from Joplin's own record, the two halves of ONE row resolving to two different gaps, a dated
+heading that keeps the time of day, the No Due Date heading that clears it, the menu a release without
+travel hands back (with the note not opening behind it), a 300 ms press that pans the list and writes
+nothing, a tap that opens the note, the ring's two gestures, a peek row that never lifts but still gets
+its menu, and a cancel over the header whose balanced guard pair is the leak check.
+
+**The Pixel round** is step 18 of MOBILE.md's checklist, eleven sub-steps with the trace ON, and 18b is
+the one that decides the design: hold, then move without lifting — if the list scrolls under the finger,
+or the trace shows `drag-cancel:pointercancel`, Android's gesture arbitration won and the drag-handle
+fallback is what ships.
+
+Suite: 347 harness checks, all passing (329 before this, plus 18: five driving the pure module, twelve
+pinning the gesture's shape and the CSS, one on the module's registration). Playwright:
+`e2e/mobile-drag.spec.ts` is ten new tests, not run in this pass — the verifier's.

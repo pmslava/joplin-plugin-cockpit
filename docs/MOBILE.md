@@ -132,8 +132,11 @@ All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click
 - **Long-press context menus**: a Pointer Events adapter (500 ms; cancelled by >10 px move, pointer
   up/cancel, or a list scroll) synthesises the three desktop context-menu handlers (to-do row, note
   row, group heading). The trailing synthetic click is swallowed so tap-to-open does not also fire.
+  Since 2.3.0 one of those four presses is answered differently: a hold on a to-do row's BODY lifts the
+  row into the touch drag (§7), and the menu is handed back by a release that never travelled.
 - **Reschedule on touch**: a mobile-only "Move to date…" to-do menu entry (and a checkbox long-press)
-  opens the in-panel alarm overlay (§1a) as the date picker.
+  opens the in-panel alarm overlay (§1a) as the date picker — still the precise route, and now
+  alongside the drag (§7).
 - **Sync status without hover**: long-pressing the sync button shows its tooltip
   (last-sync time / duration / errors) as a transient bottom toast.
 - **Tap targets**: ~40 px hit areas via `::after` overlays and stacked-row `min-height`, with the
@@ -307,11 +310,83 @@ byte-identical.
   `inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"` so
   mobile autocorrect/autocaps cannot mangle the ISO strings; primary input remains the tap pickers.
 
+### 7. Drag to reschedule on touch (`panelWebview.js`, `touchDrag.js`, `panel.css`)
+
+Shipped in 2.3.0, and the one mobile feature whose make-or-break question is a **device** question
+(step 18b below). A 500 ms press on a to-do row's BODY lifts the row; moving resolves a drop target on
+every move; releasing drops it. Everything below the input layer is the desktop drag's own machinery —
+`betweenGroupInfo`'s eligibility, the neighbour walk, `paintBetweenIndicator` /
+`paintDropTargetHighlight`, the edge auto-scroll helper, and both message shapes
+(`['todosDroppedBetween', ids, prevId, nextId, groupDate, groupEndDate]` and
+`['todosDropped', ids, target]`) — so the host cannot tell a finger from a mouse and there are **no host
+changes** beyond loading the new module.
+
+**The state machine**, all of it in `panelWebview.js`:
+
+| from | on | to | what happens |
+| --- | --- | --- | --- |
+| armed (the existing long press) | 500 ms elapsed on a row body | **lifted** | vibrate, `.-dragging`, the selection collapses onto the row, the payload is `schedulableSelection()`, the row index is built, the banner names the row, a 15 s watchdog starts, the non-passive `touchmove` listener goes on, `trace: drag-arm` |
+| lifted | the finger travels past 10 px on either axis | **moving** | `['dialogGuard', true]`, then a target resolved and painted on every move |
+| lifted | release, no travel | **menu** | `onTodoContextMenu(synthEvent(...))` — the gesture the press has always been, `trace: menu-on-release` |
+| moving | release over a gap / a `[data-drop]` | **dropped** | the drop message, THEN the guard release, `trace: drag-drop:between` / `drag-drop:date` |
+| moving / lifted | release over nothing, a second finger, `pointercancel`, `visibilitychange`, resize, orientation change, the watchdog | **cancelled** | `trace: drag-cancel:<reason>` |
+
+Every one of those ends calls the single `endTouchDrag(reason)`, which takes down the `touchmove`
+listener, the scroll loop, both indicator paints, the row's dimming, the pointer capture, the banner
+and its own watchdog — and releases the refresh guard **last**. It has exactly one `return` (the
+not-active guard on its first line), which is what makes "every exit releases the guard" a property of
+the shape rather than of a reviewer's attention; the harness pins that, and a mutation adding a second
+`return` fails it.
+
+Four hazards this was designed around, each of which cost something to get right:
+
+- **The non-passive `touchmove` is the whole gesture.** `preventDefault()` on a touchmove is the only
+  thing that stops Android panning the list under the lifted row, and a document-level touchmove
+  listener is **passive by default** in Chrome — where `preventDefault()` does nothing at all. So the
+  listener is registered `{ passive: false, capture: true }` and removed with the same options (a
+  mismatch would leave a listener that cancels every touchmove for ever, killing the list's scrolling).
+  It is attached only for the duration of a lift, which is why there is deliberately **no
+  `touch-action` on `.todo`**: that would apply to every touch on every row, always, and the list must
+  keep scrolling by flick.
+- **The checkbox ring overhangs its row.** The mobile tap-target rules grow the 18 px ring to a 40 px
+  content box and cancel the growth with an equal negative margin, so the box sticks out of a ~26 px
+  row without moving anything. `document.elementFromPoint` in the left column therefore returns the
+  **neighbour** row about as often as the right one. Rows are found geometrically instead: an index of
+  `{ el, top, bottom, info }` built at the lift and rebuilt after every auto-scrolled frame, searched by
+  the pure `window.TouchDrag.rowAtY`. The big `[data-drop]` targets are still resolved from the DOM, and
+  **first**, because a heading is a *sibling* of the rows — it sits in the very gap the row index would
+  attribute to the row above it — and because a sticky heading floating over the list (z-index 2, above
+  any overhanging ring) genuinely is what the finger is on.
+- **A leaked `dialogGuard` freezes mobile refreshes for the life of the webview.** Hence the single end
+  above, the 15 s watchdog, and the flag that keeps taking and releasing paired. The guard is taken on
+  the **first move**, not at the lift, and that is a deliberate departure from the first design: the
+  host answers the last guard coming down by repainting (`panel.ts`, the `dialogGuard` branch), and a
+  mobile repaint is a full webview reload — which on the no-travel path would reload the panel out from
+  under the very context menu the release had just opened. A hold-and-release therefore never touches
+  the guard at all. The cost is that a refresh landing between the lift and the first move ends the drag
+  by reloading; nothing is held, so that is the harmless direction.
+- **The gap that is not a target.** A gap with *both* neighbours absent in a *dateless* group
+  (Overdue/Future) is not painted and not droppable: `betweenBounds` can form no interval for it and the
+  host would write nothing, so an insertion line there would promise a move that never happens.
+
+Feedback is a lifted (dimmed) row, one insertion line **or** one whole-row highlight — never nothing
+silently — and a banner (`#cockpitDragBanner`) that names the resolved target: "before X", "after X",
+"onto Today", or "release to cancel". There is deliberately **no ghost clone** of the row: it costs a
+second thing to keep in sync with the finger and adds nothing the line does not already say.
+
+The **gesture trace** was fixed first, as its own commit, because it was blind to this gesture: it wrote
+only into the search suggestion list's hint line, which is closed during a row drag. It now falls back
+to the toast in a sticky mode, and the ring buffer holds 10 entries. Codes: `drag-arm`,
+`drag-target:before|after|drop|none` (on a **change** only), `drag-autoscroll:up|down` (on a direction
+change only), `drag-drop:between|date`, `drag-cancel:<reason>`, `menu-on-release`.
+
+**Rejected, and why** — gaps-only targets (the headings are the coarse, forgiving target a finger wants
+and they already exist); a per-row drag handle (a permanent column of chrome on every row for a gesture
+that should be discoverable by holding — **kept as the documented fallback** if step 18b shows Android
+taking the gesture); a cloned ghost row.
+
 ## Remaining / optional mobile work
 
-- **Full touch drag-to-reschedule** — the "Move to date…" menu entry (above) already covers
-  rescheduling on touch. A richer drag (Pointer Events long-press + move onto a `data-drop` target,
-  reusing the existing `['todosDropped', ids, target]` message) is a nice-to-have, not a blocker.
 - **Tag autocomplete in the mobile tag picker** — the `setTags` fallback is a plain comma input;
   autocomplete against `getAllTags()` could be added later if the plain input proves fiddly.
 - **`app_min_version_mobile` bump** — only if checklist step 8 reproduces the pre-3.4.6 off-screen
@@ -536,3 +611,71 @@ success vs failure looks like. The build to install is
     - Success: the completed title is both dimmed (opacity 0.5) **and** struck through, in every theme
       mode; the other three styles (Normal / Grayed out / Strikethrough) still behave as before.
     - Failure: only one of dim/strike applies, or the option is missing.
+
+18. **TOUCH DRAG TO RESCHEDULE (the 2.3.0 round).** Turn the **Gesture trace** setting ON first
+    (Settings → Cockpit); every step below can be read back from the strip at the bottom of the panel.
+    Work through them in order — 18b is the one that decides whether the feature ships as designed.
+
+    a. **The lift.** Press and hold a to-do row's title (not the circle) for about half a second.
+       - Success: a short vibration, the row dims, a banner appears at the top naming it, and there is
+         **no text-selection handle and no Copy / Select-all bar**. The trace reads `drag-arm`.
+       - Failure: nothing happens (the hold never fires), or the native selection bar appears (Android's
+         long press won — the CSS suppression is not reaching this row).
+
+    b. **MAKE OR BREAK: move without lifting the finger.** From that hold, slide the finger up and down
+       over other rows.
+       - Success: an insertion line follows the finger between rows, the banner reads "before …" /
+         "after …", and the **list itself does not scroll**.
+       - Failure: the list scrolls under the finger, or the trace shows `drag-cancel:pointercancel`.
+         Either means Android's compositor took the gesture rather than honouring the non-passive
+         `touchmove`. **That is the signal to fall back to a per-row drag handle** (documented above as
+         the rejected-but-kept alternative) — report it before anything else.
+
+    c. **Aim.** Drop a to-do into the gap two rows away from where it started. Repeat the same aim five
+       times.
+       - Success: at least 4 of 5 land in the gap you aimed at, and the to-do's time is between its two
+         new neighbours' times.
+       - Failure: it lands one row off more than once — the row index or the 0.5 band needs a look
+         (report which direction it is consistently off by).
+
+    d. **Auto-scroll.** Grab a to-do near the bottom of a long list, hold the finger in the strip at the
+       **top** edge of the list and keep it still.
+       - Success: the list scrolls up under the finger, the insertion line keeps following what arrives,
+         the trace shows `drag-autoscroll:up`, and releasing over a group above actually reschedules it
+         there.
+       - Failure: the list does not move, or it moves but the drop lands nowhere.
+
+    e. **A heading drop keeps the time of day.** Note a to-do's due time, then drop it on the "Tomorrow"
+       heading (or a calendar day).
+       - Success: it moves to that day at the **same clock time**; a to-do with no due date gets the day
+         start time (09:00 by default). Dropping on "No Due Date" clears the alarm.
+       - Failure: the time is reset, or the drop does nothing.
+
+    f. **The menu is not lost.** Hold a row and release **without** moving.
+       - Success: the context menu opens exactly as it did before 2.3.0, the note does **not** open
+         behind it, and "Move to date…" still works from there. The trace reads `menu-on-release`.
+       - Failure: no menu, or the menu opens and vanishes a moment later (that would mean the refresh
+         guard was taken on the no-travel path — report it, it is the one thing this design is careful
+         about).
+
+    g. **The guard does not leak.** Cancel a drag by releasing over the panel's header, then **wait two
+       minutes** doing nothing.
+       - Success: the panel still refreshes (tick a to-do elsewhere, or let a sync land, and watch the
+         list update).
+       - Failure: the panel freezes for good — a leaked `dialogGuard`. Capture the trace's last line.
+
+    h. **Rotate mid-drag.** Start a drag and rotate the phone while the finger is down.
+       - Success: the drag ends cleanly — no stuck banner, no dimmed row, no frozen panel. Trace:
+         `drag-cancel:orientation` (or `:resize`).
+
+    i. **Week view.** Switch to the week planner and drag a card onto another day's column.
+       - Success: the column highlights while the finger is over it and the to-do moves to that day.
+
+    j. **No regressions in the ordinary gestures.** Flick-scroll a long list; tap a title; tap a
+       checkbox ring; hold a checkbox ring.
+       - Success: the list scrolls freely, a tap opens the note, a tap on the ring ticks it, a hold on
+         the ring opens the date picker. None of these lifts a row.
+       - Failure: any of them behaves differently from before 2.3.0.
+
+    k. **Trace off.** Turn the Gesture trace setting back off and repeat 18a.
+       - Success: **no strip appears at all** at the bottom of the panel, and the drag still works.
