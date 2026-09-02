@@ -5421,6 +5421,11 @@ async function main() {
             assert.deepStrictEqual(plan.sections.map(s => s.name), owner.names, 'the ordered section names')
             assert.deepStrictEqual(plan.sections.map(s => s.dropDate), owner.drops, 'the drop day of each section')
             assert.deepStrictEqual(plan.sections.map(s => isoDayOf(s.end)), owner.lastDays, 'the last day of each slice')
+            // dropEndDateFor against the owner's own last days, not against the plan it reads: this is the value the
+            // heading carries as data-drop-end, and the bottom edge of a between-row drop is derived from it, so it
+            // has to be pinned to a literal or a wrong span (the drop day, the previous end, a day off) reads as true.
+            assert.deepStrictEqual(plan.sections.map(s => Horizons.dropEndDateFor(s.name, plan)), owner.lastDays,
+                'dropEndDateFor must name the last day of each slice')
             plan.sections.forEach((section, index) => {
                 // Every end is the last MILLISECOND of its day, and every boundary is exact: that millisecond still
                 // belongs to this slice, the one after it opens the next (or Future past the year slice).
@@ -5448,6 +5453,11 @@ async function main() {
         assert.strictEqual(Horizons.dropDateFor('This Week', plan), '2026-09-04')
         // A name that is not in THIS plan (that Wednesday has no Next Week) is not a drop target either.
         assert.strictEqual(Horizons.dropDateFor('Next Week', plan), null)
+        // dropEndDateFor names a SPAN, so every heading that is not a section of this plan has none - including the
+        // Next name that plan does not use. Its section values are pinned against the owner's last days above.
+        assert.deepStrictEqual(['No Due Date', 'Overdue', 'Future', 'Next Week', ''].map(name => Horizons.dropEndDateFor(name, plan)),
+            [null, null, null, null, null])
+        assert.strictEqual(Horizons.dropEndDateFor('This Week', plan), '2026-09-06')
     })
 
     // The exhaustive sweep: every day of 2026 and 2027, at midnight, noon and the last millisecond of the day, for
@@ -5506,6 +5516,9 @@ async function main() {
                 const previous = index ? new Date(plan.sections[index - 1].end) : new Date(plan.startOfToday)
                 const firstDay = index ? new Date(previous.getFullYear(), previous.getMonth(), previous.getDate() + 1) : previous
                 assert.strictEqual(section.dropDate, isoDayOf(firstDay.getTime()), `the drop day of ${section.name} at ${where}`)
+                // ...and the OTHER end of the same span, which travels with the heading as data-drop-end.
+                assert.strictEqual(Horizons.dropEndDateFor(section.name, plan), isoDayOf(section.end),
+                    `the slice end day of ${section.name} at ${where}`)
                 // (c) a to-do dropped there really lands in this slice, and the day before it does not.
                 assert.strictEqual(Horizons.horizonOf(dayAt(section.dropDate, 9), plan), section.name,
                     `${section.dropDate} 09:00 must bucket into ${section.name} at ${where}`)
@@ -5546,7 +5559,7 @@ async function main() {
     // those days - the mutation verification behind them was run mid-month, where both do discriminate.
     // Since v2.2.0 a period whose slice would be empty is replaced by the NEXT one, so every set below also has to
     // admit the Next X name wherever the calendar can produce it. The sets are not guessed and not an offline
-    // computation either: the pure check right below sweeps these four fixtures over 2024-2032 at three times of day
+    // computation either: the pure check right below sweeps these four fixtures over 2024-2040 at three times of day
     // and both week starts, and asserts that every name reachable there is in the set the rendered check uses - the
     // same constants, so widening the calendar the suite can run on cannot silently outrun them.
     const horizonFixtureSets = {
@@ -5569,14 +5582,14 @@ async function main() {
         },
     }
 
-    await test('horizon fixtures: over 2024-2032, both week starts, each of the four fixtures only ever reaches the names its rendered check allows', () => {
+    await test('horizon fixtures: over 2024-2040, both week starts, each of the four fixtures only ever reaches the names its rendered check allows', () => {
         // The rendered checks below run on the REAL clock, so their allowed sets have to hold on every day the suite
         // could run. This sweep is where that claim is made good: the same four dues, computed the same way, bucketed
-        // against a plan for every day of nine years at midnight, noon and the last millisecond, for both week starts.
+        // against a plan for every day of seventeen years at midnight, noon and the last millisecond, for both week starts.
         // Anything a set does not admit fails HERE, on a named day, instead of flaking once a year on someone's laptop.
         const reached = {}
         for (const key of Object.keys(horizonFixtureSets)) reached[key] = new Set()
-        for (let day = new Date(2024, 0, 1); day.getFullYear() < 2033; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
+        for (let day = new Date(2024, 0, 1); day.getFullYear() < 2041; day = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1)) {
             for (const clock of [[0, 0, 0, 0], [12, 0, 0, 0], [23, 59, 59, 999]]) {
                 for (const weekStartsOn of [0, 1]) {
                     const now = new Date(day.getFullYear(), day.getMonth(), day.getDate(), clock[0], clock[1], clock[2], clock[3])
