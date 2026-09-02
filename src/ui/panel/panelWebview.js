@@ -1072,10 +1072,23 @@ document.addEventListener('pointermove', onPanelSelectionDragProbe, true)
 // never raises it, which is what keeps the edge auto-scroll below from moving the list under someone else's drag.
 // Raised at the end of onTodoDragStart (once the payload is known to be non-empty) and dropped by endPanelDrag.
 var panelDragActive = false
-// The last pointer position a dragover reported, so the scroll loop can re-resolve what is under it (see
-// refreshBetweenIndicatorUnderPointer) while the rows move beneath a pointer that is holding still.
-var lastDragClientX = 0
-var lastDragClientY = 0
+// The same ownership, carried IN THE DRAG ITSELF as a custom data type. The flag alone is sticky state: its only
+// clears are a drop and a dragend, and a drag whose source row is replaced by a mid-drag re-render (the panel
+// re-renders on every sync) can end without either reaching us - the detached row's dragend does not bubble to the
+// document. That would leave the flag raised for the NEXT drag, foreign or not. The type travels with the drag
+// instead, and dataTransfer.types is readable during dragover's protected mode (getData is not), which is exactly
+// where the question is asked. Both are required: the flag says a drag of ours is in flight, the type says THIS
+// event belongs to it.
+var PANEL_DRAG_TYPE = 'application/x-cockpit-todos'
+
+// Whether this drag event belongs to a to-do drag this panel started. Falls back to the flag alone only when there
+// is no dataTransfer to ask at all.
+function isPanelDragEvent(event){
+    if (!panelDragActive) return false
+    var types = event && event.dataTransfer && event.dataTransfer.types
+    if (!types) return true
+    return Array.prototype.indexOf.call(types, PANEL_DRAG_TYPE) !== -1
+}
 
 function onTodoDragStart(event, todoID){
     if (!selectedRowIDs.has(todoID)){
@@ -1091,6 +1104,7 @@ function onTodoDragStart(event, todoID){
     var ids = schedulableSelection()
     if (!ids.length){ event.preventDefault(); return }
     event.dataTransfer.setData('text/plain', ids.join(','))
+    event.dataTransfer.setData(PANEL_DRAG_TYPE, '1')               // ownership that travels with the drag (see above)
     event.dataTransfer.effectAllowed = 'move'
     var dragged = new Set(ids)
     for (var row of allTodoRows()){
@@ -1107,7 +1121,7 @@ function onTodoDragEnd(event){
 function onDropTargetOver(event){
     event.preventDefault()
     event.dataTransfer.dropEffect = 'move'
-    event.currentTarget.classList.add('-drop-over')
+    paintDropTargetHighlight(event.currentTarget)                  // through the one painter, so nothing else stays lit
 }
 
 function onDropTargetLeave(event){
@@ -1221,7 +1235,7 @@ function betweenNeighbour(startEl, direction, draggedSet){
 }
 
 function onBetweenDragOver(event){
-    if (IS_MOBILE) return
+    if (IS_MOBILE || !isPanelDragEvent(event)) return              // never for a drag this panel did not start
     var target = betweenTargetFor(event)
     if (!target){ clearBetweenIndicator(); return }
     event.preventDefault()                                         // enable the drop on the row (rows have no inline handler)
@@ -1233,7 +1247,14 @@ async function onBetweenDrop(event){
     if (IS_MOBILE) return
     var target = betweenTargetFor(event)
     clearBetweenIndicator()
-    if (!target) return                                            // a heading/cell drop bubbles here too; its own handler ran
+    if (!target){
+        // A heading/cell drop bubbles here too; its own handler ran and already prevented the default. So does a
+        // release the edge auto-scroll accepted at the document level (see onDragAutoscroll) that landed on a row's
+        // inert middle: there is nothing to do, but the default action must still be suppressed rather than let the
+        // browser act on the dragged text.
+        if (panelDragActive) event.preventDefault()
+        return
+    }
     event.preventDefault()
     var ids = (event.dataTransfer && event.dataTransfer.getData('text/plain') || '').split(',').filter(Boolean)
     if (!ids.length) return
@@ -1263,25 +1284,31 @@ document.addEventListener('dragend', clearBetweenIndicator, false)
  * below (desktop only); the touch drag being designed for mobile is meant to call the same update()/stop() with its own pointer coordinates rather  *
  * than growing a second copy of the band and speed maths.                                                                                           *
  *                                                                                                                                                   *
- *   update(container, clientY, onScroll)  aim the loop at a container and a pointer position - it starts the loop inside a band, and stops it       *
- *                                         outside both. onScroll (optional) runs after every frame that actually moved.                             *
- *   stop()                                end it at once.                                                                                           *
+ *   update(container, clientX, clientY, onScroll)  aim the loop at a container and a pointer position - it starts the loop inside a band, and stops *
+ *                                                  it outside both. onScroll (optional) is called with that same pointer position after every frame *
+ *                                                  that actually moved, so a caller can re-resolve what is now under a still pointer.               *
+ *   stop()                                         end it at once.                                                                                  *
  *                                                                                                                                                   *
- * Nothing outlives a drag: stop() cancels the pending frame, the loop ends itself at the scroll limit, and a watchdog ends it when no update() has  *
- * arrived for AUTOSCROLL_IDLE_MS - a native drag keeps sending dragover while it is over the document, so a silence means the pointer has left the  *
- * window, or the drag ended without an event reaching us.                                                                                           *
+ * Nothing outlives a gesture, and the gesture's own ends are what say so: the pointer leaving the band (a move produces an update()), a drop, a      *
+ * dragend, and the scroll limit all stop the loop directly, and stop() cancels the pending frame. The AUTOSCROLL_IDLE_MS watchdog is a SAFETY NET   *
+ * on top of those, not the thing that keeps the loop alive: it must sit well above any caller's event cadence, because a pointer HOLDING STILL is   *
+ * the gesture this exists for, and a still pointer is exactly when events dry up. The HTML drag-and-drop model iterates every 350ms for a stationary *
+ * pointer, and a stationary finger in the coming touch drag emits no move events at all - so the watchdog only catches the case with no other end:  *
+ * the pointer leaving the window, or a drag that ended without an event reaching us.                                                                *
  ***************************************************************************************************************************************************/
 var AUTOSCROLL_BAND_RATIO = 0.15       // the edge band is this share of the container's client height...
 var AUTOSCROLL_BAND_MIN = 32           // ...but never thinner than this (a short list would otherwise have no band worth hitting)...
 var AUTOSCROLL_BAND_MAX = 72           // ...and never thicker (a tall list must not turn a sixth of itself into a moving floor)
 var AUTOSCROLL_SPEED_MIN = 2           // px per frame at the band's INNER edge - a nudge, for placing a drop precisely
 var AUTOSCROLL_SPEED_MAX = 16          // px per frame at the container's very edge - fast enough to cross a long agenda
-var AUTOSCROLL_IDLE_MS = 150           // watchdog: no update() for this long and the loop stops itself
+var AUTOSCROLL_IDLE_MS = 800           // watchdog: no update() for this long and the loop stops itself (a safety net - see the banner)
 
 var autoscrollEl = null                // the container being scrolled, or null when no loop is running
 var autoscrollStep = 0                 // signed px per frame: negative scrolls up, positive down
 var autoscrollFrame = null             // the pending requestAnimationFrame handle, or null
 var autoscrollAt = 0                   // Date.now() of the last update(), which the watchdog measures against
+var autoscrollClientX = 0              // the pointer position the last update() reported, handed back to the callback so
+var autoscrollClientY = 0              // ...it can re-resolve what is under a pointer the rows are moving beneath
 var autoscrollOnScroll = null          // optional callback, run after each frame that moved the container
 
 // The nearest ancestor of `el` (itself included) that actually scrolls vertically, or null when nothing does.
@@ -1295,24 +1322,30 @@ function scrollableAncestor(el){
     return null
 }
 
-// The signed px-per-frame step for a pointer at `clientY` over `el`: zero anywhere outside the two edge bands (and
-// outside the container altogether - a drag that has left the list must not keep it moving), and otherwise a speed
-// rising linearly with how deep into the band the pointer is, from AUTOSCROLL_SPEED_MIN at the band's inner edge to
-// AUTOSCROLL_SPEED_MAX at the container's own edge.
-function edgeAutoscrollStep(el, clientY){
+// The signed px-per-frame step for a pointer at (clientX, clientY) over `el`: zero away from both edges and zero once
+// the pointer is off to the SIDE of the container (that is someone else's gesture), and otherwise a speed rising
+// linearly with how deep into the band the pointer is, from AUTOSCROLL_SPEED_MIN at the band's inner edge to
+// AUTOSCROLL_SPEED_MAX at the container's own edge. A pointer that has OVERSHOT the container vertically is pinned at
+// full speed rather than dropped to zero: `.todos` has the controls block above it and the panel's padding below, so
+// the instinctive "shove it to the very top to keep scrolling" lands a few pixels outside the box, and stopping dead
+// there would recreate the very unreachability this exists to fix.
+function edgeAutoscrollStep(el, clientX, clientY){
     var rect = el.getBoundingClientRect()
     if (!rect.height) return 0
-    if (clientY < rect.top || clientY > rect.bottom) return 0
-    // Also clamped to half the height, so the two bands can never overlap in a very short container.
+    if (clientX < rect.left || clientX > rect.right) return 0
+    if (clientY < rect.top) return -AUTOSCROLL_SPEED_MAX
+    if (clientY > rect.bottom) return AUTOSCROLL_SPEED_MAX
+    // Also clamped to half the height, so the two bands can never overlap in a very short container. The band tests
+    // are strict, so in a container that short the exact midpoint belongs to neither band and stays inert.
     var band = Math.min(rect.height / 2, Math.max(AUTOSCROLL_BAND_MIN, Math.min(AUTOSCROLL_BAND_MAX, rect.height * AUTOSCROLL_BAND_RATIO)))
     var speedAt = function(depth){
         var reach = Math.max(0, Math.min(1, depth / band))
         return AUTOSCROLL_SPEED_MIN + (AUTOSCROLL_SPEED_MAX - AUTOSCROLL_SPEED_MIN) * reach
     }
     var fromTop = clientY - rect.top
-    if (fromTop <= band) return -speedAt(band - fromTop)
+    if (fromTop < band) return -speedAt(band - fromTop)
     var fromBottom = rect.bottom - clientY
-    if (fromBottom <= band) return speedAt(band - fromBottom)
+    if (fromBottom < band) return speedAt(band - fromBottom)
     return 0
 }
 
@@ -1320,24 +1353,36 @@ function edgeAutoscrollTick(){
     autoscrollFrame = null
     var el = autoscrollEl
     if (!el || !autoscrollStep) return
-    // The watchdog. A pointer held still inside the band keeps the stream of dragovers coming, so a silence is
-    // the drag leaving the window (or ending without an event we saw) - either way the list must stop moving.
+    // The watchdog (a safety net well above any caller's cadence - see the banner): no update() for this long means
+    // the pointer left the window, or the gesture ended without an event reaching us. Either way the list stops.
     if (Date.now() - autoscrollAt > AUTOSCROLL_IDLE_MS){ edgeAutoscrollStop(); return }
     var before = el.scrollTop
     el.scrollTop = before + autoscrollStep
     if (el.scrollTop === before){ edgeAutoscrollStop(); return }   // at the scroll limit: there is nothing left to give
-    if (autoscrollOnScroll) autoscrollOnScroll()
+    // The next frame is booked BEFORE the callback runs, so a callback that throws (elementFromPoint mid-teardown,
+    // say) cannot leave the loop dead-but-not-stopped: with autoscrollFrame null and the rest still set, only a
+    // later update() would revive it. The throw is swallowed for the same reason.
     autoscrollFrame = requestAnimationFrame(edgeAutoscrollTick)
+    if (autoscrollOnScroll){
+        try { autoscrollOnScroll(autoscrollClientX, autoscrollClientY) } catch (error){}
+    }
 }
 
-function edgeAutoscrollUpdate(container, clientY, onScroll){
-    var step = container ? edgeAutoscrollStep(container, clientY) : 0
+function edgeAutoscrollUpdate(container, clientX, clientY, onScroll){
+    var step = container ? edgeAutoscrollStep(container, clientX, clientY) : 0
     if (!step){ edgeAutoscrollStop(); return }
     autoscrollEl = container
     autoscrollStep = step
+    autoscrollClientX = clientX
+    autoscrollClientY = clientY
     autoscrollAt = Date.now()
     autoscrollOnScroll = onScroll || null
     if (autoscrollFrame === null) autoscrollFrame = requestAnimationFrame(edgeAutoscrollTick)
+}
+
+// Whether a scroll loop is running right now. The HTML5 wiring asks so it can accept the drop while the list moves.
+function edgeAutoscrollRunning(){
+    return autoscrollFrame !== null
 }
 
 function edgeAutoscrollStop(){
@@ -1350,32 +1395,54 @@ function edgeAutoscrollStop(){
 
 /** The HTML5 drag's wiring (desktop) ***************************************************************************************************************
  * Delegated on the document, like the between-rows gesture above, so one wiring survives every setHtml. It runs only for a drag THIS PANEL started  *
- * (panelDragActive, raised in onTodoDragStart and dropped again by endPanelDrag): text dragged in from another window must never make the list run  *
- * away under the cursor. Both ends are covered - a drop and a dragend each end the drag - and neither changes what a drop does.                     *
+ * (isPanelDragEvent: the in-flight flag AND the ownership type the drag itself carries): text dragged in from another window must never make the    *
+ * list run away under the cursor. Both ends are covered - a drop and a dragend each end the drag - and neither changes WHAT a drop does; the one    *
+ * thing this adds to the drop is WHETHER it is offered at all while the list is moving, which the acceptance note in the handler explains.          *
  ***************************************************************************************************************************************************/
 function onDragAutoscroll(event){
-    if (IS_MOBILE || !panelDragActive) return
-    lastDragClientX = event.clientX
-    lastDragClientY = event.clientY
+    if (IS_MOBILE || !isPanelDragEvent(event)) return
     // The scroller under the pointer - in practice always .todos, the only thing that scrolls in a list view. The
     // fallback keeps a pointer that is over nothing scrollable (a heading, the padding) aimed at the same list.
     var container = scrollableAncestor(event.target) || currentTodosEl || document.querySelector('.todos')
-    edgeAutoscrollUpdate(container, event.clientY, refreshBetweenIndicatorUnderPointer)
+    edgeAutoscrollUpdate(container, event.clientX, event.clientY, refreshDropTargetsUnderPointer)
+    if (!edgeAutoscrollRunning()) return
+    // While the list is MOVING, the drop is accepted here, at the document level. Acceptance is otherwise granted per
+    // dragover by whatever sits under the pointer (a heading's inline ondragover, or onBetweenDragOver for a gap),
+    // and the browser decides whether to fire `drop` at all from the LAST dragover it delivered - so a release during
+    // a scroll would be REFUSED outright whenever the target that has just slid under the pointer had not been asked
+    // yet, and the to-do would silently not move. Both drop handlers re-resolve the target from the release point, so
+    // accepting broadly here costs nothing: a release over an inert spot is a no-op instead of a cancelled drag.
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
 }
 
-// The rows move under a STILL pointer while the list scrolls, and the browser's own next dragover can be a few
-// hundred milliseconds away, so the insertion line is re-resolved after every scrolled frame from whatever is now at
-// the last known pointer position - the same answer a dragover there would have produced. The whole-row targets
-// (headings, calendar days, week columns) re-highlight on their own next dragover; only this one is banded finely
-// enough to look frozen in between.
-function refreshBetweenIndicatorUnderPointer(){
-    var under = document.elementFromPoint(lastDragClientX, lastDragClientY)
-    paintBetweenIndicator(under ? betweenTargetAt(under, lastDragClientY) : null)
+// Both drop affordances, re-resolved after every scrolled frame from whatever is now at the pointer - the same answer
+// a dragover there would have produced. The rows and headings move under a pointer that is HOLDING STILL, which is
+// the whole gesture, and the drag's own next dragover can be hundreds of milliseconds away: without this the
+// insertion line sits in a gap the rows have left, and a whole-row target keeps its highlight after it has slid away
+// (`-drop-over` is otherwise only ever removed by that element's own dragleave, which a still pointer never fires).
+function refreshDropTargetsUnderPointer(clientX, clientY){
+    var under = document.elementFromPoint(clientX, clientY)
+    paintBetweenIndicator(under ? betweenTargetAt(under, clientY) : null)
+    paintDropTargetHighlight(under && under.closest ? under.closest('[data-drop]') : null)
+}
+
+// Give `target` (or nothing) the whole-row drop highlight, taking it off whatever held it before. One painter, so the
+// scroll loop and the inline dragover/dragleave handlers can never leave two elements lit at once.
+function paintDropTargetHighlight(target){
+    for (var el of document.querySelectorAll('.-drop-over')){
+        if (el !== target) el.classList.remove('-drop-over')
+    }
+    if (target) target.classList.add('-drop-over')
 }
 
 function endPanelDrag(){
     panelDragActive = false
     edgeAutoscrollStop()
+    // Both transient paints go too. A gesture can end owing no dragleave at all - a target the list scrolled under a
+    // still pointer would otherwise keep its highlight until the next re-render.
+    paintDropTargetHighlight(null)
+    clearBetweenIndicator()
 }
 
 document.addEventListener('dragover', onDragAutoscroll, false)
