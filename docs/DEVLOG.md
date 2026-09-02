@@ -539,3 +539,48 @@ Suite: 296 harness checks + 73 Playwright tests (five new in `e2e/clipboard-copy
 system clipboard through the main renderer's own `require('electron').clipboard` — never `xclip -i`, which
 stays alive to own the X selection and would hang the worker; every probe is bounded, because the failure
 being guarded against is precisely a native modal, and with one open `evaluate()` never returns).
+
+## 2026-09-02 — v2.1.3: the last day of a month, and of the year, stays in its own group
+
+Marxsal opened issue #3: "If you have an item that has the date that is the last day of the year, it is put
+into 'future' rather than 'this year'." He was right, and the same shape was hiding one horizon down — the
+last day of any month skipped "This Month" and showed up under "This Year", a lone row with a date a day
+past the group it sat in.
+
+**Both horizons ended at midnight instead of at the end of the day.** `IntervalFormat.getFormatHeadingString`
+walks a strict chain — `< getStartOfToday()` is Overdue, then `< getEndOfToday()`, `< getEndOfTomorrow()`,
+`< getEndOfThisWeek()`, `< getEndOfThisMonth()`, `< getEndOfThisYear()`, else Future. Every one of those ends
+at the last millisecond of its period except two: `getEndOfThisYear()` returned `new Date(y, 11, 31)`, which
+is December 31st at 00:00:00.000, and `getEndOfThisMonth()` returned `new Date(y, m + 1, 0)`, the last day of
+the month at the same midnight. A to-do due at any ordinary hour on either of those days is therefore NOT
+less than its own boundary, and falls through to the next group — into Future off the end of the year, into
+This Year off the end of the month. Nothing about the chain or its operators was wrong; the two ends simply
+named the wrong instant. The month half had even been met before and worked around rather than fixed: the
+showcase capture pins its "This Month" fixture to the second-to-last day, with a comment explaining why the
+last day would look broken. That comment now records the fix instead of the bug.
+
+The fix is four lines. Both helpers keep building their date from local components — no UTC arithmetic, no
+ISO parsing — and then `setHours(23,59,59,999)`, exactly as `getEndOfToday()`, `getEndOfTomorrow()` and
+`endOfWeek()` already do, so daylight saving cannot shift them. The drop targets are untouched and unchanged
+by construction: `getHeadingDropTarget` passes both values through `toISODate()`, which reads only year,
+month and day, and 23:59:59.999 is the same local day as 00:00:00.000.
+
+Four regression checks pin it, and they had to be built carefully, because the harness has no fake clock —
+every check runs on the real date. Each seeds a to-do whose due date is computed from that clock with local
+`Date` constructors (the last day of this month and December 31st at 22:00, the first day of next month and
+January 1st at noon), renders an interval profile, then reads back which `<h2>` group the row landed under by
+splitting the panel HTML on its headings in document order. None of them asserts a single heading, because
+the right answer genuinely moves with the date: the last day of this month is legitimately Today on the 30th
+of September, Tomorrow on the 29th, This Week in the closing days of a month, and This Month otherwise — so
+the check asserts membership in that SET, and the bug is that the set excludes This Year and Future. December
+31st likewise ranges over Today, Tomorrow, This Week, This Month and This Year and can never be Future on any
+day of any year, leap years included. The two counter-checks run the other way: the first day of next month
+must never be This Month, and January 1st of next year never This Month or This Year, so a fix that simply
+widened every horizon would fail them.
+
+Each helper was mutation-verified on its own — the single `setHours` line reverted, the build re-run, exactly
+one new check failing ("December 31st landed under Future" for the year, "the last day of the month landed
+under This Year" for the month) and nothing else, then restored.
+
+Suite: 300 harness checks (four new), all passing. Playwright unchanged (73); the e2e suite was not run in
+this pass, only its showcase comment edited.
