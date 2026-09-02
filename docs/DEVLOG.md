@@ -740,7 +740,7 @@ the side of the container, on `drop`, on `dragend`, and at the scroll limit (a f
 `scrollTop` ends it); `stop()` cancels the pending frame, so there is no rAF and no timer left standing either
 way. "Leaves the band" is only half a rule, because leaving it OUTWARD is the overshoot case below, which pins the
 speed at maximum rather than stopping — so a pointer carried out through the top or bottom edge is the one exit
-none of those four covers, and the review round below is where it got its own end.
+none of those four covers, and the review round below is where it got its own stop.
 
 `AUTOSCROLL_IDLE_MS` sits on top of those as a **safety net**, and the first draft had it at 150ms on the
 assumption that a native drag keeps `dragover` coming while it is over the document. That assumption was never
@@ -816,7 +816,8 @@ edge and above it, −2 just inside the band's inner edge, 0 through the middle 
 50px container, where the half-height clamp bites — an exactly inert midpoint with the two bands touching but not
 overlapping.
 
-`e2e/drag-autoscroll.spec.ts` is new: seven cases driving the real handlers with the HTML5 sequence a browser
+`e2e/drag-autoscroll.spec.ts` is new: seven cases at this point in the story — ten by the end of this entry —
+driving the real handlers with the HTML5 sequence a browser
 fires, measuring `.todos.scrollTop` around each phase — the bottom band scrolls down, the middle is inert, the
 top band scrolls up, a `dragend` stops the scrolling while the pointer stays in the band and the events keep
 arriving (so only the drag's end can explain it), and a foreign drag with no `dragstart` moves nothing — which,
@@ -879,13 +880,38 @@ stillness could as easily be a dead panel as a working type check.
 Leaving the panel through the top or bottom edge had no end of its own, and the overshoot rule made that the
 worst exit rather than the mildest: a pointer outside the container vertically is pinned at `AUTOSCROLL_SPEED_MAX`,
 so the list ran on for the whole 800ms watchdog — the better part of a thousand pixels — after the drag had
-visibly gone. A document `dragleave` now ends the gesture, on a deliberately strict test: `relatedTarget` null AND
+visibly gone. A document `dragleave` now stops it, on a deliberately strict test: `relatedTarget` null AND
 the pointer outside the document's own box. `relatedTarget` alone would not do, and this is the one place where
 the auto-scroll bites its own tail — a `dragleave` also fires when the element under a HOLDING-STILL pointer
 changes, which is precisely what scrolling the rows under it does, and Blink does not reliably name the element
 the drag moved to. Acting on `relatedTarget` alone would have killed the loop the moment its own scrolling
 started working. The asymmetry decides the test: missing a real departure costs no more than the old behaviour
-(the watchdog still ends it), while ending a live gesture by mistake would cost the feature.
+(the watchdog still ends it), while stopping a live gesture's scrolling by mistake would cost the feature for as
+long as the pointer then held still.
+
+That stop, as first written, was a **one-way door**, and the round after it caught what that cost. It called
+`endPanelDrag`, which drops the ownership flag — and `panelDragActive` had exactly one place that raised it, the
+panel's own `dragstart`, while the HTML5 drag OPERATION outlives the pointer leaving the iframe. So: shove a dragged
+to-do out through the top edge (the very move the overshoot rule exists to encourage, one pixel further than "outside
+the container"), bring it back into the list, release it in a gap between two rows, and it would silently not move.
+`onBetweenDragOver` bailed on the ownership gate before its own `preventDefault`, no insertion line was drawn, so
+Chromium fired no `drop` at all — and the auto-scroll stayed dead for the rest of that drag too. Heading and
+calendar-day drops went on working, since `onDropTargetOver` is not gated, which would have made it read in use as
+"between-drops are broken" rather than as this. It was a regression against 2.2.0, where nothing gated that handler
+and a leave-and-return dropped normally; it was the review item's own blind spot rather than a deviation from it.
+
+The fix is to say what leaving actually is. A departure is not an END of the gesture, it is the end of the gesture's
+*effects over us*: the scroll loop and the two transient paints. Those three moved out of `endPanelDrag` into
+`clearPanelDragEffects`, which is what the `dragleave` now calls; `endPanelDrag` is that plus the flag, and stays
+wired to the drag's own two ends, `drop` and `dragend`. Ownership therefore never changes hands on a departure — the
+same drag coming back finds the panel exactly as it left it, and nothing about the stale-flag argument that
+introduced the ownership type moves either. The alternative considered first was letting the type RE-RAISE the flag
+in `isPanelDragEvent`; it works for the return trip, but it also makes the type sufficient on its own, and the e2e
+case that proves a `dragend` stops the scrolling while the pointer stays in the band caught it doing exactly that —
+the dragover stream after the `dragend` carries the same `DataTransfer`, so the loop came straight back. The
+narrower split has no such reach. With ownership out of it, the guard's remaining assumption — that an in-document
+`dragleave` never arrives with a zeroed coordinate — is worth one pixel at the top-left corner, and only until the
+drag's next `dragover` restarts the loop.
 
 The two cases that must not be polled failed outright whenever a background refresh replaced `.todos` mid-probe —
 numbers read off a detached node, a failure with nothing behind it. They now go through `validProbe`, which
@@ -894,8 +920,21 @@ measurements are read, so nothing about the retry can select for a result. And t
 document-level acceptance holds "while and only while the list is actually moving", which overstates
 `edgeAutoscrollRunning()`: it reports that a frame is booked. It now says a scroll loop is armed.
 
+The dragleave had arrived with no runtime cover at all — it rested entirely on source pins and on an unverified
+premise about Blink — and its two halves are load-bearing in opposite directions, so it now has two e2e cases of its
+own. One carries the drag out through the top edge and requires the list to stop dead inside the watchdog's own
+window (without an end of its own it would coast right through, at maximum speed), then streams the SAME drag back
+over the panel and requires it to scroll again — the case that says the departure is not a one-way door. The other
+dispatches the dragleave the auto-scroll itself provokes, at the very coordinates the pointer is already sitting at,
+and requires the loop to survive that. Both go through the same `probe` machinery, which grew one option: a phase can
+dispatch a synthetic `dragleave` before it starts, in either form.
+
 Suite: 329 harness checks, all passing (the 2.2.0 and drag auto-scroll blocks both intact through the merge; the
-dragleave wiring is pinned by three new assertions inside the existing dragover/dragend check, each proved by a
-mutation). Playwright: `e2e/drag-autoscroll.spec.ts` is eight tests now. Only the targeted set was run in this
-pass — `drag-autoscroll`, `multi-drag`, `selection-crossing` and `panel-todos`, the four that touch the drag
-paths the merge rewired; the full suite is the verifier's run, not this one's.
+dragleave is pinned to `clearPanelDragEffects` and pinned AGAINST ending the drag, and `endPanelDrag` is pinned as
+that sweep plus the flag — each proved by a mutation: pointing the dragleave at `endPanelDrag`, and having it drop
+the flag alongside the sweep, each fail exactly one assertion with the message that names it). Playwright:
+`e2e/drag-autoscroll.spec.ts` is ten tests now, all ten green (1.4m) — the run that first showed the RE-RAISE
+alternative failing, and then the split passing. The merge round before it ran the targeted set —
+`drag-autoscroll`, `multi-drag`, `selection-crossing` and `panel-todos`, the four that touch the drag paths the
+merge rewired — and this round re-ran `drag-autoscroll` alone, since nothing outside it moved; the full suite is
+the verifier's run, not this one's.
