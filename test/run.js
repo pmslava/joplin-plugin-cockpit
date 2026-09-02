@@ -2963,6 +2963,284 @@ async function main() {
         assert.ok(step.includes('Math.min(rect.height / 2'), 'the band must be clamped to half the container height, so the two bands never overlap')
     })
 
+    // ============================================================ drag to reschedule on TOUCH (mobile)
+    // Two layers, tested the two ways this harness can. The band and row-index arithmetic is a real module,
+    // required and driven directly - it is the part that would be wrong on a device and invisible in review, so
+    // its boundaries are exercised rather than pattern-matched. The gesture itself lives in the webview, which
+    // this harness renders but never executes, so its load-bearing shapes are pinned as SOURCE: the guard
+    // discipline (a leaked dialogGuard freezes mobile refreshes for the life of the webview), the non-passive
+    // touchmove (the one thing that stops Android panning the list), the zones the arm path must refuse, and the
+    // desktop paths that must stay exactly where they were.
+    const TouchDrag = require('../src/ui/panel/touchDrag.js')
+
+    await test('touchDrag.bandSide: the mobile 0.5 splits a row in half with the midline going BEFORE, and no inert middle', () => {
+        // 0.5 is the mobile band: every point of the row is a live target (a finger is not a cursor, and a dead
+        // strip in a 26px row reads as the gesture ignoring you).
+        assert.strictEqual(TouchDrag.bandSide(0, 26, 0.5), 'before', 'the very top of the row inserts above it')
+        assert.strictEqual(TouchDrag.bandSide(12, 26, 0.5), 'before', 'just above the midline inserts above')
+        assert.strictEqual(TouchDrag.bandSide(13, 26, 0.5), 'before', 'the midline ITSELF is before - the split is total and deterministic')
+        assert.strictEqual(TouchDrag.bandSide(14, 26, 0.5), 'after', 'past the midline inserts below')
+        assert.strictEqual(TouchDrag.bandSide(26, 26, 0.5), 'after', 'the very bottom of the row inserts below it')
+        // The gap between two rows: an offset PAST the row's height is still that row's "after" side, which is
+        // the same gap as the next row's "before". A point above the row is its "before".
+        assert.strictEqual(TouchDrag.bandSide(40, 26, 0.5), 'after', 'a point below the row belongs to the gap under it')
+        assert.strictEqual(TouchDrag.bandSide(-4, 26, 0.5), 'before', 'a point above the row belongs to the gap over it')
+        // A zero-height row collapses to its top edge, where the <= rule makes every point "before".
+        assert.strictEqual(TouchDrag.bandSide(0, 0, 0.5), 'before', 'a zero-height row has only a top edge')
+    })
+
+    await test('touchDrag.bandSide: the same function serves the desktop 0.4, whose middle stays inert', () => {
+        // The desktop drag keeps BETWEEN_BAND 0.4 and its inert middle, which it resolves itself; what this
+        // pins is that the shared arithmetic still answers the 0.4 question the same way at both edges, so the
+        // two gestures cannot drift into different ideas of where a row's halves are.
+        assert.strictEqual(TouchDrag.bandSide(4, 26, 0.4), 'before', 'inside the desktop top band')
+        assert.strictEqual(TouchDrag.bandSide(13, 26, 0.4), 'after', 'the desktop middle is past the 0.4 band')
+    })
+
+    await test('touchDrag.rowAtY: gaps belong to the row above, and both ends of the list are null', () => {
+        const index = [
+            { top: 0, bottom: 10, id: 'a' },
+            { top: 14, bottom: 24, id: 'b' },
+            { top: 28, bottom: 38, id: 'c' },
+        ]
+        const at = (y) => { const hit = TouchDrag.rowAtY(index, y); return hit ? hit.id : null }
+        assert.strictEqual(at(-1), null, 'above the first row there is nothing to insert against')
+        assert.strictEqual(at(0), 'a', "a row's own top edge is that row")
+        assert.strictEqual(at(9), 'a', 'inside the first row')
+        assert.strictEqual(at(10), 'a', 'the gap under a row belongs to it (its "after" side)')
+        assert.strictEqual(at(13), 'a', '...all the way to the next row')
+        assert.strictEqual(at(14), 'b', "...which starts at the next row's own top")
+        assert.strictEqual(at(37), 'c', 'inside the last row')
+        assert.strictEqual(at(38), null, "the last row's bottom edge is already off the end")
+        assert.strictEqual(at(1000), null, 'far below the list')
+        assert.strictEqual(TouchDrag.rowAtY([], 5), null, 'an empty index resolves to nothing')
+        assert.strictEqual(TouchDrag.rowAtY(null, 5), null, 'and so does no index at all')
+        // A single-row index has both boundaries at once.
+        const one = [{ top: 5, bottom: 15, id: 'only' }]
+        assert.strictEqual(TouchDrag.rowAtY(one, 4), null, 'above a one-row list')
+        assert.strictEqual(TouchDrag.rowAtY(one, 5).id, 'only', 'on it')
+        assert.strictEqual(TouchDrag.rowAtY(one, 15), null, 'below it')
+    })
+
+    await test('touchDrag.rowAtY: the binary search agrees with a linear scan over a long list', () => {
+        // The search is a binary one because the index is rebuilt after every auto-scrolled frame and asked on
+        // every touch move; this compares it against the obvious slow answer at every pixel of a 60-row list.
+        const index = []
+        for (let i = 0; i < 60; i++) index.push({ top: i * 30, bottom: i * 30 + 26, id: 'r' + i })
+        const linear = (y) => {
+            if (y < index[0].top || y >= index[index.length - 1].bottom) return null
+            let found = null
+            for (const entry of index) if (entry.top <= y) found = entry
+            return found
+        }
+        for (let y = -5; y <= 60 * 30 + 5; y++) {
+            const got = TouchDrag.rowAtY(index, y)
+            const want = linear(y)
+            assert.strictEqual(got ? got.id : null, want ? want.id : null, `rowAtY disagrees at y=${y}`)
+        }
+    })
+
+    await test('touchDrag.movedBeyond: per axis, and exactly the slop is still held still', () => {
+        assert.strictEqual(TouchDrag.movedBeyond(10, 0, 0, 0, 10), false, 'exactly the slop has not moved (the long press says the same)')
+        assert.strictEqual(TouchDrag.movedBeyond(11, 0, 0, 0, 10), true, 'one past the slop on x has')
+        assert.strictEqual(TouchDrag.movedBeyond(0, -11, 0, 0, 10), true, 'and so has one past it on y, in either direction')
+        assert.strictEqual(TouchDrag.movedBeyond(7, 7, 0, 0, 10), false, 'the rule is per AXIS, not a diagonal distance')
+    })
+
+    await test('webview touch drag: the lift refuses the tick circle, the notebook pill and the read-only peek', () => {
+        // Every zone that already means something else keeps meaning it, and the peek's rows are not reschedule
+        // sources at all (they are rendered draggable:false for exactly that reason). All of them fall through
+        // to the context menu, which is what the long press did for them before.
+        const lift = handlerBody('canLiftRow')
+        assert.ok(lift.includes("classList.contains('todo-checkbox')"), 'a press on the tick circle must not lift the row (it opens the date picker)')
+        assert.ok(lift.includes("classList.contains('todo-notebook')"), 'a press on the notebook pill must not lift the row (it moves the note)')
+        assert.ok(lift.includes("closest('.outside-results')"), 'a read-only peek row must never be lifted')
+        assert.ok(/dataset\.todoId/.test(lift), 'only a to-do row can be lifted at all')
+        // ...and the fourth guard is one layer up, in the adapter that arms the press: an event inside an open
+        // overlay is the overlay's own and never arms anything.
+        assert.ok(/closest\('#cockpitOverlay'\)\) return/.test(webviewSource), 'a press inside an in-panel overlay must not arm the press at all')
+        // The branch itself: only kind 'todo', and only when the zone allows it.
+        assert.ok(handlerBody('onLongPressFire').includes("longPress.kind === 'todo' && canLiftRow(longPress.target, longPress.el)"),
+            'only a to-do row body lifts; note rows, headings and the sync button keep their menus')
+    })
+
+    await test('webview touch drag: the touchmove listener is NON-PASSIVE, or the preventDefault that stops the pan is ignored', () => {
+        // A document-level touchmove listener is passive by default in Chrome, and a passive listener's
+        // preventDefault() does nothing at all - so this option is the whole gesture on Android.
+        assert.ok(/addEventListener\('touchmove', onTouchDragMove, \{ passive: false, capture: true \}\)/.test(webviewSource),
+            'the drag touchmove listener must be registered non-passive (and capturing)')
+        // ...and removed with the SAME options, or removeEventListener does not match it and the listener - which
+        // preventDefaults every touchmove - outlives the drag and kills the list's scrolling for good.
+        assert.ok(/removeEventListener\('touchmove', onTouchDragMove, \{ passive: false, capture: true \}\)/.test(webviewSource),
+            'the same listener must be removed with matching options')
+        const move = handlerBody('onTouchDragMove')
+        assert.ok(move.includes('event.preventDefault()'), 'the move handler must prevent the default (the pan)')
+        assert.ok(move.indexOf('event.preventDefault()') < move.indexOf('touches.length !== 1'),
+            'the default must be prevented before any branch can return, or a two-finger frame would let the list pan')
+    })
+
+    await test('webview touch drag: endTouchDrag is ONE end that cannot return before releasing the refresh guard', () => {
+        // A leaked ['dialogGuard', true] freezes every mobile refresh for the life of the webview, so the shape
+        // pinned here is "no way out without the release": exactly one return, and it is the not-active guard on
+        // the first line, before anything has been taken down. The statement ORDER of the teardown is not pinned -
+        // nothing depends on it - but the absence of a second exit is.
+        const end = handlerBody('endTouchDrag')
+        assert.ok(/^function endTouchDrag\(reason\)\{\s*if \(!touchDrag\.active\) return\b/.test(end),
+            'the only early return must be the not-active guard, on the first line')
+        assert.strictEqual((end.match(/\breturn\b/g) || []).length, 1,
+            'endTouchDrag must have no other return: every exit path has to reach the guard release')
+        assert.ok(end.includes("['dialogGuard', false]"), 'endTouchDrag must release the refresh guard')
+        assert.ok(end.includes('touchDrag.guarded'), 'and only when the drag actually took it (an unmatched false would decrement someone else\'s guard)')
+        // Everything the gesture put up comes down here too, so no exit can leave the panel dressed for a drag.
+        assert.ok(end.includes('edgeAutoscrollStop()'), 'ending the drag must stop the scroll loop')
+        assert.ok(end.includes('clearBetweenIndicator()'), 'ending the drag must clear the insertion line')
+        assert.ok(end.includes('paintDropTargetHighlight(null)'), 'ending the drag must clear the whole-row highlight')
+        assert.ok(end.includes("classList.remove('-dragging')"), 'ending the drag must undim the lifted row')
+        assert.ok(end.includes('hideDragBanner()'), 'ending the drag must take the banner down')
+        assert.ok(end.includes('clearTimeout(touchDrag.watchdog)'), 'ending the drag must cancel its own watchdog')
+    })
+
+    await test('webview touch drag: EVERY exit routes through that one end - cancel, second finger, hide, rotate, watchdog', () => {
+        // The exits are the call sites, and they all call the one function rather than tearing down by hand:
+        // that is what makes "every exit path releases the guard" a property of the shape above.
+        for (const [pattern, why] of [
+            [/pointercancel[\s\S]{0,220}endTouchDrag\('pointercancel'\)/, 'a pointercancel must end the drag'],
+            [/pointerdown[\s\S]{0,320}endTouchDrag\('second-pointer'\)/, 'a second finger must end the drag'],
+            [/visibilitychange[\s\S]{0,120}endTouchDrag\('hidden'\)/, 'the app going to the background must end the drag'],
+            [/'resize'[\s\S]{0,80}endTouchDrag\('resize'\)/, 'a resize must end the drag'],
+            [/'orientationchange'[\s\S]{0,80}endTouchDrag\('orientation'\)/, 'a rotation must end the drag'],
+            [/setTimeout\(function\(\)\{ endTouchDrag\('watchdog'\) \}, TOUCH_DRAG_WATCHDOG_MS\)/, 'the watchdog must end the drag'],
+            [/endTouchDrag\(target \? 'dropped' : 'no-target'\)/, 'a release over nothing must end the drag as well as a drop'],
+        ]) assert.ok(pattern.test(webviewSource), why)
+        // ...and nothing else lowers the flag behind its back.
+        assert.strictEqual((webviewSource.match(/touchDrag\.active = false/g) || []).length, 1,
+            'only endTouchDrag may clear the active flag')
+    })
+
+    await test('webview touch drag: the drop message is posted BEFORE the guard release, never after', () => {
+        // The host answers the last guard coming down with a repaint of its own (panel.ts), and a mobile repaint
+        // is a full webview reload - so releasing first would reload once for the release and again for the
+        // write, a visible double flash around every drop.
+        const drop = handlerBody('dropTouchDrag')
+        assert.ok(drop.includes("['todosDroppedBetween', ids, neighbours.prevId, neighbours.nextId, target.groupDate, target.groupEndDate]"),
+            'a gap drop must post the same message shape the desktop drop posts')
+        assert.ok(drop.includes("['todosDropped', ids, target.el.dataset.drop]"), 'a whole-row drop must post the same message the desktop drop posts')
+        assert.ok(drop.indexOf("'todosDroppedBetween'") < drop.indexOf('endTouchDrag('), 'the between message must be posted before the drag is ended')
+        assert.ok(drop.indexOf("'todosDropped'") < drop.indexOf('endTouchDrag('), 'the date message must be posted before the drag is ended')
+        assert.ok(!drop.includes('dialogGuard'), 'the drop must not release the guard itself - that belongs to the one end, after the message')
+        // The guard is taken on the first MOVE rather than at the lift, so a hold-and-release (which opens the
+        // context menu) never touches it: the host's repaint on the release would otherwise reload the webview
+        // out from under the very menu that release just opened.
+        assert.ok(!handlerBody('beginTouchDrag').includes('dialogGuard'), 'the lift must not take the guard')
+        assert.ok(handlerBody('onTouchDragMove').includes("['dialogGuard', true]"), 'the first real move must take it')
+    })
+
+    await test('webview touch drag: a gap with no neighbours in a dateless group is not painted as a target', () => {
+        // betweenBounds returns null for it (nothing to bound the interval, no group date to anchor it), so the
+        // host would write nothing - and an insertion line there would promise a move that never happens.
+        const resolve = handlerBody('resolveDragTarget')
+        assert.ok(/info\.groupDate == null/.test(resolve), 'the rule must be limited to a DATELESS group (a dated one spans its own day)')
+        assert.ok(/!neighbours\.prevId && !neighbours\.nextId\) return null/.test(resolve), 'both neighbours absent in a dateless group is not a target')
+        // The big [data-drop] targets are asked of the DOM first: a heading is a SIBLING of the rows, sitting in
+        // the very gap the row index would attribute to the row above it.
+        assert.ok(resolve.indexOf('elementFromPoint') < resolve.indexOf('TouchDrag.rowAtY'),
+            'the whole-row targets must be resolved before the gaps, or a heading would read as the gap above it')
+        assert.ok(resolve.includes("closest('[data-drop]')"), 'the whole-row targets are the existing [data-drop] elements')
+        // ...and the rows themselves come from the pure module against the index, never from elementFromPoint.
+        assert.ok(resolve.includes('window.TouchDrag.rowAtY(touchDrag.index'), 'the row must be found geometrically, in the index')
+        assert.ok(resolve.includes('window.TouchDrag.bandSide('), 'and its side by the shared band rule')
+    })
+
+    await test('webview touch drag: the row index skips the peek and is rebuilt after every scrolled frame', () => {
+        const build = handlerBody('buildRowIndex')
+        assert.ok(build.includes("closest('.outside-results')"), 'the read-only peek is not a target of any kind')
+        assert.ok(build.includes('getBoundingClientRect()'), 'the index holds the rows\' live boxes')
+        assert.ok(build.includes('betweenGroupInfo(row)'), 'each row carries the eligibility the desktop drop already resolves')
+        // The rows move under a finger that is holding still, which is the whole auto-scroll gesture.
+        const scrolled = handlerBody('onTouchDragScrolled')
+        assert.ok(scrolled.includes('buildRowIndex()'), 'a scrolled frame must rebuild the index - the boxes have all moved')
+        assert.ok(scrolled.includes('updateDragTarget()'), '...and re-resolve what the finger is now over')
+        assert.ok(handlerBody('onTouchDragMove').includes('edgeAutoscrollUpdate(currentTodosEl || document.querySelector(\'.todos\'), touchDrag.x, touchDrag.y, onTouchDragScrolled)'),
+            'the touch drag must feed the SHARED edge auto-scroll helper, not a second copy of the band maths')
+    })
+
+    await test('webview touch drag: the two bands are named constants - 0.5 on touch, the desktop 0.4 untouched', () => {
+        assert.ok(/var TOUCH_DRAG_BAND = 0\.5/.test(webviewSource), 'the touch band must be a named constant of its own, and 0.5 (no inert middle)')
+        assert.ok(/var BETWEEN_BAND = 0\.4/.test(webviewSource), 'the desktop band must still be 0.4, with its inert middle')
+        assert.ok(/var TOUCH_DRAG_SLOP = 10/.test(webviewSource), 'the travel slop must match the long press it lifts out of')
+        assert.ok(/var TOUCH_DRAG_WATCHDOG_MS = \d+/.test(webviewSource), 'the watchdog must be a named, tunable constant')
+    })
+
+    await test('webview touch drag: the desktop HTML5 handlers keep their IS_MOBILE gates', () => {
+        // The touch gesture is an ADDITION: nothing about the desktop drag moved, and the mobile early-returns
+        // that were there before this feature are still there (there is no HTML5 drag on Android to gate).
+        assert.ok(/function onBetweenDragOver\(event\)\{\s*if \(IS_MOBILE \|\| !isPanelDragEvent\(event\)\) return/.test(webviewSource), 'onBetweenDragOver stays desktop-gated')
+        assert.ok(/async function onBetweenDrop\(event\)\{\s*if \(IS_MOBILE\) return/.test(webviewSource), 'onBetweenDrop stays desktop-gated')
+        assert.ok(/function onDragAutoscroll\(event\)\{\s*if \(IS_MOBILE \|\| !isPanelDragEvent\(event\)\) return/.test(webviewSource), 'onDragAutoscroll stays desktop-gated')
+        assert.ok(/function onPanelDragLeave\(event\)\{\s*if \(IS_MOBILE \|\| !isPanelDragEvent\(event\)\) return/.test(webviewSource), 'onPanelDragLeave stays desktop-gated')
+        // The neighbour walk is now shared by both gestures rather than copied into the new one.
+        assert.ok(handlerBody('onBetweenDrop').includes('betweenNeighboursAt(target.row, target.before'), 'the desktop drop must use the shared neighbour resolution')
+        assert.ok(handlerBody('dropTouchDrag').includes('betweenNeighboursAt(target.row, target.before'), 'and so must the touch drop, so the two cannot disagree about a gap')
+    })
+
+    await test('webview touch drag: the trace falls back to the sticky toast when no suggestion hint is on screen', () => {
+        // Every row gesture happens with the suggestion list closed, so a trace written only into that list's
+        // hint line was blind to exactly the gesture the device round has to report on.
+        const trace = handlerBody('traceGesture')
+        assert.ok(trace.includes("querySelector('#searchSuggestions .suggest-hint')"), 'the hint line stays the sink while the list is open')
+        assert.ok(/showToast\(text, true\)/.test(trace), 'with no hint line the codes go to the toast in its sticky mode')
+        const toast = handlerBody('showToast')
+        assert.ok(/function showToast\(text, sticky\)/.test(toast), 'showToast must take a sticky mode')
+        assert.ok(toast.includes('if (sticky) return'), 'a sticky toast must not arm the fade timer')
+        assert.ok(/GESTURE_TRACE_MAX = 10/.test(webviewSource), 'the ring buffer must be long enough to hold a whole drag (arm, retargets, scroll, drop)')
+        // ...and the drag speaks in codes that name what happened, only when the answer CHANGES.
+        for (const code of ['drag-arm', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between'", "'drag-drop:date'", "'drag-cancel:'", 'menu-on-release']){
+            assert.ok(webviewSource.includes(code), `the trace must carry ${code}`)
+        }
+        assert.ok(handlerBody('updateDragTarget').includes('if (sameDragTarget(touchDrag.target, target)){ touchDrag.target = target; return }'),
+            'the target trace must fire on a CHANGE only, or one move would flood the whole buffer')
+    })
+
+    await test('webview touch drag: a release that never travelled hands the context menu back', () => {
+        // The gesture is speculative: the same 500ms press lifts the row, and only travel commits to a drag.
+        assert.ok(/if \(touchDrag\.moved\)\{ dropTouchDrag\(\); return \}/.test(webviewSource), 'a release that travelled drops')
+        assert.ok(/endTouchDrag\('menu'\)[\s\S]{0,120}onTodoContextMenu\(ev, todoID\)/.test(webviewSource),
+            'a release that did not travel ends the drag and opens the menu the press would have opened')
+        assert.ok(/var ev = synthEvent\(longPress\.target, touchDrag\.x, touchDrag\.y, touchDrag\.row\)/.test(webviewSource),
+            'the menu must be opened with the press point, through the same synthetic event the long press uses')
+    })
+
+    await test('panel.css touch drag: a thicker insertion line, a banner, and NO touch-action on .todo', () => {
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        const ruleBody = (selector) => {
+            const at = css.indexOf(selector)
+            assert.ok(at >= 0, `panel.css is missing the ${selector} rule`)
+            const open = css.indexOf('{', at), close = css.indexOf('}', open)
+            return css.slice(open + 1, close)
+        }
+        for (const selector of ['.cockpit-mobile .todo.-drop-before {', '.cockpit-mobile .todo.-drop-after {']) {
+            const body = ruleBody(selector)
+            assert.ok(/box-shadow:\s*inset 0 -?4px/.test(body), `${selector} must draw a 4px line, still as an inset box-shadow (no layout shift)`)
+            assert.ok(/var\(--cockpit-/.test(body), `${selector} must colour the line from a --cockpit-* variable`)
+        }
+        const banner = ruleBody('#cockpitDragBanner {')
+        assert.ok(/position: fixed/.test(banner), 'the banner must be fixed over the panel')
+        assert.ok(/pointer-events: none/.test(banner), 'the banner must never take the finger the drag needs')
+        assert.ok(css.includes('#cockpitDragBanner.-cancel {'), 'the banner must have a cancel state')
+        // The one thing that must NOT be here: a touch-action on the rows would apply to every touch on every
+        // row, always, and kill the flick-scrolling of the list. The drag stops the pan per gesture instead.
+        assert.ok(!/\.cockpit-mobile \.todo[ ,{][^}]*touch-action/.test(css), 'no touch-action may be put on the to-do rows')
+        assert.ok(!/^\.todo \{[^}]*touch-action/m.test(css), 'and none on the shared row rule either')
+    })
+
+    await test('panel.ts loads the touch-drag module before the webview that uses it', () => {
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const module = panelSource.indexOf("addScript(panel, '/ui/panel/touchDrag.js')")
+        const webview = panelSource.indexOf("addScript(panel, '/ui/panel/panelWebview.js')")
+        assert.ok(module >= 0, 'the touch-drag module must be added to the panel')
+        assert.ok(module < webview, 'and before panelWebview.js, which resolves targets through it')
+    })
+
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
     await test('version: package.json, manifest, and both package-lock fields are all 2.2.1', () => {
