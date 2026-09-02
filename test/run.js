@@ -2799,11 +2799,13 @@ async function main() {
         // BOTH ends of a drag stop it: a drop and a dragend. Losing either leaves the list scrolling after the gesture.
         assert.ok(webviewSource.includes("document.addEventListener('drop', endPanelDrag"), 'a drop must end the panel drag, and with it the scrolling')
         assert.ok(webviewSource.includes("document.addEventListener('dragend', endPanelDrag"), 'a dragend must end the panel drag, and with it the scrolling')
-        assert.ok(/function endPanelDrag\(\)\{\s*panelDragActive = false\s*edgeAutoscrollStop\(\)/.test(webviewSource),
-            'ending the drag must drop the flag AND stop the loop')
-        // ...and take both transient paints with it: a target the list scrolled out from under a STILL pointer owes no
-        // dragleave, so its highlight would otherwise survive the whole gesture.
+        // Ending the drag does all four things. Pinned as membership rather than as one regex over the statement
+        // ORDER: the order of these four is not a property anything depends on, and pinning it would fail a harmless
+        // reshuffle. A target the list scrolled out from under a STILL pointer owes no dragleave, so without the two
+        // paint sweeps its highlight would survive the whole gesture.
         const endBody = handlerBody('endPanelDrag')
+        assert.ok(endBody.includes('panelDragActive = false'), 'ending the drag must drop the ownership flag')
+        assert.ok(endBody.includes('edgeAutoscrollStop()'), 'ending the drag must stop the scroll loop')
         assert.ok(endBody.includes('paintDropTargetHighlight(null)'), 'ending the drag must clear the whole-row drop highlight')
         assert.ok(endBody.includes('clearBetweenIndicator()'), 'ending the drag must clear the between-rows insertion line')
     })
@@ -2878,6 +2880,9 @@ async function main() {
         assert.ok(step.includes('if (clientY > rect.bottom) return AUTOSCROLL_SPEED_MAX'), 'a pointer below the container must scroll down at full speed')
         // ...but off to the SIDE is someone else's gesture.
         assert.ok(step.includes('if (clientX < rect.left || clientX > rect.right) return 0'), 'a pointer beside the container must not scroll it')
+        // ...and the band is clamped to HALF the height as well, so in a very short container the top and bottom bands
+        // cannot overlap into a list with no inert middle left at all.
+        assert.ok(step.includes('Math.min(rect.height / 2'), 'the band must be clamped to half the container height, so the two bands never overlap')
     })
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
