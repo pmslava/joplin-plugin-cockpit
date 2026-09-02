@@ -17,8 +17,13 @@ import { agendaPanel, createNotebook, waitForPanelTodo, PANEL_REFRESH_TIMEOUT } 
  * does, and measure `.todos.scrollTop` around each phase.
  *
  * The whole timed sequence runs INSIDE the panel frame (one `evaluate` per probe): a dragover dispatched over CDP
- * per tick would put the round-trip latency into the very interval being measured, and the watchdog that stops
- * the loop after 150ms of silence is measured in exactly those milliseconds.
+ * per tick would put the round-trip latency into the very interval being measured, and the silent stretch that
+ * the watchdog is measured against is a matter of a few hundred milliseconds.
+ *
+ * One case deliberately sends a SINGLE dragover and then goes quiet, because the cadence of a real drag is not
+ * something this suite gets to choose: the HTML drag-and-drop model iterates every 350ms for a stationary
+ * pointer, and holding the pointer still in the band is the entire gesture. A probe that keeps its own 50ms
+ * stream running proves the loop scrolls; only the silent one proves it does not need to be fed.
  *
  * To have anything to scroll, the list must overflow: 60 undated to-dos are seeded through Joplin's own data API
  * (the GUI's "New to-do" costs seconds each, and 60 of them would not fit in a beforeAll), and the suite refuses
@@ -47,8 +52,20 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
   // A scrolling phase runs for at least 400ms at 2..16 px/frame, so tens of pixels is a floor no real run can
   // miss while still being far above any incidental movement.
   const MOVED_MIN = 50;
+  // The floor for the SILENT case. A watchdog at the old 150ms could contribute at most ~9 frames x ~15px = 135px
+  // before killing the loop, so a run that coasts past this can only have come from a watchdog well above the
+  // drag's own cadence - which is the property the still-pointer gesture depends on.
+  const COASTED_MIN = 200;
+  // AUTOSCROLL_SPEED_MAX in src/ui/panel/panelWebview.js. The helper moves the container at most once per animation
+  // frame, so a phase can never move further than the frames it was given x this - which is what keeps the speed
+  // constants honest: a helper scrolling at 200 px/frame passes every direction-only assertion. Two frames of
+  // slack absorb the counter and the loop being registered at different points in the same frame queue.
+  const SPEED_MAX = 16;
 
   test.beforeAll(async () => {
+    // Launch + API wait + 60 seeded to-dos + two panel waits + a metrics poll do not fit the shared 240s budget on
+    // a slow machine, and a hook timeout hides which step actually went wrong.
+    test.setTimeout(420_000);
     joplin = await launchJoplin({
       settings: { 'clipperServer.autoStart': true, 'api.token': API_TOKEN, 'api.port': API_PORT },
     });
@@ -61,14 +78,19 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     for (let i = 0; i < ROWS; i++) await createTodoViaApi(marker(i), folderId);
     await waitForPanelTodo(win, FIRST);
     await waitForPanelTodo(win, LAST);
-    // The precondition every measurement below rests on: the list really does overflow its container.
+    // The precondition every measurement below rests on: the list really does overflow its container, by more than
+    // the longest single coast any case asks for.
     await expect
       .poll(async () => (await listMetrics()).maxScroll, {
         timeout: PANEL_REFRESH_TIMEOUT,
         intervals: [1000, 2000, 4000],
       })
-      .toBeGreaterThan(200);
-    console.log('AUTOSCROLL FIXTURE', JSON.stringify(await listMetrics()));
+      .toBeGreaterThan(400);
+    const fixture = await listMetrics();
+    console.log('AUTOSCROLL FIXTURE', JSON.stringify(fixture));
+    // ...and it is tall enough that the two edge bands are nowhere near each other, so the MIDDLE case really is
+    // sampling an inert point rather than the seam between them.
+    expect(fixture.clientHeight, 'the list must be far taller than two edge bands').toBeGreaterThan(200);
   });
 
   test.afterAll(async () => {
@@ -155,11 +177,13 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     });
   }
 
-  /** One phase of a probe: where the pointer sits, for how long, and whether the drag ends first. */
+  /** One phase of a probe: where the pointer sits, for how long, how it is fed, and whether the drag ends first. */
   interface Phase {
     at: 'top' | 'middle' | 'bottom';
     ms: number;
     endDragFirst?: boolean;
+    /** 'stream' (default) keeps dispatching dragover; 'once' sends one and goes quiet; 'none' sends nothing. */
+    feed?: 'stream' | 'once' | 'none';
   }
 
   interface Probe {
@@ -169,7 +193,8 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     settled: number;
     /** True when a background refresh replaced the .todos node mid-probe, which invalidates the numbers. */
     rerendered: boolean;
-    phases: { at: string; endedFirst: boolean; from: number; to: number; delta: number }[];
+    /** `frames` is the animation frames the phase spanned - the ceiling on how far the loop could have moved. */
+    phases: { at: string; endedFirst: boolean; from: number; to: number; delta: number; frames: number }[];
   }
 
   /**
@@ -213,6 +238,17 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
         phases: [],
       };
 
+      // An animation-frame counter running alongside the probe. The helper moves the container at most once per
+      // frame, so the frames a phase spanned are the ceiling on how far it could legitimately have travelled - a
+      // bound that holds whatever frame rate this machine happens to manage.
+      let frames = 0;
+      let counting = true;
+      const countFrame = () => {
+        frames++;
+        if (counting) requestAnimationFrame(countFrame);
+      };
+      requestAnimationFrame(countFrame);
+
       if (o.drag && row) {
         // The plain mousedown a browser always fires before dragstart (it is what selects the row).
         row.dispatchEvent(new MouseEvent('mousedown', { button: 0, bubbles: true }));
@@ -226,10 +262,11 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
         }
         const y = yFor(phase.at);
         const from = todos.scrollTop;
-        const until = Date.now() + phase.ms;
-        while (Date.now() < until) {
-          // Dispatched on whatever is genuinely under the point, so the handler resolves the same scroll
-          // container from event.target that a real dragover would.
+        const framesFrom = frames;
+        const feed = phase.feed || 'stream';
+        // Dispatched on whatever is genuinely under the point, so the handler resolves the same scroll container
+        // from event.target that a real dragover would.
+        const dragover = () => {
           const under = (document.elementFromPoint(x, y) as HTMLElement) || todos;
           under.dispatchEvent(
             new DragEvent('dragover', {
@@ -240,15 +277,32 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
               clientY: y,
             })
           );
-          await sleep(50); // well inside the 150ms watchdog, as a real drag's own stream is
+        };
+        const until = Date.now() + phase.ms;
+        if (feed === 'stream') {
+          while (Date.now() < until) {
+            dragover();
+            await sleep(50);
+          }
+        } else {
+          if (feed === 'once') dragover();
+          await sleep(phase.ms); // ...and then silence, which is what a pointer holding perfectly still produces
         }
         const to = todos.scrollTop;
-        out.phases.push({ at: phase.at, endedFirst: !!phase.endDragFirst, from, to, delta: to - from });
+        out.phases.push({
+          at: phase.at,
+          endedFirst: !!phase.endDragFirst,
+          from,
+          to,
+          delta: to - from,
+          frames: frames - framesFrom,
+        });
       }
 
       // Always end the gesture, then look once more: a loop that outlived it would still be moving the list.
       (row || document.body).dispatchEvent(new DragEvent('dragend', { dataTransfer: dt, bubbles: true }));
       await sleep(200);
+      counting = false;
       out.settled = todos.scrollTop;
       out.rerendered = document.querySelector('.todos') !== todos;
       return out;
@@ -265,15 +319,21 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
       .poll(
         async () => {
           last = await probe({ drag: true, preScroll: 'top', phases: [{ at: 'bottom', ms: 600 }] });
-          return last.phases[0].delta;
+          // A run whose .todos was replaced mid-probe measured a detached node: retry rather than report it.
+          return last.rerendered ? 0 : last.phases[0].delta;
         },
         { timeout: 60_000, intervals: [500, 1000, 2000] }
       )
       .toBeGreaterThan(MOVED_MIN);
     console.log('BOTTOM-BAND DIAG', JSON.stringify(last));
+    expect(last!.rerendered, 'the reported run must be one no background refresh invalidated').toBe(false);
     expect(last!.dragStarted, 'the dragstart must have produced a payload').toBe(true);
     // And the scrolling stopped with the gesture: nothing moved in the 200ms after dragend.
     expect(Math.abs(last!.settled - last!.phases[0].to)).toBeLessThanOrEqual(STILL_TOL);
+    // ...and it never moved faster than the helper's own ceiling allows.
+    expect(last!.phases[0].delta, 'the list must not outrun AUTOSCROLL_SPEED_MAX per frame').toBeLessThanOrEqual(
+      (last!.phases[0].frames + 2) * SPEED_MAX + STILL_TOL
+    );
   });
 
   test('a drag held in the MIDDLE of the list does not scroll it', async () => {
@@ -292,13 +352,18 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
       .poll(
         async () => {
           last = await probe({ drag: true, preScroll: 'middle', phases: [{ at: 'top', ms: 600 }] });
-          return last.phases[0].delta;
+          return last.rerendered ? 0 : last.phases[0].delta;
         },
         { timeout: 60_000, intervals: [500, 1000, 2000] }
       )
       .toBeLessThan(-MOVED_MIN);
     console.log('TOP-BAND DIAG', JSON.stringify(last));
+    expect(last!.rerendered, 'the reported run must be one no background refresh invalidated').toBe(false);
     expect(Math.abs(last!.settled - last!.phases[0].to)).toBeLessThanOrEqual(STILL_TOL);
+    expect(
+      Math.abs(last!.phases[0].delta),
+      'the list must not outrun AUTOSCROLL_SPEED_MAX per frame'
+    ).toBeLessThanOrEqual((last!.phases[0].frames + 2) * SPEED_MAX + STILL_TOL);
   });
 
   test('dragend stops the scrolling even while the pointer stays in the band', async () => {
@@ -317,15 +382,49 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
               { at: 'bottom', ms: 600, endDragFirst: true },
             ],
           });
-          return last.phases[0].delta;
+          return last.rerendered ? 0 : last.phases[0].delta;
         },
         { timeout: 60_000, intervals: [500, 1000, 2000] }
       )
       .toBeGreaterThan(MOVED_MIN);
     console.log('DRAGEND-STOP DIAG', JSON.stringify(last));
+    expect(last!.rerendered, 'the reported run must be one no background refresh invalidated').toBe(false);
     expect(
       Math.abs(last!.phases[1].delta),
       'after dragend the list must stand still even with the pointer in the band'
+    ).toBeLessThanOrEqual(STILL_TOL);
+  });
+
+  test('one dragover keeps the list scrolling through a silence, and the watchdog then stops it', async () => {
+    // The case the whole feature rests on. A pointer HOLDING STILL in the band is the gesture - and a still
+    // pointer is exactly when the drag's events dry up: the HTML drag-and-drop model iterates every 350ms at
+    // best, and an X11 drag follows pointer motion. So this probe sends ONE dragover and then goes completely
+    // quiet for 1200ms. A loop that needs feeding could not coast past COASTED_MIN; the old 150ms watchdog had
+    // ~135px in it. The second, equally silent phase then proves nothing runs on for ever: by then the watchdog
+    // has ended it with no drop and no dragend anywhere in sight.
+    let last: Probe | null = null;
+    await expect
+      .poll(
+        async () => {
+          last = await probe({
+            drag: true,
+            preScroll: 'top',
+            phases: [
+              { at: 'bottom', ms: 1200, feed: 'once' },
+              { at: 'bottom', ms: 500, feed: 'none' },
+            ],
+          });
+          return last.rerendered ? 0 : last.phases[0].delta;
+        },
+        { timeout: 60_000, intervals: [500, 1000, 2000] }
+      )
+      .toBeGreaterThan(COASTED_MIN);
+    console.log('SILENT-COAST DIAG', JSON.stringify(last));
+    expect(last!.rerendered, 'the reported run must be one no background refresh invalidated').toBe(false);
+    expect(last!.dragStarted).toBe(true);
+    expect(
+      Math.abs(last!.phases[1].delta),
+      'the loop must have ended itself during the silence, with no drop and no dragend'
     ).toBeLessThanOrEqual(STILL_TOL);
   });
 
