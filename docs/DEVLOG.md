@@ -611,18 +611,37 @@ to-do for Sunday, the end of the period; it now schedules it for the FIRST day o
 after the previous group's last day. A plan that puts everything on the last day of the week is a plan that is
 already too late. Today and Tomorrow are their own day as before, No Due Date still clears, and Overdue and
 Future still name no date. The host-side time rule is untouched (the to-do keeps its own time of day, or takes
-the profile day-start when it had none), and between-row drops need no change either — betweenBounds anchors a
-group's top edge on the heading's date, which simply moved.
+the profile day-start when it had none). Between-row drops did need a change, which the first pass missed and
+the review caught: `betweenBounds` anchors a group's TOP edge on the heading's date — that one simply moved,
+and improved, since the first day of a slice sits at or before every row in it — but it anchored the BOTTOM
+edge on the same date, and the bottom edge needs the other end of the group. With the drop day now the first
+day, `hi` landed before the group's own rows, the interval inverted, and every to-do dropped below the last row
+of This/Next Week, Month or Year was pinned to that row's own due instead of spreading. So a heading that spans
+a stretch of days now carries its last day too, as `data-drop-end` beside `data-drop`
+(`dropEndDateFor` → `getHeadingDropEnd` → `dropTargetAttributes` → the webview's `betweenGroupInfo` → the
+`todosDroppedBetween` message → `betweenBounds`'s new fifth argument), and the two edges anchor on their own
+end. A one-day group — a Date-view heading, a calendar cell, Today, Tomorrow — sends none and behaves exactly
+as before; a dateless group (Overdue/Future) still derives both ends from its neighbour.
 
 The math went into a pure module, `src/core/horizons.js`, in the same UMD shape as `between.js`: every input
 explicit, never `Date.now()` inside, all arithmetic on local calendar parts so no boundary moves across a DST
 transition. `horizonPlan(nowMs, weekStartsOn)` returns the five ordered sections with their last millisecond
-and their first day; `horizonOf`, `kindOf` and `dropDateFor` are what the format asks it. `IntervalFormat` now
+and their first day; `horizonOf`, `kindOf`, `dropDateFor` and `dropEndDateFor` are what the format asks it. `IntervalFormat` now
 computes one plan per render (a formatter is built fresh for every render, so a lazily memoised field IS
 per-render) and reads its headings, its row labels and its drop targets out of that one plan, which is what
 keeps them from disagreeing. Row labels follow the section KIND rather than its name, so Next Week reads like
-This Week and Next Month / Next Year like theirs. The `BaseFormat` period helpers stay where they were; the
-other formats are untouched.
+This Week and Next Month / Next Year like theirs. One deliberate behaviour change rides along, worth naming
+because it is a boundary: 2.1.3 bucketed with a strict `due < end`, `horizonOf` uses `due <= end`, so a to-do
+due at exactly 23:59:59.999 now stays in its own slice instead of falling into the next. It is one millisecond,
+invisible at Joplin's second granularity, it makes the boundary claims in the owner's acceptance calendars
+satisfiable at all, and it settles an old self-contradiction: `getCompletedBucket` already used `<=`, so such a
+to-do got the "today" completed bucket and the "Tomorrow" heading. The five `BaseFormat` period helpers the
+interval view no longer consults (`getStartOfTomorrow`, `getEndOfTomorrow`, `getEndOfThisWeek`,
+`getEndOfThisMonth`, `getEndOfThisYear`) were deleted rather than left as a second, diverging implementation of
+period ends — nothing in `src/`, `test/` or `e2e/` called them, and their banners still narrated the 2.1.3 fix
+as if they were live. `getStartOfToday` and `getEndOfToday` stay: `getCompletedBucket` uses both. Three
+now-unused calendar imports went with them (`endOfWeek`, and `startOfDay` / `startOfWeek`, which had been dead
+in this file already). The other formats are untouched.
 
 Testing is in three layers. All eleven of the owner's confirmed calendars are pinned check by check — the
 exact ordered names, every drop day, every slice's last day, and both sides of every boundary. Then an
@@ -630,26 +649,41 @@ exhaustive sweep: every day of 2026 and 2027, at midnight, noon and the last mil
 week starts — 4380 plans — asserting that the ends strictly increase, that a period is replaced by its Next
 exactly when its own end is already covered, that each drop day buckets into its own slice while the day
 before it does not, that each slice owns its own last millisecond and the next owns the one after, and that
-the Overdue and No Due Date ends of the chain hold. The five 2.1.3 heading checks were kept and their allowed
-sets widened to admit the Next names — not guessed, but exactly the names the sweep reaches for those four
-fixtures over 2024-2032 — and a new rendered-panel check puts a to-do on the drop day of every section and
-pins each rendered heading's text and `data-drop` against the plan, taken on both sides of the run so a
-midnight crossing cannot flake it.
+the Overdue and No Due Date ends of the chain hold. The 2.1.3 heading checks were kept and their allowed sets
+widened to admit the Next names — and the widening is not an offline computation the reader has to take on
+trust, which is exactly what the 2.1.3 entry above was written to avoid: the four fixture dues and their
+allowed sets are one `horizonFixtureSets` table, a pure check sweeps those same dues over 2024-2032 at three
+times of day and both week starts, and it asserts both directions — every name the calendar reaches is in the
+set, and every name in the set is one the calendar reaches, so neither a missing name nor a padded one
+survives. Then the rendered panel: one run puts a to-do on the drop day of every section, so all five headings
+render, and it pins each heading's text and `data-drop`, each heading's `data-drop-end` where the slice spans
+more than a day, and each ROW's label against what the profile's own formatting produces for that section's
+kind — the last of these is what pins feature item 3 end-to-end, where `kindOf` alone could not. The plan is
+taken on both sides of every run and a match against either is accepted; if midnight actually fell DURING a
+run the fixtures and the render belong to different days, so those checks stand down for that one run rather
+than failing.
 
-Three mutations verified the new checks, each run against the full build and then restored byte-identical.
-Making the week flip unconditional (`weekAbsorbed = false`) failed the three Next Week pins and all three
-sweep checks, six in all. Reverting the week section's drop day to the end of the period failed ten of the
-eleven pinned calendars, the names check and the drop-day sweep — twelve; the one pin that survived is Friday
-1 January 2027, whose week slice is the single day Sunday the 3rd, where first day and last day are the same.
-Loosening the absorption test to a strict `<` failed exactly the calendars where a period ends ON the previous
-boundary — Saturday 5 September, Saturday 29 August and Thursday 10 December — plus all three sweeps. Nothing
-else failed in any of the three.
+Seven mutations verified the checks, each run against the full build and then restored byte-identical; the
+first three were re-run in the review round, against the widened suite, so the counts below are the measured
+ones. Making the week flip unconditional (`weekAbsorbed = false`) failed the three Next Week pins, all three
+sweep checks and the fixture sweep — seven. Reverting every section's drop day to the last day of its own
+period (the pre-2.2.0 rule) failed all eleven pinned calendars, the names check and the drop-day sweep —
+thirteen. Loosening the absorption test to a strict `<` failed exactly the calendars where a period ends ON
+the previous boundary — Saturday 5 September, Saturday 29 August and Thursday 10 December — plus all three
+sweeps and the fixture sweep: seven. Then the four of the review round: anchoring the bottom edge on the first
+day again (the regression itself) failed the two new `betweenBounds` checks and the new host-glue drop, three;
+swapping the week and month branches of `getFormatTodoString` failed the row-label check alone, one — before
+that check existed it passed the whole suite; returning null from `getHeadingDropEnd` failed the
+heading-attribute check, one; and narrowing one published fixture set by a single name failed the fixture
+sweep on a named December day, one. Nothing else failed in any of the seven.
 
-README: the interval paragraph and the drag paragraph now state the two rules, and the hero shot's spec notes
-that the capture has to be midweek and early in the month or the headings read Next. In e2e only a comment
-moved: `showcase.spec.ts` explained that a December capture pushes its far-future row into Future, which is no
-longer true — that row is now captioned Next Year. Every other spec drops onto Today or Tomorrow headings
-only, whose drop days did not change, so nothing else needed touching.
+README: the interval paragraph and the drag paragraph now state the two rules, the horizon list names the Next
+three, and the hero shot's spec closes with its own sentence saying the capture has to be midweek and early in
+the month or the headings read Next. In e2e only comments moved: `showcase.spec.ts` explained that a December
+capture pushes its far-future row into Future, which is no longer true — in December the year slice runs to the
+NEXT December 31st, so it holds both the +30-day and the +120-day row and the capture has no Future heading at
+all. Every other spec drops onto Today or Tomorrow headings only, whose drop days did not change, so nothing
+else needed touching.
 
-Suite: 317 harness checks (sixteen new), all passing. Playwright unchanged (79 tests, 72 run, 7 opt-in
-skipped) — not run in this pass.
+Suite: 323 harness checks (twenty-two new), all passing. Playwright unchanged (79 tests, 72 run, 7 opt-in
+skipped) — not run in this pass, only two of its comments corrected.
