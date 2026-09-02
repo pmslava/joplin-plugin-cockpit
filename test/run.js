@@ -2628,6 +2628,47 @@ async function main() {
         assert.strictEqual(Between.betweenBounds(0, 0, null, DAYSTART), null)
         assert.strictEqual(Between.betweenBounds(0, 0, 'not-a-date', DAYSTART), null)
     })
+    // A MULTI-DAY group (an interval period section since v2.2.0) carries two days: its data-drop is the FIRST day of
+    // the slice and its data-drop-end the last. The bottom edge must anchor on the LAST day - with only the first, its
+    // hi lands BEFORE the group's own rows, the interval inverts and betweenDue degenerates to lo, so every to-do
+    // dropped under the last row of This/Next Week, Month or Year would be pinned to that row's own due.
+    await test('betweenBounds (multi-day group): the bottom edge anchors on the group END day, not on its first day', () => {
+        const first = '2026-09-07', last = '2026-09-30'                       // a "This Month" slice: Sep 7 .. Sep 30
+        const lastRow = dueAt(2026, 9, 20, 10, 0)
+        assert.deepStrictEqual(
+            Between.betweenBounds(lastRow, 0, first, DAYSTART, last),
+            { lo: lastRow, hi: dueAt(2026, 9, 30, 23, 59) }, 'hi must be the END day at 23:59')
+        // ...and the interval it yields is a real one, forward of the last row rather than collapsed onto it.
+        const placed = Between.betweenDue(lastRow, dueAt(2026, 9, 30, 23, 59), DAYSTART)
+        assert.ok(placed > lastRow && placed <= dueAt(2026, 9, 30, 23, 59), 'the dropped to-do must land after the last row and inside the slice')
+        // Without the end day the same drop inverts: this is the shape the regression produced, pinned so it cannot
+        // come back unnoticed if the plumbing is ever dropped.
+        assert.deepStrictEqual(
+            Between.betweenBounds(lastRow, 0, first, DAYSTART),
+            { lo: lastRow, hi: dueAt(2026, 9, 7, 23, 59) }, 'without the end day the bound is the slice FIRST day (inverted)')
+    })
+    await test('betweenBounds (multi-day group): the top edge still anchors on the FIRST day, and an empty group spans both', () => {
+        const first = '2026-09-07', last = '2026-09-30'
+        const firstRow = dueAt(2026, 9, 8, 14, 0)
+        assert.deepStrictEqual(
+            Between.betweenBounds(0, firstRow, first, DAYSTART, last),
+            { lo: dueAt(2026, 9, 7, 9, 0), hi: firstRow }, 'the top edge opens at the slice first day @day-start')
+        // Both neighbours absent (the whole group is being dragged): the interval is the group's whole SPAN.
+        assert.deepStrictEqual(
+            Between.betweenBounds(0, 0, first, DAYSTART, last),
+            { lo: dueAt(2026, 9, 7, 9, 0), hi: dueAt(2026, 9, 30, 23, 59) }, 'no neighbours -> the whole span')
+    })
+    await test('betweenBounds (one-day group): an end day equal to the date, or none at all, behaves exactly as before', () => {
+        const both = Between.betweenBounds(dueAt(2026, 8, 19, 14, 0), 0, '2026-08-19', DAYSTART, '2026-08-19')
+        const only = Between.betweenBounds(dueAt(2026, 8, 19, 14, 0), 0, '2026-08-19', DAYSTART)
+        assert.deepStrictEqual(both, only, 'a Date-view / Today / Tomorrow heading is unaffected by the new argument')
+        assert.deepStrictEqual(both, { lo: dueAt(2026, 8, 19, 14, 0), hi: dueAt(2026, 8, 19, 23, 59) })
+        // A dateless group (Overdue/Future) sends null for both and still derives its day from the neighbour.
+        assert.deepStrictEqual(
+            Between.betweenBounds(dueAt(2022, 1, 8, 14, 0), 0, null, DAYSTART, null),
+            { lo: dueAt(2022, 1, 8, 14, 0), hi: dueAt(2022, 1, 8, 23, 59) }, 'dateless bottom edge unchanged')
+    })
+
 
     // ---- HOST GLUE: drive the COMPILED bundle's message paths (the alarm lesson: unit math + real wiring both) ----
     const nb = 'nb'.repeat(16)
@@ -2692,6 +2733,18 @@ async function main() {
         const got = duePutsSince(betweenGlue, before)
         assert.strictEqual(got[cDrag], dueAt(2026, 8, 19, 11, 0), 'between the FRESH 10:00 and 12:00 -> 11:00, not a value from the stale render')
     })
+    await test('host glue (todosDroppedBetween, MULTI-DAY group bottom edge): the slice END day bounds it, not the first', async () => {
+        // The shape an interval period section posts since v2.2.0: data-drop is the FIRST day of the slice
+        // (2026-09-07) and data-drop-end its last (2026-09-30). Dropping below the group's last row must spread
+        // FORWARD into the slice; with only the first day the interval inverts and the to-do stays put.
+        betweenGlue.notes[cPrev].todo_due = dueAt(2026, 9, 20, 10, 0)
+        const before = betweenGlue.notePuts.length
+        await betweenGlue.panelMessageHandler(['todosDroppedBetween', [cDrag], cPrev, null, '2026-09-07', '2026-09-30'])
+        const got = duePutsSince(betweenGlue, before)
+        assert.ok(got[cDrag] > dueAt(2026, 9, 20, 10, 0) && got[cDrag] < dueAt(2026, 9, 30, 23, 59),
+            `the dropped to-do must land strictly inside (last row, slice end), was ${new Date(got[cDrag])}`)
+        assert.strictEqual(got[cDrag], dueAt(2026, 9, 25, 9, 0), 'the midpoint DAY of Sep 20..Sep 30 at the 09:00 day start')
+    })
     await test('host glue (todosDroppedBetween, DATELESS group / Overdue): null groupDate, interior between two past dues', async () => {
         // The Overdue between-drop posts a NULL groupDate (the group has no date); the interior interval comes purely
         // from the neighbours' (past) dues, so the dragged row lands strictly between them.
@@ -2745,8 +2798,11 @@ async function main() {
     // ---- WEBVIEW SOURCE SHAPE: the harness cannot execute the webview JS, so pin the between-zone wiring as source ----
     await test('webview between-drop wiring: exists, desktop-gated, reuses the markup, cleaned up on dragend/drop', () => {
         // The gesture posts its own message shape and reads the existing markup (the row id + its heading's data-drop date).
-        assert.ok(webviewSource.includes("['todosDroppedBetween', ids, prevId, nextId, target.groupDate]"), 'the between drop must post todosDroppedBetween with prev/next/groupDate')
+        assert.ok(webviewSource.includes("['todosDroppedBetween', ids, prevId, nextId, target.groupDate, target.groupEndDate]"), 'the between drop must post todosDroppedBetween with prev/next/groupDate/groupEndDate')
         assert.ok(/getAttribute\('data-drop'\)/.test(webviewSource) && /\/\^\\d\{4\}-\\d\{2\}-\\d\{2\}\$\//.test(webviewSource), 'the group date must be read from the existing heading data-drop (a YYYY-MM-DD)')
+        // A group spanning several days (an interval period section) carries its LAST day too; the bottom edge needs
+        // it, since data-drop is only the first day of the slice.
+        assert.ok(/getAttribute\('data-drop-end'\)/.test(webviewSource), 'the slice end day must be read from the heading data-drop-end')
         assert.ok(/parentElement\.classList\.contains\('todos'\)/.test(webviewSource), 'eligibility must be limited to rows that are direct children of .todos (list views only)')
         // Desktop-gated: both drag handlers bail immediately on mobile (drag does not exist there anyway).
         assert.ok(/function onBetweenDragOver\(event\)\{\s*if \(IS_MOBILE\) return/.test(webviewSource), 'onBetweenDragOver must be desktop-gated (IS_MOBILE)')
@@ -2765,8 +2821,8 @@ async function main() {
         // neighbours; edges derived host-side). A dated heading still yields its YYYY-MM-DD groupDate.
         assert.ok(/betweenGroupInfo/.test(webviewSource), 'eligibility resolves through betweenGroupInfo')
         assert.ok(/drop === 'clear'/.test(webviewSource), "the No-Due group ('clear') must be the only excluded group")
-        assert.ok(/return \{ groupDate: null \}/.test(webviewSource), 'a dateless group (Overdue/Future) must be eligible with a null groupDate')
-        assert.ok(/return \{ groupDate: drop \}/.test(webviewSource), 'a dated group must still carry its YYYY-MM-DD date')
+        assert.ok(/return \{ groupDate: null, groupEndDate: null \}/.test(webviewSource), 'a dateless group (Overdue/Future) must be eligible with a null groupDate')
+        assert.ok(/return \{ groupDate: drop, groupEndDate: \(end && /.test(webviewSource), 'a dated group must still carry its YYYY-MM-DD date, plus its end day when it spans several')
     })
     await test('panel.css between-drop indicator: an inset box-shadow (no layout shift), a --cockpit-* accent, no @media', () => {
         const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')

@@ -19,10 +19,14 @@ export function escapeHtml(value){
 /** dropTargetAttributes ****************************************************************************************************************************
  * The attributes that make an element accept dropped to-dos. The target is either a YYYY-MM-DD date the dropped to-dos become due on, or "clear"    *
  * to remove their due dates. Returns an empty string for no target, so it can be interpolated unconditionally.                                     *
+ * `endTarget` is the LAST day of the span the element names, written as data-drop-end and only when it differs from the drop day itself. A single   *
+ * day (a calendar cell, a Date-view heading, Today / Tomorrow) needs none; an interval period heading does, because its drop day is the FIRST day   *
+ * of its slice and a between-row drop at the group's bottom edge has to reach the other end of it.                                                  *
  ***************************************************************************************************************************************************/
-export function dropTargetAttributes(target){
+export function dropTargetAttributes(target, endTarget?){
     if (!target) return ""
-    return ` data-drop="${escapeHtml(target)}" ondragover="onDropTargetOver(event)" ondragleave="onDropTargetLeave(event)" ondrop="onTodoDropped(event)"`
+    var end = (endTarget && endTarget !== target) ? ` data-drop-end="${escapeHtml(endTarget)}"` : ""
+    return ` data-drop="${escapeHtml(target)}"${end} ondragover="onDropTargetOver(event)" ondragleave="onDropTargetLeave(event)" ondrop="onTodoDropped(event)"`
 }
 
 /** headingContextAttributes ************************************************************************************************************************

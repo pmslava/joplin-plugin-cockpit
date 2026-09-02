@@ -22,11 +22,15 @@
  *                                       slice (a day at 23:59:59.999 local); `dropDate` is its first day as a local 'YYYY-MM-DD'.                     *
  *   horizonOf(dueMs, plan)            - the heading a due timestamp falls under: "No Due Date" (due 0), "Overdue" (before startOfToday), a section     *
  *                                       name, or "Future" past the last section. Each section owns its own end millisecond (due <= end), so a to-do    *
- *                                       due at 23:59:59.999 belongs to that day rather than to the next slice.                                        *
+ *                                       due at 23:59:59.999 belongs to that day rather than to the next slice. A due that is not a positive number -   *
+ *                                       0, negative (pre-1970) or NaN - is "No Due Date"; Joplin writes 0 for "no alarm" and never the other two.      *
  *   kindOf(name)                      - 'day' | 'week' | 'month' | 'year' for a section name, null for anything else. The row label follows the kind:  *
  *                                       a time under a day, a weekday under a week, a date under a month or a year.                                   *
  *   dropDateFor(name, plan)           - what dropping onto that heading does: the section's first day, "clear" for "No Due Date", null for a heading    *
  *                                       with no meaningful date (Overdue, Future).                                                                    *
+ *   dropEndDateFor(name, plan)        - the LAST day of that section's slice, as 'YYYY-MM-DD', or null for a heading that names no span. The panel      *
+ *                                       carries it beside the drop day (data-drop-end) so a between-row drop at the BOTTOM edge of a group can be      *
+ *                                       spread towards the end of the slice; the drop day alone would place its upper bound before the group's rows.   *
  *                                                                                                                                                    *
  * The very same file is require()d by the Node test harness (module.exports below) and bundled into the host by webpack (require("./horizons") in     *
  * formats.ts), so every rule here is unit-tested against the owner's acceptance calendars AND drives the real panel.                                  *
@@ -133,10 +137,23 @@
         return null
     }
 
+    /** dropEndDateFor *********************************************************************************************************************************
+     * The LAST day of the section's slice as 'YYYY-MM-DD' - the other end of the span the heading names - or null for a heading that names no span     *
+     * (No Due Date, Overdue, Future, or a name absent from this plan). Dropping ONTO the heading uses the first day (dropDateFor); dropping BELOW the  *
+     * group's last row spreads towards this one, which is why both have to travel with the heading.                                                    *
+     ***************************************************************************************************************************************************/
+    function dropEndDateFor(name, plan){
+        for (var index = 0; index < plan.sections.length; index++){
+            if (plan.sections[index].name === name) return toISODate(new Date(plan.sections[index].end))
+        }
+        return null
+    }
+
     return {
         horizonPlan: horizonPlan,
         horizonOf: horizonOf,
         kindOf: kindOf,
         dropDateFor: dropDateFor,
+        dropEndDateFor: dropEndDateFor,
     }
 })

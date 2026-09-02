@@ -27,7 +27,7 @@ import {
 } from "./calendar";
 // The pure interval-horizon math (window.CockpitHorizons is unused in this bundle; the require pulls the same UMD file
 // the Node harness unit-tests, so the panel's grouping and the tests share one implementation). Webpack bundles it in.
-const { horizonPlan, horizonOf, kindOf, dropDateFor } = require("./horizons");
+const { horizonPlan, horizonOf, kindOf, dropDateFor, dropEndDateFor } = require("./horizons");
 
 export { escapeHtml } from "./html";
 
@@ -184,7 +184,7 @@ abstract class BaseFormat {
         }
         for (var headingGroup of todoMap){
             var heading = headingGroup[0]
-            todoString += this.getHeadingString(heading, this.getHeadingDropTarget(heading, headingGroup[1]), headingGroup[1].map(todo => todo.id))
+            todoString += this.getHeadingString(heading, this.getHeadingDropTarget(heading, headingGroup[1]), headingGroup[1].map(todo => todo.id), this.getHeadingDropEnd(heading, headingGroup[1]))
             for (var todo of headingGroup[1]){
                 todoString += this.getTodoString(todo, heading)
             }
@@ -289,6 +289,15 @@ abstract class BaseFormat {
         return null
     }
 
+    /** getHeadingDropEnd ***************************************************************************************************************************
+     * The LAST day of the span this heading names, as YYYY-MM-DD, when that is a different day from the drop target above. Only a heading covering a  *
+     * STRETCH of days has one - an interval period section, whose drop day is the first day of its slice - and it is what a between-row drop at the   *
+     * group's bottom edge spreads towards. A heading that is a single day (Date view, Today, Tomorrow) returns null: its one day is both ends.        *
+     ***********************************************************************************************************************************************/
+    protected getHeadingDropEnd(heading, todos){
+        return null
+    }
+
     /** getCompletedBucket **************************************************************************************************************************
      * Whether a completed to-do belongs to the past, to today or to the future, judged by its due date. One without a due date is its own bucket,    *
      * with its own switch in the profile.                                                                                                           *
@@ -310,12 +319,12 @@ abstract class BaseFormat {
     /** getHeadingString ****************************************************************************************************************************
      * This returns the given heading string with the proper output format(i.e html or markdown)                                                    *
      ***********************************************************************************************************************************************/
-    private getHeadingString(headingString, dropTarget?, todoIDs?){
+    private getHeadingString(headingString, dropTarget?, todoIDs?, dropEnd?){
         if (headingString){
             if (this.outputFormat == "markdown"){
                 return `## ${headingString}\n`
             } else if (this.outputFormat == "html") {
-                return `<h2${dropTargetAttributes(dropTarget)}${headingContextAttributes(todoIDs)}>${escapeHtml(headingString)}</h2>`;
+                return `<h2${dropTargetAttributes(dropTarget, dropEnd)}${headingContextAttributes(todoIDs)}>${escapeHtml(headingString)}</h2>`;
             }
         } else {
             return ""
@@ -570,6 +579,14 @@ class IntervalFormat extends BaseFormat {
      ***********************************************************************************************************************************************/
     protected getHeadingDropTarget(heading, todos){
         return dropDateFor(heading, this.getPlan())
+    }
+
+    /** getHeadingDropEnd ***************************************************************************************************************************
+     * The other end of the slice: its LAST day. It rides along on the heading (data-drop-end) purely for the between-row gesture - a drop below the  *
+     * group's last row spreads from that row towards the end of the slice, and the drop day, being the FIRST day, sits before the group's own rows.  *
+     ***********************************************************************************************************************************************/
+    protected getHeadingDropEnd(heading, todos){
+        return dropEndDateFor(heading, this.getPlan())
     }
 }
 

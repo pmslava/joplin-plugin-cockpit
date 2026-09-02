@@ -1119,7 +1119,7 @@ async function onTodoDropped(event){
  * existing markup (the row's data-todo-id and its group heading's data-drop date) and posts, holding nothing across renders but the transient indicator *
  * class, which is cleared on every dragover, on dragend and on drop. It lives only in the LIST views: an eligible row is a .todo[data-todo-id] that is a *
  * DIRECT child of the .todos container (week cards sit in .week-day, month/notes/peek rows in their own sections, so those are excluded). A DATED group   *
- * (heading data-drop = YYYY-MM-DD) anchors its edges on that date; a DATELESS group (Overdue/Future, no data-drop) is eligible too - an interior drop     *
+ * (heading data-drop = YYYY-MM-DD) anchors its edges on that date - on data-drop-end for the bottom edge, where the group spans several days; a DATELESS group (Overdue/Future, no data-drop) is eligible too - an interior drop     *
  * needs no group date and its edges are derived host-side from the neighbour's own due. Only the No-Due group (data-drop "clear") is excluded: its rows   *
  * carry no due, so there is nothing to sit between.                                                                                                       *
  *                                                                                                                                                        *
@@ -1153,8 +1153,13 @@ function betweenGroupInfo(row){
     if (!heading) return null
     var drop = heading.getAttribute('data-drop')
     if (drop === 'clear') return null                             // No-Due: its rows have no due to be between
-    if (drop && /^\d{4}-\d{2}-\d{2}$/.test(drop)) return { groupDate: drop }   // dated group: its date anchors the edges
-    return { groupDate: null }                                    // dateless group (Overdue/Future): edges from neighbours
+    if (drop && /^\d{4}-\d{2}-\d{2}$/.test(drop)){
+        // A heading that names a STRETCH of days (an interval period section) carries the last day of its slice too;
+        // its data-drop is only the FIRST day, which would put the bottom edge's bound before the group's own rows.
+        var end = heading.getAttribute('data-drop-end')
+        return { groupDate: drop, groupEndDate: (end && /^\d{4}-\d{2}-\d{2}$/.test(end)) ? end : drop }
+    }
+    return { groupDate: null, groupEndDate: null }                // dateless group (Overdue/Future): edges from neighbours
 }
 
 // The eligible between-target under the pointer, or null when the pointer is over a row's inert middle or not over an
@@ -1167,8 +1172,8 @@ function betweenTargetFor(event){
     var rect = row.getBoundingClientRect()
     if (!rect.height) return null
     var offset = event.clientY - rect.top
-    if (offset <= rect.height * BETWEEN_BAND) return { row: row, before: true, groupDate: info.groupDate }
-    if (offset >= rect.height * (1 - BETWEEN_BAND)) return { row: row, before: false, groupDate: info.groupDate }
+    if (offset <= rect.height * BETWEEN_BAND) return { row: row, before: true, groupDate: info.groupDate, groupEndDate: info.groupEndDate }
+    if (offset >= rect.height * (1 - BETWEEN_BAND)) return { row: row, before: false, groupDate: info.groupDate, groupEndDate: info.groupEndDate }
     return null                                                    // the inert middle: keep today's behaviour (nothing)
 }
 
@@ -1219,7 +1224,7 @@ async function onBetweenDrop(event){
     var prevId = betweenNeighbour(upperStart, -1, draggedSet)
     var nextId = betweenNeighbour(lowerStart, +1, draggedSet)
     selectedRowIDs.clear()
-    await webviewApi.postMessage(['todosDroppedBetween', ids, prevId, nextId, target.groupDate])
+    await webviewApi.postMessage(['todosDroppedBetween', ids, prevId, nextId, target.groupDate, target.groupEndDate])
 }
 
 // Delegated on the document so a single wiring survives every setHtml re-render (the rows are recreated each time). The

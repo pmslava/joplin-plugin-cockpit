@@ -7,9 +7,11 @@
  *   betweenDue(lo, hi, dayStartMinutes)        - ONE datetime strictly inside the open interval (lo, hi), by the owner's rules below.                  *
  *   sequenceBetween(lo, hi, count, dayStart)   - `count` datetimes for a multi-drag by EQUAL DIVISION of (lo, hi): N notes split the interval into      *
  *                                                 N+1 equal parts, note k at lo + k*(hi-lo)/(N+1), keeping the dragged order and strictly increasing.   *
- *   betweenBounds(prevDue, nextDue, date, dm)  - resolves the (lo, hi) the host feeds the two functions above from the FRESH neighbour dues and, at a  *
+ *   betweenBounds(prev, next, date, dm, end)   - resolves the (lo, hi) the host feeds the two functions above from the FRESH neighbour dues and, at a  *
  *                                                 group edge (a missing neighbour), an anchoring day: the group's date, or - for a DATELESS group      *
- *                                                 (Overdue/Future) - the day of the present neighbour's own due. Kept here so the rules are unit-tested. *
+ *                                                 (Overdue/Future) - the day of the present neighbour's own due. A group that spans MORE than one day  *
+ *                                                 (an interval period section, whose date is the FIRST day of its slice) also passes `end`, the last   *
+ *                                                 day of that span, which anchors the bottom edge. Kept here so the rules are unit-tested.             *
  *                                                                                                                                                      *
  * betweenDue rules (owner-specified):                                                                                                                  *
  *   1. If at least one full calendar day lies strictly between dayOf(lo) and dayOf(hi): the MIDPOINT day (floor of the day-range midpoint) at the       *
@@ -160,17 +162,26 @@
         return usable ? snapped : minute
     }
 
+    // The [year, month, day] of a local 'YYYY-MM-DD', or null when there is no usable date.
+    function dateParts(iso){
+        var parts = iso ? String(iso).split('-').map(Number) : null
+        return (parts && parts.length === 3 && parts.every(Number.isFinite)) ? parts : null
+    }
+
     /** betweenBounds **********************************************************************************************************************************
      * The (lo, hi) the host feeds betweenDue / sequenceBetween, resolved from the FRESH neighbour dues (prevDue above the gap, nextDue below it; each 0  *
      * when that neighbour is absent) and, at a group edge, the anchoring DAY. The day is the group's own date (a local 'YYYY-MM-DD') for a dated group,  *
      * or - when the group is DATELESS (Overdue/Future, no date) - the day of the single present neighbour's own due. Returns null only when no interval  *
      * can be formed at all (an edge with no date AND no neighbour to borrow a day from): the host then writes nothing.                                   *
+     * A group that spans a STRETCH of days rather than one day - an interval period section, whose `groupDate` is the FIRST day of its slice - passes    *
+     * its last day as `groupEndDate`, and the two ends then use their own anchor. Without it a bottom-edge drop under "This Month" would be bounded by   *
+     * the slice's first day, which lies BEFORE the group's own rows: an inverted interval, and every dropped to-do pinned to its neighbour's due.        *
      *   - Interior (both neighbours present) : (prevDue, nextDue) - no day needed, so dated AND dateless groups both work.                                *
-     *   - Bottom edge (no next)              : (prevDue, day@23:59), day = group date else day-of(prevDue).                                              *
+     *   - Bottom edge (no next)              : (prevDue, day@23:59), day = group END date else group date else day-of(prevDue).                           *
      *   - Top edge (no prev)                 : (day@day-start, nextDue), day = group date else day-of(nextDue); if day-start >= nextDue, (day@00:00, ..). *
-     *   - Both absent (no neighbours)        : the whole group day, (day@day-start, day@23:59) - only when a real group date is present, else null.       *
+     *   - Both absent (no neighbours)        : the whole group span, (first day@day-start, last day@23:59) - only with a real group date, else null.       *
      ***************************************************************************************************************************************************/
-    function betweenBounds(prevDue, nextDue, groupDate, dayStartMinutes){
+    function betweenBounds(prevDue, nextDue, groupDate, dayStartMinutes, groupEndDate){
         dayStartMinutes = normMinutes(dayStartMinutes)
         var prev = (prevDue && prevDue > 0) ? prevDue : 0
         var next = (nextDue && nextDue > 0) ? nextDue : 0
@@ -179,21 +190,26 @@
         if (prev && next) return { lo: prev, hi: next }
         // An edge needs a DAY to anchor the open end. Prefer the group's own calendar date (dated groups); when the
         // group is DATELESS (Overdue/Future) derive the day from the single present neighbour's due instead.
-        var parts = groupDate ? String(groupDate).split('-').map(Number) : null
-        var haveDate = !!(parts && parts.length === 3 && parts.every(Number.isFinite))
+        var parts = dateParts(groupDate)
+        var haveDate = !!parts
+        // The group's LAST day, for the bottom edge. A one-day group sends none (or the same day), and then the top
+        // anchor doubles as the bottom one exactly as before.
+        var endParts = dateParts(groupEndDate) || parts
         // A day-anchored timestamp: from the group date when there is one, else from the given neighbour timestamp.
         // Built from calendar parts so a DST transition shifts no clock time.
         function anchorDay(baseTs){ return haveDate ? new Date(parts[0], parts[1] - 1, parts[2]) : new Date(baseTs) }
+        function anchorEndDay(baseTs){ return haveDate ? new Date(endParts[0], endParts[1] - 1, endParts[2]) : new Date(baseTs) }
         function dayStartOf(baseTs){ var d = anchorDay(baseTs); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), Math.floor(dayStartMinutes / 60), dayStartMinutes % 60, 0, 0).getTime() }
         function midnightOf(baseTs){ var d = anchorDay(baseTs); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime() }
-        function endOfDayOf(baseTs){ var d = anchorDay(baseTs); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 0, 0).getTime() }
-        if (prev) return { lo: prev, hi: endOfDayOf(prev) }                   // bottom edge: (lastDue, day-of@23:59)
+        function endOfDayOf(baseTs){ var d = anchorEndDay(baseTs); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 0, 0).getTime() }
+        if (prev) return { lo: prev, hi: endOfDayOf(prev) }                   // bottom edge: (lastDue, last-day@23:59)
         if (next){                                                            // top edge: (day-of@day-start, firstDue)
             var lo = dayStartOf(next)
             if (lo >= next) lo = midnightOf(next)                             // fall through to (day-of@00:00, firstDue)
             return { lo: lo, hi: next }
         }
-        // No neighbours at all: only placeable when the group carries a real date (spread across that whole day).
+        // No neighbours at all: only placeable when the group carries a real date - spread across the group's whole
+        // span, which for a one-day group is that day and for a period slice is first day @day-start .. last day.
         if (haveDate) return { lo: dayStartOf(0), hi: endOfDayOf(0) }
         return null                                                          // dateless AND no neighbours -> host writes nothing
     }

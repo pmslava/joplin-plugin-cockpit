@@ -428,7 +428,8 @@ async function eventHandler(message){
         }
     } else if (message[0] == 'todosDroppedBetween'){
         // Desktop list-view "drop between rows": the webview posts the dragged ids plus the ids of the to-do rows
-        // immediately above (prevId) and below (nextId) the insertion gap, and the group's own date (for the edges).
+        // immediately above (prevId) and below (nextId) the insertion gap, and the group's own date (for the edges) -
+        // plus, for a group spanning several days, the LAST day of that span, which anchors the bottom edge.
         // A null neighbour means the gap is at a group edge. The dues are computed here, from the neighbours' dues
         // re-read FRESH (the alarm lesson: never trust the stale value the webview last rendered), so a due changed
         // between render and drop is respected.
@@ -436,8 +437,9 @@ async function eventHandler(message){
         var prevID = message[2] ? String(message[2]) : null
         var nextID = message[3] ? String(message[3]) : null
         var groupDate = message[4] ? String(message[4]) : null
+        var groupEndDate = message[5] ? String(message[5]) : null
         if (betweenIDs.length){
-            await applyBetweenDrop(betweenIDs, prevID, nextID, groupDate)
+            await applyBetweenDrop(betweenIDs, prevID, nextID, groupDate, groupEndDate)
             await refreshInterfaces()
             // Same post-write flow as todosDropped: reconcile repaints once the index catches up, overview rewrites.
             scheduleReconcile()
@@ -627,16 +629,17 @@ async function readFreshTodoDue(todoID){
 
 /** applyBetweenDrop ********************************************************************************************************************************
  * Assigns due datetimes to the dragged to-dos so they land IN BETWEEN the temporal neighbours of the insertion gap. The neighbours' dues are read   *
- * fresh (readFreshTodoDue), the open interval is resolved by the pure betweenBounds (interior, or a group edge when a neighbour is absent), and the  *
+ * fresh (readFreshTodoDue), the open interval is resolved by the pure betweenBounds (interior, or a group edge when a neighbour is absent - the      *
+ * bottom edge anchored on the group's LAST day, which is its own date for a one-day group and the end of the slice for a period section), and the    *
  * per-to-do datetimes come from the pure sequenceBetween (dragged order preserved, strictly increasing). The result is written per id, one PUT each, *
  * exactly like the multi-select alarm plan lands. A null interval (no neighbours AND no usable group date) writes nothing.                           *
  ***************************************************************************************************************************************************/
-async function applyBetweenDrop(todoIDs, prevID, nextID, groupDate){
+async function applyBetweenDrop(todoIDs, prevID, nextID, groupDate, groupEndDate?){
     var dayStart = await getDayStartTime()
     var dayStartMinutes = dayStart.hours * 60 + dayStart.minutes
     var prevDue = await readFreshTodoDue(prevID)
     var nextDue = await readFreshTodoDue(nextID)
-    var bounds = betweenBounds(prevDue, nextDue, groupDate, dayStartMinutes)
+    var bounds = betweenBounds(prevDue, nextDue, groupDate, dayStartMinutes, groupEndDate)
     if (!bounds) return
     var dues = sequenceBetween(bounds.lo, bounds.hi, todoIDs.length, dayStartMinutes)
     await setTodoDuesPerId(todoIDs.map((id, index) => ({ id: id, due: dues[index] })))
