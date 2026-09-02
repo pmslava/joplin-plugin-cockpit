@@ -961,16 +961,22 @@ document.addEventListener('click', function(event){
 /** showToast (mobile) ******************************************************************************************************************************
  * A transient bottom toast, used to surface the sync button's status text on a long press (touch has no hover, so the desktop title tooltip is       *
  * otherwise unreachable). The toast lives on <body>, which persists across the panel's setHtml re-renders, so it is created once and reused.          *
+ *                                                                                                                                                    *
+ * `sticky` is the gesture trace's mode (see traceGesture): the strip stays up instead of fading, because a gesture worth tracing outlives three        *
+ * seconds and the point is to still be readable when the finger comes off. It is not a second element and needs no clean-up of its own: the next       *
+ * ordinary toast overwrites the text and re-arms the fade, and on mobile the strip dies with the webview reload that turning the setting off causes.   *
  ***************************************************************************************************************************************************/
 var toastTimer = null
 
-function showToast(text){
+function showToast(text, sticky){
     var toast = document.getElementById('cockpitToast')
     if (!toast){ toast = document.createElement('div'); toast.id = 'cockpitToast'; document.body.appendChild(toast) }
     toast.textContent = text
     void toast.offsetWidth        // force a reflow so the opacity transition runs again on each show
     toast.classList.add('-show')
-    if (toastTimer) clearTimeout(toastTimer)
+    toast.classList.toggle('-trace', !!sticky)
+    if (toastTimer){ clearTimeout(toastTimer); toastTimer = null }
+    if (sticky) return            // the trace strip stays up until the gesture is over and something replaces it
     toastTimer = setTimeout(function(){ toast.classList.remove('-show') }, 3000)
 }
 
@@ -2098,13 +2104,20 @@ function wireSuggestList(list, input){
 
 /** Gesture trace (mobile diagnostic, off by default) **********************************************************************************************
  * Two device rounds have been spent guessing at why a long press on a suggestion row behaves differently on the Pixel than everything here predicts.  *
- * This records the gesture-relevant events as they happen and shows them, newest last, in place of the list's hint line - so the next device session   *
- * can report what actually fired instead of what it looked like.                                                                                       *
+ * This records the gesture-relevant events as they happen and shows them, newest last, so the next device session can report what actually fired      *
+ * instead of what it looked like.                                                                                                                      *
+ *                                                                                                                                                      *
+ * TWO SINKS, because the trace outgrew its first one. The suggestion list's hint line is still used whenever that list is open - it is right under the *
+ * rows being traced - but the ROW gestures (the long press, and the touch drag it lifts a row into) happen with no list on screen at all, so a trace    *
+ * written only there was blind to exactly the gesture the next device round has to report on. When there is no hint line the codes go to the toast     *
+ * instead, in its STICKY mode: it stays up for the whole gesture rather than fading after three seconds, and the next ordinary toast simply replaces    *
+ * it. Nothing is created at all while the setting is off, so "off" really is no strip.                                                                 *
  *                                                                                                                                                      *
  * Off unless the "Gesture trace" setting is on, mobile only, and capped at a handful of entries: a ring buffer of short codes and one textContent write *
- * per event, so it costs nothing when off and next to nothing when on.                                                                                  *
+ * per traced event, so it costs nothing when off and next to nothing when on. The cap is what decides how much of a gesture is still readable at the    *
+ * end of it - a drag arms, changes target a few times, scrolls and drops - so it is a little longer than the press-only trace needed.                   *
  ***************************************************************************************************************************************************/
-var GESTURE_TRACE_MAX = 6
+var GESTURE_TRACE_MAX = 10
 var gestureTrace = []
 // The setting, read ONCE per render rather than per traced pointer event: tracing sits on the gesture path,
 // and JSON-parsing the data island on every pointermove would make "costs nothing when off" untrue.
@@ -2122,8 +2135,10 @@ function traceGesture(code){
     if (!gestureTraceEnabled()) return
     gestureTrace.push(code)
     if (gestureTrace.length > GESTURE_TRACE_MAX) gestureTrace.shift()
+    var text = gestureTrace.join(' > ')
     var hint = document.querySelector('#searchSuggestions .suggest-hint')
-    if (hint) hint.textContent = gestureTrace.join(' > ')
+    if (hint){ hint.textContent = text; return }
+    showToast(text, true)                  // no list on screen (every row gesture): the sticky strip instead
 }
 
 /** Touch press tracking (mobile) ******************************************************************************************************************

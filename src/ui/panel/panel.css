@@ -1455,6 +1455,17 @@ table {
 
 #cockpitToast.-show { opacity: 1; }
 
+/* The gesture trace's sticky strip (see traceGesture in panelWebview.js): the same toast element, dressed
+ * as a diagnostic read-out rather than a notice - smaller, monospaced and left-aligned, so a line of codes
+ * reads as a sequence and wraps instead of being centred and clipped. It does not fade on its own; an
+ * ordinary toast takes the class back off and re-arms the fade. */
+#cockpitToast.-trace {
+    font-family: monospace;
+    font-size: 0.75em;
+    text-align: left;
+    word-break: break-word;
+}
+
 /* In-panel overlays (mobile): the notebook / tag / alarm pickers, drawn as a fixed layer over the panel
  * so a native dialog (which opens BEHIND the panel on mobile) is never needed. Appended to <body>, so a
  * host re-render cannot destroy them; only ever created on mobile, so these rules are inert on desktop. */
