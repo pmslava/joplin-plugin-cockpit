@@ -610,7 +610,8 @@ inside one inner element — `.todos`, `flex: 1 1 auto; min-height: 0; overflow-
 would have to happen is an inner scroller's, and nothing in the platform was going to do it for us.
 
 The fix is a small helper in `panelWebview.js`, written input-agnostic on purpose. It knows nothing about drag
-events: `update(container, clientY, onScroll)` aims it at a scroller and a pointer position, `stop()` ends it.
+events: `update(container, clientX, clientY, onScroll)` aims it at a scroller and a pointer position, `stop()`
+ends it, and the callback is handed that same position back so the caller needs no globals of its own.
 The edge band is `clamp(15% of the container's client height, 32px, 72px)` — and additionally clamped to half
 the height, so the two bands can never overlap in a short container — and the speed rises linearly with how deep
 into the band the pointer is, from 2 px/frame at the band's inner edge to 16 px/frame at the container's own
@@ -621,13 +622,29 @@ fallback only covers a pointer resting on something that does not scroll (a head
 
 Nothing outlives a gesture, which is the part worth being strict about — a list that keeps moving after the drop
 would be worse than one that never moved. The loop stops when the pointer leaves the band, on `drop`, on
-`dragend`, at the scroll limit (a frame that does not change `scrollTop` ends it), and on a watchdog: a native
-drag keeps sending `dragover` while it is over the document, so `AUTOSCROLL_IDLE_MS` (150ms) of silence means
-the pointer has left the window, or the drag ended without an event reaching us. `stop()` cancels the pending
-frame, so there is no rAF and no timer left standing either way. The wiring is delegated on the document like
-the between-rows gesture — one wiring that survives every `setHtml` — and it is doubly gated: `IS_MOBILE` (there
-is no HTML5 drag there at all) and `panelDragActive`, raised only by this panel's own `onTodoDragStart`, so text
-or a file dragged in from another window can never make the list run away under the cursor.
+`dragend`, and at the scroll limit (a frame that does not change `scrollTop` ends it); `stop()` cancels the
+pending frame, so there is no rAF and no timer left standing either way.
+
+`AUTOSCROLL_IDLE_MS` sits on top of those as a **safety net**, and the first draft had it at 150ms on the
+assumption that a native drag keeps `dragover` coming while it is over the document. That assumption was never
+measured, and it is at best half true: the HTML drag-and-drop model's own processing loop iterates every 350ms
+for a stationary pointer, and an X11 drag is driven by `XdndPosition` messages that follow pointer *motion*. A
+150ms watchdog would therefore kill the loop before the next event could possibly arrive, and ship the feature as
+"wiggle the mouse continuously to keep it scrolling" — a hair away from the report it exists to answer. Worse for
+the reuse plan: a finger holding still emits no `touchmove` at all, ever. So the watchdog is now 800ms, the real
+ends of the gesture do the stopping, and the harness pins the constant at ≥ 500ms with the reason written next to
+it. A runaway is still bounded by the scroll limit.
+
+The wiring is delegated on the document like the between-rows gesture — one wiring that survives every `setHtml`
+— and it is gated on `IS_MOBILE` (there is no HTML5 drag there at all) and on ownership: a drag this panel did
+not start must never make the list run away under the cursor. Ownership was a bare `panelDragActive` flag, which
+is sticky state whose only clears are `drop` and `dragend` — and the panel re-renders on every sync, so a drag
+held for a couple of seconds routinely outlives its own source row, whose `dragend` (if Blink dispatches one at
+all) no longer bubbles to the document. A flag left raised would then hand the next foreign drag the scroll loop.
+So the drag now carries its ownership itself: `onTodoDragStart` stamps `application/x-cockpit-todos` on the
+`dataTransfer`, and `isPanelDragEvent` requires both the flag and that type — `types` is readable in dragover's
+protected mode, unlike `getData`. The between-rows dragover is gated the same way, which as a side effect stops
+it drawing an insertion line for text dragged in from another window.
 
 One thing did not survive contact with the design. The insertion line between rows is resolved from a pixel band
 inside the row under the pointer, and while the list is scrolling the rows move under a pointer that is holding
@@ -636,34 +653,68 @@ a couple of hundred pixels of lag in a line that is meant to sit in a specific g
 split into a coordinate form, `betweenTargetAt(element, clientY)`, the indicator painting was factored out into
 `paintBetweenIndicator`, and the scroll loop re-asks the question after every frame that moved, from
 `document.elementFromPoint` at the last pointer position — the same answer a `dragover` there would have given.
-The whole-row targets (headings, calendar days, week columns) are left to re-highlight on their own next
-`dragover`: they are room-sized rather than pixel-banded, and their inline handlers own that class. The
-programmatic scroll deliberately flows through the existing `.todos` scroll listener, so the position is saved
-and posted exactly as a user scroll is; `restoringScroll` only ever covers the two frames after a re-render
+The whole-row targets (headings, calendar days, week columns) were left out of that refresh at first, on the
+grounds that they are room-sized rather than pixel-banded. That answered the visual lag and missed the binary
+half: **whether the drop is offered at all**. The browser decides whether to fire `drop` from the *last*
+`dragover` it delivered, and acceptance is granted per event by whatever sits under the pointer — a heading's
+inline `ondragover`, or `onBetweenDragOver` for a gap. Hold the pointer over a row's inert middle, let the list
+scroll "This Week" under it, release: the last `dragover` said *not accepted*, so no `drop` event fires and the
+to-do silently does not move — the exact complaint, one layer down. And `-drop-over` is only ever removed by that
+element's own `dragleave`, which a still pointer never fires, so a heading that scrolled away kept its highlight
+until the next re-render. Both are new with the scrolling, because the content now moves while the pointer does
+not. So the loop's callback re-resolves *both* affordances (`refreshDropTargetsUnderPointer`, with
+`paintDropTargetHighlight` as the single owner of that class), `endPanelDrag` sweeps both paints, and — while and
+only while the list is actually moving — `onDragAutoscroll` accepts the drop at the document level. The drop
+handlers already re-resolve their target from the release point, so accepting broadly there costs nothing: a
+release over an inert spot becomes a no-op instead of a cancelled drag, with the default action still suppressed.
+Two smaller corrections came out of the same pass: a pointer that has overshot the container vertically now pins
+the speed at maximum instead of dropping to zero (the controls block sits directly above `.todos`, so the
+instinctive shove to the very top landed one pixel outside the box and stopped the scroll dead), and the callback
+runs after the next frame is booked, inside a `try`, so a throwing callback cannot leave the loop
+dead-but-not-stopped.
+
+The programmatic scroll deliberately flows through the existing `.todos` scroll listener, so the position is
+saved and posted exactly as a user scroll is — a drag is now a new source of `scrollChanged` traffic, which is
+harmless: the host stores it and explicitly never refreshes on it, and the 300ms trailing throttle bounds it.
+`restoringScroll` only ever covers the two frames after a re-render
 installs a fresh container, and a mid-drag re-render is self-healing anyway — the loop's old node is detached,
 its `scrollTop` stops changing, the limit check ends it, and the next `dragover` finds the new `.todos`.
 
-Three harness pins guard the wiring rather than the maths, in the style of the between-drop source pins (the
+Six harness pins guard the wiring rather than the maths, in the style of the between-drop source pins (the
 harness cannot execute the webview, so these read its source): the document `dragover` path feeds the helper and
-both `drop` and `dragend` end the drag; the watchdog constant and the check that uses it exist, and stopping
-cancels the frame; and the handler is gated on `IS_MOBILE` and on the panel's own drag flag. Both mutations were
-run and restored byte-identical — deleting the `dragend` wiring failed exactly "a dragend must end the panel
-drag, and with it the scrolling", removing the watchdog line failed exactly "the loop must stop itself when no
-update has arrived within the watchdog timeout", and nothing else moved. The band and speed curve were checked
-separately by lifting the helper out of the file and running it against a fake container: 72px band at a 600px
-height, −16 px/frame at the very top edge, −2 at the band's inner edge, 0 through the middle and outside the box,
-and the loop stopping on the watchdog, at the limit, and on `stop()`.
+both `drop` and `dragend` end the drag *and* clear both paints; the watchdog is a named constant of at least
+500ms and stopping cancels the frame; the handler is gated on `IS_MOBILE` and on ownership, which the dragstart
+stamps on the drag and `isPanelDragEvent` reads off `dataTransfer.types`; the loop stops at the scroll limit and
+outside the bands, and hands the pointer position to a callback that re-resolves *both* target kinds after the
+next frame is booked; a release while the list moves is accepted, and an unmatched drop still suppresses the
+default; and the band and speed constants are declared together and read by the maths rather than inlined, with
+the overshoot pinned at full speed. Eight mutations were run and the file restored byte-identical — deleting the
+scroll-limit stop, putting the watchdog back to 150ms, dropping the ownership stamp, removing the acceptance,
+dropping the whole-row half of the refresh, inlining `AUTOSCROLL_SPEED_MAX`, calling the callback without the
+pointer position, and booking the frame after the callback each failed exactly one pin with the message that
+names it, and nothing else moved. The band and speed curve were checked separately by lifting the step maths out
+of the file and running it against fake containers: a 72px band at a 600px height, −16 px/frame at the very top
+edge and above it, −2 just inside the band's inner edge, 0 through the middle and off to either side, and — in a
+50px container, where the half-height clamp bites — an exactly inert midpoint with the two bands touching but not
+overlapping.
 
-`e2e/drag-autoscroll.spec.ts` is new: five cases driving the real handlers with the HTML5 sequence a browser
+`e2e/drag-autoscroll.spec.ts` is new: six cases driving the real handlers with the HTML5 sequence a browser
 fires, measuring `.todos.scrollTop` around each phase — the bottom band scrolls down, the middle is inert, the
 top band scrolls up, a `dragend` stops the scrolling while the pointer stays in the band and the events keep
-arriving (so only the drag's end can explain it), and a foreign drag with no `dragstart` moves nothing. The
-whole timed sequence runs inside one `frame.evaluate`, because a dragover dispatched per tick over CDP would put
-the round-trip into the very interval being measured, and the watchdog is measured in exactly those
-milliseconds. To have something to scroll, 60 undated to-dos are seeded through Joplin's data API rather than
-the GUI (60 × "New to-do" would not fit in a `beforeAll`), and the suite refuses to start until the panel itself
-reports `scrollHeight > clientHeight`. The two negative cases are measured ONCE rather than polled: an
-`expect.poll` around a negative retries until a run happens to hold still, which is the failure they exist to
-catch.
+arriving (so only the drag's end can explain it), and a foreign drag with no `dragstart` moves nothing. The sixth
+is the one that matters most, and it is there because the first draft of this suite could not have failed for the
+assumption the feature rested on: every case drove its own 50ms `dragover` stream, a cadence no real drag
+produces. That case sends a SINGLE `dragover` and then goes quiet for 1200ms, and requires the list to have
+coasted more than 200px — more than a 150ms watchdog could ever have contributed — before a second, equally
+silent phase requires it to have stopped, with no `drop` and no `dragend` anywhere in sight. The three positive
+cases also bound the distance from above, at the animation frames the phase actually spanned × 16 px, so a
+helper with the wrong speed constants can no longer pass a direction-only assertion; and every polled case now
+retries a run whose `.todos` was replaced mid-probe rather than reporting its numbers. The whole timed sequence
+runs inside one `frame.evaluate`, because a dragover dispatched per tick over CDP would put the round-trip into
+the very interval being measured. To have something to scroll, 60 undated to-dos are seeded through Joplin's data
+API rather than the GUI (60 × "New to-do" would not fit in a `beforeAll`), and the suite refuses to start until
+the panel itself reports more than 400px of scroll and a container taller than two bands. The two negative cases
+are measured ONCE rather than polled: an `expect.poll` around a negative retries until a run happens to hold
+still, which is the failure they exist to catch.
 
-Suite: 304 harness checks (three new), all passing. e2e: 5 new tests, not run in this pass.
+Suite: 307 harness checks (six new), all passing. e2e: 6 new tests, not run in this pass.
