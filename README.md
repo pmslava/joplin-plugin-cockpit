@@ -17,7 +17,9 @@ Cockpit is a single [Joplin](https://joplinapp.org) panel built to replace the n
      theme left on "Match Joplin theme". Joplin's own notebook sidebar and note list hidden (Cockpit
      replaces them), Cockpit docked on the left, a to-do open in the editor. The panel shows the interval
      view with Overdue / Today / Tomorrow / This Week / This Month / This Year / Future / No Due
-     Date / Notes groups, the three header rows (profile picker + New note/New to-do, notebook
+     Date / Notes groups - capture midweek and early in the month, since a period whose remaining days
+     are already covered by the groups above it is replaced by the next one and the headings then read
+     Next Week / Next Month / Next Year, the three header rows (profile picker + New note/New to-do, notebook
      filter + sort + sync, search field), notebook pills on rows, one greyed completed to-do, and
      partly-filled progress rings including on the row whose note is open in the editor — with that
      note's checkboxes visible beside it so the ring and the ticks match. Completed to-dos setting:
@@ -37,7 +39,7 @@ Cockpit needs Joplin 2.9 or newer on desktop and 3.3 or newer on mobile.
 
 ## Views
 
-**Interval** is the default. It sorts everything into named horizons — Overdue, Today, Tomorrow, This Week, This Month, This Year, Future, No Due Date — and labels each row with just as much date as its group needs: a time under Today, a weekday under This Week, a full date under Overdue.
+**Interval** is the default. It sorts everything into named horizons — Overdue, Today, Tomorrow, This Week, This Month, This Year, Future, No Due Date — and labels each row with just as much date as its group needs: a time under Today, a weekday under This Week, a full date under Overdue. Each group covers only the time the groups above it have not already taken, so a period whose remaining days are all covered is replaced by the next one: on a Saturday the week is already spent, and you see **Next Week** instead of This Week. The same goes for **Next Month** in the last days of a month and **Next Year** through December.
 
 **Date** gives one heading per calendar day, each row prefixed with its due time. **Basic** does no grouping at all: a single list of titles, for a profile that wants a plain roll-up rather than a schedule.
 
@@ -74,7 +76,7 @@ Regular notes appear in their own "Notes" group, before or after the to-dos, per
 
 ## Due dates
 
-On desktop, drag a to-do onto a calendar day, a week-planner day or a list heading to reschedule it. Onto Today or Tomorrow it becomes due that day; onto This Week, This Month or This Year it becomes due by the end of that period; onto No Due Date its alarm is cleared. Drop into the gap *between* two rows and it lands midway between its new neighbours; drop several and the interval is divided into equal shares in the order you dragged them. That works at a group's edges too, including inside Overdue. A to-do dragged onto a bare day gets the day start time, 09:00 unless you change it.
+On desktop, drag a to-do onto a calendar day, a week-planner day or a list heading to reschedule it. Onto Today or Tomorrow it becomes due that day; onto a period group — This or Next Week, Month or Year — it becomes due on the **first** day of that group, the earliest day it names rather than its deadline; onto No Due Date its alarm is cleared. Drop into the gap *between* two rows and it lands midway between its new neighbours; drop several and the interval is divided into equal shares in the order you dragged them. That works at a group's edges too, including inside Overdue. A to-do dragged onto a bare day gets the day start time, 09:00 unless you change it.
 
 For an exact time there is the picker: a YYYY-MM-DD date field, an HH:MM time field, and a month grid starting on the profile's first day of the week, with scrolling hour and minute columns pinned flush with it. Two rows of buttons sit above. The first is absolute — Today, Tomorrow, Weekends (the nearest Saturday), Next Monday. The second accumulates as you press it: +hour, +day, +week, +month(day) for the same weekday next month, +month(date) for the same day-of-month, clamped.
 

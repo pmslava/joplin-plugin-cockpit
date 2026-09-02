@@ -594,3 +594,62 @@ Suite: 301 harness checks (five new), all passing. Playwright untouched by this 
 opt-in showcase captures skipped without `SHOWCASE=1`; commit f579b42 grew `showcase.spec.ts` from one test
 to seven after the v2.1.2 entry recorded 73, which is why that number moved without a test being written
 here). The e2e suite was not run in this pass, only its showcase comment edited.
+
+## 2026-09-02 — v2.2.0: next-period horizons and the first-day drop
+
+The interval view named its groups after periods, and on a Saturday that produced a "This Week" holding
+nothing: the week ends tomorrow, and Today and Tomorrow have already taken both remaining days. The owner's
+rule replaces the period with the SLICE — each group covers only the time the groups above it have not taken
+— and when a slice comes out empty its slot goes to the next period instead. So a Saturday shows Next Week
+(Mon the 7th through Sun the 13th, once Today and Tomorrow have eaten the 5th and 6th), the 29th of a month
+shows This Week running into October and then Next Month for the 5th to the 31st, and every ordinary December
+day shows Next Year, because December 31st is both this month's last day and this year's. A Next slice can
+never itself be empty — its end always lies past the one above it — so the chain terminates after one step.
+
+The drop rule changed with it, for all six period headings. Dropping onto "This Week" used to schedule the
+to-do for Sunday, the end of the period; it now schedules it for the FIRST day of the group's slice, the day
+after the previous group's last day. A plan that puts everything on the last day of the week is a plan that is
+already too late. Today and Tomorrow are their own day as before, No Due Date still clears, and Overdue and
+Future still name no date. The host-side time rule is untouched (the to-do keeps its own time of day, or takes
+the profile day-start when it had none), and between-row drops need no change either — betweenBounds anchors a
+group's top edge on the heading's date, which simply moved.
+
+The math went into a pure module, `src/core/horizons.js`, in the same UMD shape as `between.js`: every input
+explicit, never `Date.now()` inside, all arithmetic on local calendar parts so no boundary moves across a DST
+transition. `horizonPlan(nowMs, weekStartsOn)` returns the five ordered sections with their last millisecond
+and their first day; `horizonOf`, `kindOf` and `dropDateFor` are what the format asks it. `IntervalFormat` now
+computes one plan per render (a formatter is built fresh for every render, so a lazily memoised field IS
+per-render) and reads its headings, its row labels and its drop targets out of that one plan, which is what
+keeps them from disagreeing. Row labels follow the section KIND rather than its name, so Next Week reads like
+This Week and Next Month / Next Year like theirs. The `BaseFormat` period helpers stay where they were; the
+other formats are untouched.
+
+Testing is in three layers. All eleven of the owner's confirmed calendars are pinned check by check — the
+exact ordered names, every drop day, every slice's last day, and both sides of every boundary. Then an
+exhaustive sweep: every day of 2026 and 2027, at midnight, noon and the last millisecond of the day, for both
+week starts — 4380 plans — asserting that the ends strictly increase, that a period is replaced by its Next
+exactly when its own end is already covered, that each drop day buckets into its own slice while the day
+before it does not, that each slice owns its own last millisecond and the next owns the one after, and that
+the Overdue and No Due Date ends of the chain hold. The five 2.1.3 heading checks were kept and their allowed
+sets widened to admit the Next names — not guessed, but exactly the names the sweep reaches for those four
+fixtures over 2024-2032 — and a new rendered-panel check puts a to-do on the drop day of every section and
+pins each rendered heading's text and `data-drop` against the plan, taken on both sides of the run so a
+midnight crossing cannot flake it.
+
+Three mutations verified the new checks, each run against the full build and then restored byte-identical.
+Making the week flip unconditional (`weekAbsorbed = false`) failed the three Next Week pins and all three
+sweep checks, six in all. Reverting the week section's drop day to the end of the period failed ten of the
+eleven pinned calendars, the names check and the drop-day sweep — twelve; the one pin that survived is Friday
+1 January 2027, whose week slice is the single day Sunday the 3rd, where first day and last day are the same.
+Loosening the absorption test to a strict `<` failed exactly the calendars where a period ends ON the previous
+boundary — Saturday 5 September, Saturday 29 August and Thursday 10 December — plus all three sweeps. Nothing
+else failed in any of the three.
+
+README: the interval paragraph and the drag paragraph now state the two rules, and the hero shot's spec notes
+that the capture has to be midweek and early in the month or the headings read Next. In e2e only a comment
+moved: `showcase.spec.ts` explained that a December capture pushes its far-future row into Future, which is no
+longer true — that row is now captioned Next Year. Every other spec drops onto Today or Tomorrow headings
+only, whose drop days did not change, so nothing else needed touching.
+
+Suite: 317 harness checks (sixteen new), all passing. Playwright unchanged (79 tests, 72 run, 7 opt-in
+skipped) — not run in this pass.
