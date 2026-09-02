@@ -271,10 +271,13 @@ function buildFixtures(now: Date) {
   };
 
   /**
-   * The middle of the month AFTER the capture month: past This Month, still inside This Year, so the
-   * interval list shows every horizon it has a name for. (A December capture has no room between the
-   * two and this lands in Future - the clock picks a Wednesday the 6th-12th of whatever month the run
-   * happens in, so that is a once-a-year shape, not the usual one.)
+   * The middle of the month AFTER the capture month: past This Month, still inside the year slice, so
+   * the interval list shows every horizon it has a name for. (In December the year slice is "Next
+   * Year" rather than "This Year" - since v2.2.0 a period whose remaining days are already covered by
+   * the group above it hands its slot to the next period - and this row is captioned Next Year
+   * instead. The clock picks a Wednesday the 6th-12th of whatever month the run happens in, so that is
+   * a once-a-year shape, not the usual one; every other month captures This Week / This Month / This
+   * Year exactly as before.)
    */
   const nextMonth = (hour: number, minute: number) => {
     const date = new Date(now.getFullYear(), now.getMonth() + 1, 15);
