@@ -44,6 +44,14 @@ import { agendaPanel, createNotebook, waitForPanelTodo, PANEL_REFRESH_TIMEOUT } 
  * DataTransfer instead (rejected on the ownership TYPE). Only the second reaches that branch, and it carries its own
  * control phase - the same band, the same instant, the drag's own payload - so its stillness cannot be a dead panel.
  *
+ * Leaving the panel stops the scrolling, and two cases hold the two halves of that test apart. One carries the drag
+ * out through the top edge - a `dragleave` with no relatedTarget, the pointer above the frame's viewport - and
+ * requires the list to stop dead well inside the watchdog's own window, then streams the SAME drag back over the
+ * panel and requires it to scroll again: leaving takes the gesture's EFFECTS down, not its ownership, because the
+ * drag operation outlives the pointer leaving the frame and a drag that comes back must still be able to drop. The
+ * other dispatches the dragleave the auto-scroll itself provokes - the pointer has not moved, the rows moved under
+ * it - and requires the loop to survive that.
+ *
  * What no spec here can prove is the document-level ACCEPTANCE that a release mid-scroll depends on: a dispatched
  * `drop` event fires whether or not any dragover called preventDefault(), so whether a real browser would have offered
  * the drop at all is invisible from here. That half rests on the source pin in test/run.js and on a manual in-app drag.
@@ -252,6 +260,15 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
      * isPanelDragEvent: with the flag down the function returns on the flag and never looks at the types at all.
      */
     dt?: 'own' | 'foreign';
+    /**
+     * A synthetic `dragleave` dispatched at the START of this phase, both forms with `relatedTarget` null (Blink
+     * does not reliably name the element a drag moved to):
+     *   'departed'    the drag carried out through the top edge - the pointer is above the frame's own viewport,
+     *                 which is what leaving the document looks like, and the scrolling must stop there and then.
+     *   'in-document' the dragleave the AUTO-SCROLL itself provokes - the pointer has not moved at all, the rows
+     *                 moved under it, so the coordinates are this phase's own. The loop must survive it.
+     */
+    leave?: 'departed' | 'in-document';
   }
 
   interface Probe {
@@ -265,6 +282,7 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
     phases: {
       at: string;
       dt: string;
+      left: string;
       endedFirst: boolean;
       from: number;
       to: number;
@@ -357,6 +375,21 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
           (row || document.body).dispatchEvent(new DragEvent('dragend', { dataTransfer: dt, bubbles: true }));
         }
         const y = yFor(phase.at);
+        if (phase.leave) {
+          // Above the frame's viewport for a departure; exactly where this phase's dragovers are for the one the
+          // scrolling itself causes. relatedTarget is null in both - the halves of the guard are the coordinates.
+          const leaveY = phase.leave === 'departed' ? -5 : y;
+          const under = (document.elementFromPoint(x, y) as HTMLElement) || todos;
+          under.dispatchEvent(
+            new DragEvent('dragleave', {
+              dataTransfer: dt,
+              bubbles: true,
+              clientX: x,
+              clientY: leaveY,
+              relatedTarget: null,
+            })
+          );
+        }
         const from = todos.scrollTop;
         const framesFrom = frames;
         const feed = phase.feed || 'stream';
@@ -389,6 +422,7 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
         out.phases.push({
           at: phase.at,
           dt: phase.dt || 'own',
+          left: phase.leave || 'none',
           endedFirst: !!phase.endDragFirst,
           from,
           to,
@@ -762,6 +796,82 @@ test.describe('Drag auto-scroll at the list edges (desktop)', () => {
       result.phases[1].delta,
       'the same band with the drag OWN payload must scroll, or the phase above proved nothing'
     ).toBeGreaterThan(MOVED_MIN);
+  });
+
+  test('a drag carried out of the document stops the loop at once, and coming back revives it', async () => {
+    // The departure and the return, in one gesture. Phase one scrolls (the loop is live and fed). Phase two
+    // dispatches the dragleave a drag carried out through the top edge produces - relatedTarget null, the pointer
+    // above the frame's viewport - and then goes SILENT for 500ms, which is inside the 800ms watchdog: without an
+    // end of its own the loop would coast right through that at AUTOSCROLL_SPEED_MAX (the overshoot rule pins it
+    // there), so a still list can only be the dragleave. Phase three streams again with the drag's OWN payload, the
+    // way a drag brought back over the panel does, and the list must move again - because leaving takes the
+    // gesture's EFFECTS down and not its ownership. A dragleave that ended the drag outright would leave the panel
+    // deaf to the rest of it: no scrolling, no insertion line, and (in a real browser, which this cannot show) no
+    // drop offered at all.
+    let last: Probe | null = null;
+    await expect
+      .poll(
+        async () => {
+          last = await probe({
+            drag: true,
+            preScroll: 'top',
+            phases: [
+              { at: 'bottom', ms: 400 },
+              { at: 'bottom', ms: 500, feed: 'none', leave: 'departed' },
+              { at: 'bottom', ms: 500 },
+            ],
+          });
+          return last.rerendered ? 0 : last.phases[0].delta;
+        },
+        { timeout: 60_000, intervals: [500, 1000, 2000] }
+      )
+      .toBeGreaterThan(MOVED_MIN);
+    console.log('DEPARTURE DIAG', JSON.stringify(last));
+    expect(last!.rerendered, 'the reported run must be one no background refresh invalidated').toBe(false);
+    expect(
+      Math.abs(last!.phases[1].delta),
+      'a drag carried out of the document must stop the list at once, not coast to the watchdog'
+    ).toBeLessThanOrEqual(STILL_TOL);
+    expect(
+      last!.phases[2].delta,
+      'the same drag coming back over the panel must be able to scroll it again - leaving is not an ending'
+    ).toBeGreaterThan(MOVED_MIN);
+  });
+
+  test('the dragleave the auto-scroll itself causes does not stop the loop', async () => {
+    // The load-bearing half of the departure guard, and the reason it cannot be `relatedTarget === null` alone: a
+    // dragleave ALSO fires when the element under a HOLDING-STILL pointer changes, which is precisely what this
+    // feature does to it - it moves the rows, not the pointer - and Blink does not reliably name the element the
+    // drag moved to. So phase two dispatches that dragleave, relatedTarget null and all, at the very coordinates
+    // the pointer is already sitting at, and then stays silent: the list must keep moving. Acting on relatedTarget
+    // alone would stop the loop the moment its own scrolling started working.
+    let last: Probe | null = null;
+    await expect
+      .poll(
+        async () => {
+          last = await probe({
+            drag: true,
+            preScroll: 'top',
+            phases: [
+              { at: 'bottom', ms: 400 },
+              { at: 'bottom', ms: 400, feed: 'none', leave: 'in-document' },
+            ],
+          });
+          return last.rerendered ? 0 : last.phases[0].delta;
+        },
+        { timeout: 60_000, intervals: [500, 1000, 2000] }
+      )
+      .toBeGreaterThan(MOVED_MIN);
+    console.log('IN-DOCUMENT-LEAVE DIAG', JSON.stringify(last));
+    expect(last!.rerendered, 'the reported run must be one no background refresh invalidated').toBe(false);
+    expect(
+      last!.phases[1].delta,
+      'a dragleave inside the document must leave the loop running - it is what the scrolling itself provokes'
+    ).toBeGreaterThan(MOVED_MIN);
+    // ...and it was still the loop's own frames doing it, not a runaway.
+    expect(last!.phases[1].delta, 'the list must not outrun AUTOSCROLL_SPEED_MAX per frame').toBeLessThanOrEqual(
+      (last!.phases[1].frames + 2) * SPEED_MAX + STILL_TOL
+    );
   });
 
   test('a to-do released after the auto-scroll is rescheduled onto the group that arrived', async () => {
