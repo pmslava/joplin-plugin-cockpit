@@ -255,7 +255,7 @@ function buildFixtures(now: Date) {
   /**
    * Late in the capture month, but never ON its last day.
    *
-   * The last day of the month used to fall through to "This Year": getEndOfThisMonth() returned
+   * The last day of the month used to fall through to "This Year": the old getEndOfThisMonth() returned
    * MIDNIGHT of the last day, so anything due at a normal hour on it sorted past the boundary and the
    * shot showed a lone This Year row sitting under This Month with a date one day later. A fixed +21
    * day offset landed there whenever the capture clock picked the 9th of a 30-day month. That grouping
@@ -274,10 +274,11 @@ function buildFixtures(now: Date) {
    * The middle of the month AFTER the capture month: past This Month, still inside the year slice, so
    * the interval list shows every horizon it has a name for. (In December the year slice is "Next
    * Year" rather than "This Year" - since v2.2.0 a period whose remaining days are already covered by
-   * the group above it hands its slot to the next period - and this row is captioned Next Year
-   * instead. The clock picks a Wednesday the 6th-12th of whatever month the run happens in, so that is
-   * a once-a-year shape, not the usual one; every other month captures This Week / This Month / This
-   * Year exactly as before.)
+   * the group above it hands its slot to the next period - and it then runs to December 31st of the
+   * year after, so it swallows the +120-day "Annual insurance renewal" row below as well: a December
+   * capture shows two rows under Next Year and NO Future heading at all. The clock picks a Wednesday
+   * the 6th-12th of whatever month the run happens in, so that is a once-a-year shape, not the usual
+   * one; every other month captures This Week / This Month / This Year / Future exactly as before.)
    */
   const nextMonth = (hour: number, minute: number) => {
     const date = new Date(now.getFullYear(), now.getMonth() + 1, 15);
@@ -344,7 +345,8 @@ function buildFixtures(now: Date) {
     // Later
     { title: 'Renew the passport', notebook: 'Home', due: at(11, 10, 0), isTodo: true, tags: ['home', 'admin', 'travel'] },
     { title: 'Sprint planning', notebook: 'Work', due: at(14, 10, 0), isTodo: true, tags: ['work'] },
-    // The one This Year row: without it the list jumps from This Month straight to Future.
+    // The one year-slice row - This Year, or Next Year in a December capture: without it the list jumps
+    // from This Month straight to Future (and in December there is no Future group, see nextMonth above).
     { title: 'Quarterly budget review', notebook: 'Work', due: nextMonth(15, 0), isTodo: true, tags: ['work', 'finance'] },
     { title: 'Pay the rent', notebook: 'Home', due: lateThisMonth(9, 0), isTodo: true, tags: ['home', 'bills'] },
     { title: 'Annual insurance renewal', notebook: 'Home', due: at(120, 9, 0), isTodo: true, tags: ['home', 'admin'] },
