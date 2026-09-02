@@ -735,9 +735,12 @@ element under the pointer, falling back to the live `.todos`; in practice it is 
 fallback only covers a pointer resting on something that does not scroll (a heading, the padding).
 
 Nothing outlives a gesture, which is the part worth being strict about — a list that keeps moving after the drop
-would be worse than one that never moved. The loop stops when the pointer leaves the band, on `drop`, on
-`dragend`, and at the scroll limit (a frame that does not change `scrollTop` ends it); `stop()` cancels the
-pending frame, so there is no rAF and no timer left standing either way.
+would be worse than one that never moved. The loop stops when the pointer moves INWARD out of the band or off to
+the side of the container, on `drop`, on `dragend`, and at the scroll limit (a frame that does not change
+`scrollTop` ends it); `stop()` cancels the pending frame, so there is no rAF and no timer left standing either
+way. "Leaves the band" is only half a rule, because leaving it OUTWARD is the overshoot case below, which pins the
+speed at maximum rather than stopping — so a pointer carried out through the top or bottom edge is the one exit
+none of those four covers, and the review round below is where it got its own end.
 
 `AUTOSCROLL_IDLE_MS` sits on top of those as a **safety net**, and the first draft had it at 150ms on the
 assumption that a native drag keeps `dragover` coming while it is over the document. That assumption was never
@@ -777,8 +780,9 @@ to-do silently does not move — the exact complaint, one layer down. And `-drop
 element's own `dragleave`, which a still pointer never fires, so a heading that scrolled away kept its highlight
 until the next re-render. Both are new with the scrolling, because the content now moves while the pointer does
 not. So the loop's callback re-resolves *both* affordances (`refreshDropTargetsUnderPointer`, with
-`paintDropTargetHighlight` as the single owner of that class), `endPanelDrag` sweeps both paints, and — while and
-only while the list is actually moving — `onDragAutoscroll` accepts the drop at the document level. The drop
+`paintDropTargetHighlight` as the single owner of that class), `endPanelDrag` sweeps both paints, and — while a
+scroll loop is armed, which is all `edgeAutoscrollRunning()` reports — `onDragAutoscroll` accepts the drop at the
+document level. The drop
 handlers already re-resolve their target from the release point, so accepting broadly there costs nothing: a
 release over an inert spot becomes a no-op instead of a cancelled drag, with the default action still suppressed.
 Two smaller corrections came out of the same pass: a pointer that has overshot the container vertically now pins
@@ -815,8 +819,8 @@ overlapping.
 `e2e/drag-autoscroll.spec.ts` is new: seven cases driving the real handlers with the HTML5 sequence a browser
 fires, measuring `.todos.scrollTop` around each phase — the bottom band scrolls down, the middle is inert, the
 top band scrolls up, a `dragend` stops the scrolling while the pointer stays in the band and the events keep
-arriving (so only the drag's end can explain it), and a foreign drag with no `dragstart` moves nothing (carrying
-`text/plain`, as a real one does, so it is the ownership type it fails on and not the absence of any type at all).
+arriving (so only the drag's end can explain it), and a foreign drag with no `dragstart` moves nothing — which,
+as the round below found, proves the FLAG half of ownership and not the type half it was written to claim.
 The silent case is there because the first draft of this suite could not have failed for the assumption the
 feature rested on: every case drove its own 50ms `dragover` stream, a cadence no real drag produces. That case
 sends a SINGLE `dragover` and then goes quiet for 1200ms, and requires the list to have coasted more than 200px
@@ -847,8 +851,51 @@ To have something to scroll, 90 undated to-dos plus that dated group are seeded 
 than the GUI (90 × "New to-do" would not fit in a `beforeAll`), and the suite refuses to start until the panel
 itself reports more than 1200px of scroll and a container taller than two bands. The range grew with the
 watchdog's own reach: 800ms at 60fps × 16 px/frame is about 770px, and the silent case's "the watchdog stopped
-it" is only a distinguishable claim while the list still has somewhere to go. The two negative cases are measured
-ONCE rather than polled: an `expect.poll` around a negative retries until a run happens to hold still, which is
-the failure they exist to catch.
+it" is only a distinguishable claim while the list still has somewhere to go. The negative cases are never polled
+on their measurement: an `expect.poll` around a negative retries until a run happens to hold still, which is the
+failure they exist to catch.
 
-Suite: 307 harness checks (six new), all passing. e2e: 7 new tests, not run in this pass.
+**Merging onto 2.2.0, and the last review round.** The branch was cut from 2.1.3 and 2.2.0 shipped while it was
+out, so the two met in the merge — and they met inside the *same four functions*, because next-period horizons
+changed the between-rows drop as well. 2.2.0 gave period headings a `data-drop-end` (a heading now names a
+STRETCH of days, and its `data-drop` is only the first of them, so the bottom edge of a between-drop needs the
+other end), which `betweenGroupInfo` reads, `betweenTargetFor` carries and `onBetweenDrop` posts as a sixth
+argument. This branch had split `betweenTargetFor` into `betweenTargetAt(element, clientY)` so the scroll loop
+could re-ask the question from `elementFromPoint`. Both landed: the coordinate form takes `clientY` and returns
+`groupEndDate` alongside `groupDate`. The rest was text — the README drag paragraph now carries the first-day
+drop rule *and* the auto-scroll sentence, and both DEVLOG entries stand as written.
+
+Four findings from the branch's last re-check were fixed here rather than there:
+
+The e2e case named "a foreign drag never scrolls" was not testing what it said. With no `dragstart` of its own,
+`panelDragActive` is false, `isPanelDragEvent` returns on that first line, and the drag's types are never read —
+so the `text/plain` the fixture carefully carried decided nothing, and the ownership TYPE, the half that exists
+because the flag can go stale, had no cover at all. The case still proves the flag half and now says so; an
+eighth case reaches the other branch: a real `dragstart` from a row raises the flag, then a `dragover` stream in
+the bottom band carries a SECOND `DataTransfer` holding only `text/plain`, and the list must not move. Its second
+phase is a control — same band, same pointer, the drag's own payload — which must scroll, or the first phase's
+stillness could as easily be a dead panel as a working type check.
+
+Leaving the panel through the top or bottom edge had no end of its own, and the overshoot rule made that the
+worst exit rather than the mildest: a pointer outside the container vertically is pinned at `AUTOSCROLL_SPEED_MAX`,
+so the list ran on for the whole 800ms watchdog — the better part of a thousand pixels — after the drag had
+visibly gone. A document `dragleave` now ends the gesture, on a deliberately strict test: `relatedTarget` null AND
+the pointer outside the document's own box. `relatedTarget` alone would not do, and this is the one place where
+the auto-scroll bites its own tail — a `dragleave` also fires when the element under a HOLDING-STILL pointer
+changes, which is precisely what scrolling the rows under it does, and Blink does not reliably name the element
+the drag moved to. Acting on `relatedTarget` alone would have killed the loop the moment its own scrolling
+started working. The asymmetry decides the test: missing a real departure costs no more than the old behaviour
+(the watchdog still ends it), while ending a live gesture by mistake would cost the feature.
+
+The two cases that must not be polled failed outright whenever a background refresh replaced `.todos` mid-probe —
+numbers read off a detached node, a failure with nothing behind it. They now go through `validProbe`, which
+retries up to three times on that one condition and asserts on the FIRST valid run, chosen before its
+measurements are read, so nothing about the retry can select for a result. And the entry above claimed the
+document-level acceptance holds "while and only while the list is actually moving", which overstates
+`edgeAutoscrollRunning()`: it reports that a frame is booked. It now says a scroll loop is armed.
+
+Suite: 329 harness checks, all passing (the 2.2.0 and drag auto-scroll blocks both intact through the merge; the
+dragleave wiring is pinned by three new assertions inside the existing dragover/dragend check, each proved by a
+mutation). Playwright: `e2e/drag-autoscroll.spec.ts` is eight tests now. Only the targeted set was run in this
+pass — `drag-autoscroll`, `multi-drag`, `selection-crossing` and `panel-todos`, the four that touch the drag
+paths the merge rewired; the full suite is the verifier's run, not this one's.
