@@ -1118,10 +1118,11 @@ async function onTodoDropped(event){
  * edge) assigns due datetimes IN BETWEEN the neighbours. This is desktop-only (mobile has no HTML5 drag) and stateless DOM wiring - it reads the        *
  * existing markup (the row's data-todo-id and its group heading's data-drop date) and posts, holding nothing across renders but the transient indicator *
  * class, which is cleared on every dragover, on dragend and on drop. It lives only in the LIST views: an eligible row is a .todo[data-todo-id] that is a *
- * DIRECT child of the .todos container (week cards sit in .week-day, month/notes/peek rows in their own sections, so those are excluded). A DATED group   *
- * (heading data-drop = YYYY-MM-DD) anchors its edges on that date - on data-drop-end for the bottom edge, where the group spans several days; a DATELESS group (Overdue/Future, no data-drop) is eligible too - an interior drop     *
- * needs no group date and its edges are derived host-side from the neighbour's own due. Only the No-Due group (data-drop "clear") is excluded: its rows   *
- * carry no due, so there is nothing to sit between.                                                                                                       *
+ * DIRECT child of the .todos container (week cards sit in .week-day, month/notes/peek rows in their own sections, so those are excluded). A DATED group *
+ * (heading data-drop = YYYY-MM-DD) anchors its top edge on that date and its bottom edge on data-drop-end, the last day of the group's slice, which is  *
+ * a later day whenever the group spans more than one. A DATELESS group (Overdue/Future, no data-drop) is eligible too - an interior drop needs no group *
+ * date and its edges are derived host-side from the neighbour's own due. Only the No-Due group (data-drop "clear") is excluded: its rows carry no due,  *
+ * so there is nothing to sit between.                                                                                                                  *
  *                                                                                                                                                        *
  * The gap is a thin band at each row boundary: the top BETWEEN_BAND of a row means "insert before it", the bottom band "insert after it", and the middle *
  * keeps today's behaviour (nothing - no indicator, no drop). The insertion line is drawn as an inset box-shadow on the row (.-drop-before/.-drop-after   *

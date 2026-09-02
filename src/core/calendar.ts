@@ -65,15 +65,6 @@ export function startOfWeek(date, weekStartsOn): Date {
     return addDays(startOfDay(date), -offset)
 }
 
-/** endOfWeek ***************************************************************************************************************************************
- * The last moment of the week containing the given date                                                                                            *
- ***************************************************************************************************************************************************/
-export function endOfWeek(date, weekStartsOn): Date {
-    var lastDay = addDays(startOfWeek(date, weekStartsOn), 6)
-    lastDay.setHours(23, 59, 59, 999)
-    return lastDay
-}
-
 /** buildMonthGrid **********************************************************************************************************************************
  * The days shown by a month view: whole weeks covering the anchor's month, so the grid always starts and ends on a week boundary. The length varies  *
  * between 28 and 42 days depending on the month, rather than being padded to a fixed six weeks.                                                     *
