@@ -1451,9 +1451,31 @@ function endPanelDrag(){
     clearBetweenIndicator()
 }
 
+// A drag that leaves the panel's document altogether ends the gesture here and now. Without this the loop coasts for
+// the whole AUTOSCROLL_IDLE_MS watchdog - and the overshoot rule makes that the WORST case rather than the mildest
+// one: a pointer carried out through the top or bottom edge is outside the container vertically, which pins the
+// speed at AUTOSCROLL_SPEED_MAX, so the list runs on for ~800ms x 60fps x 16px, most of a thousand pixels, after the
+// drag has visibly left. Both conditions are required:
+//   - relatedTarget null: the drag moved to no element of THIS document. On its own that is NOT "left the document".
+//     A dragleave also fires when the element under a pointer changes, which is exactly what the auto-scroll does to
+//     a pointer HOLDING STILL - it moves the rows, not the pointer - and Blink does not reliably name the element
+//     the drag moved to. Acting on relatedTarget alone would kill the loop the moment its own scrolling worked.
+//   - the pointer outside the document's own box: which is what leaving through an edge actually looks like, and
+//     what a still pointer inside the list can never be.
+// Missing a real departure costs nothing worse than today's behaviour (the watchdog still ends it); ending a live
+// gesture by mistake would cost the feature, so the test is the strict one.
+function onPanelDragLeave(event){
+    if (IS_MOBILE || !isPanelDragEvent(event)) return
+    if (event.relatedTarget !== null) return
+    var x = event.clientX, y = event.clientY
+    if (x > 0 && y > 0 && x < window.innerWidth && y < window.innerHeight) return
+    endPanelDrag()
+}
+
 document.addEventListener('dragover', onDragAutoscroll, false)
 document.addEventListener('drop', endPanelDrag, false)
 document.addEventListener('dragend', endPanelDrag, false)
+document.addEventListener('dragleave', onPanelDragLeave, false)
 
 /** onTodoChecked ***********************************************************************************************************************************
  * When a to-do's checkbox is ticked, this sends the id AND the state the tick just set to the plugin. The browser has already flipped the checkbox   *

@@ -2845,7 +2845,7 @@ async function main() {
     })
 
     // ---- WEBVIEW SOURCE SHAPE: drag auto-scroll at the list edges (same reason - the harness cannot run the webview) ----
-    await test('webview drag auto-scroll: the document dragover feeds the helper, and drop/dragend stop it', () => {
+    await test('webview drag auto-scroll: the document dragover feeds the helper, and drop/dragend/dragleave stop it', () => {
         // Delegated on the document like the between-rows gesture, so one wiring survives every setHtml re-render.
         assert.ok(webviewSource.includes("document.addEventListener('dragover', onDragAutoscroll"), 'the dragover path must be delegated on the document')
         // Anchored INSIDE the handler (a lazy [\s\S]*? gap would still pass if the call moved to another function).
@@ -2854,6 +2854,19 @@ async function main() {
         // BOTH ends of a drag stop it: a drop and a dragend. Losing either leaves the list scrolling after the gesture.
         assert.ok(webviewSource.includes("document.addEventListener('drop', endPanelDrag"), 'a drop must end the panel drag, and with it the scrolling')
         assert.ok(webviewSource.includes("document.addEventListener('dragend', endPanelDrag"), 'a dragend must end the panel drag, and with it the scrolling')
+        // ...and so does the drag LEAVING the document, which neither of those two covers: a pointer carried out
+        // through the top or bottom edge is outside the container vertically, where the overshoot rule pins the speed
+        // at maximum, so without this the list runs on for the whole watchdog - the better part of a thousand pixels.
+        assert.ok(webviewSource.includes("document.addEventListener('dragleave', onPanelDragLeave"), 'a drag leaving the document must end the panel drag too')
+        const leaveBody = handlerBody('onPanelDragLeave')
+        assert.ok(leaveBody.includes('endPanelDrag()'), 'the dragleave handler must end the panel drag')
+        // Both halves of "left the document", and the second is the load-bearing one: a dragleave ALSO fires when the
+        // element under a HOLDING-STILL pointer changes because the auto-scroll moved the rows under it, and Blink
+        // does not reliably name the element the drag moved to. relatedTarget alone would end the gesture the moment
+        // the scrolling it exists for started working.
+        assert.ok(leaveBody.includes('if (event.relatedTarget !== null) return'), 'the dragleave handler must ignore a move to another element of this document')
+        assert.ok(/clientX < window\.innerWidth && .*clientY < window\.innerHeight|x < window\.innerWidth && y < window\.innerHeight/.test(leaveBody),
+            'the dragleave handler must also require the pointer to be outside the document box, so a still pointer the list scrolls under is never mistaken for a departure')
         // Ending the drag does all four things. Pinned as membership rather than as one regex over the statement
         // ORDER: the order of these four is not a property anything depends on, and pinning it would fail a harmless
         // reshuffle. A target the list scrolled out from under a STILL pointer owes no dragleave, so without the two
