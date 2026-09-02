@@ -559,13 +559,13 @@ named the wrong instant. The month half had even been met before and worked arou
 showcase capture pins its "This Month" fixture to the second-to-last day, with a comment explaining why the
 last day would look broken. That comment now records the fix instead of the bug.
 
-The fix is four lines. Both helpers keep building their date from local components — no UTC arithmetic, no
+The fix is one line per helper. Both keep building their date from local components — no UTC arithmetic, no
 ISO parsing — and then `setHours(23,59,59,999)`, exactly as `getEndOfToday()`, `getEndOfTomorrow()` and
 `endOfWeek()` already do, so daylight saving cannot shift them. The drop targets are untouched and unchanged
 by construction: `getHeadingDropTarget` passes both values through `toISODate()`, which reads only year,
 month and day, and 23:59:59.999 is the same local day as 00:00:00.000.
 
-Four regression checks pin it, and they had to be built carefully, because the harness has no fake clock —
+Five regression checks pin it, and they had to be built carefully, because the harness has no fake clock —
 every check runs on the real date. Each seeds a to-do whose due date is computed from that clock with local
 `Date` constructors (the last day of this month and December 31st at 22:00, the first day of next month and
 January 1st at noon), renders an interval profile, then reads back which `<h2>` group the row landed under by
@@ -576,11 +576,21 @@ the check asserts membership in that SET, and the bug is that the set excludes T
 31st likewise ranges over Today, Tomorrow, This Week, This Month and This Year and can never be Future on any
 day of any year, leap years included. The two counter-checks run the other way: the first day of next month
 must never be This Month, and January 1st of next year never This Month or This Year, so a fix that simply
-widened every horizon would fail them.
+widened every horizon would fail them. The fifth check stops the drop targets from being an argument: it
+reads the `data-drop` of the This Month and This Year headings out of the same rendered panel and pins each
+to its own last day. Both headings only exist when their group is non-empty, so it looks away in the closing
+days of a month and in December — as do the two positive heading checks, which an earlier horizon then
+satisfies with or without the fix. That blind spot is now written into the block comment above them, so a
+green run at a month edge is not over-trusted.
 
-Each helper was mutation-verified on its own — the single `setHours` line reverted, the build re-run, exactly
-one new check failing ("December 31st landed under Future" for the year, "the last day of the month landed
-under This Year" for the month) and nothing else, then restored.
+Each helper was mutation-verified on its own, in both directions — the build re-run each time, exactly one
+check failing and nothing else, then restored: each `setHours` line reverted in turn ("December 31st landed
+under Future" for the year, "the last day of the month landed under This Year" for the month), and then each
+helper widened the wrong way instead — to the first day of the next period at midnight, which the heading
+checks cannot see at all — failing only the drop-target check. All four mutations were run on September 2nd,
+mid-month, where every check discriminates.
 
-Suite: 300 harness checks (four new), all passing. Playwright unchanged (73); the e2e suite was not run in
-this pass, only its showcase comment edited.
+Suite: 301 harness checks (five new), all passing. Playwright untouched by this pass — 79 tests (72 run, 7
+opt-in showcase captures skipped without `SHOWCASE=1`; commit f579b42 grew `showcase.spec.ts` from one test
+to seven after the v2.1.2 entry recorded 73, which is why that number moved without a test being written
+here). The e2e suite was not run in this pass, only its showcase comment edited.
