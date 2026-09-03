@@ -733,6 +733,10 @@ function showNoteContextMenu(event, noteID, isTodo){
     // this) BEFORE armTouchDrag(), so `touchDrag.active` is still false on that one call and true on every other
     // route in - a native contextmenu that somehow got past the capture listener, a stray inline handler, a second
     // gesture. That ORDER is therefore load-bearing rather than merely tidy, and the harness pins it.
+    // One consequence, on the one path nothing can reach today: a fire landing while a PREVIOUS gesture is still
+    // in flight now opens no menu at all - this returns, and armTouchDrag ends the old gesture through the single
+    // end just after. That is the right way round (a stale gesture's refresh guard is worth more than a menu) and
+    // it is not silent: the strip reads `menu-blocked > drag-cancel:re-arm`, which names both halves.
     if (touchDrag.active){ traceGesture('menu-blocked'); return }
     hideNoteContextMenu()
     // The ids this menu acts on. Any row - to-do or note - that is itself part of a multi-row selection
@@ -888,10 +892,12 @@ function requestAlarm(ids){
 }
 
 /** Long-press adapter (mobile) *********************************************************************************************************************
- * The mobile webview never fires oncontextmenu, so touch has no way into the context menus that a desktop right click opens. This synthesises them  *
- * from a Pointer Events long press: a touch that stays put for 500ms on a to-do row, a note row, a group heading or the sync button fires the same   *
- * handler the desktop right click would, passing a minimal event carrying the press point and pressed element. It is fully gated on IS_MOBILE and    *
- * on a non-mouse pointer, so on desktop (and for a desktop mouse) it is inert and the existing click / dblclick / contextmenu paths are untouched.   *
+ * Touch has no way OF ITS OWN into the context menus that a desktop right click opens, and the platform's own way in is refused: Android's native    *
+ * long press DOES fire a real `contextmenu`, which the panel suppresses panel-wide on mobile (the capture listener further down - it was opening     *
+ * the menu behind this adapter's back, and that was the second Pixel round's bug). So the adapter synthesises the menus itself, from a Pointer       *
+ * Events long press: a touch that stays put for 500ms on a to-do row, a note row, a group heading or the sync button fires the same handler the      *
+ * desktop right click would, passing a minimal event carrying the press point and pressed element. It is fully gated on IS_MOBILE and on a           *
+ * non-mouse pointer, so on desktop (and for a desktop mouse) it is inert and the existing click / dblclick / contextmenu paths are untouched.        *
  * A move of more than 10px, a pointer up/cancel, or a scroll of the list aborts the press (a scroll or a drag is not a long press). The click the    *
  * browser synthesises right after the touch is swallowed, so a fired long press does not also open or toggle the item.                               *
  *                                                                                                                                                    *
@@ -2775,8 +2781,9 @@ document.addEventListener('click', function(event){
 //   - the system callout / selection bar over the list (the CSS suppression, -webkit-touch-callout / user-select
 //     in panel.css, is the first defence; this is the belt to its braces), and
 //   - the panel's OWN context menu, opened behind the long-press adapter's back: every to-do row carries an inline
-//     oncontextmenu="onTodoContextMenu(event, id)" and every note row an onNoteContextMenu (src/core/formats.ts,
-//     the list rows and the week cards), so Android's long press reached showNoteContextMenu without the adapter
+//     oncontextmenu="onTodoContextMenu(event, id)", every note row an onNoteContextMenu (src/core/formats.ts, the
+//     list rows and the week cards) and every group heading an onHeadingContextMenu (src/core/html.ts) - four
+//     inline handlers in all, so Android's long press reached showNoteContextMenu without the adapter
 //     ever knowing. That is the second Pixel round's bug. Its TIMING is the device's, not ours - the "Touch & hold
 //     delay" accessibility setting plus Chrome's own ~500ms - so the native event can land BEFORE the adapter's
 //     fire (a second menu over the first) or AFTER the lift has closed the menu (a menu re-opening over a lifted
@@ -2786,9 +2793,16 @@ document.addEventListener('click', function(event){
 // the inline handlers are listeners like any other and would still run. Stopping the event dead in the capture
 // phase, at the document, is what makes the long-press adapter the ONLY way a touch opens a context menu.
 // Desktop returns on the first line, so a right click there - in the list, on a row, anywhere - is untouched.
+// ONE exemption, and it is deliberately not a zone of the panel's but a kind of element: a real editable field -
+// the search box (#searchFilter), the notebook filter, the alarm overlay's date and time. Android raises the
+// text-selection handles and the Paste / Select-all bar through this very event, and in a field on a phone that
+// bar is the only way to paste; cancelling it there would be a regression with nothing to gain, since none of
+// those elements carries an inline oncontextmenu, none is a drag source and none is a zone the long-press adapter
+// recognises. Everything else - rows, headings, the suggestion list, the body - is refused.
 document.addEventListener('contextmenu', function(event){
     if (!IS_MOBILE) return
     var el = event.target && event.target.closest ? event.target : null
+    if (el && el.closest('input, textarea, select, [contenteditable]')) return
     traceGesture('contextmenu-suppressed:' + (!el ? 'other' : el.closest('.todo') ? 'row' : el.closest('h2') ? 'heading' : 'other'))
     event.preventDefault()
     event.stopImmediatePropagation()
