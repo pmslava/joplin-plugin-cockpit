@@ -888,9 +888,9 @@ function requestAlarm(ids){
  * A move of more than 10px, a pointer up/cancel, or a scroll of the list aborts the press (a scroll or a drag is not a long press). The click the    *
  * browser synthesises right after the touch is swallowed, so a fired long press does not also open or toggle the item.                               *
  *                                                                                                                                                    *
- * ONE OF THE FOUR KINDS NO LONGER OPENS ITS MENU AT ONCE: a hold on the BODY of a to-do row lifts the row into the touch drag below instead, and the  *
- * menu is handed back by a release that never travelled. Every other kind, and every other zone of a to-do row (the tick circle, the notebook pill,   *
- * the read-only peek's rows), reaches the same handler it always did on the same 500ms.                                                               *
+ * EVERY KIND STILL OPENS ITS MENU AT ONCE, on the same 500ms, and ONE OF THEM ALSO DOES SOMETHING ELSE: a hold on the BODY of a to-do row opens the   *
+ * menu and, behind it, ARMS the touch drag below with the finger still down, so that a move up or down from there can lift the row. The arming is      *
+ * invisible - nothing is lifted, painted or guarded by it - and a release that never moved throws it away and leaves the menu exactly as it opened.    *
  ***************************************************************************************************************************************************/
 var longPress = { timer: null, x: 0, y: 0, fired: false, target: null, el: null, kind: null, id: null, pointerId: null }
 
@@ -913,13 +913,18 @@ function onLongPressFire(){
     longPress.timer = null
     longPress.fired = true
     if (navigator.vibrate){ try { navigator.vibrate(10) } catch (error){} }
-    // A hold on a to-do row's BODY lifts the row instead of opening its menu (see the touch drag below). The
-    // menu is not lost, it is DEFERRED: a release that never travelled opens it from there, with this same
-    // press point. Every zone the drag refuses - the tick circle, the notebook pill, a read-only peek row -
-    // falls straight through to the handler it has always reached.
-    if (longPress.kind === 'todo' && canLiftRow(longPress.target, longPress.el)){ beginTouchDrag(); return }
     var ev = synthEvent(longPress.target, longPress.x, longPress.y, longPress.el)
-    if (longPress.kind === 'todo') onTodoContextMenu(ev, longPress.id)
+    if (longPress.kind === 'todo'){
+        // The menu FIRST, and with the finger still down: this is exactly the gesture that shipped before the
+        // touch drag existed, and the first Pixel round is why it is back (a lift at the 500ms fought Joplin's
+        // own side-menu swipe and neither won).
+        onTodoContextMenu(ev, longPress.id)
+        // ...and then, for a press on the row's BODY only, the drag is ARMED silently behind that menu: a move
+        // up or down lifts the row from here (see the touch drag's own block below). Every zone the drag
+        // refuses - the tick circle, the notebook pill, a read-only peek row - has opened its menu on the line
+        // above and arms nothing at all.
+        if (canLiftRow(longPress.target, longPress.el)) armTouchDrag()
+    }
     else if (longPress.kind === 'note') onNoteContextMenu(ev, longPress.id)
     else if (longPress.kind === 'heading') onHeadingContextMenu(ev)
     else if (longPress.kind === 'sync') showToast(longPress.el.title || 'Synchronize')
@@ -1538,50 +1543,56 @@ document.addEventListener('dragleave', onPanelDragLeave, false)
  * indicator painters, the edge auto-scroll helper, and both message shapes - so a touch drop and a mouse drop are the same operation, and the host    *
  * cannot tell them apart.                                                                                                                             *
  *                                                                                                                                                     *
- * THE GESTURE. The 500ms long press above already exists and already means "this row, deliberately"; a hold on a to-do row's BODY now LIFTS the row   *
- * rather than opening its menu, and the menu is handed back by a release that never travelled. So one press does both, nothing new has to be          *
- * discovered, and the zones that already mean something else - the tick circle (the date picker), the notebook pill (move to notebook), the read-only *
- * peek's rows - keep their behaviour exactly.                                                                                                          *
- *                                                                                                                                                     *
- *   armed (the press)  -> lifted (500ms: the row dims, the banner names it)                                                                            *
- *   lifted             -> moving  (the finger travels past the slop: the refresh guard is taken, the target is resolved on every move)                 *
- *   lifted             -> menu    (release without travelling: onTodoContextMenu with the press point, exactly as before)                              *
- *   moving             -> dropped (release over a gap or a [data-drop]: the message, then the guard release)                                           *
- *   moving/lifted      -> cancelled (release over nothing, a second finger, a pointercancel, the app hiding, a resize/rotation, the watchdog)          *
+ * THE GESTURE IS MENU-FIRST, and the first Pixel round is why. The design that shipped in the first draft LIFTED the row at the 500ms and deferred    *
+ * the menu to a release that never travelled; on the device that lift arrived in the middle of Joplin's own side-menu swipe and the drag did not work  *
+ * at all. So the hold now does exactly what it did before this feature existed - it opens the to-do's context menu, with the finger still down - and   *
+ * the drag is ARMED behind it, invisibly. What the finger does NEXT decides between the two, once, on the first travel past the slop: UP or DOWN lifts *
+ * the row into the drag and closes the menu; SIDEWAYS is not ours, so the arming is thrown away silently and Android's own gesture is left to do       *
+ * whatever it does. Nothing is preventDefault()ed while the drag is merely armed, precisely so that a sideways stroke reaches the native layer whole.   *
+ *                                                                                                                                                      *
+ *   (the press)        -> armed   (500ms: the menu opens; capture, the touchmove listener, the row index and the watchdog go on. Nothing visible.)      *
+ *   armed              -> lifted  (first travel past the slop, |dy| >= |dx|: the menu closes, the guard is taken, the row dims, the banner names it)    *
+ *   armed              -> released (the finger comes up without travelling: the arming is torn down, the menu stays open. Nothing was ever taken.)      *
+ *   armed              -> sideways (first travel past the slop, |dx| > |dy|: torn down, menu left open, nothing prevented - the side menu may have it)  *
+ *   lifted             -> dropped (release over a gap or a [data-drop]: the message, then the guard release)                                            *
+ *   lifted             -> cancelled (release over nothing, a second finger, a pointercancel, the app hiding, a resize/rotation, the watchdog)           *
+ *   armed              -> cancelled (the same set: an armed gesture ends the same way, having nothing to release)                                       *
  *                                                                                                                                                     *
  * WHY A NON-PASSIVE touchmove. Preventing the default on touchmove is the ONE thing that stops Android panning the list under the lifted row; a        *
  * document-level touchmove listener is passive by default in Chrome, and a passive listener's preventDefault() is ignored with a console warning. It   *
- * is attached only for the duration of a drag, so ordinary flick-scrolling is never routed through it. This is also the part no synthetic test can     *
- * settle: whether Android's own gesture arbitration lets the panel keep the finger is the make-or-break device question (MOBILE.md, step 2).          *
+ * is attached only from the arm onwards, so ordinary flick-scrolling is never routed through it - and it prevents nothing until the row is lifted, so   *
+ * even an armed gesture leaves the native layer alone. This is also the part no synthetic test can settle: whether Android's own gesture arbitration    *
+ * lets the panel keep the finger is the make-or-break device question (MOBILE.md, step 18b).                                                            *
  *                                                                                                                                                     *
  * WHY THE ROW IS FOUND BY GEOMETRY. The mobile checkbox ring is a ~40px box overhanging a ~26px row, so document.elementFromPoint in the left column   *
- * returns the NEIGHBOUR row about as often as the right one. The rows' boxes are indexed at lift time (and shifted by every scroll, since they move),    *
+ * returns the NEIGHBOUR row about as often as the right one. The rows' boxes are indexed at arm time (and shifted by every scroll, since they move),     *
  * and the finger's y is searched against that index by the pure window.TouchDrag. The big [data-drop] targets are still resolved from the DOM: a       *
  * heading is a SIBLING of the rows, sitting in the gap where the index would attribute it to the row above, and a sticky heading floating over the     *
  * list is genuinely what the finger is on (z-index 2 puts it above any ring overhanging from below) - which is why a heading under the finger ends the *
  * resolution either way, as its own target or as no target at all.                                                                                     *
  *                                                                                                                                                     *
- * THE REFRESH GUARD, AND WHY IT IS TAKEN ON THE FIRST MOVE RATHER THAN AT THE LIFT. A mobile refresh is a full webview RELOAD, which would destroy a   *
- * drag in progress, so a real drag holds ['dialogGuard', true] and releases it on every exit path. It is deliberately NOT taken at the lift, because   *
- * the host answers the RELEASE by repainting once (panel.ts: the last guard down runs refreshPanelData) - and on the no-travel path that repaint would *
- * reload the webview out from under the context menu the release had just opened, breaking a gesture that works today. Taking it at the first move     *
- * keeps the pair inside the drag proper: a hold-and-release never touches the guard at all. The cost is that a refresh landing in the moment between   *
- * the lift and the first move ends the drag by reloading - silently, with nothing left holding, which is the harmless direction.                       *
+ * THE REFRESH GUARD, AND WHY IT IS TAKEN AT THE LIFT RATHER THAN AT THE ARM. A mobile refresh is a full webview RELOAD, which would destroy a drag in  *
+ * progress, so a real drag holds ['dialogGuard', true] and releases it on every exit path. It is deliberately NOT taken when the press merely arms,    *
+ * because the host answers the RELEASE by repainting once (panel.ts: the last guard down runs refreshPanelData) - and on the released and sideways     *
+ * paths that repaint would reload the webview out from under the context menu the press had just opened, breaking the gesture this design exists to    *
+ * keep. Taking it at the lift keeps the pair strictly inside the drag proper: a hold-and-release, and a hold-and-swipe, never touch the guard at all.  *
+ * The cost is that a refresh landing in the moment between the arm and the lift ends the gesture by reloading - silently, with nothing left holding,   *
+ * which is the harmless direction.                                                                                                                     *
  ***************************************************************************************************************************************************/
 var TOUCH_DRAG_BAND = 0.5              // mobile: the whole row is live - the top half inserts before it, the bottom half after
-var TOUCH_DRAG_SLOP = 10               // px per axis before a lift becomes a move (the long press's own slop)
+var TOUCH_DRAG_SLOP = 10               // px per axis before the armed gesture decides between a lift and the native swipe
 var TOUCH_DRAG_WATCHDOG_MS = 15000     // last resort: no gesture lasts this long, and a stuck one must not hold the guard
 
 var touchDrag = {
-    active: false,          // a row is lifted right now
-    guarded: false,         // ...and the refresh guard has been taken for it (first move onwards)
-    pointerId: null,        // the finger that lifted it; a second one cancels
+    active: false,          // the gesture owns this finger right now - armed behind the menu, or lifted
+    lifted: false,          // ...and the row is actually up: the drag proper, the only state that paints or prevents
+    guarded: false,         // ...and the refresh guard has been taken for it (the lift onwards)
+    pointerId: null,        // the finger that armed it; a second one cancels
     ids: [],                // the payload, as schedulableSelection() resolved it at the lift
-    row: null,              // the lifted row element
-    title: '',              // ...and its title, for the banner
+    row: null,              // the pressed row element
+    title: '',              // ...and its title, for the banner (read at the lift, which is the only thing that shows it)
     index: null,            // [{ el, top, bottom, info }] - the rows' boxes, searched by y
     indexTop: 0,            // ...and the list's scrollTop when they were measured, so a scroll can shift them
-    moved: false,           // has the finger travelled past the slop yet (a lift that never does opens the menu)
     startX: 0, startY: 0,
     x: 0, y: 0,             // the finger's last position, which the auto-scroll re-resolves against
     target: null,           // the resolved drop, or null for the cancel state
@@ -1589,10 +1600,10 @@ var touchDrag = {
     watchdog: null,
 }
 
-// Whether a long press on a to-do row may lift it. The three zones that already mean something else keep their
-// meaning, and the read-only peek is never a reschedule source (its rows are rendered draggable:false for exactly
-// that reason, see renderTodoRowHtml) - all of them fall through to the context menu. A press inside an open
-// overlay never gets this far: the adapter's pointerdown returns on #cockpitOverlay before it arms at all.
+// Whether a long press on a to-do row may ARM the drag behind the menu it has just opened. The three zones that
+// already mean something else keep their meaning, and the read-only peek is never a reschedule source (its rows are
+// rendered draggable:false for exactly that reason, see renderTodoRowHtml) - all of them get their menu and nothing
+// else. A press inside an open overlay never gets this far: the adapter's pointerdown returns on #cockpitOverlay.
 function canLiftRow(target, row){
     if (!row || !row.dataset || !row.dataset.todoId) return false
     if (!target || !target.classList) return false
@@ -1628,7 +1639,7 @@ function dropTargetLabel(el){
 /** buildRowIndex ***********************************************************************************************************************************
  * The rows' live boxes, in document order, with the between-eligibility each one already resolves to (null for the No-Due group, for a week card and *
  * for anything outside the .todos list - see betweenGroupInfo). The read-only peek's rows are left out entirely: they are not a target of any kind.  *
- * Measured once at the lift; every later scroll SHIFTS it (see syncRowIndex) rather than re-measuring, because   *
+ * Measured once at the arm; every later scroll SHIFTS it (see syncRowIndex) rather than re-measuring, because     *
  * the boxes move while the finger holds still.                                                                                                       *
  ***************************************************************************************************************************************************/
 function buildRowIndex(){
@@ -1735,55 +1746,88 @@ function updateDragTarget(){
     traceGesture('drag-target:' + (!target ? 'none' : target.kind === 'drop' ? 'drop' : target.before ? 'before' : 'after'))
 }
 
-/** beginTouchDrag **********************************************************************************************************************************
- * The lift. The selection collapses onto the pressed row and the payload is taken the way the desktop dragstart takes it - schedulableSelection(),   *
- * the to-dos within the selection - so it is this one row today and inherits a mobile multi-select for free if one is ever built. The row is itself  *
- * a to-do and is in the selection by the time this reads it, so the payload is never empty.                                                          *
+/** armTouchDrag ************************************************************************************************************************************
+ * The ARM, at the 500ms fire, with the row's context menu already open and the finger still down. NOTHING here is visible and nothing is claimed: no *
+ * lift, no dimming, no banner, no selection change, no payload and above all no refresh guard - a release from here has to leave the menu standing,  *
+ * and a guard release would make the host repaint the panel out from under it. All this does is put the gesture in a position to read the finger's   *
+ * next move: pointer capture on the row, the non-passive capturing touchmove listener, the row index, and the 15s watchdog that must outlive even a  *
+ * gesture nothing ever ends.                                                                                                                         *
+ *                                                                                                                                                    *
+ * The index is measured NOW rather than at the lift because now is when the list is certainly still: the menu is position:fixed and moves no row, and *
+ * any scroll between here and the lift shifts the index through the same listener the lifted drag uses.                                               *
  ***************************************************************************************************************************************************/
-function beginTouchDrag(){
+function armTouchDrag(){
     var row = longPress.el
+    touchDrag.active = true
+    touchDrag.lifted = false
+    touchDrag.guarded = false
+    touchDrag.pointerId = longPress.pointerId
+    touchDrag.ids = []
+    touchDrag.row = row
+    touchDrag.title = ''
+    touchDrag.target = null
+    touchDrag.autoscroll = 0
+    touchDrag.startX = touchDrag.x = longPress.x
+    touchDrag.startY = touchDrag.y = longPress.y
+    // Non-passive, or the preventDefault() that stops the pan once the row IS lifted is ignored (see the banner).
+    // Capture, like every other listener in the touch layer, so nothing on the way up can take the gesture away.
+    // It prevents NOTHING while the drag is merely armed - a sideways stroke has to reach Android untouched.
+    document.addEventListener('touchmove', onTouchDragMove, { passive: false, capture: true })
+    // Pointer capture keeps this finger's events coming to us even if a re-render detaches the row under it.
+    try { row.setPointerCapture(touchDrag.pointerId) } catch (error){}
+    buildRowIndex()
+    touchDrag.watchdog = setTimeout(function(){ endTouchDrag('watchdog') }, TOUCH_DRAG_WATCHDOG_MS)
+    traceGesture('menu-open')
+}
+
+/** liftTouchDrag ***********************************************************************************************************************************
+ * The LIFT, taken by the first travel past the slop that went UP or DOWN. This is the moment the gesture stops being the menu's and becomes the       *
+ * drag's, and everything the armed state refused to do happens here, in one place:                                                                    *
+ *   - the context menu the press opened is closed, with no side effects: on mobile showNoteContextMenu never gives it focus, so hideNoteContextMenu   *
+ *     hands nothing back and simply removes the element (which also clears it out of elementFromPoint's way, since it sits under the finger).         *
+ *   - the refresh guard is taken, for the drag proper only.                                                                                           *
+ *   - the selection collapses onto the pressed row and the payload is taken the way the desktop dragstart takes it - schedulableSelection(), the      *
+ *     to-dos within the selection - so it is this one row today and inherits a mobile multi-select for free if one is ever built. The row is itself a *
+ *     to-do and is in the selection by the time this reads it, so the payload is never empty.                                                         *
+ *   - the row dims and the banner names it.                                                                                                           *
+ ***************************************************************************************************************************************************/
+function liftTouchDrag(){
+    hideNoteContextMenu()
+    touchDrag.lifted = true
+    touchDrag.guarded = true
+    void webviewApi.postMessage(['dialogGuard', true]);
     selectedRowIDs.clear()
     selectedRowIDs.add(longPress.id)
     lastClickedRowID = longPress.id
     lastSelectionInteractionID = longPress.id
     paintTodoSelection()
-    touchDrag.active = true
-    touchDrag.guarded = false
-    touchDrag.pointerId = longPress.pointerId
     touchDrag.ids = schedulableSelection()
-    touchDrag.row = row
-    touchDrag.title = rowLabel(row)
-    touchDrag.moved = false
-    touchDrag.target = null
-    touchDrag.autoscroll = 0
-    touchDrag.startX = touchDrag.x = longPress.x
-    touchDrag.startY = touchDrag.y = longPress.y
-    row.classList.add('-dragging')
-    // Non-passive, or the preventDefault() that stops the pan is ignored (see the banner). Capture, like every
-    // other listener in the touch layer, so nothing on the way up can take the gesture away.
-    document.addEventListener('touchmove', onTouchDragMove, { passive: false, capture: true })
-    // Pointer capture keeps this finger's events coming to us even if a re-render detaches the row under it.
-    try { row.setPointerCapture(touchDrag.pointerId) } catch (error){}
-    buildRowIndex()
+    touchDrag.title = rowLabel(touchDrag.row)
+    if (touchDrag.row) touchDrag.row.classList.add('-dragging')
     showDragBanner('Moving ' + touchDrag.title + ' — release outside the list to cancel', false)
-    touchDrag.watchdog = setTimeout(function(){ endTouchDrag('watchdog') }, TOUCH_DRAG_WATCHDOG_MS)
-    traceGesture('drag-arm')
+    traceGesture('drag-lift')
 }
 
 function onTouchDragMove(event){
     if (!touchDrag.active) return
-    // THE line the whole gesture rests on: it tells Android that this panel, not the scroller, owns the finger.
-    event.preventDefault()
+    // THE line the whole gesture rests on: it tells Android that this panel, not the scroller, owns the finger -
+    // and it is spoken ONLY once the row is lifted. While the drag is merely armed behind the open menu this
+    // handler blocks nothing at all, because the move that is about to be measured may well be Joplin's own
+    // side-menu swipe, and a panel that cancelled it would break the app's navigation to save its own gesture.
+    if (touchDrag.lifted) event.preventDefault()
     if (!event.touches || event.touches.length !== 1){ endTouchDrag('multi-touch'); return }
     touchDrag.x = event.touches[0].clientX
     touchDrag.y = event.touches[0].clientY
-    if (!touchDrag.moved){
-        // A hand tremor is not a move: below the slop the gesture is still the deferred context menu, nothing is
-        // painted and the refresh guard is not taken.
-        if (!window.TouchDrag.movedBeyond(touchDrag.x, touchDrag.y, touchDrag.startX, touchDrag.startY, TOUCH_DRAG_SLOP)) return
-        touchDrag.moved = true
-        touchDrag.guarded = true
-        void webviewApi.postMessage(['dialogGuard', true]);
+    if (!touchDrag.lifted){
+        // THE ONE DECISION. A hand tremor is not a move: below the slop the gesture is still just the open menu,
+        // nothing is painted and the refresh guard is not taken. The first travel past it is read once, and for
+        // good - up or down is ours, sideways is Android's and we get out of its way without a trace of state.
+        var direction = window.TouchDrag.firstMoveDirection(touchDrag.x - touchDrag.startX, touchDrag.y - touchDrag.startY, TOUCH_DRAG_SLOP)
+        if (!direction) return
+        if (direction === 'sideways'){ endTouchDrag('sideways'); return }
+        liftTouchDrag()
+        // The lifting move claims the finger too: from here the list must not pan under the row.
+        event.preventDefault()
     }
     // The shared edge auto-scroll, fed the finger's own coordinates: inside a band at the top or bottom of the
     // list it scrolls, and re-resolves the target after every frame that moved (the rows travel, the finger does
@@ -1799,7 +1843,7 @@ function onTouchDragMove(event){
 
 // After a scrolled frame the boxes are all in new places, so the index is shifted before the target is re-asked.
 function onTouchDragScrolled(clientX, clientY){
-    if (!touchDrag.active) return
+    if (!touchDrag.lifted) return
     syncRowIndex()
     updateDragTarget()
     // ...and RE-AIM at the same point, which is what keeps the loop alive under a finger that is holding still -
@@ -1838,14 +1882,19 @@ function dropTouchDrag(){
  * resize or rotation, and the watchdog. Everything the gesture put up comes down here - the touchmove listener, the scroll loop, both indicator      *
  * paints, the lifted row's dimming, the pointer capture, the banner and the watchdog itself - and the refresh guard is released LAST.                *
  *                                                                                                                                                    *
+ * IT IS ALSO THE END OF AN ARMED-BUT-NEVER-LIFTED GESTURE - a release without travel, a sideways swipe, or any of the cancels arriving while the     *
+ * menu is still the only thing on screen. Those paths took nothing, so this takes nothing down: what it must NOT do is touch the context menu, which  *
+ * belongs to the press rather than to the drag and stays open until the user dismisses it (the lift closes it explicitly, in liftTouchDrag).           *
+ *                                                                                                                                                     *
  * There is exactly one early return, before anything has been taken down, and no return between the teardown and the guard release: a leaked         *
  * ['dialogGuard', true] freezes every mobile refresh for the life of the webview, and the only defences past this point are a fresh load's           *
- * resetOverlayGuard and the watchdog above. `guarded` is what keeps the pair balanced - a lift that never travelled never took the guard, so it must  *
+ * resetOverlayGuard and the watchdog above. `guarded` is what keeps the pair balanced - a gesture that never lifted never took the guard, so it must  *
  * not post a release either (an unmatched false would decrement someone else's guard).                                                                *
  ***************************************************************************************************************************************************/
 function endTouchDrag(reason){
     if (!touchDrag.active) return
     touchDrag.active = false
+    touchDrag.lifted = false
     if (touchDrag.watchdog){ clearTimeout(touchDrag.watchdog); touchDrag.watchdog = null }
     document.removeEventListener('touchmove', onTouchDragMove, { passive: false, capture: true })
     edgeAutoscrollStop()
@@ -1861,51 +1910,56 @@ function endTouchDrag(reason){
     touchDrag.target = null
     touchDrag.ids = []
     touchDrag.autoscroll = 0
-    touchDrag.moved = false
     touchDrag.pointerId = null
     touchDrag.title = ''
-    if (reason !== 'dropped' && reason !== 'menu') traceGesture('drag-cancel:' + reason)
+    // The two ends that are not cancels and not drops get their own codes: an armed gesture that simply let go
+    // (the menu stays, and that IS the gesture), and one whose first move was sideways (Android's, not ours).
+    if (reason === 'released') traceGesture('drag-released')
+    else if (reason === 'sideways') traceGesture('drag-sideways-ignored')
+    else if (reason !== 'dropped') traceGesture('drag-cancel:' + reason)
     var guarded = touchDrag.guarded
     touchDrag.guarded = false
     if (guarded) void webviewApi.postMessage(['dialogGuard', false]);
 }
 
 /** The touch drag's own listeners **********************************************************************************************************************
- * Document-level capture, registered once, exactly like the long-press adapter they extend - and inert until a row is actually lifted (endTouchDrag and *
- * each handler return at once when no drag is in flight), so on desktop, and for every touch that is not a drag, none of this does anything at all.     *
+ * Document-level capture, registered once, exactly like the long-press adapter they extend - and inert until a press has actually ARMED one (endTouchDrag *
+ * and each handler return at once when no gesture is in flight), so on desktop, and for every touch that is not a held to-do row, none of this does       *
+ * anything at all.                                                                                                                                        *
  ***************************************************************************************************************************************************/
-// The release: a drag that travelled drops, one that did not hands the context menu back. Either way longPress.fired
-// is still set, so the click the browser synthesises next is swallowed by the adapter's own click listener and the
-// note does not open.
+// The release: a LIFTED drag drops, and one that only ever armed lets go of the arming and leaves the menu the
+// press opened standing. Either way longPress.fired is still set, so the click the browser synthesises next is
+// swallowed by the adapter's own click listener - which is what keeps the note from opening AND what keeps that
+// click from reaching the menu now sitting under the finger (the swallower stopPropagation()s it at the document).
 document.addEventListener('pointerup', function(event){
     if (!touchDrag.active || event.pointerId !== touchDrag.pointerId) return
-    if (touchDrag.moved){ dropTouchDrag(); return }
-    var ev = synthEvent(longPress.target, touchDrag.x, touchDrag.y, touchDrag.row)
-    var todoID = longPress.id
-    endTouchDrag('menu')
-    traceGesture('menu-on-release')
-    onTodoContextMenu(ev, todoID)
+    if (touchDrag.lifted){ dropTouchDrag(); return }
+    endTouchDrag('released')
 }, true)
 
 document.addEventListener('pointercancel', function(event){
     if (touchDrag.active && event.pointerId === touchDrag.pointerId) endTouchDrag('pointercancel')
 }, true)
 
-// A second finger while a row is lifted: this is no longer one drag. The press the long-press adapter has just
-// armed for that finger goes with it, or its own 500ms would lift a row out of the cancelled gesture.
+// A second finger while the gesture is armed or lifted: this is no longer one drag. The press the long-press
+// adapter has just armed for that finger goes with it, or its own 500ms would open a menu (and arm a second drag)
+// out of the cancelled gesture.
 document.addEventListener('pointerdown', function(event){
     if (!touchDrag.active || event.pointerId === touchDrag.pointerId) return
     cancelLongPress()
     endTouchDrag('second-pointer')
 }, true)
 
-// ANY scroll of the list while a row is lifted, not only the drag's own auto-scroll (which re-syncs in its own
+// ANY scroll of the list under a live gesture, not only the drag's own auto-scroll (which re-syncs in its own
 // callback, so this one finds nothing left to do). If Android pans the list out from under a gesture without
 // taking the gesture away - the 18b failure mode, in the sub-case where no pointercancel follows - the boxes the
 // index was measured from stop describing the screen, and a release would write neighbours from rows that have
 // scrolled off. Re-syncing turns that silent wrong write into a correct one.
 document.addEventListener('scroll', function(){
-    if (touchDrag.active && syncRowIndex()) updateDragTarget()
+    if (!touchDrag.active) return
+    // The index is kept honest even while the drag is only armed (the list can still pan then - nothing is
+    // prevented yet), but only a LIFTED drag has a target to re-resolve or anything to paint.
+    if (syncRowIndex() && touchDrag.lifted) updateDragTarget()
 }, true)
 
 // The app going to the background, and a rotation or resize: the boxes the index was built from are gone or about

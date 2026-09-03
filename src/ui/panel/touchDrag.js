@@ -13,6 +13,7 @@
  *   bandSide(offsetY, height, band)              which half (or band) of a row a point is in: 'before' (insert above) or 'after' (insert below).      *
  *   rowAtY(index, y)                             the indexed row a viewport y falls on, or null when y is off either end of the list.                 *
  *   movedBeyond(x, y, startX, startY, slop)      whether a finger has actually travelled, per axis - the same rule the long press cancels on.         *
+ *   firstMoveDirection(dx, dy, slop)             which way the finger went FIRST once it left the slop: 'vertical' (lift) or 'sideways'.              *
  ***************************************************************************************************************************************************/
 ;(function(root, factory){
     var api = factory()
@@ -65,9 +66,26 @@
         return Math.abs(x - startX) > slop || Math.abs(y - startY) > slop
     }
 
+    /** firstMoveDirection *****************************************************************************************************************************
+     * Which way the finger went FIRST, once it has gone anywhere at all: 'vertical', 'sideways', or null while it is still inside the slop. This is   *
+     * the whole decision the menu-first gesture turns on. The 500ms hold opens the to-do's context menu with the finger still DOWN and arms the drag  *
+     * silently behind it; what the finger does next says which of the two the press meant. Up or down LIFTS the row into the drag. Sideways is left   *
+     * strictly alone - on Android that stroke is Joplin's own side-menu swipe, and a panel that fought it would break the app's navigation to save   *
+     * its own gesture - so the arming is simply thrown away and nothing is prevented.                                                                 *
+     *                                                                                                                                                 *
+     * "Has it moved at all" is movedBeyond's rule, per axis, so it means exactly what the long press means by it. The tie - a perfect diagonal, where *
+     * |dy| equals |dx| - goes to VERTICAL, deliberately: a swipe refused here is one flick away from being re-tried, while a lift refused here cannot *
+     * be recovered without lifting the finger and pressing again.                                                                                     *
+     ***********************************************************************************************************************************************/
+    function firstMoveDirection(dx, dy, slop){
+        if (!movedBeyond(dx, dy, 0, 0, slop)) return null
+        return Math.abs(dy) >= Math.abs(dx) ? 'vertical' : 'sideways'
+    }
+
     return {
         bandSide: bandSide,
         rowAtY: rowAtY,
         movedBeyond: movedBeyond,
+        firstMoveDirection: firstMoveDirection,
     }
 })
