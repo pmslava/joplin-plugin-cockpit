@@ -3111,6 +3111,7 @@ async function main() {
             [/'orientationchange'[\s\S]{0,80}endTouchDrag\('orientation'\)/, 'a rotation must end the drag'],
             [/setTimeout\(function\(\)\{ endTouchDrag\('watchdog'\) \}, TOUCH_DRAG_WATCHDOG_MS\)/, 'the watchdog must end the drag'],
             [/endTouchDrag\(target \? 'dropped' : 'no-target'\)/, 'a release over nothing must end the drag as well as a drop'],
+            [/endTouchDrag\('multi-touch'\)/, 'a second finger arriving mid-move must end the drag'],
         ]) assert.ok(pattern.test(webviewSource), why)
         // ...and nothing else lowers the flag behind its back.
         assert.strictEqual((webviewSource.match(/touchDrag\.active = false/g) || []).length, 1,
@@ -3132,6 +3133,11 @@ async function main() {
         // context menu) never touches it: the host's repaint on the release would otherwise reload the webview
         // out from under the very menu that release just opened.
         assert.ok(!handlerBody('beginTouchDrag').includes('dialogGuard'), 'the lift must not take the guard')
+        // The payload is taken the way the desktop dragstart takes it - the to-dos WITHIN the selection - so it is
+        // the one pressed row today and inherits a mobile multi-select for free if one is ever built. Reading
+        // longPress.id directly would pass every other pin here and quietly lose that.
+        assert.ok(handlerBody('beginTouchDrag').includes('touchDrag.ids = schedulableSelection()'),
+            'the drag payload must come from schedulableSelection(), like the desktop dragstart')
         assert.ok(handlerBody('onTouchDragMove').includes("['dialogGuard', true]"), 'the first real move must take it')
     })
 
@@ -3146,25 +3152,46 @@ async function main() {
         assert.ok(resolve.indexOf('elementFromPoint') < resolve.indexOf('TouchDrag.rowAtY'),
             'the whole-row targets must be resolved before the gaps, or a heading would read as the gap above it')
         assert.ok(resolve.includes("closest('[data-drop]')"), 'the whole-row targets are the existing [data-drop] elements')
+        // ...and a heading that accepts NO drop (Overdue and Future name no date) is not the gap above it either:
+        // it is a sibling of the rows, so without this the index would attribute its whole band - and, while it is
+        // stuck to the top of a scrolled list, the rows under it - to a row in the group before it, and write there.
+        assert.ok(/closest\('h2'\)\) return null/.test(resolve),
+            'a drop-refusing heading under the finger must resolve to nothing, not to the gap above it')
+        assert.ok(resolve.indexOf("closest('h2')") > resolve.indexOf("closest('[data-drop]')"),
+            'and it must be asked AFTER [data-drop], or the headings that DO accept drops would be refused too')
         // ...and the rows themselves come from the pure module against the index, never from elementFromPoint.
         assert.ok(resolve.includes('window.TouchDrag.rowAtY(touchDrag.index'), 'the row must be found geometrically, in the index')
         assert.ok(resolve.includes('window.TouchDrag.bandSide('), 'and its side by the shared band rule')
     })
 
-    await test('webview touch drag: the row index skips the peek and is rebuilt after every scrolled frame', () => {
+    await test('webview touch drag: the row index skips the peek, and every scroll shifts it', () => {
         const build = handlerBody('buildRowIndex')
         assert.ok(build.includes("closest('.outside-results')"), 'the read-only peek is not a target of any kind')
         assert.ok(build.includes('getBoundingClientRect()'), 'the index holds the rows\' live boxes')
         assert.ok(build.includes('betweenGroupInfo(row)'), 'each row carries the eligibility the desktop drop already resolves')
-        // The rows move under a finger that is holding still, which is the whole auto-scroll gesture.
+        assert.ok(build.includes('touchDrag.indexTop = scroller ? scroller.scrollTop : 0'),
+            'the index must record the scroll position it was measured at, so a later scroll can shift it')
+        // The rows move under a finger that is holding still, which is the whole auto-scroll gesture. A scroll moves
+        // every row by the same delta and changes nothing else about them, so the boxes are shifted, not re-measured:
+        // a rebuild is a getBoundingClientRect() plus a walk to the heading per row, on every frame, on the device.
+        const sync = handlerBody('syncRowIndex')
+        assert.ok(/delta = scroller\.scrollTop - touchDrag\.indexTop/.test(sync), 'the shift is the list\'s own scroll delta')
+        assert.ok(/entry\.top -= delta; entry\.bottom -= delta/.test(sync), 'and it moves every box by exactly that')
+        assert.ok(/if \(!delta\) return false/.test(sync), 'a scroll that moved nothing must cost nothing')
         const scrolled = handlerBody('onTouchDragScrolled')
-        assert.ok(scrolled.includes('buildRowIndex()'), 'a scrolled frame must rebuild the index - the boxes have all moved')
+        assert.ok(scrolled.includes('syncRowIndex()'), 'a scrolled frame must re-sync the index - the boxes have all moved')
         assert.ok(scrolled.includes('updateDragTarget()'), '...and re-resolve what the finger is now over')
+        // ...and so must a scroll the drag did not ask for: if the list pans out from under a lifted row without the
+        // gesture being taken away, an unsynced index would write neighbours from rows that have scrolled off.
+        assert.ok(/addEventListener\('scroll', function\(\)\{\s*if \(touchDrag\.active && syncRowIndex\(\)\) updateDragTarget\(\)\s*\}, true\)/.test(webviewSource),
+            'any scroll while a row is lifted must re-sync the index and re-resolve the target')
         // ...and re-aim at the same point, or the helper's idle watchdog stops the list after 800ms: a still
         // FINGER sends no touchmove at all, and holding still at the edge is the entire gesture.
         assert.ok(scrolled.includes('edgeAutoscrollUpdate('), 'a scrolled frame must re-aim the loop, or a still finger would stop it')
-        assert.ok(handlerBody('onTouchDragMove').includes('edgeAutoscrollUpdate(currentTodosEl || document.querySelector(\'.todos\'), touchDrag.x, touchDrag.y, onTouchDragScrolled)'),
+        assert.ok(handlerBody('onTouchDragMove').includes('edgeAutoscrollUpdate(touchDragScroller(), touchDrag.x, touchDrag.y, onTouchDragScrolled)'),
             'the touch drag must feed the SHARED edge auto-scroll helper, not a second copy of the band maths')
+        assert.ok(/function touchDragScroller\(\)\{\s*return currentTodosEl \|\| document\.querySelector\('\.todos'\)/.test(webviewSource),
+            'and the index, the shift and the auto-scroll must all mean the same scroller')
     })
 
     await test('webview touch drag: the two bands are named constants - 0.5 on touch, the desktop 0.4 untouched', () => {
@@ -3211,6 +3238,18 @@ async function main() {
             'a release that did not travel ends the drag and opens the menu the press would have opened')
         assert.ok(/var ev = synthEvent\(longPress\.target, touchDrag\.x, touchDrag\.y, touchDrag\.row\)/.test(webviewSource),
             'the menu must be opened with the press point, through the same synthetic event the long press uses')
+        // That event is read from longPress AFTER the adapter's own pointerup listener has run, which is safe only
+        // because of two orderings nothing else pins: the adapter's cancel tidies up the timer and NOTHING else, and
+        // the drag's release listener is registered after the adapter's. Break either and the menu opens on a null
+        // target, with every other test here still green.
+        const cancel = handlerBody('cancelLongPress')
+        assert.strictEqual(cancel.replace(/longPress\.timer/g, '').includes('longPress.'), false,
+            'cancelLongPress must touch longPress.timer and nothing else - the deferred menu reads the rest after it')
+        const adapterUp = webviewSource.indexOf("document.addEventListener('pointerup', cancelLongPress, true)")
+        const dragUp = webviewSource.indexOf('if (touchDrag.moved){ dropTouchDrag(); return }')
+        assert.ok(adapterUp >= 0, 'the adapter\'s own pointerup must still cancel the pending press')
+        assert.ok(adapterUp < dragUp,
+            '...and be registered BEFORE the drag\'s release listener, so the press is cancelled and still readable there')
     })
 
     await test('panel.css touch drag: a thicker insertion line, a banner, and NO touch-action on .todo', () => {
@@ -3232,8 +3271,14 @@ async function main() {
         assert.ok(css.includes('#cockpitDragBanner.-cancel {'), 'the banner must have a cancel state')
         // The one thing that must NOT be here: a touch-action on the rows would apply to every touch on every
         // row, always, and kill the flick-scrolling of the list. The drag stops the pan per gesture instead.
-        assert.ok(!/\.cockpit-mobile \.todo[ ,{][^}]*touch-action/.test(css), 'no touch-action may be put on the to-do rows')
-        assert.ok(!/^\.todo \{[^}]*touch-action/m.test(css), 'and none on the shared row rule either')
+        // Scanned over EVERY rule whose selector list mentions a row, in any shape (".cockpit-mobile .todos .todo",
+        // ".todo.-dragging", a grouped selector), rather than the one spelling the feature happened to use.
+        const bare = css.replace(/\/\*[\s\S]*?\*\//g, ' ')
+        for (const rule of bare.match(/[^{}]+\{[^}]*\}/g) || []) {
+            const selector = rule.slice(0, rule.indexOf('{'))
+            if (!/(^|[\s,.>+~])\.todo(?![\w-])/.test(selector)) continue
+            assert.ok(!/touch-action/.test(rule), `no touch-action may be put on the to-do rows, and "${selector.trim()}" has one`)
+        }
     })
 
     await test('panel.ts loads the touch-drag module before the webview that uses it', () => {
