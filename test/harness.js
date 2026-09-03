@@ -78,6 +78,18 @@ function makeJoplin(options) {
         panelVisibility: {},
         // Every views.panels.show call, in order, as { handle, visible }.
         panelShows: [],
+        // joplin.window.loadChromeCssFile / loadNoteCssFile: the file paths the plugin asked Joplin to link into
+        // the app window and into the note viewer. The real API has no way to unload one, so recording the paths
+        // in order is the whole observable surface - and it is what lets a test prove a stylesheet is loaded once
+        // on desktop when its setting is on, and never otherwise.
+        chromeCssFiles: [],
+        noteCssFiles: [],
+        // joplin.contentScripts.register, as { type, id, scriptPath }, in order.
+        contentScripts: [],
+        // joplin.contentScripts.onMessage handlers by content script id. Wrapped with withTimerCapture, the same
+        // treatment views.panels.onMessage gets: the alarm write these handlers can reach arms the reconcile and
+        // overview lanes, and an uncaptured setTimeout would leak across scenarios on a real clock.
+        contentScriptHandlers: {},
     }
 
     const notes = options.notes || {}
@@ -125,6 +137,14 @@ function makeJoplin(options) {
             installationDir: async () => options.installationDir,
         },
         require: (moduleName) => options.require(moduleName),
+        window: {
+            loadChromeCssFile: async (filePath) => { state.chromeCssFiles.push(filePath) },
+            loadNoteCssFile: async (filePath) => { state.noteCssFiles.push(filePath) },
+        },
+        contentScripts: {
+            register: async (type, id, scriptPath) => { state.contentScripts.push({ type, id, scriptPath }) },
+            onMessage: async (id, handler) => { state.contentScriptHandlers[id] = withTimerCapture(handler) },
+        },
         versionInfo: async () => options.versionInfo,
         settings: {
             registerSection: async () => {},

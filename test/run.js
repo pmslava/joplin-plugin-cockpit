@@ -6708,6 +6708,208 @@ async function main() {
         assert.ok(/var\(--cockpit-/.test(body), 'and it must take its colours from the theme variables')
     })
 
+    // ============================================ the note title bar (v2.5.0): the due date on hover, and the bell's own picker
+    // Two owner-approved, desktop-only features, both OFF by default and both "after a Joplin restart" - because neither can be
+    // undone while the app runs: Joplin cannot unload a chrome stylesheet, and it cannot unregister a content script.
+    //  A. A chrome stylesheet hides the due-date text Joplin prints beside the alarm bell and brings it back as a hover bubble.
+    //  B. An editor content script catches the bell's click in the renderer and hands it to Cockpit's own alarm dialog. Joplin's
+    //     editAlarm cannot be overridden (registerDeclaration REPLACES the entry and drops its mapStateToTitle, which is what puts
+    //     the due date on the button in the first place), so the DOM intercept is the only route.
+    const bellTodoID = '1a'.repeat(16)
+    const bellDoneID = '2b'.repeat(16)
+    const bellNoteID = '3c'.repeat(16)
+    const bellUnknownID = '4d'.repeat(16)
+    const titleBarNotes = {
+        [bellTodoID]: { id: bellTodoID, title: 'Bell task', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: 'n'.repeat(32) },
+        [bellDoneID]: { id: bellDoneID, title: 'Bell task done', is_todo: 1, todo_completed: Date.now() - 3600000, todo_due: Date.now() + 3600000, parent_id: 'n'.repeat(32) },
+        [bellNoteID]: { id: bellNoteID, title: 'Bell plain note', is_todo: 0, todo_completed: 0, parent_id: 'n'.repeat(32) },
+    }
+    const titleBarInstall = path.join(tmp, 'title-bar-install')
+    const HOVER_KEY = 'hideDueDateOnBell'
+    const PICKER_KEY = 'bellOpensCockpitPicker'
+    const HOVER_CSS_PATH = `${titleBarInstall}/ui/chrome/dueOnHover.css`
+    let titleBarSeq = 0
+    const runTitleBar = (initialSettings, platform) => run({
+        dataDir: path.join(tmp, 'title-bar-' + (++titleBarSeq)),
+        installationDir: titleBarInstall,
+        require: platform === 'mobile' ? mobileRequire : desktopRequire,
+        versionInfo: { version: '3.7.0', platform: platform || 'desktop' },
+        todos: [titleBarNotes[bellTodoID]],
+        notes: titleBarNotes,
+        initialSettings: initialSettings || {},
+    })
+    const bothOn = { [HOVER_KEY]: true, [PICKER_KEY]: true }
+
+    await test('title bar settings: two public Bool settings in the Cockpit section, both defaulting to OFF, both naming the restart', async () => {
+        const state = await runTitleBar()
+        const defs = state.registeredSettings
+        for (const [key, label] of [
+            [HOVER_KEY, 'Hide the due date next to the bell in the note title bar and show it on hover'],
+            [PICKER_KEY, "Open Cockpit's date picker instead of Joplin's when the alarm bell is clicked"],
+        ]){
+            const def = defs[key]
+            assert.ok(def, `the ${key} setting must be registered`)
+            assert.strictEqual(def.label, label, `${key} label`)
+            assert.strictEqual(def.value, false, `${key} must default to OFF - neither feature may appear unasked`)
+            assert.strictEqual(def.type, 3, `${key} must be SettingItemType.Bool (3)`)
+            assert.strictEqual(def.public, true, `${key} must be visible in Settings > Cockpit`)
+            assert.strictEqual(def.section, 'section', `${key} must live in Cockpit's own section`)
+            // The house style carries the caveat inline in the description (cf. showToolbarButton), because Joplin
+            // gives a plugin no way to say "restart needed" in the Settings screen itself.
+            assert.ok(/restart/i.test(def.description || ''), `${key}'s description must say the change needs a Joplin restart`)
+            assert.ok(/desktop/i.test(def.description || ''), `${key}'s description must say it is desktop only`)
+        }
+        // The Markdown-editor limit belongs to the intercept alone: with the Rich Text editor no plugin JS runs in
+        // the window at all, so the bell keeps Joplin's picker and the user has to be told.
+        assert.ok(/markdown/i.test(defs[PICKER_KEY].description), "the picker setting must name the Markdown-editor limit")
+    })
+
+    await test('due date on hover (A): the chrome stylesheet is loaded exactly once, from the installation directory, when the setting is on', async () => {
+        const state = await runTitleBar({ [HOVER_KEY]: true })
+        assert.deepStrictEqual(state.chromeCssFiles, [HOVER_CSS_PATH],
+            'exactly the one file, at the path the CopyPlugin ships it to inside the installed plugin')
+        // The note viewer is a different surface entirely and must not be touched by a title-bar tweak.
+        assert.deepStrictEqual(state.noteCssFiles, [], 'no note stylesheet may be loaded')
+    })
+
+    await test('due date on hover (A): nothing is loaded while the setting is off', async () => {
+        const state = await runTitleBar({ [HOVER_KEY]: false })
+        assert.deepStrictEqual(state.chromeCssFiles, [],
+            'a stylesheet loaded here could never be unloaded again - the setting is the only gate there is')
+    })
+
+    await test('due date on hover (A): nothing is loaded on mobile, even with the setting on', async () => {
+        const state = await runTitleBar(bothOn, 'mobile')
+        assert.deepStrictEqual(state.chromeCssFiles, [], 'joplin.window is a desktop API and mobile has no note title bar')
+    })
+
+    await test('the bell intercept (B): the content script is registered as a CodeMirror plugin, with its handler, when the setting is on', async () => {
+        const state = await runTitleBar({ [PICKER_KEY]: true })
+        assert.deepStrictEqual(state.contentScripts, [{
+            type: 'codeMirrorPlugin',
+            id: 'cockpit-title-bar',
+            scriptPath: './contentScripts/titleBar.js',
+        }], 'the type, the id and the built path are the whole registration - and the path must be the one the archive carries')
+        assert.ok(typeof state.contentScriptHandlers['cockpit-title-bar'] === 'function',
+            'the same id must carry an onMessage handler, or the click has nowhere to go')
+        // The built file really is in dist/, so the registered path is not a promise the build fails to keep.
+        assert.ok(fs.existsSync(path.join(__dirname, '..', 'dist', 'contentScripts', 'titleBar.js')),
+            'plugin.config.json must build src/contentScripts/titleBar.ts into dist/contentScripts/titleBar.js')
+    })
+
+    await test('the bell intercept (B): nothing is registered while the setting is off', async () => {
+        const state = await runTitleBar({ [PICKER_KEY]: false })
+        assert.deepStrictEqual(state.contentScripts, [], 'a registered content script cannot be unregistered while Joplin runs')
+        assert.deepStrictEqual(Object.keys(state.contentScriptHandlers), [], 'and no handler may be listening')
+    })
+
+    await test('the bell intercept (B): nothing is registered on mobile, even with the setting on', async () => {
+        const state = await runTitleBar(bothOn, 'mobile')
+        assert.deepStrictEqual(state.contentScripts, [],
+            'mobile has no note title bar and no CodeMirror-hosted chrome DOM for the script to reach')
+        assert.deepStrictEqual(Object.keys(state.contentScriptHandlers), [])
+    })
+
+    await test('the bell intercept (B): an uncompleted to-do opens Cockpit\'s dialog, and OK writes its due', async () => {
+        const state = await runTitleBar({ [PICKER_KEY]: true })
+        state.dialogResult = { id: 'ok', formData: { alarm: { date: '2027-03-04', time: '08:30' } } }
+        const putsBefore = state.notePuts.length
+        const answer = await state.contentScriptHandlers['cockpit-title-bar']({ type: 'openAlarm', noteId: bellTodoID })
+        assert.deepStrictEqual(answer, { ok: true })
+        const puts = state.notePuts.slice(putsBefore)
+        assert.strictEqual(puts.length, 1, 'exactly the one to-do the bell belongs to is written')
+        assert.strictEqual(puts[0].id, bellTodoID)
+        assert.strictEqual(typeof puts[0].fields.todo_due, 'number', 'the due must land as a numeric timestamp')
+        assert.strictEqual(puts[0].fields.todo_due, new Date(2027, 2, 4, 8, 30, 0, 0).getTime(),
+            'and be exactly the datetime the dialog came back with')
+    })
+
+    await test('the bell intercept (B): a plain note is refused, and nothing is written', async () => {
+        const state = await runTitleBar({ [PICKER_KEY]: true })
+        state.dialogResult = { id: 'ok', formData: { alarm: { date: '2027-03-04', time: '08:30' } } }
+        const putsBefore = state.notePuts.length
+        const answer = await state.contentScriptHandlers['cockpit-title-bar']({ type: 'openAlarm', noteId: bellNoteID })
+        assert.strictEqual(answer.ok, false, 'Joplin disables the bell on a plain note, so Cockpit must not offer an alarm for one')
+        assert.strictEqual(state.notePuts.length, putsBefore, 'and no note may be written')
+    })
+
+    await test('the bell intercept (B): a completed to-do is refused, and nothing is written', async () => {
+        const state = await runTitleBar({ [PICKER_KEY]: true })
+        state.dialogResult = { id: 'ok', formData: { alarm: { date: '2027-03-04', time: '08:30' } } }
+        const putsBefore = state.notePuts.length
+        const answer = await state.contentScriptHandlers['cockpit-title-bar']({ type: 'openAlarm', noteId: bellDoneID })
+        assert.strictEqual(answer.ok, false, 'a completed to-do is the other state in which Joplin disables the bell')
+        assert.strictEqual(state.notePuts.length, putsBefore)
+    })
+
+    await test('the bell intercept (B): an unknown id and a malformed payload come back as { ok: false }, never as a throw', async () => {
+        const state = await runTitleBar({ [PICKER_KEY]: true })
+        const handler = state.contentScriptHandlers['cockpit-title-bar']
+        // data.get throws 'Not Found' for an id the database does not know (the note was deleted between the render
+        // and the click). A rejected promise here would reach the renderer as an unhandled rejection and do nothing
+        // visible at all, so every refusal has to come back as a value the content script can log.
+        const unknown = await handler({ type: 'openAlarm', noteId: bellUnknownID })
+        assert.strictEqual(unknown.ok, false, 'an unknown id is a refusal, not a failure')
+        for (const payload of [null, undefined, 'openAlarm', 42, { type: 'openAlarm', noteId: 17 }, { type: 'somethingElse', noteId: bellTodoID }]){
+            const answer = await handler(payload)
+            assert.strictEqual(answer.ok, false, `the payload ${JSON.stringify(payload)} must be refused`)
+        }
+        assert.deepStrictEqual(state.notePuts, [], 'and none of them may write anything')
+    })
+
+    await test('the bell intercept (B): the content script binds on .note-editor-wrapper in the CAPTURE phase, keys on the alarm icon, and reads the note id at click time', () => {
+        // A SOURCE pin: this file runs in Joplin's renderer window, which this harness does not have. Each line
+        // below is one of the three constraints that make the intercept work, and each is a mistake that would
+        // look correct in review.
+        const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'contentScripts', 'titleBar.ts'), 'utf8')
+        const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+        // 1. The listener goes on the stable wrapper, NEVER on the button: the bell's React key embeds the due-date
+        //    text, so the button is remounted the moment an alarm changes and a listener on it would be dropped.
+        assert.ok(/closest\('\.note-editor-wrapper'\)/.test(code), "the listener's host must be found with closest('.note-editor-wrapper')")
+        assert.ok(/root\.addEventListener\('click',/.test(code), 'and the listener must be bound to that wrapper')
+        assert.ok(!/button\.addEventListener|btn\.addEventListener/.test(code), 'never to the button, which remounts on every alarm change')
+        // 3. Capture phase, and the event is stopped there - React 18 delegates onClick from a BUBBLE listener on
+        //    its root container, so only a capture-phase stop below that root keeps Joplin's editAlarm from running.
+        const listener = code.slice(code.indexOf("root.addEventListener('click'"))
+        assert.ok(/\}, true\)/.test(listener), 'the listener must be registered with capture: true')
+        assert.ok(/event\.stopPropagation\(\)/.test(listener), 'and stop the event')
+        assert.ok(/event\.preventDefault\(\)/.test(listener), 'and prevent its default')
+        assert.ok(/stopImmediatePropagation/.test(listener), 'with stopImmediatePropagation as the belt to that braces')
+        // 2. The discriminator: the title-bar row AND the bell's own icon. Never -has-title, which a to-do without
+        //    an alarm does not carry; never the other title-bar buttons (spellcheck, layout, properties, the gauge).
+        assert.ok(/closest\('\.note-title-info-group button\.toolbar-button'\)/.test(listener),
+            'the click must be narrowed to a title-bar toolbar button')
+        assert.ok(/querySelector\('span\.toolbar-icon\.icon-alarm'\)/.test(listener),
+            'and then to the ALARM one by its icon - the only discriminator that holds for a to-do with no alarm yet')
+        assert.ok(!/-has-title/.test(listener), '-has-title is present only once the to-do HAS an alarm, so it must not be the key')
+        // The disabled bell dispatches no click at all; the early return is what makes that explicit and leaves
+        // such an event untouched rather than swallowing it.
+        assert.ok(/if \(button\.disabled\) return/.test(listener), 'a disabled bell must be left entirely alone')
+        // The note id is a facet read INSIDE the listener: plugin() runs once per editor MOUNT, not once per note,
+        // so an id captured at mount time would be the first note the editor ever showed, forever.
+        assert.ok(/noteIdFacet/.test(code), 'the note id must come from the editor\'s noteIdFacet')
+        assert.ok(/var noteId = currentNoteId\(\)/.test(listener), 'and be read at click time, not at mount time')
+        assert.ok(/postMessage\(\{ type: 'openAlarm', noteId: noteId \}\)/.test(listener), 'the message shape the plugin handler answers')
+    })
+
+    await test('due date on hover (A): the stylesheet is the owner\'s block, scoped to the title-bar row and keyed on -has-title', () => {
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'chrome', 'dueOnHover.css'), 'utf8')
+        const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
+        // Every selector is scoped to the note title bar's own row: this file is loaded into the WHOLE app window,
+        // so an unscoped rule would hide text in every toolbar Joplin has.
+        const selectors = rules.split('}').map(part => part.slice(0, part.indexOf('{')).trim()).filter(Boolean)
+        assert.strictEqual(selectors.length, 4, 'the owner\'s block is four rules')
+        for (const selector of selectors){
+            assert.ok(selector.startsWith('.note-title-info-group button.toolbar-button.-has-title'),
+                `every rule must be scoped to the title-bar bell, "${selector}" is not`)
+        }
+        // -has-title is what makes the selector the BELL and nothing else: editAlarm is the only title-bar command
+        // with a mapStateToTitle, so it is the only button Joplin ever gives a text title to.
+        assert.ok(/> span:not\(\.toolbar-icon\) \{\s*display: none/.test(rules), 'the due-date text span is the thing hidden')
+        assert.ok(/:hover > span:not\(\.toolbar-icon\)/.test(rules), 'and hover is what brings it back')
+        assert.ok(/overflow: visible/.test(rules), 'the button must stop clipping, or the hover bubble is cut off')
+    })
+
     await test('sandbox proxy: no joplin.* member is ever read without being called in the same expression', () => {
         // THE golden rule, enforced over the whole source tree. `joplin` is sandboxProxy(wrappedTarget): its
         // handler.get pushes the property onto a SHARED __joplinNamespace array and only handler.apply pops one
