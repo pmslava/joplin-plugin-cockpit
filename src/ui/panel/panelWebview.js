@@ -894,10 +894,12 @@ function requestAlarm(ids){
  ***************************************************************************************************************************************************/
 var longPress = { timer: null, x: 0, y: 0, fired: false, target: null, el: null, kind: null, id: null, pointerId: null }
 
-// ONLY the timer. The touch drag below reads longPress.target/el/id AFTER this has run - the adapter's own
-// pointerup listener is registered first and so cancels the press before the drag's release handler opens the
-// deferred context menu with that same press point. Clearing anything else here would hand that menu a
-// synthEvent(null, ...) instead, and no drag path would notice.
+// ONLY the timer, and the one field it must NOT clear is `fired`. This runs on the pointerup of every gesture,
+// including one whose press has already fired - and `fired` is read AFTER that by both click listeners on the
+// click the browser then synthesises: the menu-dismiss listener stands aside for it, and the swallower eats it.
+// Clearing it here would let that click through, and the context menu the press had just opened would vanish the
+// instant the finger came up. Nothing else in longPress outlives this: the drag it may have armed snapshotted
+// everything it needs (row, pointer, id, press point) at the fire, in armTouchDrag.
 function cancelLongPress(){
     if (longPress.timer){ clearTimeout(longPress.timer); longPress.timer = null }
 }
@@ -1588,6 +1590,7 @@ var touchDrag = {
     lifted: false,          // ...and the row is actually up: the drag proper, the only state that paints or prevents
     guarded: false,         // ...and the refresh guard has been taken for it (the lift onwards)
     pointerId: null,        // the finger that armed it; a second one cancels
+    id: null,               // the pressed row's to-do id, snapshotted at the arm (see liftTouchDrag)
     ids: [],                // the payload, as schedulableSelection() resolved it at the lift
     row: null,              // the pressed row element
     title: '',              // ...and its title, for the banner (read at the lift, which is the only thing that shows it)
@@ -1762,6 +1765,9 @@ function armTouchDrag(){
     touchDrag.lifted = false
     touchDrag.guarded = false
     touchDrag.pointerId = longPress.pointerId
+    // The whole of what the press hands over is taken HERE, in one place - including the id, which the lift would
+    // otherwise reach back for on a touchmove arriving long after the press object had moved on.
+    touchDrag.id = longPress.id
     touchDrag.ids = []
     touchDrag.row = row
     touchDrag.title = ''
@@ -1797,13 +1803,15 @@ function liftTouchDrag(){
     touchDrag.guarded = true
     void webviewApi.postMessage(['dialogGuard', true]);
     selectedRowIDs.clear()
-    selectedRowIDs.add(longPress.id)
-    lastClickedRowID = longPress.id
-    lastSelectionInteractionID = longPress.id
+    selectedRowIDs.add(touchDrag.id)
+    lastClickedRowID = touchDrag.id
+    lastSelectionInteractionID = touchDrag.id
     paintTodoSelection()
     touchDrag.ids = schedulableSelection()
+    // The row is never null here: canLiftRow required its data-todo-id before the arm, and the arm is the only
+    // thing that puts a gesture in a state to reach this line.
     touchDrag.title = rowLabel(touchDrag.row)
-    if (touchDrag.row) touchDrag.row.classList.add('-dragging')
+    touchDrag.row.classList.add('-dragging')
     showDragBanner('Moving ' + touchDrag.title + ' — release outside the list to cancel', false)
     traceGesture('drag-lift')
 }
@@ -1822,10 +1830,16 @@ function onTouchDragMove(event){
         // THE ONE DECISION. A hand tremor is not a move: below the slop the gesture is still just the open menu,
         // nothing is painted and the refresh guard is not taken. The first travel past it is read once, and for
         // good - up or down is ours, sideways is Android's and we get out of its way without a trace of state.
-        var direction = window.TouchDrag.firstMoveDirection(touchDrag.x - touchDrag.startX, touchDrag.y - touchDrag.startY, TOUCH_DRAG_SLOP)
-        if (!direction) return
-        if (direction === 'sideways'){ endTouchDrag('sideways'); return }
+        var firstMove = window.TouchDrag.firstMoveDirection(touchDrag.x - touchDrag.startX, touchDrag.y - touchDrag.startY, TOUCH_DRAG_SLOP)
+        if (!firstMove) return
+        if (firstMove === 'sideways'){ endTouchDrag('sideways'); return }
         liftTouchDrag()
+        // ...and if THIS move already arrives non-cancelable, the panel never had the finger to claim: Chromium
+        // decided the touch sequence's blocking region before this listener existed, so preventDefault() is a
+        // silent no-op from here to the end of the gesture and the list will pan under the lifted row. That is a
+        // different failure from the list twitching in the pre-lift slop, and the trace is the only thing that can
+        // tell them apart on the device (MOBILE.md, step 18b).
+        if (!event.cancelable) traceGesture('drag-uncancelable')
         // The lifting move claims the finger too: from here the list must not pan under the row.
         event.preventDefault()
     }
@@ -1911,6 +1925,7 @@ function endTouchDrag(reason){
     touchDrag.ids = []
     touchDrag.autoscroll = 0
     touchDrag.pointerId = null
+    touchDrag.id = null
     touchDrag.title = ''
     // The two ends that are not cancels and not drops get their own codes: an armed gesture that simply let go
     // (the menu stays, and that IS the gesture), and one whose first move was sideways (Android's, not ours).
