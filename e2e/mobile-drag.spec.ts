@@ -514,6 +514,38 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     return at;
   }
 
+  /** The centre of a footer button in the open in-panel overlay, in TOP-LEVEL coordinates. */
+  async function overlayButtonPoint(win: Page, label: string): Promise<Point> {
+    const panel = await agendaPanel(win);
+    const box = await panel.evaluate((text) => {
+      const buttons = Array.from(
+        document.querySelectorAll('#cockpitOverlay .cockpit-overlay-footer button')
+      ) as HTMLElement[];
+      const button = buttons.find((b) => (b.textContent || '').trim() === text);
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    }, label);
+    if (!box) throw new Error(`the open overlay has no ${label} button`);
+    const origin = await panelOrigin(win);
+    return { x: origin.x + box.x, y: origin.y + box.y };
+  }
+
+  /**
+   * One tap, with a finger of its own. Used where a case has to press something with touch rather than with
+   * Playwright's mouse - see the ring case for the one place where that difference is the whole point.
+   */
+  async function tapAt(win: Page, at: Point): Promise<void> {
+    const finger = await newFinger(win);
+    try {
+      await finger.down(at);
+      await win.waitForTimeout(80);
+      await finger.up();
+    } finally {
+      await finger.dispose();
+    }
+  }
+
   /** ------------------------------------------------------------------------------------------
    * Helper 3: what the panel POSTED
    * --------------------------------------------------------------------------------------- */
@@ -978,7 +1010,17 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       await finger.dispose();
     }
     await expect(panel.locator('#cockpitOverlay')).toBeVisible();
-    await panel.locator('#cockpitOverlay .cockpit-overlay-footer button', { hasText: 'Cancel' }).first().click();
+    // Dismissed with a FINGER, and it has to be. The hold above fired, so `longPress.fired` is set; the move that
+    // followed it carried the touch past Chromium's tap slop, so the release synthesised NO click, and nothing
+    // consumed the flag. On a phone that is harmless and invisible: the next input is another touch, and the
+    // adapter's pointerdown clears the flag before any zone check (panelWebview.js, `longPress.fired = false`
+    // ahead of the `#cockpitOverlay` early return), so the tap's own click sails through the swallower. Playwright's
+    // `.click()` is a MOUSE click, which that pointerdown returns on before it can reset anything - so the stale
+    // flag survives to the click and the swallower eats the Cancel press. That mixture, a mouse click landing in
+    // the panel after a touch gesture, is a desktop-host artefact this file otherwise never produces; the fix is to
+    // stop producing it here rather than to weaken the flag the menu-first gesture depends on (a release without
+    // travel MUST still reach its click with `fired` set, or the menu 18a is about would close under the finger).
+    await tapAt(win, await overlayButtonPoint(win, 'Cancel'));
     await expect(panel.locator('#cockpitOverlay')).toHaveCount(0);
   });
 
