@@ -31,6 +31,9 @@ export default defineConfig({
   // (the suite still gets its full 30 minutes once its turn comes); on CI each repo has its own VM,
   // the lock is never contended, and the cap stays exactly where the job's own limit needs it.
   //
+  // Left at 30 for 2.4.0's eighteenth file (the Whereabouts commands): one more Joplin launch and three short
+  // cases, a couple of minutes against a cap a healthy run does not come near.
+  //
   // Raised 18 → 25 when the mobile touch-drag spec became the seventeenth file, and 25 → 30 for 2.3.0, where
   // that spec grew to twenty cases whose beforeAll seeds ~100 to-dos through the data API: main alone ran 82
   // tests in ~12 minutes, and each file launches its own Joplin while the gesture cases each wait out a settle

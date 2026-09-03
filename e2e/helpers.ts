@@ -250,6 +250,7 @@ export interface ProfileFields {
   displayFormat?: 'basic' | 'interval' | 'date' | 'month' | 'week';
   showCompleted?: boolean;
   showNoDue?: boolean;
+  showNotes?: boolean;
   noDueDatesAtEnd?: boolean;
 }
 
@@ -310,6 +311,7 @@ async function fillProfileForm(frame: Frame, fields: ProfileFields): Promise<voi
     }
   }
   if (fields.showNoDue != null) await setCheckbox('#showNoDueCheckbox', fields.showNoDue);
+  if (fields.showNotes != null) await setCheckbox('#showNotesCheckbox', fields.showNotes);
   if (fields.noDueDatesAtEnd != null) {
     await setCheckbox('#noDueDatesAtEndCheckbox', fields.noDueDatesAtEnd);
   }
@@ -498,6 +500,45 @@ export async function panelToastVisible(win: Page): Promise<boolean> {
 /** ----------------------------------------------------------------------------------------------
  * Commands and note content
  * ------------------------------------------------------------------------------------------- */
+
+/**
+ * Execute one of Cockpit's own plugin commands, with arguments, the way another PLUGIN would.
+ *
+ * This is the only route a spec has to a command that takes an argument. Joplin's command palette can
+ * trigger a registered command but never passes it anything, and the renderer is a webpack bundle whose
+ * services `window.require` cannot reach (it would hand back a second, unconnected copy of the module).
+ * Joplin itself publishes the running instances - `window.joplin.commandService` and friends - but only
+ * when the app is started with `--env dev`, so the spec that uses this launches Joplin with
+ * `launchJoplin({ envDev: true })`.
+ *
+ * CommandService.execute(name, ...args) is the same entry point a plugin's own
+ * `joplin.commands.execute(...)` ends up in, so a command driven from here is driven exactly as the
+ * Whereabouts plugin drives it.
+ */
+export async function executePluginCommand(
+  win: Page,
+  name: string,
+  ...args: unknown[]
+): Promise<void> {
+  await expect
+    .poll(
+      async () =>
+        win.evaluate(() => {
+          const debug = (window as any).joplin;
+          return !!(debug && debug.commandService);
+        }),
+      { timeout: 60_000 }
+    )
+    .toBe(true);
+  await win.evaluate(
+    async (call) => {
+      await (window as any).joplin.commandService.execute(call.name, ...call.args);
+      return true;
+    },
+    { name, args }
+  );
+  await win.waitForTimeout(SETTLE);
+}
 
 /**
  * The text of the rendered note viewer, which is how the body of the currently selected note is

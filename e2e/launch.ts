@@ -137,7 +137,24 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
  * sometimes starts, answers the debugging endpoint and then quits again over the profile lock.
  */
 export async function launchJoplin(
-  opts: { loadPlugin?: boolean; profileDir?: string; settings?: Record<string, unknown> } = {}
+  opts: {
+    loadPlugin?: boolean;
+    profileDir?: string;
+    settings?: Record<string, unknown>;
+    /**
+     * Start Joplin with `--env dev`, which is the only way to reach the app's own CommandService from a
+     * spec: Joplin's renderer publishes `window.joplin = { commandService, pluginService, ... }` in its
+     * "add debug variables" startup step, and that step is gated on `Setting.value('env') === 'dev'`.
+     * Without it the renderer is a webpack bundle with no handle on its own services - `window.require`
+     * resolves real node modules (electron, @electron/remote) but would hand back a SECOND, unconnected
+     * copy of any @joplin module, whose singletons know nothing of the running app.
+     *
+     * Only the spec that has to execute a plugin command WITH ARGUMENTS needs this (the command palette
+     * can trigger a command, but never pass it anything). `--env dev` is a flag Joplin's own parser
+     * accepts, and the profile is still the throwaway one this harness creates.
+     */
+    envDev?: boolean;
+  } = {}
 ): Promise<JoplinInstance> {
   const { loadPlugin = true } = opts;
   assertE2EReady();
@@ -146,7 +163,7 @@ export async function launchJoplin(
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      return await startInstance(profileDir);
+      return await startInstance(profileDir, !!opts.envDev);
     } catch (error) {
       lastError = error;
       // eslint-disable-next-line no-console
@@ -158,7 +175,7 @@ export async function launchJoplin(
 }
 
 /** Spawn Joplin once and attach to it, cleaning up the process if anything goes wrong. */
-async function startInstance(profileDir: string): Promise<JoplinInstance> {
+async function startInstance(profileDir: string, envDev = false): Promise<JoplinInstance> {
   const port = await getFreePort();
 
   const child = spawn(
@@ -170,6 +187,8 @@ async function startInstance(profileDir: string): Promise<JoplinInstance> {
       '--no-sandbox',
       '--disable-gpu',
       `--remote-debugging-port=${port}`,
+      // Joplin's own flag, and the one thing that makes its services reachable from a spec (see envDev).
+      ...(envDev ? ['--env', 'dev'] : []),
     ],
     {
       env: {
