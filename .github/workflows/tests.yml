@@ -28,7 +28,9 @@ jobs:
     # A healthy run is well under this. Playwright's own globalTimeout (see playwright.config.ts) is
     # set below this cap so a stuck suite stops itself and still uploads its report/traces, rather
     # than being hard-cancelled here (a cancel skips the upload, which is why the first run left none).
-    timeout-minutes: 28
+    # Raised 28 → 40 for 2.3.0 alongside that globalTimeout's 25 → 30, keeping the same relationship:
+    # the suite's own cap ends the run first, and this one is only the backstop behind it.
+    timeout-minutes: 40
     env:
       # Must be >= the plugin's manifest app_min_version. Keep in sync with scripts/setup-e2e.sh.
       JOPLIN_E2E_VERSION: 3.6.14
