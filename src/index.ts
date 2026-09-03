@@ -16,6 +16,7 @@ import { setupAlarmDialog } from './ui/alarm/alarm'
 import { setupMenu } from './ui/menu/menu'
 import { setupEditor } from './ui/editor/editor'
 import { setupToolbar } from './ui/toolbar/toolbar'
+import { setupChromeCss } from './ui/chrome/chrome'
 import { setupStyler } from './ui/styler/styler'
 
 /** Plugin Registration *****************************************************************************************************************************
@@ -34,6 +35,8 @@ joplin.plugins.register({ onStart: setupPlugin })
     await setupMenu()
     await setupStyler()
     await setupAlarmDialog()
+    // A note-title-bar feature (v2.5.0), settings-gated and desktop only.
+    await setupChromeCss()
     await setupPanel()
     await setupEditor()
     await setupTimer()

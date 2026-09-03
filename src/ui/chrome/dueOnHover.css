@@ -1,0 +1,44 @@
+/** README ******************************************************************************************************************************************
+ * The owner's own userchrome block, shipped as a plugin stylesheet and loaded by src/ui/chrome/chrome.ts when the "Hide the due date next to the
+ * bell in the note title bar and show it on hover" setting is on. Loaded through joplin.window.loadChromeCssFile, so it applies to the window UI
+ * (not the note viewer), exactly as the "Custom stylesheet for Joplin-wide app styles" setting would.
+ *
+ * WHAT IT MATCHES, and why nothing else can be caught by it:
+ * .note-title-info-group is Joplin's note TITLE BAR button row (NoteTitleBar). A ToolbarButton there gets the -has-title class - and a second text
+ * <span> beside its icon <span> - only when its command supplies a mapStateToTitle. The alarm bell (the editAlarm command) is the ONLY title-bar
+ * button in Joplin that has one: it renders the to-do's due date as that text. Plugin buttons never get a title, and Whereabouts' notebook chip is
+ * mounted outside .note-title-info-group entirely, so this block is the bell and nothing else. The spellcheck, layout and note-properties buttons
+ * are icon-only, carry no -has-title, and are untouched.
+ *
+ * WHY THE SETTING SAYS "after a Joplin restart": Joplin has no API to unload a chrome stylesheet once loadChromeCssFile has linked it into the
+ * window. Turning the setting off therefore only stops the NEXT startup from loading it.
+ *
+ * Revert: turn the setting off (and restart), or delete this file's rules.
+ ***************************************************************************************************************************************************/
+.note-title-info-group button.toolbar-button.-has-title {
+    position: relative;
+    overflow: visible !important; /* core .toolbar-button sets overflow:hidden (text
+                                     ellipsis) — with position:relative that clipped
+                                     the hover bubble, which sits outside the button */
+}
+.note-title-info-group button.toolbar-button.-has-title > span:not(.toolbar-icon) {
+    display: none !important;
+}
+.note-title-info-group button.toolbar-button.-has-title .toolbar-icon.-has-title {
+    margin-right: 0 !important;   /* spacing that separated icon from the text */
+}
+.note-title-info-group button.toolbar-button.-has-title:hover > span:not(.toolbar-icon) {
+    display: block !important;
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 100;
+    background: var(--joplin-background-color);
+    color: var(--joplin-color);
+    border: 1px solid var(--joplin-divider-color);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
