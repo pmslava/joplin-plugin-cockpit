@@ -122,7 +122,7 @@ export async function setupSettings(){
 		},
 		[bellOpensCockpitPickerSettingKey]: {
 			label: "Open Cockpit's date picker instead of Joplin's when the alarm bell is clicked",
-			description: "Clicking the bell in the note title bar opens Cockpit's alarm picker - the calendar, the time columns and the quick buttons - instead of Joplin's own prompt. Desktop and the Markdown editor only, as no plugin code runs in the window with the Rich Text editor. The Note menu's Set alarm item and its keyboard shortcut keep Joplin's picker. Takes effect after Joplin restarts, since Joplin cannot register an editor content script while running.",
+			description: "Clicking the bell in the note title bar opens Cockpit's alarm picker - the calendar, the time columns and the quick buttons - instead of Joplin's own prompt. Desktop and the Markdown editor only, as no plugin code runs in the window with the Rich Text editor. The Note menu's Set alarm item and its keyboard shortcut keep Joplin's picker. Takes effect after Joplin restarts, since Joplin registers editor content scripts only at startup and cannot unregister one afterwards.",
 			value: false,
 			type: SettingItemType.Bool,
 			public: true,

@@ -219,7 +219,14 @@ export function toDateTimeLocal(date: Date): string {
   );
 }
 
-/** Set the selected to-do's alarm (which is what Agenda treats as its due date). */
+/**
+ * Set the selected to-do's alarm (which is what Agenda treats as its due date), through JOPLIN's own prompt.
+ *
+ * Note this drives the bell in the note title bar. With Cockpit's "Open Cockpit's date picker instead of
+ * Joplin's when the alarm bell is clicked" setting ON, that click opens Cockpit's dialog instead and the
+ * `input[type="datetime-local"]` below never appears - a spec that presets that setting must set alarms another
+ * way (see e2e/title-bar.spec.ts, which drives Cockpit's picker deliberately).
+ */
 export async function setAlarm(win: Page, date: Date): Promise<void> {
   await win.click('button[title="Set alarm"]');
   await win.waitForTimeout(2000);
@@ -636,18 +643,30 @@ async function configScreenOpen(win: Page): Promise<boolean> {
  * option text accepted as a fallback.
  */
 export async function setCockpitSetting(win: Page, label: string, value: string): Promise<void> {
+  await withCockpitOptions(win, async () => {
+    const control = win.getByLabel(label, { exact: true }).first();
+    await control.waitFor({ state: 'visible', timeout: 30_000 });
+    try {
+      await control.selectOption(value);
+    } catch {
+      await control.selectOption({ label: value });
+    }
+  });
+}
+
+/**
+ * Open Joplin's Options screen on Cockpit's tab, run `work` there, and leave again.
+ *
+ * The open/close half is identical for every kind of control and is by far the slow part, so both
+ * `setCockpitSetting` (enums) and `setCockpitCheckboxes` (Bools) share it and differ only in `work`.
+ */
+async function withCockpitOptions(win: Page, work: () => Promise<void>): Promise<void> {
   const opened = await activateJoplinMenuItem(win, /^(Options|Preferences\.\.\.)$/);
   if (!opened) throw new Error('Could not open Joplin\'s Options screen from the application menu');
   const screen = win.locator('.config-screen');
   await screen.waitFor({ state: 'visible', timeout: 60_000 });
   await screen.getByRole('tab', { name: 'Cockpit' }).first().click();
-  const control = win.getByLabel(label, { exact: true }).first();
-  await control.waitFor({ state: 'visible', timeout: 30_000 });
-  try {
-    await control.selectOption(value);
-  } catch {
-    await control.selectOption({ label: value });
-  }
+  await work();
   await win.waitForTimeout(500);
   // Joplin disables OK/Apply while there is nothing to save, so asking for the value a setting already
   // has has to leave by the Back button instead - clicking a disabled OK just waits until the test dies.
@@ -670,24 +689,14 @@ export async function setCockpitSetting(win: Page, label: string, value: string)
  * The keys of `values` are the setting LABELS as registered.
  */
 export async function setCockpitCheckboxes(win: Page, values: Record<string, boolean>): Promise<void> {
-  const opened = await activateJoplinMenuItem(win, /^(Options|Preferences\.\.\.)$/);
-  if (!opened) throw new Error('Could not open Joplin\'s Options screen from the application menu');
-  const screen = win.locator('.config-screen');
-  await screen.waitFor({ state: 'visible', timeout: 60_000 });
-  await screen.getByRole('tab', { name: 'Cockpit' }).first().click();
-  for (const [label, wanted] of Object.entries(values)) {
-    const control = win.getByLabel(label, { exact: true }).first();
-    await control.waitFor({ state: 'visible', timeout: 30_000 });
-    if ((await control.isChecked()) !== wanted) await control.click();
-    await expect.poll(async () => control.isChecked(), { timeout: 10_000 }).toBe(wanted);
-  }
-  await win.waitForTimeout(500);
-  // Joplin disables OK/Apply while there is nothing to save, so a no-op visit has to leave by Back instead.
-  const ok = screen.locator('.button-bar button', { hasText: 'OK' }).first();
-  if (await ok.isEnabled()) await ok.click();
-  else await screen.locator('.button-bar button', { hasText: 'Back' }).first().click();
-  await expect.poll(async () => configScreenOpen(win), { timeout: 30_000 }).toBe(false);
-  await win.waitForTimeout(SETTLE);
+  await withCockpitOptions(win, async () => {
+    for (const [label, wanted] of Object.entries(values)) {
+      const control = win.getByLabel(label, { exact: true }).first();
+      await control.waitFor({ state: 'visible', timeout: 30_000 });
+      if ((await control.isChecked()) !== wanted) await control.click();
+      await expect.poll(async () => control.isChecked(), { timeout: 10_000 }).toBe(wanted);
+    }
+  });
 }
 
 /** One press of the "Move left" arrow on the named pane in "Change application layout". */

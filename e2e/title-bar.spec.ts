@@ -32,14 +32,29 @@ test.describe('The note title bar (due date on hover, and the bell opening Cockp
   const BELL = '.note-title-info-group button.toolbar-button:has(.icon-alarm)';
   /** The due-date text Joplin prints inside that button beside the icon - the thing the stylesheet hides. */
   const BELL_TEXT = '.note-title-info-group button.toolbar-button:has(.icon-alarm) > span:not(.toolbar-icon)';
+  /**
+   * The SPELL CHECKER button's own text label, in that same row - the thing the stylesheet must NOT hide.
+   *
+   * `editAlarm` is not the only title-bar command with a `mapStateToTitle`: `showSpellCheckerMenu` has one too and
+   * prints the enabled dictionary languages ("en"), which gives its button `-has-title` and a text span exactly
+   * like the bell's. A first draft of feature A keyed on `-has-title` alone and hid this label as collateral. The
+   * profile below presets `spellChecker.languages` so that label is deterministically present, and this is the
+   * assertion that keeps the selector narrow.
+   *
+   * Joplin renders an `fa`/`fas` icon name as an `<i>` and anything else as a `<span>`, so `fas fa-globe` is an
+   * `<i class="toolbar-icon">` - which is also why `:has(span.toolbar-icon.icon-alarm)` cannot match this button.
+   */
+  const SPELLCHECK_TEXT = '.note-title-info-group button.toolbar-button:has(i.fa-globe) > span:not(.toolbar-icon)';
 
-  /** The `display` the browser actually computes for the bell's text span (so a CSS rule is read, not guessed). */
-  async function bellTextDisplay(win: Page): Promise<string> {
-    return win.evaluate((selector) => {
-      const span = document.querySelector(selector);
+  /** The `display` the browser actually computes for a title-bar button's text span (a CSS rule read, not guessed). */
+  async function textDisplay(win: Page, selector: string): Promise<string> {
+    return win.evaluate((sel) => {
+      const span = document.querySelector(sel);
       return span ? getComputedStyle(span).display : 'missing';
-    }, BELL_TEXT);
+    }, selector);
   }
+
+  const bellTextDisplay = (win: Page) => textDisplay(win, BELL_TEXT);
 
   /** Whether Joplin's OWN alarm prompt (PromptDialog, `.prompt-dialog`) is on screen. */
   async function joplinPromptOpen(win: Page): Promise<boolean> {
@@ -68,7 +83,12 @@ test.describe('The note title bar (due date on hover, and the bell opening Cockp
   }
 
   test.beforeAll(async () => {
-    profileDir = createJoplinProfile(true);
+    // spellChecker.* are File-storage settings, so presetting them here makes the spell checker's button carry a
+    // title ("en") deterministically - without which the SPELLCHECK_TEXT assertion below would be vacuous.
+    profileDir = createJoplinProfile(true, {
+      'spellChecker.enabled': true,
+      'spellChecker.languages': ['en-GB'],
+    });
     joplin = await launchJoplin({ profileDir });
     await createTodo(joplin.win, bellTodo);
     // An alarm is what makes Joplin print the due date inside the button (-has-title), which is the whole subject
@@ -85,8 +105,9 @@ test.describe('The note title bar (due date on hover, and the bell opening Cockp
     const { win } = joplin;
     await selectNote(win, bellTodo);
     await expect(win.locator(BELL)).toBeVisible();
-    // Nothing is hidden: the plugin loaded no stylesheet, so the button looks exactly as Joplin drew it.
+    // Nothing is hidden: the plugin loaded no stylesheet, so the buttons look exactly as Joplin drew them.
     expect(await bellTextDisplay(win)).not.toBe('none');
+    expect(await textDisplay(win, SPELLCHECK_TEXT)).not.toBe('none');
 
     await win.locator(BELL).click();
     await expect.poll(async () => joplinPromptOpen(win), { timeout: 20_000 }).toBe(true);
@@ -109,6 +130,10 @@ test.describe('The note title bar (due date on hover, and the bell opening Cockp
     await expect.poll(async () => bellTextDisplay(win), { timeout: 20_000 }).toBe('none');
     await win.locator(BELL).hover();
     await expect.poll(async () => bellTextDisplay(win), { timeout: 10_000 }).toBe('block');
+
+    // ...and ONLY the bell. The spell checker's language label sits in the same row with the same -has-title, and
+    // it must be exactly as Joplin drew it. This is the assertion the first draft of the selector would fail.
+    expect(await textDisplay(win, SPELLCHECK_TEXT)).not.toBe('none');
 
     // B: the content script takes the click in the capture phase, so Joplin's editAlarm never runs.
     await win.locator(BELL).click();
