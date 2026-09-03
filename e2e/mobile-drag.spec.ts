@@ -903,6 +903,17 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
         const fieldNotCancelled = field.dispatchEvent(fieldEvent);
         fieldPrevented = !fieldNotCancelled || fieldEvent.defaultPrevented;
       }
+      // ...and the edge BETWEEN those two, which is where the exemption was wrong once: the row's tick circle is
+      // an <input>, so an exemption written about the tag rather than about text let this event through - and it
+      // bubbles to the row's own inline handler, whose FIRST branch is the circle (openAlarmOverlay). The target
+      // here is a CHILD of the handler-carrying element, which the two dispatches above never are.
+      const box = row.querySelector('input.todo-checkbox') as HTMLElement | null;
+      let boxPrevented: boolean | null = null;
+      if (box) {
+        const boxEvent = new MouseEvent('contextmenu', { button: 2, bubbles: true, cancelable: true });
+        const boxNotCancelled = box.dispatchEvent(boxEvent);
+        boxPrevented = !boxNotCancelled || boxEvent.defaultPrevented;
+      }
       return {
         // The hazard, asserted rather than assumed: the row really does carry the handler that would have opened
         // the menu. The day the markup stops emitting it, this case is testing nothing and should say so.
@@ -911,6 +922,11 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
         menus: document.querySelectorAll('#noteContextMenu').length,
         hasField: !!field,
         fieldPrevented,
+        hasBox: !!box,
+        boxPrevented,
+        // The circle's branch opens the alarm overlay on mobile, so the overlay is what says whether the inline
+        // handler ran - the context-menu count above cannot see this path at all.
+        overlays: document.querySelectorAll('#cockpitOverlay').length,
       };
     }, CTX);
     console.log('TOUCH CTXMENU', JSON.stringify(seen));
@@ -927,6 +943,15 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       seen!.fieldPrevented,
       'a contextmenu in a text field must NOT be cancelled: the selection handles and the Paste / Select-all bar ride on it, and nothing in the field opens a menu of ours'
     ).toBe(false);
+    expect(seen!.hasBox, 'the row must still have its tick circle - the <input> the exemption must not reach').toBe(true);
+    expect(
+      seen!.boxPrevented,
+      "a contextmenu on the row's tick circle must be cancelled like the rest of the row: it is an <input> that takes no text, and it sits inside the element carrying the inline handler"
+    ).toBe(true);
+    expect(
+      seen!.overlays,
+      "and the circle's branch must never run: an unsuppressed contextmenu there re-enters openAlarmOverlay behind the adapter's back"
+    ).toBe(0);
     // ...and the same row still opens its menu the way it is supposed to, on a real hold: the suppression removes
     // the platform's route in without touching the panel's own.
     const finger = await newFinger(win);
