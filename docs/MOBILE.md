@@ -646,6 +646,13 @@ refusal (the hazard list above), which is the one part of this gesture that used
 whole successful gesture therefore reads as
 `menu-open > drag-lift n=1 > drag-target:after > drag-drop:between a1b2|c3d4 > drag-drop:posted`, or
 `menu-open > drag-released`, or `menu-open > drag-sideways-ignored` — the three outcomes are told apart at a glance, which is the whole
+job of the trace on the device. **The strip is a ring of 12, and a real drag can still overflow it**: a
+`contextmenu-suppressed:row` at the head, plus three or four `drag-target:` changes and an autoscroll or two
+during the glide, will push `menu-open` off the front. A strip that begins mid-drag is the buffer doing its job,
+not a menu that never opened — read the TAIL for the outcome. The one shape that is **not** the buffer doing its
+job is a strip that reads `contextmenu-suppressed:row` and then nothing at all: that is a touch sequence that was
+cancelled before the 500 ms, which is what Android's native drag used to do (first hazard below).
+
 **Where the trace is now (2.3.0, the owner's call).** With the mobile drag shipped, the `gestureTrace`
 setting is registered `public: false` in `src/core/settings.ts`: it no longer appears in Settings ›
 Plugins › Cockpit, and a user's build has no way to turn a diagnostic strip on. Nothing else changed —
@@ -654,14 +661,14 @@ island, and every trace point listed above is still compiled in and simply inert
 device round, flip that one word back in a DEV BUILD**: set `public: true` on `gestureTraceSettingKey`
 in `src/core/settings.ts`, `npm run dist`, sideload the `.jpl`, and the option is back in Settings ›
 Plugins › Cockpit exactly as it was for the 2.3.0 rounds. Do not ship that build; the flip is not meant
-to be committed.
-
-job of the trace on the device. **The strip is a ring of 12, and a real drag can still overflow it**: a
-`contextmenu-suppressed:row` at the head, plus three or four `drag-target:` changes and an autoscroll or two
-during the glide, will push `menu-open` off the front. A strip that begins mid-drag is the buffer doing its job,
-not a menu that never opened — read the TAIL for the outcome. The one shape that is **not** the buffer doing its
-job is a strip that reads `contextmenu-suppressed:row` and then nothing at all: that is a touch sequence that was
-cancelled before the 500 ms, which is what Android's native drag used to do (first hazard below).
+to be committed — and while it is in place `npm test` goes red **by design**, on the harness pin that
+holds the setting off the Settings screen (`test/run.js`, "mobile diagnostic: the gesture trace is a
+mobile-only, default-off, HIDDEN setting"). That is why the dev-build recipe says `npm run dist` and not
+`npm test`: revert the word and the pin passes again. One case the hiding does not reach: a user who had
+already turned the trace ON in a shipped build (it was public from 1.9.10 through 2.2.1) keeps their
+stored `true`, and now has no switch to turn it off. Deliberately left alone — a forced write on upgrade
+would also stamp out the dev flip above, and the population is mobile users who deliberately enabled a
+diagnostic on a sideloaded build.
 
 **Rejected, and why** — gaps-only targets (the headings are the coarse, forgiving target a finger wants
 and they already exist); a per-row drag handle (a permanent column of chrome on every row for a gesture
@@ -846,7 +853,8 @@ success vs failure looks like. The build to install is
       does nothing, a plain tap commits while marks exist, or the list closes on the first tap.
     - **If it fails again, turn on the trace.** The trace is hidden from Settings in a shipping build
       (§7), so this needs a **dev build**: set `public: true` on `gestureTraceSettingKey` in
-      `src/core/settings.ts`, `npm run dist`, sideload, then Settings → Cockpit → "Show a touch-gesture
+      `src/core/settings.ts`, `npm run dist` (not `npm test` — the flip fails a pin by design, §7),
+      sideload, then Settings → Cockpit → "Show a touch-gesture
       trace in the search suggestions". With it on, the list's hint line is replaced by the last few
       touch events as they happen — e.g. `down > hold-fired > up > click-swallowed`, or
       `down > press-cancelled > field-left > list-closed:field-left`. Read that line back to us: it says
@@ -904,7 +912,9 @@ success vs failure looks like. The build to install is
 18. **TOUCH DRAG TO RESCHEDULE (the 2.3.0 round).** Get the **Gesture trace** ON first. It is hidden
     from a shipping build's Settings screen (§7), so this round runs on a **dev build**: set
     `public: true` on `gestureTraceSettingKey` in `src/core/settings.ts`, `npm run dist`, sideload that
-    `.jpl`, then turn the setting on in Settings → Cockpit. Every step below can then be read back from
+    `.jpl`, then turn the setting on in Settings → Cockpit. (`npm run dist`, not `npm test`: with the flip
+    in place the harness pin that holds the setting off the Settings screen fails by design — see §7.)
+    Every step below can then be read back from
     the strip at the bottom of the panel; on a shipping build the steps still work, with nothing to read.
     Work through them in order — 18b is the one that decides whether the feature ships as designed, and
     18b-bis is its other half (the stroke the panel deliberately does NOT take).
