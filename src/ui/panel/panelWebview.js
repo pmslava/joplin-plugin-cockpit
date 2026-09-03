@@ -991,7 +991,7 @@ document.addEventListener('pointerdown', function(event){
     // THE TEST IS isPrimary, NOT THE POINTER ID, and the reason is a platform claim this file must not make
     // silently: Blink hands every touch point a fresh id and does not reuse the last one, so "the same finger
     // pressing twice" arrives with a DIFFERENT id and an id comparison here would be dead code on the device.
-    // That claim is checked on the phone (step 18k of MOBILE.md), not assumed. What holds without it is what
+    // That claim is checked on the phone (step 18f-ter of MOBILE.md), not assumed. What holds without it is what
     // isPrimary MEANS: a press that begins with no other finger on the glass. A gesture that still has its finger
     // down cannot be joined by one, so an active gesture meeting a primary press is a gesture whose end was lost.
     // It is ended here, through the single end, so its refresh guard comes down with it - and the press itself is
