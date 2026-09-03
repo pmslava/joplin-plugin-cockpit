@@ -424,22 +424,57 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   }
 
   /**
+   * How far the lifting step below may travel, measured from BOTH edges of the scroller - and the bound is not
+   * merely "does the point stay inside the list". The drag's own edge auto-scroll arms inside a band at the top and
+   * the bottom of the scroller, max(32, min(72, 0.15 x height)) px deep (AUTOSCROLL_BAND_* in panelWebview.js), and
+   * a finger parked in that band starts the list scrolling on the very move that lifts the row - under a finger
+   * that then holds still, since `onTouchDragScrolled` re-aims and keeps the loop alive by itself. The aim that
+   * follows would glide over a moving list and the drop would land wherever the list had got to. So the step is
+   * taken TOWARDS the middle of the list, and if even that leaves it inside a band the case fails here, naming the
+   * band - rather than later, looking like a bad aim (which is exactly the misdiagnosis this file's header warns
+   * about).
+   */
+  const AUTOSCROLL_BAND_CLEARANCE = 80;
+
+  /**
    * The move that turns the open menu into a lifted row. The gesture is decided by the FIRST travel past the 10 px
    * slop and by nothing else: |dy| >= |dx| lifts, |dx| > |dy| is refused as Joplin's side-menu swipe. So the lift
    * is one deliberate 24 px step at a CONSTANT x - unambiguously vertical, well past the slop, and the same move a
-   * finger makes when it starts dragging a row. Downwards when there is room inside the list, upwards otherwise,
-   * so the step can never leave the scroller. Returns where the finger now is, which is what the aim glides from.
+   * finger makes when it starts dragging a row. Returns where the finger now is, which is what the aim glides from.
+   *
+   * `bounded` is for the cases that MUST NOT lift anything (the tick circle, a read-only peek row): there is no
+   * target to aim at afterwards, the finger may be standing over an open overlay or a search render, and consulting
+   * the `.todos` scroller there buys nothing while adding a way to fail on the list's metrics rather than on the
+   * gesture. Those take the plain 24 px step downwards.
    */
   async function liftByMovingUpOrDown(
     finger: { move: (at: Point) => Promise<unknown> },
     from: Point,
-    win: Page
+    win: Page,
+    bounded = true
   ): Promise<Point> {
-    const list = await listBox(win);
-    const at = { x: from.x, y: from.y + 24 <= list.bottom - 4 ? from.y + 24 : from.y - 24 };
+    const at = { x: from.x, y: from.y + (bounded ? await verticalLiftStep(win, from) : 24) };
     await finger.move(at);
     await win.waitForTimeout(80);
     return at;
+  }
+
+  /** The signed 24 px step, towards whichever edge of the list is further away, checked against both bands. */
+  async function verticalLiftStep(win: Page, from: Point): Promise<number> {
+    const list = await listBox(win);
+    const clearance = (y: number) => Math.min(y - list.top, list.bottom - y);
+    const step = clearance(from.y + 24) >= clearance(from.y - 24) ? 24 : -24;
+    await assertOnScreen(win, `the ${step > 0 ? 'downward' : 'upward'} lifting step`, from.y + step);
+    const room = clearance(from.y + step);
+    if (room < AUTOSCROLL_BAND_CLEARANCE) {
+      throw new Error(
+        `the lifting step lands ${Math.round(room)}px from an edge of the list (${Math.round(list.top)}..${Math.round(
+          list.bottom
+        )}), inside the drag's edge auto-scroll band - the list would scroll under the still finger and the drop ` +
+          `would land wherever it got to. Not the gesture's fault: the source row is too near an edge for this case.`
+      );
+    }
+    return step;
   }
 
   /** The centre of a to-do's checkbox ring, in TOP-LEVEL coordinates. */
@@ -817,6 +852,10 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     // ['dialogGuard', true] would stop refreshing, so a note created afterwards must still reach it.
     const folderId = await folderIdByTitle(book);
     const later = `td-after-swipe-${stamp}`;
+    // This dateless to-do stays in the book for the rest of the file, one more row in the No-Due group, and every
+    // later case's rows sit one row lower for it. Nothing here reads a row by position - `rowPoint` finds rows by
+    // their marker text and `assertOnScreen` refuses a point the list has pushed out of view - so the shift is
+    // absorbed rather than merely tolerated. Same shape as `td-after-cancel-*` in the header-cancel case.
     await createTodoViaApi(later, folderId);
     await waitForPanelTodo(win, later);
   });
@@ -903,9 +942,11 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       await finger.down(ring);
       await win.waitForTimeout(700);
       // The ring is NOT a drag zone: the hold reaches the date picker and arms nothing behind it, so the move
-      // that would lift an ordinary row lifts nothing here either.
+      // that would lift an ordinary row lifts nothing here either. By now the picker overlay is open UNDER the
+      // finger, which is precisely why the step is the unbounded one: there is no drop to aim at afterwards, and
+      // the list's own metrics have nothing to say about a move whose whole assertion is that nothing happened.
       expect((await dragState()).dragging, 'a hold on the ring must not lift the row').toBe(0);
-      await liftByMovingUpOrDown(finger, ring, win);
+      await liftByMovingUpOrDown(finger, ring, win, false);
       expect((await dragState()).dragging, 'and a vertical move from the ring must still lift nothing').toBe(0);
       await finger.up();
     } finally {
@@ -1030,8 +1071,9 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       await finger.down(from);
       await win.waitForTimeout(700);
       expect((await dragState()).dragging, 'a peek row must never be lifted - it is not a reschedule source').toBe(0);
-      // ...and it arms nothing either, so even the move that WOULD lift an ordinary row does nothing here.
-      await liftByMovingUpOrDown(finger, from, win);
+      // ...and it arms nothing either, so even the move that WOULD lift an ordinary row does nothing here. The
+      // unbounded step again: nothing is aimed at afterwards, and the list under this case is a search render.
+      await liftByMovingUpOrDown(finger, from, win, false);
       expect((await dragState()).dragging, 'and a vertical move from a peek row must still lift nothing').toBe(0);
       await finger.up();
     } finally {
