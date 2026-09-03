@@ -339,7 +339,8 @@ changes** beyond loading the new module.
 | armed | the first travel past 10 px, `\|dx\| > \|dy\|` | **(torn down)** | `endTouchDrag('sideways')` — the menu is untouched, nothing was prevented, Android's own gesture keeps the stroke. `trace: drag-sideways-ignored` |
 | armed | release without travelling | **(torn down)** | `endTouchDrag('released')` — the menu the press opened stays open; the synthetic click is swallowed, so no note opens and no menu item runs. `trace: drag-released` |
 | lifted | release over a gap / a `[data-drop]` | **dropped** | the drop message, THEN the guard release, `trace: drag-drop:between` / `drag-drop:date` |
-| armed / lifted | release over nothing, a second finger, `pointercancel`, `visibilitychange`, resize, orientation change, the watchdog | **cancelled** | `trace: drag-cancel:<reason>` |
+| lifted | release over nothing | **cancelled** | `endTouchDrag('no-target')` — only a lifted drag can reach this; an armed release is the row above. `trace: drag-cancel:no-target` |
+| armed / lifted | a second finger, `pointercancel`, `visibilitychange`, resize, orientation change, the watchdog | **cancelled** | `trace: drag-cancel:<reason>` |
 
 Every one of those ends calls the single `endTouchDrag(reason)`, which takes down the `touchmove`
 listener, the scroll loop, both indicator paints, the row's dimming, the pointer capture, the banner
@@ -442,9 +443,11 @@ to the toast in a sticky mode, and the ring buffer holds 10 entries. Codes: `men
 up, drag armed), `drag-lift`, `drag-uncancelable` (the lifting move arrived non-cancelable, so
 `preventDefault()` is a no-op from there — 18b's second failure shape), `drag-released`,
 `drag-sideways-ignored`, `drag-target:before|after|drop|none` (on a **change** only), `drag-autoscroll:up|down` (on a direction
-change only), `drag-drop:between|date`, `drag-cancel:<reason>`. A whole gesture therefore reads as
-`menu-open > drag-lift > drag-target:after > drag-drop:between`, or `menu-open > drag-released`, or
-`menu-open > drag-sideways-ignored` — the three outcomes are told apart at a glance, which is the whole
+change only), `drag-drop:between|date`, `drag-cancel:<reason>` (including `drag-cancel:re-arm`, the
+unreachable-today path where a fire lands on a gesture still in flight and `armTouchDrag` ends it through
+the single end rather than overwriting its state, so a taken guard can never be dropped silently). A
+whole gesture therefore reads as `menu-open > drag-lift > drag-target:after > drag-drop:between`, or
+`menu-open > drag-released`, or `menu-open > drag-sideways-ignored` — the three outcomes are told apart at a glance, which is the whole
 job of the trace on the device.
 
 **Rejected, and why** — gaps-only targets (the headings are the coarse, forgiving target a finger wants
@@ -716,9 +719,13 @@ success vs failure looks like. The build to install is
             (§7, the non-passive bullet): register the `touchmove` listener once at load instead of
             mid-gesture, so the touch sequence is blocking from its `touchstart`, then repeat 18b and 18j.
          3. *The row never lifts at all*, or the trace ends at `menu-open > drag-cancel:pointercancel`
-            with no `drag-lift`. Android's compositor took the pointer away outright. Try the same load-time
-            registration; if that changes nothing, this is **the signal to fall back to a per-row drag
-            handle** (documented above as the rejected-but-kept alternative).
+            with no `drag-lift`. Android's compositor took the pointer away outright — but note **where** it
+            took it: if the stroke was clearly vertical, the likeliest cause is that the compositor claimed
+            the sequence inside the un-prevented 10 px slop window, which is shape 1 arriving as a cancel
+            rather than as a twitch. So try `TOUCH_DRAG_SLOP` at 4–6 px **first** and repeat 18b; only if a
+            short slop still cancels is this a genuine outright steal. Then try the same load-time
+            registration; if that changes nothing either, this is **the signal to fall back to a per-row
+            drag handle** (documented above as the rejected-but-kept alternative).
 
     b-bis. **SIDEWAYS first must be left alone.** Hold a to-do row again, and this time move the finger
        **across** the row (left or right) rather than up or down.
@@ -729,6 +736,11 @@ success vs failure looks like. The build to install is
        - Failure: the row lifts on a sideways move (the direction rule is inverted), or the side menu no
          longer opens from a held row (the panel is preventing something it should not), or the panel
          stops refreshing afterwards (a guard taken on a path that must not take one).
+       - **Not** a failure: the menu closing while nothing lifts and the trace still reads
+         `menu-open > drag-sideways-ignored`. A stroke with any vertical component pans the list (the armed
+         state prevents nothing on purpose), and *any* scroll dismisses the context menu through the
+         panel's own `document`-level `scroll` listener — which predates this feature and is not the drag's
+         doing. Only "the row lifted" and "the guard was taken" decide this step.
 
     c. **Aim.** Drop a to-do into the gap two rows away from where it started. Repeat the same aim five
        times.

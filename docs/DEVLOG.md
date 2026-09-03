@@ -1227,6 +1227,27 @@ list and refuses, by name, a landing point within 80 px of either edge. The rest
 takes `touchDrag.id` too and the lift touches no `longPress` field at all; and §2 of MOBILE.md was still
 describing a hold that lifts.
 
+A second review round caught that the band guard, as first written, was stricter than the hazard and
+would have failed the very cases it was added to protect. It used a flat 80 px against *both* edges, but
+the panel's band is `min(height/2, max(32, min(72, 0.15 x height)))` and, more to the point, a band only
+bites where the scroller can still move that way: `edgeAutoscrollTick` stops the loop on the first frame
+that does not change `scrollTop`, so at the top of an unscrolled list - which is exactly where `settle()`
+parks every case, and where the first rows of the "Overdue" group sit - an upward auto-scroll moves
+nothing at all. The flagship gap case would have thrown on a layout error before dragging anything. The
+step now computes the band with `edgeAutoscrollStep`'s own arithmetic, treats a band as an obstacle only
+when the list can actually scroll into it, and tries the other direction before giving up. The same round
+found the new sideways case pressing at 75% of the row width - inside the notebook pill, which
+`canLiftRow` refuses and whose own long press opens the notebook overlay - so the case could never have
+armed the gesture whose sideways rule it exists to test; it presses mid-row now, clear of both the pill
+and the tick circle. Two smaller things went with it: `armTouchDrag` no longer clears `touchDrag.guarded`
+in place but ends any live gesture through the single `endTouchDrag('re-arm')` first, so "a taken guard is
+always released" is a property of the shape rather than of an argument about which listener runs when;
+and the peek case now asserts its menu *before* its unbounded pan, since any scroll dismisses the context
+menu through the panel's own `document` listener and the case is not about that. That listener is also
+why 18b-bis now names one thing that is **not** a failure: a stroke with any vertical component pans the
+list and closes the menu without the drag having touched it, so only "the row lifted" and "the guard was
+taken" decide that step.
+
 **The Pixel round** is step 18 of MOBILE.md's checklist, with the trace ON. 18a is now "the menu opens
 with the finger still down"; **18b** is the one that decides the design — keep holding and move up or
 down: the menu must close, the row must lift, and the list must not scroll; and **18b-bis** is its other
@@ -1238,15 +1259,21 @@ Suite: 350 harness checks, all passing (347 before the redesign, plus 3: one dri
 `firstMoveDirection` — including a grid sweep proving its slop gate cannot disagree with `movedBeyond` —
 and two pinning the new order, the menu-before-arm fire with an arm that takes nothing, and the
 first-move rule with the lift that closes the menu and takes the guard; the pins that encoded the old
-order were rewritten in place, so the rest of the count is unchanged). Six mutations were run against
-it and each failed the pins that name it: taking the guard at the arm instead of at the lift ("the hold
-opens the MENU first...", "the FIRST move decides...", "the drop message is posted BEFORE the guard
-release"), calling `preventDefault()` while merely armed ("the touchmove listener is NON-PASSIVE..."),
+order were rewritten in place, so the rest of the count is unchanged; the two review rounds added
+assertions inside those blocks rather than blocks of their own, so 350 has held since). Nine mutations
+were run against it - six kinds in the first pass (seven edits: the sideways one was tried in two
+places) and three more for the pins the review rounds changed - and each failed the pins that name it:
+taking the guard at the arm instead of at the lift ("the hold opens the MENU first...", "the FIRST move
+decides...", "the drop message is posted BEFORE the guard release"), calling `preventDefault()` while merely armed ("the touchmove listener is NON-PASSIVE..."),
 treating a sideways-first move as vertical both in the module ("touchDrag.firstMoveDirection...") and by
 deleting the panel's bail ("the FIRST move decides...", "EVERY exit routes through that one end"), letting
 a release-without-travel skip `endTouchDrag` so the `touchmove` listener outlives the gesture ("EVERY exit
 routes through that one end", "a release that never moved tears the arming down..."), dropping the
 `drag-uncancelable` trace on the lifting move ("the touchmove listener is NON-PASSIVE...", "the trace falls
 back to the sticky toast...") and having the lift read `longPress.id` instead of the arm's snapshot ("the
-hold opens the MENU first..."). Playwright: `e2e/mobile-drag.spec.ts` is twelve tests, not run in this
-pass — the verifier's.
+hold opens the MENU first..."). The review rounds' three: moving `armTouchDrag()` out of the fire's
+`todo` branch into the else-if chain, which the old ordering-only pin let through and the containment
+slice now catches ("the arm refuses the tick circle..."); deleting the arm's `endTouchDrag('re-arm')`
+("the hold opens the MENU first..."); and giving `.todo.-dragging` a `padding-left`, which would move
+every row under the index the arm had already measured ("panel.css touch drag..."). Playwright:
+`e2e/mobile-drag.spec.ts` is twelve tests, not run in this pass — the verifier's.
