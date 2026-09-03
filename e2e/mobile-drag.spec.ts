@@ -11,9 +11,17 @@ import {
 } from './helpers';
 
 /**
- * Real-app cover for the MOBILE touch drag: a 500 ms press on a to-do row lifts it, moving it resolves a target on
- * every move, and releasing drops it into the gap between two rows or onto a [data-drop] target (a group heading,
- * a calendar day, a week column) - the same two messages, and the same host writes, the desktop drag produces.
+ * Real-app cover for the MOBILE touch drag, which is MENU-FIRST since the first Pixel round: a 500 ms press on a
+ * to-do row opens its context menu with the finger still down and arms the drag silently behind it; the first
+ * travel past the 10 px slop then decides, once - UP or DOWN closes the menu, lifts the row and enters the drag
+ * proper, SIDEWAYS is left to Android (that stroke is Joplin's own side-menu swipe) and the arming is thrown away.
+ * A release that never moved leaves the menu exactly as the press opened it. From the lift on, moving resolves a
+ * target on every move and releasing drops into the gap between two rows or onto a [data-drop] target (a group
+ * heading, a calendar day, a week column) - the same two messages, and the same host writes, the desktop drag
+ * produces.
+ *
+ * Because of that order, no case here lifts a row by holding alone: every drag case holds, checks the menu is up
+ * and nothing is lifted, then makes ONE deliberate vertical step (`liftByMovingUpOrDown`) and only then aims.
  *
  * Two things make this spec unusual, and both are deliberate.
  *
@@ -35,8 +43,10 @@ import {
  * WHAT NO SPEC HERE CAN PROVE, and what the Pixel round is for: Android's own gesture arbitration. Chromium under
  * Xvfb happily lets a non-passive `touchmove` cancel the pan; whether the Android WebView's compositor hands the
  * gesture over at all - rather than starting a fling and delivering non-cancelable moves, or raising the native
- * text-selection callout over the row - is a property of the device, not of this harness. That is checklist step 2
- * in docs/MOBILE.md, and it is the one that decides between this gesture and the drag-handle fallback.
+ * text-selection callout over the row - is a property of the device, not of this harness. Nor can it prove the
+ * other half of the new order: that a SIDEWAYS stroke, which this panel now deliberately does not prevent, really
+ * does reach Joplin's side menu. Both are checklist step 18b in docs/MOBILE.md, and they are what decides between
+ * this gesture and the drag-handle fallback.
  */
 test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   let joplin: JoplinInstance;
@@ -62,6 +72,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   const MENU = `td-menu-${stamp}`;
   const CANCEL = `td-cancel-${stamp}`;
   const REFUSE = `td-refuse-${stamp}`;
+  const SWIPE = `td-swipe-${stamp}`;
   const TAP = `td-tap-${stamp}`;
   const TICK = `td-tick-${stamp}`;
   const ALARM = `td-alarm-${stamp}`;
@@ -148,6 +159,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     ids[MENU] = await createTodoViaApi(MENU, folderId, yesterdayAt(12));
     ids[CANCEL] = await createTodoViaApi(CANCEL, folderId, yesterdayAt(13));
     ids[REFUSE] = await createTodoViaApi(REFUSE, folderId, yesterdayAt(13, 30));
+    ids[SWIPE] = await createTodoViaApi(SWIPE, folderId, yesterdayAt(13, 45));
     ids[TAP] = await createTodoViaApi(TAP, folderId, yesterdayAt(14));
     ids[TICK] = await createTodoViaApi(TICK, folderId, yesterdayAt(15));
     ids[ALARM] = await createTodoViaApi(ALARM, folderId, yesterdayAt(16));
@@ -411,6 +423,25 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     return at;
   }
 
+  /**
+   * The move that turns the open menu into a lifted row. The gesture is decided by the FIRST travel past the 10 px
+   * slop and by nothing else: |dy| >= |dx| lifts, |dx| > |dy| is refused as Joplin's side-menu swipe. So the lift
+   * is one deliberate 24 px step at a CONSTANT x - unambiguously vertical, well past the slop, and the same move a
+   * finger makes when it starts dragging a row. Downwards when there is room inside the list, upwards otherwise,
+   * so the step can never leave the scroller. Returns where the finger now is, which is what the aim glides from.
+   */
+  async function liftByMovingUpOrDown(
+    finger: { move: (at: Point) => Promise<unknown> },
+    from: Point,
+    win: Page
+  ): Promise<Point> {
+    const list = await listBox(win);
+    const at = { x: from.x, y: from.y + 24 <= list.bottom - 4 ? from.y + 24 : from.y - 24 };
+    await finger.move(at);
+    await win.waitForTimeout(80);
+    return at;
+  }
+
   /** The centre of a to-do's checkbox ring, in TOP-LEVEL coordinates. */
   async function checkboxPoint(win: Page, marker: string): Promise<Point> {
     const panel = await agendaPanel(win);
@@ -568,22 +599,31 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
    * The cases
    * --------------------------------------------------------------------------------------- */
 
-  test('a hold and a move into a gap lands the to-do strictly between its new neighbours', async () => {
+  test('a hold, then a move up or down into a gap, lands the to-do strictly between its new neighbours', async () => {
     const { win } = joplin;
     expect(await forceMobilePanel(win), 'the panel must be in mobile mode').toBe(true);
     await armMessageLog(win);
+    const panel = await agendaPanel(win);
     const finger = await newFinger(win);
     try {
       const from = await rowPoint(win, GAP, 0.5);
       await finger.down(from);
-      await win.waitForTimeout(700); // past the 500ms hold: the row lifts
+      await win.waitForTimeout(700); // past the 500ms hold: the MENU opens, with the finger still down
+      const held = await dragState();
+      console.log('TOUCH DRAG HELD', JSON.stringify(held));
+      expect(held.dragging, 'the hold alone must not lift anything').toBe(0);
+      expect(held.banner, 'and it must put no banner up either').toBe(null);
+      await expect(panel.locator('#noteContextMenu'), 'the hold opens the menu').toBeVisible();
+      // The one deliberate vertical step: THIS is what lifts the row, and it closes the menu.
+      const at = await liftByMovingUpOrDown(finger, from, win);
       const lifted = await dragState();
       console.log('TOUCH DRAG LIFTED', JSON.stringify(lifted));
-      expect(lifted.dragging, 'the held row must be lifted').toBe(1);
+      expect(lifted.dragging, 'a vertical first move must lift the held row').toBe(1);
       expect(lifted.banner, 'the banner must name what is moving').toContain('Moving');
+      await expect(panel.locator('#noteContextMenu'), 'and the menu must be gone').toHaveCount(0);
       // Into the BOTTOM half of the 08:00 anchor, which is the gap between it and the 12:00 one.
       const to = await rowPoint(win, LO, 0.8);
-      await finger.glide(from, to);
+      await finger.glide(at, to);
       const aiming = await dragState();
       console.log('TOUCH DRAG AIMING', JSON.stringify(aiming));
       expect(aiming.before + aiming.after, 'exactly one insertion line must be painted').toBe(1);
@@ -597,7 +637,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     expect(names(posted), 'the gap drop must post the desktop between-drop message').toContain('todosDroppedBetween');
     const between = posted.find((m) => m[0] === 'todosDroppedBetween')!;
     expect(between[1], 'the payload is the dragged to-do').toEqual([ids[GAP]]);
-    // The guard is taken on the first move and released after the drop message, in that order.
+    // The guard is taken at the LIFT and released after the drop message, in that order.
     const guards = posted.filter((m) => m[0] === 'dialogGuard');
     expect(guards.map((m) => m[1]), 'the refresh guard must be taken once and released once').toEqual([true, false]);
     expect(posted.indexOf(between), 'the drop must be posted before the guard is released').toBeLessThan(
@@ -665,11 +705,13 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       const from = await rowPoint(win, REFUSE, 0.5);
       await finger.down(from);
       await win.waitForTimeout(700);
-      expect((await dragState()).dragging, 'the row must be lifted by the hold').toBe(1);
+      expect((await dragState()).dragging, 'the hold alone must not lift the row').toBe(0);
+      const at = await liftByMovingUpOrDown(finger, from, win);
+      expect((await dragState()).dragging, 'the vertical move must lift it').toBe(1);
       // headingPoint with `dropped: false` asserts the heading really carries no data-drop, so this case cannot
       // quietly become a test of a droppable heading.
       const to = await headingPoint(win, 'Overdue', false);
-      await finger.glide(from, to);
+      await finger.glide(at, to);
       const aiming = await dragState();
       console.log('TOUCH REFUSED HEADING', JSON.stringify(aiming));
       expect(aiming.before + aiming.after + aiming.over, 'a heading that refuses drops must paint nothing at all').toBe(0);
@@ -689,38 +731,94 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     expect(await todoDue(REFUSE), 'and the due date is untouched').toBe(before);
   });
 
-  test('a hold and a release WITHOUT moving still opens the context menu, and opens no note', async () => {
+  test('a hold opens the menu with the finger DOWN, and a release without moving leaves it open', async () => {
     const { win } = joplin;
     await settle();
     // Park the editor somewhere else, so "the note did not open" is observable.
     await parkEditor(win);
     const before = await todoDue(MENU);
     await armMessageLog(win);
+    const panel = await agendaPanel(win);
     const finger = await newFinger(win);
     try {
       await finger.down(await rowPoint(win, MENU, 0.5));
       await win.waitForTimeout(700);
-      expect((await dragState()).dragging, 'the row is lifted while the finger is down').toBe(1);
+      // THE ORDER THIS WHOLE REDESIGN IS ABOUT: the menu is already up while the finger is still down, and
+      // nothing has been lifted for it.
+      await expect(panel.locator('#noteContextMenu'), 'the menu must be open before the finger comes up').toBeVisible();
+      const held = await dragState();
+      expect(held.dragging, 'and nothing may be lifted by the hold alone').toBe(0);
+      expect(held.banner, 'nor any banner shown').toBe(null);
       await finger.up();
     } finally {
       await finger.dispose();
     }
-    const panel = await agendaPanel(win);
-    await expect(panel.locator('#noteContextMenu')).toBeVisible();
+    await expect(panel.locator('#noteContextMenu'), 'and it must survive the release').toBeVisible();
+    expect((await dragState()).dragging, 'the release must leave nothing lifted behind it').toBe(0);
     const posted = await postedMessages(win);
     console.log('TOUCH MENU POSTED', JSON.stringify(posted));
-    // A lift that never travelled never takes the refresh guard - the host answers a release by repainting, and on
-    // mobile that repaint is a webview reload which would destroy the menu this very release just opened.
+    // A gesture that never lifted never takes the refresh guard - the host answers a release by repainting, and on
+    // mobile that repaint is a webview reload which would destroy the menu the press just opened.
     expect(names(posted), 'a hold-and-release must not touch the refresh guard').not.toContain('dialogGuard');
     expect(names(posted), 'and must write nothing').not.toContain('todosDropped');
     expect(names(posted), 'and must write nothing').not.toContain('todosDroppedBetween');
     expect(names(posted), 'and the synthetic click must not open the note').not.toContain('todoClicked');
+    // ...nor may that click land on the menu now sitting under the finger and run one of its items.
+    expect(names(posted), 'and must not run a menu action').not.toContain('noteMenuAction');
     expect(await todoDue(MENU), 'the due date is untouched').toBe(before);
     await expect
       .poll(async () => win.locator('input.title-input').inputValue(), { timeout: 30_000 })
       .toContain(PARK);
     await panel.locator('body').press('Escape');
     await expect(panel.locator('#noteContextMenu')).toHaveCount(0);
+  });
+
+  test('a hold then a SIDEWAYS first move lifts nothing, writes nothing and never takes the guard', async () => {
+    // The other half of the first-move rule, and the reason the whole gesture was redesigned: on the Pixel a
+    // sideways stroke from a held row is Joplin's own side-menu swipe. The panel must refuse it completely -
+    // no lift, no paint, no message, and above all no refresh guard, since a guard taken here and released on
+    // the swipe would have the host repaint the panel out from under the menu the press just opened.
+    const { win } = joplin;
+    await settle();
+    const before = await todoDue(SWIPE);
+    await waitForPanelTodo(win, SWIPE);
+    await armMessageLog(win);
+    const panel = await agendaPanel(win);
+    const finger = await newFinger(win);
+    try {
+      // Both points are on the SAME row at the same y, so the stroke is exactly horizontal: dy is 0 and every
+      // step of it is unambiguously sideways, which is the input the rule is written for.
+      const from = await rowPoint(win, SWIPE, 0.5, 0.75);
+      const to = await rowPoint(win, SWIPE, 0.5, 0.15);
+      await finger.down(from);
+      await win.waitForTimeout(700);
+      await expect(panel.locator('#noteContextMenu'), 'the hold still opens the menu').toBeVisible();
+      await finger.glide(from, to, 6, 40);
+      const swiping = await dragState();
+      console.log('TOUCH SWIPE STATE', JSON.stringify(swiping));
+      expect(swiping.dragging, 'a sideways first move must never lift the row').toBe(0);
+      expect(swiping.banner, 'and must show no banner').toBe(null);
+      expect(swiping.before + swiping.after + swiping.over, 'and must paint no target').toBe(0);
+      await finger.up();
+    } finally {
+      await finger.dispose();
+    }
+    // The menu is the press's, not the drag's: a refused swipe leaves it exactly as it was.
+    await expect(panel.locator('#noteContextMenu'), 'the menu must still be open after the swipe').toBeVisible();
+    const posted = await postedMessages(win);
+    console.log('TOUCH SWIPE POSTED', JSON.stringify(posted));
+    for (const forbidden of ['dialogGuard', 'todosDropped', 'todosDroppedBetween', 'noteMenuAction', 'todoClicked']) {
+      expect(names(posted), `a refused swipe must not post ${forbidden}`).not.toContain(forbidden);
+    }
+    expect(await todoDue(SWIPE), 'and the due date is untouched').toBe(before);
+    await panel.locator('body').press('Escape');
+    await expect(panel.locator('#noteContextMenu')).toHaveCount(0);
+    // The proof that the guard was never taken is not the empty log alone: a panel holding a stray
+    // ['dialogGuard', true] would stop refreshing, so a note created afterwards must still reach it.
+    const folderId = await folderIdByTitle(book);
+    const later = `td-after-swipe-${stamp}`;
+    await createTodoViaApi(later, folderId);
+    await waitForPanelTodo(win, later);
   });
 
   test('a press SHORTER than the hold scrolls the list and writes nothing', async () => {
@@ -801,10 +899,14 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     const panel = await agendaPanel(win);
     finger = await newFinger(win);
     try {
-      await finger.down(await checkboxPoint(win, ALARM));
+      const ring = await checkboxPoint(win, ALARM);
+      await finger.down(ring);
       await win.waitForTimeout(700);
-      // The ring is NOT a drag zone: the hold must reach the date picker, not lift the row.
+      // The ring is NOT a drag zone: the hold reaches the date picker and arms nothing behind it, so the move
+      // that would lift an ordinary row lifts nothing here either.
       expect((await dragState()).dragging, 'a hold on the ring must not lift the row').toBe(0);
+      await liftByMovingUpOrDown(finger, ring, win);
+      expect((await dragState()).dragging, 'and a vertical move from the ring must still lift nothing').toBe(0);
       await finger.up();
     } finally {
       await finger.dispose();
@@ -824,9 +926,12 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       const from = await rowPoint(win, CANCEL, 0.5);
       await finger.down(from);
       await win.waitForTimeout(700);
+      expect((await dragState()).dragging, 'the hold alone must not lift the row').toBe(0);
+      const at = await liftByMovingUpOrDown(finger, from, win);
+      expect((await dragState()).dragging, 'the vertical move must lift it').toBe(1);
       // Out of the list altogether, onto the panel's own controls: nothing there is a drop target.
       const origin = await panelOrigin(win);
-      await finger.glide(from, { x: from.x, y: origin.y + 12 }, 10, 40);
+      await finger.glide(at, { x: at.x, y: origin.y + 12 }, 10, 40);
       const cancelling = await dragState();
       console.log('TOUCH CANCEL STATE', JSON.stringify(cancelling));
       expect(cancelling.before + cancelling.after + cancelling.over, 'nothing may be painted as a target').toBe(0);
@@ -921,9 +1026,13 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     await armMessageLog(win);
     const finger = await newFinger(win);
     try {
-      await finger.down(await rowPoint(win, PEEK, 0.5));
+      const from = await rowPoint(win, PEEK, 0.5);
+      await finger.down(from);
       await win.waitForTimeout(700);
       expect((await dragState()).dragging, 'a peek row must never be lifted - it is not a reschedule source').toBe(0);
+      // ...and it arms nothing either, so even the move that WOULD lift an ordinary row does nothing here.
+      await liftByMovingUpOrDown(finger, from, win);
+      expect((await dragState()).dragging, 'and a vertical move from a peek row must still lift nothing').toBe(0);
       await finger.up();
     } finally {
       await finger.dispose();
@@ -936,22 +1045,29 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   });
 
   /**
-   * One drag, start to finish: hold a row until it lifts, glide onto whatever `target()` resolves to at that
-   * moment (a heading's centre, a point in a row's top or bottom half), and release there. The target is resolved
-   * AFTER the lift on purpose - a panel that re-rendered between the two would otherwise be aimed at with stale
-   * coordinates.
+   * One drag, start to finish, in the menu-first order: hold a row until the 500 ms fire opens its context menu
+   * (nothing is lifted by that alone any more), make ONE vertical step to lift it - which closes the menu - then
+   * glide onto whatever `target()` resolves to at that moment (a heading's centre, a point in a row's top or
+   * bottom half) and release there. The target is resolved AFTER the lift on purpose - a panel that re-rendered
+   * between the two would otherwise be aimed at with stale coordinates.
    */
   async function dragRowTo(marker: string, target: () => Promise<Point>): Promise<void> {
     const { win } = joplin;
     await waitForPanelTodo(win, marker);
+    const panel = await agendaPanel(win);
     const finger = await newFinger(win);
     try {
       const from = await rowPoint(win, marker, 0.5);
       await finger.down(from);
       await win.waitForTimeout(700);
-      expect((await dragState()).dragging, `${marker} must be lifted by the hold`).toBe(1);
+      // The hold is the MENU, with the finger still down. The drag is armed behind it and invisible.
+      expect((await dragState()).dragging, `${marker} must NOT be lifted by the hold alone`).toBe(0);
+      await expect(panel.locator('#noteContextMenu'), 'the hold must open the context menu').toBeVisible();
+      const lifted = await liftByMovingUpOrDown(finger, from, win);
+      expect((await dragState()).dragging, `${marker} must be lifted by the vertical move`).toBe(1);
+      await expect(panel.locator('#noteContextMenu'), 'and the lift must close the menu').toHaveCount(0);
       const to = await target();
-      await finger.glide(from, to);
+      await finger.glide(lifted, to);
       const aiming = await dragState();
       console.log('TOUCH DRAG AIM', marker, JSON.stringify(aiming));
       expect(
