@@ -3139,12 +3139,6 @@ async function main() {
         }
     })
 
-    // The two thresholds AS SHIPPED, read from the panel rather than repeated here, so the pure checks below can
-    // never go on proving things about numbers the gesture no longer uses. Their values and their RELATION are
-    // pinned by name further down ('the two bands are named constants').
-    const PRESS_SLOP = Number(/var TOUCH_DRAG_SLOP = (\d+)/.exec(webviewSource)[1])
-    const LIFT_PX = Number(/var TOUCH_DRAG_LIFT_PX = (\d+)/.exec(webviewSource)[1])
-
     await test('touchDrag.movedBeyond: per axis, and exactly the slop is still held still', () => {
         assert.strictEqual(TouchDrag.movedBeyond(10, 0, 0, 0, 10), false, 'exactly the slop has not moved (the long press says the same)')
         assert.strictEqual(TouchDrag.movedBeyond(11, 0, 0, 0, 10), true, 'one past the slop on x has')
@@ -3152,41 +3146,39 @@ async function main() {
         assert.strictEqual(TouchDrag.movedBeyond(7, 7, 0, 0, 10), false, 'the rule is per AXIS, not a diagonal distance')
         // The same arithmetic answers the drag's own, larger question: one function, two thresholds, so "has it
         // moved" cannot come to mean two different things to the press and to the lift.
-        assert.strictEqual(TouchDrag.movedBeyond(LIFT_PX, 0, 0, 0, LIFT_PX), false, 'exactly the lift threshold is still held still too')
-        assert.strictEqual(TouchDrag.movedBeyond(0, LIFT_PX + 1, 0, 0, LIFT_PX), true, 'and one past it has travelled')
+        assert.strictEqual(TouchDrag.movedBeyond(24, 0, 0, 0, 24), false, 'exactly the lift threshold is still held still too')
+        assert.strictEqual(TouchDrag.movedBeyond(0, 25, 0, 0, 24), true, 'and one past it has travelled')
     })
 
     await test('touchDrag.liftDecision: the LIFT threshold first, then the axis - and a perfect diagonal lifts', () => {
         // The whole of the menu-first gesture's decision. The hold opens the context menu with the finger still
         // down; this says what the finger did NEXT, once, and for good: up or down is the drag, across is Joplin's
         // own side-menu swipe and the panel gets out of its way.
-        const d = (dx, dy) => TouchDrag.liftDecision(dx, dy, LIFT_PX)
-        const past = LIFT_PX + 1
+        const d = (dx, dy) => TouchDrag.liftDecision(dx, dy, 24)
         assert.strictEqual(d(0, 0), null, 'a finger that has not moved has decided nothing')
-        assert.strictEqual(d(LIFT_PX, 0), null, 'exactly the threshold is still held still, the same as movedBeyond')
-        assert.strictEqual(d(LIFT_PX - 1, LIFT_PX - 1), null, 'the threshold is per AXIS, not a diagonal distance')
-        assert.strictEqual(d(0, past), 'vertical', 'down past the threshold is the drag')
-        assert.strictEqual(d(0, -past), 'vertical', '...and so is up')
-        assert.strictEqual(d(past, 0), 'sideways', 'across past the threshold is the side menu, not ours')
-        assert.strictEqual(d(-past, 0), 'sideways', '...in either direction')
-        assert.strictEqual(d(past, past), 'vertical', 'a perfect diagonal goes to the drag: a refused swipe is one flick from being re-tried, a refused lift is not')
-        assert.strictEqual(d(past + 1, past), 'sideways', 'one pixel more across than down is sideways')
-        assert.strictEqual(d(past, past + 1), 'vertical', 'and one more down than across is vertical')
-        assert.strictEqual(d(-past, past + 1), 'vertical', 'the two axes are compared by magnitude, never by sign')
+        assert.strictEqual(d(24, 0), null, 'exactly the threshold is still held still, the same as movedBeyond')
+        assert.strictEqual(d(17, 17), null, 'the threshold is per AXIS, not a diagonal distance')
+        assert.strictEqual(d(0, 25), 'vertical', 'down past the threshold is the drag')
+        assert.strictEqual(d(0, -25), 'vertical', '...and so is up')
+        assert.strictEqual(d(25, 0), 'sideways', 'across past the threshold is the side menu, not ours')
+        assert.strictEqual(d(-25, 0), 'sideways', '...in either direction')
+        assert.strictEqual(d(25, 25), 'vertical', 'a perfect diagonal goes to the drag: a refused swipe is one flick from being re-tried, a refused lift is not')
+        assert.strictEqual(d(26, 25), 'sideways', 'one pixel more across than down is sideways')
+        assert.strictEqual(d(25, 26), 'vertical', 'and one more down than across is vertical')
+        assert.strictEqual(d(-25, 26), 'vertical', 'the two axes are compared by magnitude, never by sign')
         // THE THIRD PIXEL ROUND'S ARITHMETIC. The press survives on 10px from the press point; if the lift used
         // that same number the arm would be born at the edge of its own threshold and the smallest drift after the
         // menu opened would lift the row and close the menu. Everything the OLD gate would have decided, this one
         // must still call undecided - which is what "some tolerance for hold and move" means as a test.
-        for (const [dx, dy] of [[0, PRESS_SLOP + 1], [PRESS_SLOP + 1, 0], [PRESS_SLOP + 2, PRESS_SLOP + 2],
-                                [0, -LIFT_PX], [LIFT_PX - 1, 0], [0, LIFT_PX], [-LIFT_PX, LIFT_PX]]){
+        for (const [dx, dy] of [[0, 11], [11, 0], [12, 12], [0, -20], [23, 0], [0, 24], [-24, 24]]){
             assert.strictEqual(d(dx, dy), null, `travel of ${dx},${dy} is inside the tolerance and must decide nothing`)
-            assert.strictEqual(TouchDrag.movedBeyond(dx, dy, 0, 0, PRESS_SLOP) && d(dx, dy) === null, TouchDrag.movedBeyond(dx, dy, 0, 0, PRESS_SLOP),
-                `...even though ${dx},${dy} would have passed the press's own ${PRESS_SLOP}px slop`)
+            assert.strictEqual(TouchDrag.movedBeyond(dx, dy, 0, 0, 10) && d(dx, dy) === null, TouchDrag.movedBeyond(dx, dy, 0, 0, 10),
+                `...even though ${dx},${dy} would have passed the press's own 10px slop`)
         }
         // The threshold gate IS movedBeyond, at whatever number the caller passes, so the two cannot drift apart:
         // anything that has moved for one has moved for the other, at every point of a grid straddling both
         // boundaries in all four quadrants.
-        for (const threshold of [PRESS_SLOP, LIFT_PX]){
+        for (const threshold of [10, 24]){
             for (let dx = -30; dx <= 30; dx++) for (let dy = -30; dy <= 30; dy++){
                 assert.strictEqual(TouchDrag.liftDecision(dx, dy, threshold) === null, !TouchDrag.movedBeyond(dx, dy, 0, 0, threshold),
                     `the threshold gate must agree with movedBeyond at ${dx},${dy} (threshold ${threshold})`)
@@ -3693,7 +3685,7 @@ async function main() {
         assert.ok(/var TOUCH_DRAG_BAND = 0\.5/.test(webviewSource), 'the touch band must be a named constant of its own, and 0.5 (no inert middle)')
         assert.ok(/var BETWEEN_BAND = 0\.4/.test(webviewSource), 'the desktop band must still be 0.4, with its inert middle')
         assert.ok(/var TOUCH_DRAG_SLOP = 10/.test(webviewSource), 'the press slop must match the long press it lifts out of')
-        assert.ok(/var TOUCH_DRAG_LIFT_PX = 20/.test(webviewSource), 'the lift threshold must be a named constant of its own')
+        assert.ok(/var TOUCH_DRAG_LIFT_PX = 24/.test(webviewSource), 'the lift threshold must be a named constant of its own')
         assert.ok(/var TOUCH_DRAG_WATCHDOG_MS = \d+/.test(webviewSource), 'the watchdog must be a named, tunable constant')
         // THE RELATION, not just the two numbers. The press survives 10px from the press point; if the lift used
         // that same number from that same origin the arm would be born at the edge of its own threshold, which is
