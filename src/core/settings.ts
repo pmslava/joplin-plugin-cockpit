@@ -15,6 +15,8 @@ import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches } from ".
 /** Variable Setup *********************************************************************************************************************************/
 export const customCssSettingKey = "customCss"
 export const showToolbarButtonSettingKey = "showToolbarButton"
+export const hideDueDateOnBellSettingKey = "hideDueDateOnBell"
+export const bellOpensCockpitPickerSettingKey = "bellOpensCockpitPicker"
 export const gestureTraceSettingKey = "gestureTrace"
 export const updateFrequencySettingKey = "updateFrequency"
 export const dayStartTimeSettingKey = "dayStartTime"
@@ -106,6 +108,22 @@ export async function setupSettings(){
 			label: "Show the Cockpit button in the note toolbar",
 			description: "Shows the Cockpit panel toggle button (the gauge icon) in the note editor toolbar. Desktop only. Takes effect after Joplin restarts, since Joplin cannot add or remove a toolbar button while running.",
 			value: true,
+			type: SettingItemType.Bool,
+			public: true,
+			section: 'section',
+		},
+		[hideDueDateOnBellSettingKey]: {
+			label: "Hide the due date next to the bell in the note title bar and show it on hover",
+			description: "When a to-do has an alarm, Joplin prints the due date as text beside the bell in the note title bar, and that text eats the space the title has. This hides it and shows it instead as a small bubble under the bell while the pointer is over the bell. Desktop only. Takes effect after Joplin restarts, since Joplin cannot unload a stylesheet it has already loaded.",
+			value: false,
+			type: SettingItemType.Bool,
+			public: true,
+			section: 'section',
+		},
+		[bellOpensCockpitPickerSettingKey]: {
+			label: "Open Cockpit's date picker instead of Joplin's when the alarm bell is clicked",
+			description: "Clicking the bell in the note title bar opens Cockpit's alarm picker - the calendar, the time columns and the quick buttons - instead of Joplin's own prompt. Desktop and the Markdown editor only, as no plugin code runs in the window with the Rich Text editor. The Note menu's Set alarm item and its keyboard shortcut keep Joplin's picker. Takes effect after Joplin restarts, since Joplin cannot register an editor content script while running.",
+			value: false,
 			type: SettingItemType.Bool,
 			public: true,
 			section: 'section',
@@ -343,6 +361,20 @@ export async function getCustomCss(){
  ***************************************************************************************************************************************************/
 export async function isToolbarButtonEnabled(){
 	return await joplin.settings.value(showToolbarButtonSettingKey)
+}
+
+/** isDueDateOnHoverEnabled ************************************************************************************************************************
+ * Whether the chrome stylesheet that hides the bell's due-date text (and shows it on hover) should be loaded at startup							*
+ ***************************************************************************************************************************************************/
+export async function isDueDateOnHoverEnabled(){
+	return await joplin.settings.value(hideDueDateOnBellSettingKey)
+}
+
+/** isBellPickerEnabled *****************************************************************************************************************************
+ * Whether the editor content script that hands the title bar's bell click to Cockpit's alarm dialog should be registered at startup				*
+ ***************************************************************************************************************************************************/
+export async function isBellPickerEnabled(){
+	return await joplin.settings.value(bellOpensCockpitPickerSettingKey)
 }
 
 /** setCustomCss ************************************************************************************************************************************
