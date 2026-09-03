@@ -95,7 +95,7 @@ export async function setupSettings(){
 			// lists) is untouched and inert. A future device round re-enables it in a DEV BUILD by turning the
 			// public flag below back on, rebuilding and sideloading - see docs/MOBILE.md §7. (Written that way
 			// on purpose: the harness pin reads this whole block and refuses the enabled spelling inside it.)
-			label: "Show a touch-gesture trace in the search suggestions (diagnostic, hidden - see src/core/settings.ts)",
+			label: "Show a touch-gesture trace in the search suggestions (diagnostic)",
 			description: "Mobile only, and only while the search suggestion list is open: replaces the list's hint line with the last few touch events (press, hold, cancel, context menu, why the list closed). Leave this off - it exists so a touch problem on a real device can be reported precisely instead of guessed at.",
 			value: false,
 			type: SettingItemType.Bool,

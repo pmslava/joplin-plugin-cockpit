@@ -1580,7 +1580,7 @@ return ("a release that never moved tears the arming down..."). The second round
 slice now catches ("the arm refuses the tick circle..."); deleting the arm's `endTouchDrag('re-arm')`
 ("the hold opens the MENU first..."); and giving `.todo.-dragging` a `padding-left`, which would move
 every row under the index the arm had already measured ("panel.css touch drag..."). Playwright:
-`e2e/mobile-drag.spec.ts` is fourteen tests now (twelve before this round, plus two for Android's `contextmenu`:
+`e2e/mobile-drag.spec.ts` was fourteen tests at the end of THIS round (twelve before it, plus two for Android's `contextmenu`:
 one dispatching the event on a mobile-mode row and asserting it is `defaultPrevented` and opens NO
 `#noteContextMenu` while the row still carries the inline handler that would have opened one, and one firing it
 in the middle of a LIFTED drag — by the event and again by calling the row's own handler outright, which is what
@@ -1591,6 +1591,8 @@ produces it on the device is Android's and no harness of ours can make Chromium 
 halves are real CDP touch as everywhere else in the file.) Of the twelve that came before, the verifier ran the
 file for the first time since the redesign and got eleven green, the ring case red for the spec reason above and
 fixed there; the file is not re-run here — that is the verifier's, and the two new cases have never been run.
+(The rounds after this one took the file to its shipped twenty, which is the number the `globalTimeout` note
+above is sized for; fourteen is this round's count, not v2.3.0's.)
 
 **The fourth Pixel round passed, and the trace goes quiet.** 18a: the hold opens the to-do's context menu
 with the finger still down. 18b, the step the whole design rested on: keep holding and move, and the row
@@ -1610,3 +1612,25 @@ place rather than dropped — it asserts the hidden shape (`public: false`, and 
 block to contradict it) on top of everything it already asserted about the default, the type, the island and
 the reader — so the count stays at 359, and README's settings list, which describes the Settings screen,
 loses the bullet that is no longer on it.
+
+**The merge review, and the numbers it caught.** The independent read of the merge found one real defect: the
+"Where the trace is now" paragraph had been spliced into the MIDDLE of a sentence in MOBILE.md §7 — the line
+ending "...told apart at a glance, which is the whole" was cut off from "job of the trace on the device", and
+with no blank line between them the rendered Markdown ran the broken half into the new bold paragraph. The
+block now sits after the ring-of-12 paragraph that used to be interrupted, and the sentence reads as one line
+again. That is the one doc the next device round reads end to end, so it is the one that had to be right.
+Three counts were wrong with it. `playwright.config.ts` justified the 25 → 30 minute cap with "sixteen cases"
+while `e2e/mobile-drag.spec.ts` holds twenty (`test()` calls, none skipped) — ironic in a comment whose other
+half was fixing stale numbers, and now twenty, matching the `globalTimeout` note in this entry. The v2.3.0
+entry also said the spec "is fourteen tests now"; that was true of the round it describes and stale by the
+time the entry shipped, so it now says *was*, at the end of THAT round, with a clause pointing at the shipped
+twenty. And the hidden setting's label had grown a "(diagnostic, hidden - see src/core/settings.ts)" suffix —
+text no user can ever reach, pointing a developer at the file they would already be reading, and actively
+wrong in the dev build where the flip makes it visible again; it is back to the shipped "(diagnostic)". Two
+things the review raised were documented rather than coded. A user who turned the trace ON in a shipped build
+(public from 1.9.10 through 2.2.1) keeps their stored `true` with no switch left to turn it off: a forced
+`setValue(false)` on upgrade would have to be gated or it would stamp out the dev flip the next device round
+depends on, and the population is mobile users who deliberately enabled a diagnostic on a sideload, so §7
+names the case instead of fixing it. And the dev-build recipe now says why it stops at `npm run dist`: with
+`public: true` in place the harness pin that holds the setting off the Settings screen fails BY DESIGN, which
+is a confused minute saved for whoever runs the next round.

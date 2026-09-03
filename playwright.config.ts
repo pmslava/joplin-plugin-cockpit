@@ -32,7 +32,7 @@ export default defineConfig({
   // the lock is never contended, and the cap stays exactly where the job's own limit needs it.
   //
   // Raised 18 → 25 when the mobile touch-drag spec became the seventeenth file, and 25 → 30 for 2.3.0, where
-  // that spec grew to sixteen cases whose beforeAll seeds ~100 to-dos through the data API: main alone ran 82
+  // that spec grew to twenty cases whose beforeAll seeds ~100 to-dos through the data API: main alone ran 82
   // tests in ~12 minutes, and each file launches its own Joplin while the gesture cases each wait out a settle
   // and a panel refresh. A healthy full run is still well under the cap; what the cap is for is a stuck one
   // ending itself gracefully, with its report and traces written.
