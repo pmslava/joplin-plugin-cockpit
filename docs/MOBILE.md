@@ -419,8 +419,13 @@ the row selection is written down here rather than inferred:
   to-dos within the selection, in the selection's own order, notes silently dropped), every payload row
   dims rather than only the row under the finger, the banner says "Moving 3 to-dos" rather than picking
   one title out of three, and the one end undims them all. The **arm** touches the selection not at all,
-  and neither do the ends that took nothing: a hold-and-release, a sideways swipe and a cancel leave it
-  exactly as they found it. The **drop** clears it, because every other drop path in the file does.
+  and neither do the ends that never lifted: a hold-and-release and a sideways swipe leave it exactly as
+  they found it. A cancel **after** a lift does not give back what the lift settled — the rewrite has
+  already happened and nothing reverses it, exactly as on the desktop, where a dragstart that ends in a
+  cancelled drop leaves the selection it made. The **drop** clears it, because every other drop path in
+  the file does. The lift's rewrite is `onTodoDragStart`'s three statements and no more: `clear`, `add`,
+  `paintTodoSelection` — not `lastClickedRowID`/`lastSelectionInteractionID`, which are a **click**'s
+  Shift-range anchors that no drag of either kind writes.
 - **What is still unknown, and how the strip answers it.** Whether a phone delivers those compatibility
   mouse events after a long press is a platform behaviour this repo cannot read off its own source. So
   `onRowPressed` and `onRowClicked` each trace on mobile — `row-press:<id> n=<size>` and
@@ -568,6 +573,22 @@ Pixel round added, and a sixth the third round found underneath all of them:
   opened. A hold-and-release, and a hold-and-swipe, therefore never touch the guard at all. The cost is
   that a refresh landing between the arm and the lift ends the gesture by reloading; nothing is held, so
   that is the harmless direction.
+- **A gesture whose release was lost silences the NEXT hold's menu, and the reset for it cannot be
+  written on a pointer id.** `showNoteContextMenu` turns every opener away while a gesture is active, so
+  an `active` flag left standing by a pointerup that never arrived swallows every menu until the 15 s
+  watchdog fires — the third round's *"the context menu doesn't appear at all"*, by a route that has
+  nothing to do with the lift. The adapter's own `pointerdown` clears it, and the test is
+  **`event.isPrimary`, not the pointer id**. The id version was written first and was almost certainly
+  dead code on the device: Blink hands every touch point a fresh id and does not reuse the last one, so
+  "the same finger pressing twice" arrives with a *different* id. That is a claim about the platform, and
+  like the side-menu claim it is checked on the phone (step 18f-ter) rather than assumed. What needs no
+  claim is what `isPrimary` means — a press that begins with no other finger on the glass — so an active
+  gesture meeting one is a gesture whose end was lost. It is ended through the single end (the strip says
+  `drag-cancel:stale-pointer`) and the new press is **not** cancelled: it is the user's next hold. A
+  **non**-primary press is a real second finger and belongs to the drag's own second-pointer listener,
+  which ends the gesture *and* cancels the press that finger just started. The registration order carries
+  the difference: the adapter's listener runs first, so on a primary press `active` is already false when
+  the second-pointer listener runs and it returns at its own guard.
 - **A still finger sends nothing at all.** The shared edge auto-scroll stops itself after
   `AUTOSCROLL_IDLE_MS` (800 ms) without an `update()` — a watchdog sized for the HTML5 drag, which
   re-fires `dragover` every ~350 ms even for a stationary pointer. A finger holding at the edge, which is
@@ -625,7 +646,7 @@ refusal (the hazard list above), which is the one part of this gesture that used
 whole successful gesture therefore reads as
 `menu-open > drag-lift n=1 > drag-target:after > drag-drop:between a1b2|c3d4 > drag-drop:posted`, or
 `menu-open > drag-released`, or `menu-open > drag-sideways-ignored` — the three outcomes are told apart at a glance, which is the whole
-job of the trace on the device. **The strip is a ring of 10, and a real drag can overflow it**: a
+job of the trace on the device. **The strip is a ring of 12, and a real drag can still overflow it**: a
 `contextmenu-suppressed:row` at the head, plus three or four `drag-target:` changes and an autoscroll or two
 during the glide, will push `menu-open` off the front. A strip that begins mid-drag is the buffer doing its job,
 not a menu that never opened — read the TAIL for the outcome. The one shape that is **not** the buffer doing its
@@ -1035,6 +1056,12 @@ success vs failure looks like. The build to install is
          - Report the `n=` values either way, even on success. Whether those two handlers run at all on
            Android is still an open question in this repo (§7, the selection contract), and this step is
            the only instrument for it.
+         - **Not a failure, and it is easy to mistake for one:** two other holds legitimately leave rows
+           selected, and neither of them is the drag. A hold on a row's **tick circle** selects that row
+           and opens the alarm picker; a hold on a **group heading** selects the whole group and opens the
+           same picker. Cancelling the picker does not take the selection back (main's behaviour, on the
+           desktop too). So hold the row **body** for this step, and if rows are lit at the end of it, ask
+           first whether the last hold landed on a ring or a heading.
        - **A multi-row drag.** The one way a phone can build a multi-selection today is a **long press on
          a group heading**, which selects every to-do in that group and opens the alarm picker. Pick a
          small group, do that, cancel the picker, then hold one of that group's rows and drag it into a
@@ -1049,6 +1076,21 @@ success vs failure looks like. The build to install is
          - Success: that row alone lifts and moves, and the rows that were selected are left where they
            are. This is the desktop rule exactly (`onTodoDragStart`), and it is deliberate: anything else
            would move rows the finger never touched.
+
+    f-ter. **Two holds in a row, and the press that follows a lost release.** Hold a row until the menu
+       opens, release, close the menu, and immediately hold the **same** row again. Then do the harsher
+       version: hold a row, drag it a little, and take the finger off the screen at the very edge of the
+       panel (or drag it out of the WebView), which is how a release gets lost; then hold any row.
+       - Success: **every** hold opens a menu, including the second one. The strip for the second hold
+         reads `menu-open`, and after a lost release it may read `drag-cancel:stale-pointer > menu-open` —
+         the stale gesture being cleared by the press that begins alone, which is exactly the mechanism
+         under test.
+       - Failure: the second hold opens nothing (the strip would show `menu-blocked`, or the
+         `contextmenu-suppressed:row` line alone), or the panel stops refreshing (the stale gesture's
+         guard was never released).
+       - Report either way whether `drag-cancel:stale-pointer` ever appears. It is the only evidence that
+         the reset fires on this platform at all — it is written on `isPrimary` precisely because the
+         pointer-id version could not (§7).
 
     g. **The guard does not leak.** Cancel a drag by releasing over the panel's header, then **wait two
        minutes** doing nothing.

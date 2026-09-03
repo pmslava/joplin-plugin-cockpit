@@ -1423,10 +1423,10 @@ un-prevented pan drags every row out from under the just-opened menu and fires t
 closes it, which is a second, lift-independent route to "no menu". The sideways rule survives that because Joplin's
 side-menu responder is on the **native** side of the WebView - this document's `preventDefault()` cancels this
 document's own default and nothing beyond it. That is a claim about the platform, so it is written down as one and
-18b-bis is what checks it. And a third route to a missing menu, unrelated to either: the drag's second-pointer
-listener ends a gesture only when the new pointer id DIFFERS, so a one-finger re-press carrying the same id arrived
-with a stale `active` flag and `showNoteContextMenu` turned it away for up to the 15 s watchdog. The adapter's own
-pointerdown now ends that gesture through the single end (`drag-cancel:stale-pointer`).
+18b-bis is what checks it. And a third route to a missing menu, unrelated to either: a gesture whose `pointerup`
+never arrived sits there `active`, and `showNoteContextMenu` turns every opener away for up to the 15 s watchdog.
+The adapter's own pointerdown now ends that gesture through the single end (`drag-cancel:stale-pointer`) - and the
+review round below is why that reset is written on `event.isPrimary` rather than on a pointer id.
 
 **The selection** (finding 2) had no feature to repair: there is no mobile multi-select of rows, on this branch or
 on main. A row carries `onmousedown` and `onclick` and no touch handler at all, Shift and Ctrl are unreachable from
@@ -1461,6 +1461,30 @@ whether the list still holds the number of rows it was measured with. The trace 
 A successful 18b now reads `menu-open > drag-lift n=1 > drag-target:after > drag-drop:between a1b2|c3d4 >
 drag-drop:posted`, and a refused gap says which refusal it was rather than leaving the next round to guess.
 
+**The review round after it caught a fix that could not fire.** The stale-gesture reset above was written as
+`event.pointerId === touchDrag.pointerId`, on a stated belief that one finger pressing twice is handed the same id.
+Blink hands every touch point a **fresh** id and does not reuse the last one, so on the device that comparison is
+never true: the reset was dead code, and the route to "the context menu doesn't appear at all" it was added to
+close stayed open. It is written on **`event.isPrimary`** now - a press that begins with no other finger on the
+glass, which a gesture still holding one cannot be joined by - so it needs no claim about ids at all, and the one
+claim it does rest on is checked on the phone (new step 18f-ter) instead of asserted in a comment. The press itself
+is deliberately not cancelled: it is the user's next hold, and what keeps it alive is the registration order - the
+adapter's pointerdown runs before the drag's second-pointer listener, which then returns at its own guard rather
+than cancelling the press it was just rescued for. That order is pinned. In the same round the lift stopped writing
+`lastClickedRowID` and `lastSelectionInteractionID`: they are a **click**'s Shift-range anchors, `onTodoDragStart`
+writes neither, and "verbatim" has to be a claim about what is not written as much as about what is - so the pin
+now asserts their absence, against `onTodoDragStart`'s own body so it retires honestly if that ever changes. Two of
+the round's own tests were also proving less than they read as. The e2e check that the drag banner and trace strip
+are `pointer-events: none` ran **after** the release, and `hideDragBanner()` removes the banner at every end, so it
+was comparing `'none'` with `'none'` for two elements that were not on the page - deleting the CSS rule would have
+left it green; it is read while the row is still lifted now, and asserts the element is there before it reads its
+style. The tolerance case drifted 12 px from a fire point 8 px below the press point, which is exactly the
+threshold from the press point and `movedBeyond` is strictly greater, so a build that regressed only the **origin**
+would have passed it: 13 px makes that travel 21 and the case proves both halves. And the multi-selection case had
+seeded three new dated rows, which push the "No Due Date" heading - which another case needs on screen at scrollTop
+0 - three rows further down; it reuses three rows already in the fixture now, by the file's own aliasing rule, so
+this round's e2e geometry is exactly the one the file was last proven green on.
+
 **The Pixel round** is step 18 of MOBILE.md's checklist, with the trace ON. 18a is now "the menu opens
 with the finger still down"; **18b** is the one that decides the design — keep holding and move up or
 down: the menu must close, the row must lift, and the list must not scroll; and **18b-bis** is its other
@@ -1468,7 +1492,13 @@ half — move sideways instead, and nothing may lift while the menu stays and th
 stroke. If 18b still fails, the cheap fix (registering the `touchmove` listener once at load) comes
 first, and only then the drag-handle fallback.
 
-Suite: 359 harness checks, all passing (351 before the THIRD PIXEL ROUND above, plus 8: three at the MARKUP,
+Suite: 359 harness checks, all passing (the review round above rewrote three of them in place and added no new
+ones - the stale reset pinned on `isPrimary` and refused on the pointer id, the registration order the rescued
+press depends on, the two selection anchors the lift must not write, and a table row in the `liftDecision` pin that
+had reduced to `X === X` and now asserts what it meant). Two further mutations were run for those: restoring the
+pointer-id comparison fails "a stale gesture is cleared by the next press that begins alone", and writing
+`lastClickedRowID` at the lift again fails "the lift respects the selection instead of collapsing it". 351 before
+the THIRD PIXEL ROUND above, plus 8: three at the MARKUP,
 which is where that round's fix lives - a mobile list row and a mobile week card carry no draggable attribute and
 no drag handlers, nothing anywhere in a mobile panel does, and the mobile row is the desktop row minus exactly
 those and nothing else - one for the two belts behind it (the capturing dragstart listener with its trace code,
