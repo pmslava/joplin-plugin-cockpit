@@ -2969,8 +2969,9 @@ async function main() {
     // its boundaries are exercised rather than pattern-matched. The gesture itself lives in the webview, which
     // this harness renders but never executes, so its load-bearing shapes are pinned as SOURCE: the guard
     // discipline (a leaked dialogGuard freezes mobile refreshes for the life of the webview), the non-passive
-    // touchmove (the one thing that stops Android panning the list), the zones the arm path must refuse, and the
-    // desktop paths that must stay exactly where they were.
+    // touchmove (the one thing that stops Android panning the list, and only once the row is up), the zones the arm
+    // path must refuse, the menu-first order the first Pixel round forced, and the desktop paths that must stay
+    // exactly where they were.
     const TouchDrag = require('../src/ui/panel/touchDrag.js')
 
     await test('touchDrag.bandSide: the mobile 0.5 splits a row in half with the midline going BEFORE, and no inert middle', () => {
@@ -3047,10 +3048,34 @@ async function main() {
         assert.strictEqual(TouchDrag.movedBeyond(7, 7, 0, 0, 10), false, 'the rule is per AXIS, not a diagonal distance')
     })
 
-    await test('webview touch drag: the lift refuses the tick circle, the notebook pill and the read-only peek', () => {
+    await test('touchDrag.firstMoveDirection: the slop first, then the axis - and a perfect diagonal lifts', () => {
+        // The whole of the menu-first gesture's decision. The hold opens the context menu with the finger still
+        // down; this says what the finger did NEXT, once, and for good: up or down is the drag, across is Joplin's
+        // own side-menu swipe and the panel gets out of its way.
+        const d = (dx, dy) => TouchDrag.firstMoveDirection(dx, dy, 10)
+        assert.strictEqual(d(0, 0), null, 'a finger that has not moved has decided nothing')
+        assert.strictEqual(d(10, 0), null, 'exactly the slop is still held still, the same as movedBeyond')
+        assert.strictEqual(d(7, 7), null, 'the slop is per AXIS, not a diagonal distance - the long press says the same')
+        assert.strictEqual(d(0, 11), 'vertical', 'down past the slop is the drag')
+        assert.strictEqual(d(0, -11), 'vertical', '...and so is up')
+        assert.strictEqual(d(11, 0), 'sideways', 'across past the slop is the side menu, not ours')
+        assert.strictEqual(d(-11, 0), 'sideways', '...in either direction')
+        assert.strictEqual(d(11, 11), 'vertical', 'a perfect diagonal goes to the drag: a refused swipe is one flick from being re-tried, a refused lift is not')
+        assert.strictEqual(d(12, 11), 'sideways', 'one pixel more across than down is sideways')
+        assert.strictEqual(d(11, 12), 'vertical', 'and one more down than across is vertical')
+        assert.strictEqual(d(-11, 12), 'vertical', 'the two axes are compared by magnitude, never by sign')
+        // The slop gate IS movedBeyond, so the two cannot drift apart: anything that has moved for one has moved
+        // for the other, at every point of a fine grid straddling the boundary in all four quadrants.
+        for (let dx = -14; dx <= 14; dx++) for (let dy = -14; dy <= 14; dy++){
+            assert.strictEqual(d(dx, dy) === null, !TouchDrag.movedBeyond(dx, dy, 0, 0, 10),
+                `the slop gate must agree with movedBeyond at ${dx},${dy}`)
+        }
+    })
+
+    await test('webview touch drag: the arm refuses the tick circle, the notebook pill and the read-only peek', () => {
         // Every zone that already means something else keeps meaning it, and the peek's rows are not reschedule
-        // sources at all (they are rendered draggable:false for exactly that reason). All of them fall through
-        // to the context menu, which is what the long press did for them before.
+        // sources at all (they are rendered draggable:false for exactly that reason). All of them get their
+        // context menu on the fire like every other kind, and arm no drag behind it.
         const lift = handlerBody('canLiftRow')
         assert.ok(lift.includes("classList.contains('todo-checkbox')"), 'a press on the tick circle must not lift the row (it opens the date picker)')
         assert.ok(lift.includes("classList.contains('todo-notebook')"), 'a press on the notebook pill must not lift the row (it moves the note)')
@@ -3060,8 +3085,62 @@ async function main() {
         // overlay is the overlay's own and never arms anything.
         assert.ok(/closest\('#cockpitOverlay'\)\) return/.test(webviewSource), 'a press inside an in-panel overlay must not arm the press at all')
         // The branch itself: only kind 'todo', and only when the zone allows it.
-        assert.ok(handlerBody('onLongPressFire').includes("longPress.kind === 'todo' && canLiftRow(longPress.target, longPress.el)"),
-            'only a to-do row body lifts; note rows, headings and the sync button keep their menus')
+        assert.ok(/if \(longPress\.kind === 'todo'\)\{[\s\S]{0,900}if \(canLiftRow\(longPress\.target, longPress\.el\)\) armTouchDrag\(\)/.test(handlerBody('onLongPressFire')),
+            'only a to-do row body arms the drag; note rows, headings and the sync button reach their own handlers untouched')
+    })
+
+    await test('webview touch drag: the hold opens the MENU first and only arms the drag behind it', () => {
+        // The first Pixel round killed the lift-at-500ms design: the lift landed in the middle of Joplin's own
+        // side-menu swipe and neither gesture won. The hold is back to being exactly what it was before this
+        // feature existed - it opens the to-do's context menu, with the finger still down - and the drag is armed
+        // silently behind that menu, for the next move to decide.
+        const fire = handlerBody('onLongPressFire')
+        assert.ok(fire.includes('onTodoContextMenu(ev, longPress.id)'), 'a held to-do row must open its menu at the fire, as it always did')
+        assert.ok(fire.indexOf('onTodoContextMenu(ev') < fire.indexOf('armTouchDrag()'),
+            'the menu must open BEFORE the arm, which indexes the rows - and the menu is the one thing on screen that could still move them')
+        assert.strictEqual((fire.match(/\breturn\b/g) || []).length, 0,
+            'no kind may short-circuit the fire any more: every one of the four opens its own menu')
+        // The arm takes NOTHING. A release from there has to leave the menu standing, and a guard release would
+        // have the host repaint the panel out from under it (panel.ts runs refreshPanelData on the last guard down).
+        const arm = handlerBody('armTouchDrag')
+        assert.ok(!arm.includes('dialogGuard'), 'the arm must not take the refresh guard')
+        assert.ok(!arm.includes("classList.add('-dragging')"), 'the arm must not lift the row')
+        assert.ok(!arm.includes('showDragBanner('), 'the arm must not put the banner up')
+        assert.ok(!arm.includes('schedulableSelection()'), 'the arm must not resolve a payload')
+        assert.ok(!arm.includes('selectedRowIDs'), 'the arm must not touch the selection')
+        assert.ok(!arm.includes('NoteContextMenu'), 'and above all it must not close the menu it was armed behind')
+        // What it DOES put in place is everything the next move needs to be read, plus the watchdog that has to
+        // outlive a gesture nothing ever ends.
+        assert.ok(/addEventListener\('touchmove', onTouchDragMove/.test(arm), 'the arm must attach the move listener')
+        assert.ok(arm.includes('setPointerCapture'), 'the arm must capture the finger, so a re-render cannot take the moves away')
+        assert.ok(arm.includes('buildRowIndex()'), 'the arm must index the rows, while the list is certainly still')
+        assert.ok(arm.includes('TOUCH_DRAG_WATCHDOG_MS'), 'the arm must start the watchdog')
+    })
+
+    await test('webview touch drag: the FIRST move decides - vertical lifts the row, sideways is left to Android', () => {
+        const move = handlerBody('onTouchDragMove')
+        assert.ok(move.includes('window.TouchDrag.firstMoveDirection(touchDrag.x - touchDrag.startX, touchDrag.y - touchDrag.startY, TOUCH_DRAG_SLOP)'),
+            'the decision must come from the shared module, measured from the press point with the long press\'s own slop')
+        assert.ok(/if \(!direction\) return/.test(move), 'inside the slop nothing happens at all - the gesture is still only the open menu')
+        assert.ok(/if \(direction === 'sideways'\)\{ endTouchDrag\('sideways'\); return \}/.test(move),
+            'a sideways first move must tear the arming down through the one end, and do nothing else whatsoever')
+        assert.ok(move.includes('liftTouchDrag()'), 'a vertical first move must lift the row')
+        assert.ok(move.indexOf("endTouchDrag('sideways')") < move.indexOf('liftTouchDrag()'),
+            'and the sideways bail must be tested first, or a sideways move would fall straight through into the lift')
+        // The lift is where everything the armed state refused to do happens, in one place - including closing the
+        // menu, which is done by the gesture taking the finger over rather than by the one end (see below).
+        const lift = handlerBody('liftTouchDrag')
+        assert.ok(lift.includes('hideNoteContextMenu()'), 'the lift must close the menu the press opened, before any target is resolved under it')
+        assert.ok(lift.includes("['dialogGuard', true]") && lift.includes('touchDrag.guarded = true'),
+            'the lift is where the refresh guard is taken, and where `guarded` starts saying so')
+        // The payload is taken the way the desktop dragstart takes it - the to-dos WITHIN the selection - so it is
+        // the one pressed row today and inherits a mobile multi-select for free if one is ever built. Reading
+        // longPress.id directly would pass every other pin here and quietly lose that.
+        assert.ok(lift.includes('touchDrag.ids = schedulableSelection()'),
+            'the drag payload must come from schedulableSelection(), like the desktop dragstart')
+        assert.ok(lift.includes("classList.add('-dragging')") && lift.includes('showDragBanner('), 'the lift is what shows the row is up')
+        assert.ok(!handlerBody('endTouchDrag').includes('NoteContextMenu'),
+            'the one end must never touch the context menu: it also ends the gestures whose whole point is that the menu stays')
     })
 
     await test('webview touch drag: the touchmove listener is NON-PASSIVE, or the preventDefault that stops the pan is ignored', () => {
@@ -3075,8 +3154,23 @@ async function main() {
             'the same listener must be removed with matching options')
         const move = handlerBody('onTouchDragMove')
         assert.ok(move.includes('event.preventDefault()'), 'the move handler must prevent the default (the pan)')
-        assert.ok(move.indexOf('event.preventDefault()') < move.indexOf('touches.length !== 1'),
-            'the default must be prevented before any branch can return, or a two-finger frame would let the list pan')
+        // ...but ONLY once the row is lifted. While the drag is merely armed behind the open menu this handler has
+        // to block nothing at all: the move it is about to measure may be Joplin's own side-menu swipe, and a
+        // panel that cancelled it would break the app's navigation to save its own gesture.
+        const first = move.indexOf('event.preventDefault()')
+        assert.strictEqual(move.slice(first - 22, first), 'if (touchDrag.lifted) ',
+            'the first preventDefault must be guarded by the lifted flag - an armed gesture prevents nothing')
+        assert.strictEqual((move.match(/event\.preventDefault\(\)/g) || []).length, 2,
+            'and there must be exactly two: the guarded one, and the lifting move claiming the finger')
+        const second = move.indexOf('event.preventDefault()', first + 1)
+        assert.ok(second > move.indexOf('liftTouchDrag()'),
+            'the second must come AFTER the lift, so the move that lifts the row also stops the list panning under it')
+        assert.ok(move.indexOf('firstMoveDirection') < second,
+            'nothing may be prevented before the direction has been decided')
+        // The guarded one is before the two-finger bail, so a lifted drag still does not let a second finger pan
+        // the list out from under it on the frame that ends the gesture.
+        assert.ok(first < move.indexOf('touches.length !== 1'),
+            'a LIFTED drag must prevent the default before the two-finger bail can return')
     })
 
     await test('webview touch drag: endTouchDrag is ONE end that cannot return before releasing the refresh guard', () => {
@@ -3112,7 +3206,22 @@ async function main() {
             [/setTimeout\(function\(\)\{ endTouchDrag\('watchdog'\) \}, TOUCH_DRAG_WATCHDOG_MS\)/, 'the watchdog must end the drag'],
             [/endTouchDrag\(target \? 'dropped' : 'no-target'\)/, 'a release over nothing must end the drag as well as a drop'],
             [/endTouchDrag\('multi-touch'\)/, 'a second finger arriving mid-move must end the drag'],
+            // The two ends an ARMED gesture has of its own: a finger that came up without travelling, and a first
+            // move that went sideways. Both took nothing, and both must still unwind through the same one end -
+            // that is what takes the touchmove listener, the pointer capture and the watchdog back off.
+            [/endTouchDrag\('released'\)/, 'a release that never moved must tear the arming down'],
+            [/endTouchDrag\('sideways'\)/, 'a sideways first move must tear the arming down'],
         ]) assert.ok(pattern.test(webviewSource), why)
+        // ...and the lifted flag is written in exactly three places, or a torn-down gesture could leave a handler
+        // still thinking the row is up: the arm starts a gesture that is not lifted, the lift raises it, the one
+        // end lowers it. Nothing else may touch it.
+        assert.strictEqual((webviewSource.match(/touchDrag\.lifted = false/g) || []).length, 2,
+            'the lifted flag is lowered in two places only: the arm that initialises the gesture, and the one end')
+        assert.ok(handlerBody('armTouchDrag').includes('touchDrag.lifted = false'), 'the arm must start a gesture that is not lifted')
+        assert.ok(handlerBody('endTouchDrag').includes('touchDrag.lifted = false'), 'and the one end must lower it again')
+        assert.strictEqual((webviewSource.match(/touchDrag\.lifted = true/g) || []).length, 1,
+            'and only one place raises it')
+        assert.ok(handlerBody('liftTouchDrag').includes('touchDrag.lifted = true'), '...the lift itself')
         // ...and nothing else lowers the flag behind its back.
         assert.strictEqual((webviewSource.match(/touchDrag\.active = false/g) || []).length, 1,
             'only endTouchDrag may clear the active flag')
@@ -3129,16 +3238,11 @@ async function main() {
         assert.ok(drop.indexOf("'todosDroppedBetween'") < drop.indexOf('endTouchDrag('), 'the between message must be posted before the drag is ended')
         assert.ok(drop.indexOf("'todosDropped'") < drop.indexOf('endTouchDrag('), 'the date message must be posted before the drag is ended')
         assert.ok(!drop.includes('dialogGuard'), 'the drop must not release the guard itself - that belongs to the one end, after the message')
-        // The guard is taken on the first MOVE rather than at the lift, so a hold-and-release (which opens the
-        // context menu) never touches it: the host's repaint on the release would otherwise reload the webview
-        // out from under the very menu that release just opened.
-        assert.ok(!handlerBody('beginTouchDrag').includes('dialogGuard'), 'the lift must not take the guard')
-        // The payload is taken the way the desktop dragstart takes it - the to-dos WITHIN the selection - so it is
-        // the one pressed row today and inherits a mobile multi-select for free if one is ever built. Reading
-        // longPress.id directly would pass every other pin here and quietly lose that.
-        assert.ok(handlerBody('beginTouchDrag').includes('touchDrag.ids = schedulableSelection()'),
-            'the drag payload must come from schedulableSelection(), like the desktop dragstart')
-        assert.ok(handlerBody('onTouchDragMove').includes("['dialogGuard', true]"), 'the first real move must take it')
+        // The guard is taken at the LIFT rather than at the arm, so the two gestures that end with the menu still
+        // open - a release that never moved, and a sideways first move - never touch it: the host's repaint on the
+        // release would otherwise reload the webview out from under the very menu the press had just opened.
+        assert.ok(!handlerBody('armTouchDrag').includes('dialogGuard'), 'the arm must not take the guard')
+        assert.ok(handlerBody('liftTouchDrag').includes("['dialogGuard', true]"), 'the lift must take it')
     })
 
     await test('webview touch drag: a gap with no neighbours in a dateless group is not painted as a target', () => {
@@ -3183,8 +3287,8 @@ async function main() {
         assert.ok(scrolled.includes('updateDragTarget()'), '...and re-resolve what the finger is now over')
         // ...and so must a scroll the drag did not ask for: if the list pans out from under a lifted row without the
         // gesture being taken away, an unsynced index would write neighbours from rows that have scrolled off.
-        assert.ok(/addEventListener\('scroll', function\(\)\{\s*if \(touchDrag\.active && syncRowIndex\(\)\) updateDragTarget\(\)\s*\}, true\)/.test(webviewSource),
-            'any scroll while a row is lifted must re-sync the index and re-resolve the target')
+        assert.ok(/addEventListener\('scroll', function\(\)\{\s*if \(!touchDrag\.active\) return[\s\S]{0,400}if \(syncRowIndex\(\) && touchDrag\.lifted\) updateDragTarget\(\)\s*\}, true\)/.test(webviewSource),
+            'any scroll under a live gesture must re-sync the index - and only a LIFTED one has a target to re-resolve or anything to paint')
         // ...and re-aim at the same point, or the helper's idle watchdog stops the list after 800ms: a still
         // FINGER sends no touchmove at all, and holding still at the edge is the entire gesture.
         assert.ok(scrolled.includes('edgeAutoscrollUpdate('), 'a scrolled frame must re-aim the loop, or a still finger would stop it')
@@ -3224,32 +3328,45 @@ async function main() {
         assert.ok(toast.includes('if (sticky) return'), 'a sticky toast must not arm the fade timer')
         assert.ok(/GESTURE_TRACE_MAX = 10/.test(webviewSource), 'the ring buffer must be long enough to hold a whole drag (arm, retargets, scroll, drop)')
         // ...and the drag speaks in codes that name what happened, only when the answer CHANGES.
-        for (const code of ['drag-arm', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between'", "'drag-drop:date'", "'drag-cancel:'", 'menu-on-release']){
+        for (const code of ['menu-open', 'drag-lift', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between'", "'drag-drop:date'",
+                            "'drag-cancel:'", 'drag-released', 'drag-sideways-ignored']){
             assert.ok(webviewSource.includes(code), `the trace must carry ${code}`)
         }
+        // The trace is the whole of what the device round can report, and the menu-first gesture's three outcomes
+        // have to be told apart in it: the row went up, the finger let go with the menu still open, or the stroke
+        // was the side menu's. So none of the three shares the cancel code.
+        const end = handlerBody('endTouchDrag')
+        assert.ok(end.includes("if (reason === 'released') traceGesture('drag-released')"), 'a release that never moved must trace as itself')
+        assert.ok(end.includes("else if (reason === 'sideways') traceGesture('drag-sideways-ignored')"), 'and so must a sideways first move')
+        assert.ok(end.includes("else if (reason !== 'dropped') traceGesture('drag-cancel:' + reason)"), 'everything else is a cancel, and a drop traces its own code')
         assert.ok(handlerBody('updateDragTarget').includes('if (sameDragTarget(touchDrag.target, target)){ touchDrag.target = target; return }'),
             'the target trace must fire on a CHANGE only, or one move would flood the whole buffer')
     })
 
-    await test('webview touch drag: a release that never travelled hands the context menu back', () => {
-        // The gesture is speculative: the same 500ms press lifts the row, and only travel commits to a drag.
-        assert.ok(/if \(touchDrag\.moved\)\{ dropTouchDrag\(\); return \}/.test(webviewSource), 'a release that travelled drops')
-        assert.ok(/endTouchDrag\('menu'\)[\s\S]{0,120}onTodoContextMenu\(ev, todoID\)/.test(webviewSource),
-            'a release that did not travel ends the drag and opens the menu the press would have opened')
-        assert.ok(/var ev = synthEvent\(longPress\.target, touchDrag\.x, touchDrag\.y, touchDrag\.row\)/.test(webviewSource),
-            'the menu must be opened with the press point, through the same synthetic event the long press uses')
-        // That event is read from longPress AFTER the adapter's own pointerup listener has run, which is safe only
-        // because of two orderings nothing else pins: the adapter's cancel tidies up the timer and NOTHING else, and
-        // the drag's release listener is registered after the adapter's. Break either and the menu opens on a null
-        // target, with every other test here still green.
+    await test('webview touch drag: a release that never moved tears the arming down and leaves the menu standing', () => {
+        // The gesture is speculative in the other direction now: the press has ALREADY opened the menu, and a
+        // finger that comes up without travelling simply throws away an arming nobody ever saw.
+        assert.ok(/if \(touchDrag\.lifted\)\{ dropTouchDrag\(\); return \}/.test(webviewSource), 'a release from a LIFTED drag drops')
+        assert.ok(/if \(touchDrag\.lifted\)\{ dropTouchDrag\(\); return \}\s*endTouchDrag\('released'\)/.test(webviewSource),
+            'and a release from a merely armed one goes through the one end - which is what takes the touchmove listener, the capture and the watchdog back off')
+        const at = webviewSource.indexOf("document.addEventListener('pointerup', function(event){\n    if (!touchDrag.active")
+        assert.ok(at >= 0, 'the drag\'s own release listener must still be there')
+        const release = webviewSource.slice(at, webviewSource.indexOf('}, true)', at))
+        assert.ok(!release.includes('ContextMenu'), 'the release must neither open nor close a menu: the press opened it 500ms ago and it stays')
+        assert.ok(!release.includes('synthEvent'), '...so it needs no synthetic event of its own any more')
+        // The synthetic click that follows is what would otherwise dismiss that menu (the capture dismiss listener)
+        // or open the note (tap-to-open), and both are held off by longPress.fired still being set. Which is why
+        // the adapter's cancel must tidy up its TIMER and nothing else: clearing `fired` there would let the click
+        // through and the menu would vanish the instant the finger came up.
         const cancel = handlerBody('cancelLongPress')
         assert.strictEqual(cancel.replace(/longPress\.timer/g, '').includes('longPress.'), false,
-            'cancelLongPress must touch longPress.timer and nothing else - the deferred menu reads the rest after it')
-        const adapterUp = webviewSource.indexOf("document.addEventListener('pointerup', cancelLongPress, true)")
-        const dragUp = webviewSource.indexOf('if (touchDrag.moved){ dropTouchDrag(); return }')
-        assert.ok(adapterUp >= 0, 'the adapter\'s own pointerup must still cancel the pending press')
-        assert.ok(adapterUp < dragUp,
-            '...and be registered BEFORE the drag\'s release listener, so the press is cancelled and still readable there')
+            'cancelLongPress must touch longPress.timer and nothing else - the click swallower and the menu-dismiss bail both read longPress.fired after it has run')
+        assert.ok(webviewSource.indexOf("document.addEventListener('pointerup', cancelLongPress, true)") >= 0,
+            'the adapter\'s own pointerup must still cancel the pending press')
+        const dismiss = webviewSource.indexOf('if (longPress && longPress.fired) return')
+        const swallow = webviewSource.indexOf('if (longPress.fired){ longPress.fired = false; event.preventDefault(); event.stopPropagation() }')
+        assert.ok(dismiss >= 0 && swallow > dismiss,
+            'the menu-dismiss click listener must be registered before the swallower, so it sees fired still set and stands aside')
     })
 
     await test('panel.css touch drag: a thicker insertion line, a banner, and NO touch-action on .todo', () => {
