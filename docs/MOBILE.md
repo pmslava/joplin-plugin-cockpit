@@ -132,8 +132,11 @@ All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click
 - **Long-press context menus**: a Pointer Events adapter (500 ms; cancelled by >10 px move, pointer
   up/cancel, or a list scroll) synthesises the three desktop context-menu handlers (to-do row, note
   row, group heading). The trailing synthetic click is swallowed so tap-to-open does not also fire.
-  Since 2.3.0 one of those four presses is answered differently: a hold on a to-do row's BODY lifts the
-  row into the touch drag (§7), and the menu is handed back by a release that never travelled.
+  Since 2.3.0 one of those four presses also does something *behind* the menu it opens: a hold on a
+  to-do row's BODY **arms** the touch drag (§7) silently, with the finger still down. What the finger
+  does next decides — a move up or down closes the menu and lifts the row, a sideways move is left to
+  Android's own side-menu gesture, and a release without moving leaves the menu standing and throws the
+  arming away. The menu itself opens exactly as it always did.
 - **Reschedule on touch**: a mobile-only "Move to date…" to-do menu entry (and a checkbox long-press)
   opens the in-panel alarm overlay (§1a) as the date picker — still the precise route, and now
   alongside the drag (§7).
@@ -366,20 +369,30 @@ Four hazards this was designed around, each of which cost something to get right
   would break the app's navigation to save its own gesture. Which is also why there is deliberately **no
   `touch-action` on `.todo`**: that would apply to every touch on every row, always, and the list must
   keep scrolling by flick.
-  The listener is registered **mid-gesture**, 500 ms into the touch, and that is the part the device
-  round tests: Chromium decides a touch sequence's blocking-handler region on the compositor and a
-  handler added late may arrive after that decision, in which case the moves are delivered
-  *non-cancelable* and `preventDefault()` is a silent no-op — which looks exactly like 18b's failure.
-  **The cheaper thing to try before falling back to a drag handle** is to register the same listener
-  once at load (mobile only) with `if (!touchDrag.active) return` as its first line: identical behaviour,
-  but the region is blocking from `touchstart` onward. It is not the default because it routes every
-  ordinary flick through a main-thread handler, so its cost has to be measured on the device (18j), not
-  assumed away.
+  Two distinct things can go wrong on a device, and they need different fixes — 18b separates them, and
+  the trace is what tells them apart.
+  - **Before the lift**, in the 0–10 px slop window, the panel deliberately prevents nothing at all, while
+    Chromium starts its own pan at roughly 8 px. A single twitch of the list before the row comes up is
+    therefore the *expected* behaviour of this design on any device, not a fault, and **no amount of
+    listener registration changes it**: the handler is declining to cancel those moves on purpose. The
+    fix, if the twitch is bad enough to matter, is to **lower `TOUCH_DRAG_SLOP`** below the platform's
+    scroll-start threshold (4–6 px), at the cost of lifting on a smaller tremor.
+  - **After the lift**, `preventDefault()` is the only thing stopping the pan — and *that* is where the
+    registration point matters. The listener is attached **mid-gesture**, 500 ms into the touch: Chromium
+    decides a touch sequence's blocking-handler region on the compositor, and a handler added late may
+    arrive after that decision, in which case the moves are delivered *non-cancelable* and
+    `preventDefault()` is a silent no-op. The lift traces `drag-uncancelable` when it sees exactly that
+    (`onTouchDragMove` checks `event.cancelable` on the lifting move), so this case names itself.
+    **The cheaper thing to try before falling back to a drag handle** is to register the same listener
+    once at load (mobile only) with `if (!touchDrag.active) return` as its first line: the *lifted* drag
+    then behaves identically but the region is blocking from `touchstart` onward. It is not the default
+    because it routes every ordinary flick through a main-thread handler, so its cost has to be measured
+    on the device (18j), not assumed away.
 - **The checkbox ring overhangs its row.** The mobile tap-target rules grow the 18 px ring to a 40 px
   content box and cancel the growth with an equal negative margin, so the box sticks out of a ~26 px
   row without moving anything. `document.elementFromPoint` in the left column therefore returns the
   **neighbour** row about as often as the right one. Rows are found geometrically instead: an index of
-  `{ el, top, bottom, info }` built at the lift and **shifted** by every later scroll — the drag's own
+  `{ el, top, bottom, info }` built at the **arm** — while the list is certainly still — and **shifted** by every later scroll — the drag's own
   auto-scroll and any other, since a scroll moves every row by the same delta and changes nothing else
   about them — searched by the pure `window.TouchDrag.rowAtY`. (Shifted rather than re-measured because a
   rebuild is a `getBoundingClientRect()` plus `betweenGroupInfo`'s walk back to the heading *per row*, and
@@ -426,8 +439,9 @@ second thing to keep in sync with the finger and adds nothing the line does not 
 The **gesture trace** was fixed first, as its own commit, because it was blind to this gesture: it wrote
 only into the search suggestion list's hint line, which is closed during a row drag. It now falls back
 to the toast in a sticky mode, and the ring buffer holds 10 entries. Codes: `menu-open` (the hold: menu
-up, drag armed), `drag-lift`, `drag-released`, `drag-sideways-ignored`,
-`drag-target:before|after|drop|none` (on a **change** only), `drag-autoscroll:up|down` (on a direction
+up, drag armed), `drag-lift`, `drag-uncancelable` (the lifting move arrived non-cancelable, so
+`preventDefault()` is a no-op from there — 18b's second failure shape), `drag-released`,
+`drag-sideways-ignored`, `drag-target:before|after|drop|none` (on a **change** only), `drag-autoscroll:up|down` (on a direction
 change only), `drag-drop:between|date`, `drag-cancel:<reason>`. A whole gesture therefore reads as
 `menu-open > drag-lift > drag-target:after > drag-drop:between`, or `menu-open > drag-released`, or
 `menu-open > drag-sideways-ignored` — the three outcomes are told apart at a glance, which is the whole
@@ -688,16 +702,23 @@ success vs failure looks like. The build to install is
        - Success: the **menu closes**, the row dims and lifts, an insertion line follows the finger
          between rows, the banner reads "before …" / "after …", and the **list itself does not scroll**.
          The trace reads `menu-open > drag-lift > drag-target:…`.
-       - Failure: the list scrolls under the finger, the row never lifts, or the trace shows
-         `drag-cancel:pointercancel`. Any of those means Android's compositor took the gesture rather
-         than honouring the non-passive `touchmove`. Report it before anything else. **Try the cheap fix
-         first** (§7, the non-passive bullet): register the `touchmove` listener once at load instead of
-         mid-gesture, so the touch sequence is blocking from its `touchstart`, then repeat 18b and 18j.
-         Only if that changes nothing is this **the signal to fall back to a per-row drag handle**
-         (documented above as the rejected-but-kept alternative).
-       - Also report, either way: how far the finger had to travel before the row lifted. The rule fires
-         at 10 px per axis, and Chromium starts its own pan at roughly 8 px — if the list twitches once
-         before the lift takes hold, that margin is what needs changing.
+       - Failure comes in **three different shapes, with three different fixes**. Read the trace strip
+         before deciding which one you saw, and report the strip verbatim either way.
+         1. *The list twitches once, and then the drag takes over anyway* (the trace still reads
+            `menu-open > drag-lift > drag-target:…`). This is the **slop margin**, not Android winning:
+            the panel prevents nothing for the first 10 px on purpose, and Chromium starts its own pan at
+            roughly 8. Registering the listener at load does **not** help here. The fix is to lower
+            `TOUCH_DRAG_SLOP` (panelWebview.js) to 4–6 px and repeat 18b. Report how far the finger had to
+            travel before the row lifted.
+         2. *The row lifts, but the list keeps scrolling under it* — and the trace shows
+            `drag-uncancelable` right after `drag-lift`. The moves are arriving **non-cancelable**, so the
+            `preventDefault()` that stops the pan is a silent no-op. **This is the cheap fix's case**
+            (§7, the non-passive bullet): register the `touchmove` listener once at load instead of
+            mid-gesture, so the touch sequence is blocking from its `touchstart`, then repeat 18b and 18j.
+         3. *The row never lifts at all*, or the trace ends at `menu-open > drag-cancel:pointercancel`
+            with no `drag-lift`. Android's compositor took the pointer away outright. Try the same load-time
+            registration; if that changes nothing, this is **the signal to fall back to a per-row drag
+            handle** (documented above as the rejected-but-kept alternative).
 
     b-bis. **SIDEWAYS first must be left alone.** Hold a to-do row again, and this time move the finger
        **across** the row (left or right) rather than up or down.

@@ -1004,7 +1004,7 @@ content box and cancel the growth with an equal negative margin, so the box stic
 without moving anything on screen. `elementFromPoint` anywhere in the left column therefore returns the
 NEIGHBOUR row about as often as the right one — a gesture that would have rescheduled the wrong to-do
 roughly half the time it was aimed near a circle. Rows are found geometrically instead: an index of the
-rows' boxes, built at the lift and shifted by every scroll, searched by y. That search
+rows' boxes, built at the arm - while the list is certainly still - and shifted by every scroll, searched by y. That search
 is the part that would be wrong on a device and invisible in review, so it lives in a pure module
 (`src/ui/panel/touchDrag.js`, `window.TouchDrag`, the `between.js` pattern) the harness requires
 directly. The big `[data-drop]` targets are still asked of the DOM, and asked FIRST, for a reason that
@@ -1082,7 +1082,7 @@ are proved by mutation rather than asserted: adding a second `return` to `endTou
 release fails "endTouchDrag is ONE end that cannot return before releasing the refresh guard"; making the
 `touchmove` listener passive fails "the touchmove listener is NON-PASSIVE"; moving the guard release
 above the drop message fails "the drop message is posted BEFORE the guard release"; and letting the arm
-path accept a `.todo-checkbox` press fails "the lift refuses the tick circle, the notebook pill and the
+path accept a `.todo-checkbox` press fails "the arm refuses the tick circle, the notebook pill and the
 read-only peek". Each fails exactly one check, with the message that names it.
 
 The review round added seven more, each also failing exactly one check: deleting the `h2` bail fails the
@@ -1090,8 +1090,8 @@ resolver check; rebuilding the index instead of shifting it, and dropping the re
 scroll, both fail the index check; taking the payload from `longPress.id` instead of
 `schedulableSelection()` fails the payload check — the Q3 decision had been the only one with no test at
 all, since both e2e payload assertions read the same single id either way; letting `cancelLongPress` tidy
-up anything besides its timer, and removing the adapter's own `pointerup` registration, each fail the
-deferred-menu check, which now pins the two orderings that menu quietly rests on; and a `touch-action`
+up anything besides its timer fails "a release that never moved tears the arming down and leaves the menu
+standing", which pins the orderings that menu quietly rests on; and a `touch-action`
 smuggled in under `.todo.-dragging` fails the CSS check, which used to look only for the one selector
 spelling the feature happened to use and now scans every rule whose selector mentions a row.
 
@@ -1156,13 +1156,19 @@ out.
 
 ### The first Pixel round, and the menu-first redesign
 
-The device answered before the checklist could be worked through: **the drag did not work**, and the
-reason was not the one every hazard above was written for. It was not Android refusing the non-passive
-`touchmove`, and not the row index. It was that a lift at the 500 ms fire lands *inside Joplin's own
-side-menu gesture* — a hold near the left of the screen followed by any movement is how the app's drawer
-opens — and the two gestures fought over the same touch sequence. Neither won. The half of the design
-that had felt safest, "the 500 ms press already means this row deliberately, so let it lift", was the
-half that was wrong: on this device that press is not exclusively the panel's to interpret.
+The device answered before the checklist could be worked through: **the drag did not work**, and what the
+owner reported was that it **conflicted with Joplin's own side menu on the long press**. That is the
+observation, and it is all of it — the gesture-trace lines from that round never arrived, so nothing below
+is measured. The *working diagnosis* is that a lift at the 500 ms fire lands inside the app's own
+side-menu gesture (a hold followed by movement is how the drawer opens) and that the two fought over the
+same touch sequence with neither winning. It fits the symptom, and it is what the redesign is built on;
+it is not proven, and the hazards this section was originally written for are **not** excluded by it —
+§7 and 18b keep "Android refuses the non-passive `touchmove`" as a live hypothesis with a cheap fix
+attached. What would confirm the diagnosis is 18b-bis (a sideways stroke from a held row opening the
+drawer while the panel lifts nothing) and, if the round produces trace lines,
+`menu-open > drag-cancel:pointercancel` at the 500 ms mark would point the other way. Either way, the half
+of the old design that had felt safest — "the 500 ms press already means this row deliberately, so let it
+lift" — is the half that has to go: on this device that press is not exclusively the panel's to interpret.
 
 Slava's call, and the shape it takes: **the gesture becomes menu-first**, and the panel gives the
 sideways stroke back.
@@ -1197,6 +1203,30 @@ adapter's swallower already eats the click after a fired long press, which is wh
 opening AND — since it `stopPropagation()`s at the document — what keeps that click from reaching the
 menu now sitting under the finger and running one of its items.
 
+The review round that followed left the state machine alone and spent itself on the two things that decide
+whether the *next* device round is conclusive. First, 18b's failure list had survived the redesign unchanged
+and was now wrong in a way that would have cost the feature: it read "the list scrolls under the finger"
+as proof that Android had taken the gesture, and sent the operator to the load-time listener registration.
+But the panel now prevents nothing for the whole 0-10 px armed window, on purpose, while Chromium starts
+its own pan at roughly 8 - so a twitch before the lift is this design's expected behaviour on any device,
+and the load-time registration cannot fix it, because the handler is declining to cancel those moves by
+design. The operator would have run the cheap fix, seen the same twitch, and concluded the design was
+dead. 18b now separates three failure shapes with three different remedies - the twitch (lower
+`TOUCH_DRAG_SLOP`), the pan *after* the lift (the load-time registration), and no lift at all (the
+registration, then the drag handle) - and one line of code makes the middle one name itself:
+`onTouchDragMove` traces `drag-uncancelable` when the lifting move arrives non-cancelable, which is
+Chromium saying it had already decided the sequence's blocking region before the listener existed. Second,
+the e2e lifting step was picking its direction on "does the point stay inside the list", which let it park
+the finger inside the drag's own edge auto-scroll band (32-72 px deep): the list would then scroll under a
+still finger through the whole aim, and the drop would land wherever it had got to - failing like a bad
+aim, the one misdiagnosis that file's header exists to prevent. It now steps towards the middle of the
+list and refuses, by name, a landing point within 80 px of either edge. The rest was accuracy: the
+`cancelLongPress` comment still justified itself by the deleted deferred menu (its real reader is
+`longPress.fired`, which both click listeners consult after the cancel has run); the lift reached back into
+`longPress.id` at a moment minutes of gesture after the arm had snapshotted everything else, so the arm now
+takes `touchDrag.id` too and the lift touches no `longPress` field at all; and §2 of MOBILE.md was still
+describing a hold that lifts.
+
 **The Pixel round** is step 18 of MOBILE.md's checklist, with the trace ON. 18a is now "the menu opens
 with the finger still down"; **18b** is the one that decides the design — keep holding and move up or
 down: the menu must close, the row must lift, and the list must not scroll; and **18b-bis** is its other
@@ -1208,9 +1238,15 @@ Suite: 350 harness checks, all passing (347 before the redesign, plus 3: one dri
 `firstMoveDirection` — including a grid sweep proving its slop gate cannot disagree with `movedBeyond` —
 and two pinning the new order, the menu-before-arm fire with an arm that takes nothing, and the
 first-move rule with the lift that closes the menu and takes the guard; the pins that encoded the old
-order were rewritten in place, so the rest of the count is unchanged). Four mutations were run against
-it and each failed the pins that name it: taking the guard at the arm instead of at the lift, prevent-
-`Default`ing while merely armed, treating a sideways-first move as vertical (both in the module and by
-deleting the panel's bail), and letting a release-without-travel skip `endTouchDrag` so the `touchmove`
-listener outlives the gesture. Playwright: `e2e/mobile-drag.spec.ts` is twelve tests, not run in this
+order were rewritten in place, so the rest of the count is unchanged). Six mutations were run against
+it and each failed the pins that name it: taking the guard at the arm instead of at the lift ("the hold
+opens the MENU first...", "the FIRST move decides...", "the drop message is posted BEFORE the guard
+release"), calling `preventDefault()` while merely armed ("the touchmove listener is NON-PASSIVE..."),
+treating a sideways-first move as vertical both in the module ("touchDrag.firstMoveDirection...") and by
+deleting the panel's bail ("the FIRST move decides...", "EVERY exit routes through that one end"), letting
+a release-without-travel skip `endTouchDrag` so the `touchmove` listener outlives the gesture ("EVERY exit
+routes through that one end", "a release that never moved tears the arming down..."), dropping the
+`drag-uncancelable` trace on the lifting move ("the touchmove listener is NON-PASSIVE...", "the trace falls
+back to the sticky toast...") and having the lift read `longPress.id` instead of the arm's snapshot ("the
+hold opens the MENU first..."). Playwright: `e2e/mobile-drag.spec.ts` is twelve tests, not run in this
 pass — the verifier's.
