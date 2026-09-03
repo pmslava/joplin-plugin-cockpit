@@ -5,7 +5,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { openStyler } from "../ui/styler/styler";
-import { togglePanelVisibility } from "../ui/panel/panel";
+import { filterByNotebook, revealNote, togglePanelVisibility } from "../ui/panel/panel";
 import { showToolbarButtonSettingKey } from "./settings";
 
 /** setupCommands ***********************************************************************************************************************************
@@ -27,6 +27,24 @@ export async function setupCommands(){
         name: 'showStylerDialog',
         label: 'Set Panel CSS',
         execute: openStyler
+    })
+    // ------------------------------------------------------------------ the cross-plugin contract
+    // These two exist for OTHER PLUGINS to call, and their names are the contract: the Whereabouts plugin's
+    // notebook chip executes 'cockpit.filterByNotebook' on a left click and 'cockpit.revealNote' on a double
+    // click, passing a plain id string, and swallows every failure - so a rename here does not break its build,
+    // it silently stops working. They are namespaced (the plain names above are this plugin's own history) and
+    // carry a label so they are reachable from the command palette too, but no menu or toolbar item: neither is
+    // useful without an argument. Both are total on their input - an id that resolves to nothing warns and
+    // returns rather than throwing back into the calling plugin - and neither does any work beyond one refresh.
+    await joplin.commands.register({
+        name: 'cockpit.filterByNotebook',
+        label: 'Cockpit: filter by notebook',
+        execute: filterByNotebook
+    })
+    await joplin.commands.register({
+        name: 'cockpit.revealNote',
+        label: 'Cockpit: reveal note',
+        execute: revealNote
     })
 }
 
