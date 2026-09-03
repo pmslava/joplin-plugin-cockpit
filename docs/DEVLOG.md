@@ -1270,6 +1270,60 @@ produce, so the fix is in the spec - the ring case dismisses the picker with a f
 the device does anyway - and a new pin holds that reset above every early return in the `pointerdown`,
 since the case rests on the ordering rather than merely benefiting from it.
 
+### The second Pixel round: Android's own `contextmenu`, and the handler nobody was watching
+
+The device answered again, and this time with a much sharper report. 18a passed — the hold opens the menu with
+the finger still down. Then: keep holding and move up or down, and **the row lifts (it dims), but the menu does
+not close** (it stays, or sometimes vanishes), **and the row is not moved between rows on release**. So the
+redesign's own half worked: the gesture is being read, the lift happens, Android is not stealing the sequence.
+Something else was putting the menu back.
+
+It was the rows themselves. Every to-do row is rendered with an inline
+`oncontextmenu="onTodoContextMenu(event, id)"` and every note row with `onNoteContextMenu` (`src/core/formats.ts`,
+the list rows and the week cards) — markup that predates the mobile phase entirely and exists for the desktop
+right click. Android's native long press fires a **real `contextmenu`** on whatever is under the finger, and the
+panel's only suppression of it was scoped to `#searchSuggestions`: the belt added in 1.9.8 for the search
+dropdown's own native-callout problem. So on a row the event went straight through to the inline handler, which
+called `showNoteContextMenu` behind the long-press adapter's back.
+
+The nasty part is the timing, because it is **the device's, not ours**: Android's long press is governed by the
+"Touch & hold delay" accessibility setting *and* by Chrome's own ~500 ms, both independent of our adapter's
+500 ms timer. So the platform's `contextmenu` can arrive **before** the fire (a second menu opening over the
+first — which is very plausibly what the FIRST round felt as "a conflict with the side menu on the long press",
+and would mean that diagnosis was half right about the symptom and wrong about the cause), or **after** the lift
+has already run `hideNoteContextMenu()` — which re-opens a menu over a lifted row, exactly the reported "the menu
+does not close". And a menu re-opened under the finger is also what stops the drop: `#noteContextMenu` is a
+`position: fixed` element on `<body>`, so the release lands on IT rather than on a row or a gap, the resolver
+finds no target, and the to-do is not moved. One cause, both halves of the report.
+
+None of it appeared in the gesture trace, and that is the second lesson of the round after the trace's own
+blindness in the first: a row's inline handler is on no traced path, so the panel was doing something visible on
+screen with nothing whatsoever to say about it.
+
+The fix is one line of scope and one word of API. The mobile `contextmenu` listener now refuses the event for
+**every** target — rows, headings, the list, the body alike — and calls `stopImmediatePropagation()` as well as
+`preventDefault()`. That second call is the whole point: `preventDefault()` cancels the *native* menu and the
+selection callout, but an inline `oncontextmenu` is a listener like any other and runs anyway. Stopping the event
+dead in the capture phase, at the document, is what makes the long-press adapter the only way a touch can open a
+context menu. Desktop returns on the listener's first line, so a right click there is byte-identical.
+
+A belt went on those braces at the other end, in `showNoteContextMenu`: while a touch gesture owns the finger —
+armed behind the menu, or lifted into the drag — any other caller is turned away (`menu-blocked`) **before** the
+function's own `hideNoteContextMenu()` can run, which is the other half of the report (the menu that "sometimes
+vanishes" is a blocked opener tidying up on its way in). What makes `touchDrag.active` a sufficient test is the
+fire's ORDER, which the redesign had already fixed for its own reasons: `onLongPressFire` opens the menu *before*
+`armTouchDrag()`, so the adapter's own call is the one call in the panel that finds the flag false. That order is
+now load-bearing rather than merely tidy, and it is pinned from both sides.
+
+The drop path got the trace it should have had from the start. `drag-drop:between` and `drag-drop:date` said only
+that a release had resolved *something*; they now carry **what is about to be written** — four characters of each
+neighbour id (`-` for the end of a group), or the `[data-drop]` date verbatim — and are followed by
+`drag-drop:posted` once the message has gone. A drop into the wrong gap, a correct drop that was never posted,
+and a release that reached no target at all were three states with one code between them; they are three codes
+now, the last being `drag-release:no-target`, which is deliberately NOT one of the `drag-cancel:` family: that end
+is the user's own doing (the banner said "release to cancel" and they did), while every remaining cancel is the
+platform taking the gesture away. Every end of the drag still speaks exactly once.
+
 **The Pixel round** is step 18 of MOBILE.md's checklist, with the trace ON. 18a is now "the menu opens
 with the finger still down"; **18b** is the one that decides the design — keep holding and move up or
 down: the menu must close, the row must lift, and the list must not scroll; and **18b-bis** is its other
@@ -1277,7 +1331,24 @@ half — move sideways instead, and nothing may lift while the menu stays and th
 stroke. If 18b still fails, the cheap fix (registering the `touchmove` listener once at load) comes
 first, and only then the drag-handle fallback.
 
-Suite: 350 harness checks, all passing (347 before the redesign, plus 3: one driving the new pure
+Suite: 351 harness checks, all passing (350 before the SECOND PIXEL ROUND above, plus 1: the panel-wide contextmenu
+suppression and the menu guard, pinned together with the fire order that makes the guard sufficient and with the
+inline handlers in `formats.ts` that are the hazard — the pin asserts those exist, so it retires itself honestly
+if the markup ever stops emitting them. Two existing pins were rewritten in place rather than added to: the
+suggestion list's contextmenu pin now asserts the ABSENCE of its own old `#searchSuggestions` scope, and the
+trace pin carries the four new codes and the drop path's before/after pair. Four more mutations were run against
+the round's own pins, each failing exactly the pin that names it: restoring the `#searchSuggestions`-only
+condition fails "the suppression must NOT be scoped to the suggestion list any more" (and the rewritten
+suggestion-list pin, which now names the same regression from the other side); dropping
+`stopImmediatePropagation()` fails "the event must be stopped dead, or preventDefault alone leaves the inline
+oncontextmenu handlers to run"; removing the `showNoteContextMenu` guard fails "a live touch gesture must block
+any other opener of the context menu"; and swapping the fire's order so the arm runs before the menu fails "the
+fire must open the menu BEFORE it arms the drag" twice over — in the new pin and in the redesign's own. That
+last one is the interesting mutation: with the arm first, `touchDrag.active` would be true on the adapter's own
+call and the guard would block the menu the hold exists to open, so the two changes hold each other up.)
+
+How the 350 it grew from was reached, and what was already proved by mutation, is unchanged below. 350 (347
+before the redesign, plus 3: one driving the new pure
 `firstMoveDirection` — including a grid sweep proving its slop gate cannot disagree with `movedBeyond` —
 and two pinning the new order, the menu-before-arm fire with an arm that takes nothing, and the
 first-move rule with the lift that closes the menu and takes the guard; the pins that encoded the old
@@ -1300,6 +1371,14 @@ return ("a release that never moved tears the arming down..."). The second round
 slice now catches ("the arm refuses the tick circle..."); deleting the arm's `endTouchDrag('re-arm')`
 ("the hold opens the MENU first..."); and giving `.todo.-dragging` a `padding-left`, which would move
 every row under the index the arm had already measured ("panel.css touch drag..."). Playwright:
-`e2e/mobile-drag.spec.ts` is twelve tests. The verifier ran the file for the first time since the
-redesign and got eleven of them green, the ring case red for the spec reason above; it is not re-run
-here - that is the verifier's.
+`e2e/mobile-drag.spec.ts` is fourteen tests now (twelve before this round, plus two for Android's `contextmenu`:
+one dispatching the event on a mobile-mode row and asserting it is `defaultPrevented` and opens NO
+`#noteContextMenu` while the row still carries the inline handler that would have opened one, and one firing it
+in the middle of a LIFTED drag — by the event and again by calling the row's own handler outright, which is what
+an inline handler that survived would do — and then completing the drop, which must still land the to-do
+strictly between its new neighbours as read back from Joplin. The event is synthetic in both, deliberately: what
+is under test is the event PATH, which a dispatched `MouseEvent` exercises exactly, while the gesture that
+produces it on the device is Android's and no harness of ours can make Chromium under Xvfb emit it. The gesture
+halves are real CDP touch as everywhere else in the file.) Of the twelve that came before, the verifier ran the
+file for the first time since the redesign and got eleven green, the ring case red for the spec reason above and
+fixed there; the file is not re-run here — that is the verifier's, and the two new cases have never been run.

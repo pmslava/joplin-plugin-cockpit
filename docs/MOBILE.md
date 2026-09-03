@@ -127,7 +127,9 @@ platforms (it draws above the panel on mobile).
 ### 2. Touch-interaction layer + tap targets + viewport (`panelWebview.js`, `panel.css`)
 
 All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click, dblclick,
-`contextmenu` and HTML5 drag are untouched.
+`contextmenu` and HTML5 drag are untouched. On mobile `contextmenu` is the one event suppressed
+outright, panel-wide: it is the platform's own long press, and the adapter below is the only thing
+allowed to open a menu from a touch (§7's first hazard).
 
 - **Long-press context menus**: a Pointer Events adapter (500 ms; cancelled by >10 px move, pointer
   up/cancel, or a list scroll) synthesises the three desktop context-menu handlers (to-do row, note
@@ -189,7 +191,9 @@ All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click
   change and the native selection at source, so the field never blurs. Without the CSS half, Android's native long press wins —
   it starts a text selection on the row, takes the pointer (a `pointercancel` abandons the 500 ms hold,
   so no mark is ever made) and blurs the search field, which used to tear the whole list down. That was
-  the 1.9.8 device bug; `contextmenu` inside the list is now suppressed on mobile too, and the
+  the 1.9.8 device bug; `contextmenu` is now suppressed on mobile too — panel-wide since 2.3.0's
+  second device round, not only over this list (see §7's first hazard: the rows' own inline handlers were
+  how Android's long press opened a context menu behind the touch drag) — and the
   press-inside flag that protects the field's focus covers the **whole hold**, not just a tap. An apply button (enter-arrow) appears at the right of the list's embedded filter box
   whenever ≥1 row is marked, and doubles as the selection-mode indicator (mobile has no Ctrl to hint
   at, and the hint line at the list's bottom edge reads "Press and hold - select several" there). The
@@ -338,8 +342,8 @@ changes** beyond loading the new module.
 | armed | the first travel past 10 px, `\|dy\| >= \|dx\|` | **lifted** | `liftTouchDrag()`: `hideNoteContextMenu()`, `['dialogGuard', true]`, the selection collapses onto the row, the payload is `schedulableSelection()`, `.-dragging`, the banner names the row — then a target resolved and painted on every move. `trace: drag-lift` |
 | armed | the first travel past 10 px, `\|dx\| > \|dy\|` | **(torn down)** | `endTouchDrag('sideways')` — the menu is untouched, nothing was prevented, Android's own gesture keeps the stroke. `trace: drag-sideways-ignored` |
 | armed | release without travelling | **(torn down)** | `endTouchDrag('released')` — the menu the press opened stays open; the synthetic click is swallowed, so no note opens and no menu item runs. `trace: drag-released` |
-| lifted | release over a gap / a `[data-drop]` | **dropped** | the drop message, THEN the guard release, `trace: drag-drop:between` / `drag-drop:date` |
-| lifted | release over nothing | **cancelled** | `endTouchDrag('no-target')` — only a lifted drag can reach this; an armed release is the row above. `trace: drag-cancel:no-target` |
+| lifted | release over a gap / a `[data-drop]` | **dropped** | the drop message, THEN the guard release, `trace: drag-drop:between <prev>\|<next>` / `drag-drop:date <YYYY-MM-DD>`, then `drag-drop:posted` |
+| lifted | release over nothing | **cancelled** | `endTouchDrag('no-target')` — only a lifted drag can reach this; an armed release is the row above. `trace: drag-release:no-target` (the user's own release, told apart from the platform's `drag-cancel:` ends) |
 | armed / lifted | a second finger, `pointercancel`, `visibilitychange`, resize, orientation change, the watchdog | **cancelled** | `trace: drag-cancel:<reason>` |
 
 Every one of those ends calls the single `endTouchDrag(reason)`, which takes down the `touchmove`
@@ -358,8 +362,30 @@ drag), and otherwise compares magnitudes. The tie — a perfect diagonal — goe
 deliberately: a swipe refused here is one flick away from being re-tried, a lift refused here needs the
 finger up and the press made again.
 
-Four hazards this was designed around, each of which cost something to get right:
+Four hazards this was designed around, each of which cost something to get right — and a fifth the
+second Pixel round added:
 
+- **Android's long press fires a real `contextmenu` on the row, and the rows carry inline handlers.** Every to-do
+  row is rendered with `oncontextmenu="onTodoContextMenu(event, id)"` and every note row with
+  `onNoteContextMenu` (`src/core/formats.ts`, the list rows and the week cards), so the platform's own long press
+  could open the panel's context menu with the adapter knowing nothing about it. Its **timing is the device's**,
+  not ours — the "Touch & hold delay" accessibility setting plus Chrome's own ~500 ms — so it can land
+  *before* the adapter's fire (a menu opening over the menu, which is what the first round reported as a conflict
+  with the side menu) or *after* `liftTouchDrag` has closed the menu (a menu re-opening over the lifted row, whose
+  element then swallows the release that should have reached a gap). **That is the second Pixel round's failure**:
+  the hold opened the menu, the row lifted, the menu stayed, and nothing was rescheduled. None of it showed in the
+  gesture trace, because a row's inline handler is on no traced path. So on mobile `contextmenu` is suppressed
+  **panel-wide** — any target at all, rows and headings and the list and the body alike — with
+  `preventDefault()` **and** `stopImmediatePropagation()` in the document's capture listener, traced once per
+  event as `contextmenu-suppressed:row|heading|other`. `preventDefault()` alone is not enough: it cancels the
+  native callout, but the inline handlers are listeners like any other and would still run; only stopping the
+  event dead in the capture phase makes the long-press adapter the ONLY way a touch opens a context menu. The belt
+  to those braces is in `showNoteContextMenu`, which returns at once (`menu-blocked`) while a touch gesture owns
+  the finger — armed or lifted — and returns **before** it could close the menu that is already open (a
+  blocked call that tidied up on its way out is the other half of the reported symptom). What makes
+  `touchDrag.active` a sufficient test there is the fire's order: the menu opens *before* `armTouchDrag()`, so the
+  adapter's own call is the one call that finds the flag false. Desktop returns on the listener's first line and
+  is byte-identical.
 - **The non-passive `touchmove` is the whole gesture.** `preventDefault()` on a touchmove is the only
   thing that stops Android panning the list under the lifted row, and a document-level touchmove
   listener is **passive by default** in Chrome — where `preventDefault()` does nothing at all. So the
@@ -443,10 +469,16 @@ to the toast in a sticky mode, and the ring buffer holds 10 entries. Codes: `men
 up, drag armed), `drag-lift`, `drag-uncancelable` (the lifting move arrived non-cancelable, so
 `preventDefault()` is a no-op from there — 18b's second failure shape), `drag-released`,
 `drag-sideways-ignored`, `drag-target:before|after|drop|none` (on a **change** only), `drag-autoscroll:up|down` (on a direction
-change only), `drag-drop:between|date`, `drag-cancel:<reason>` (including `drag-cancel:re-arm`, the
+change only), `drag-drop:between <prev>|<next>` and `drag-drop:date <YYYY-MM-DD>` (**what** the release is
+about to write — four characters of each neighbour id, `-` for the end of a group) followed by
+`drag-drop:posted` (the message went), `drag-release:no-target` (a lifted drag released over nothing droppable:
+the user's own cancel, deliberately not one of the platform's), `drag-cancel:<reason>` (including `drag-cancel:re-arm`, the
 unreachable-today path where a fire lands on a gesture still in flight and `armTouchDrag` ends it through
-the single end rather than overwriting its state, so a taken guard can never be dropped silently). A
-whole gesture therefore reads as `menu-open > drag-lift > drag-target:after > drag-drop:between`, or
+the single end rather than overwriting its state, so a taken guard can never be dropped silently), and
+`contextmenu-suppressed:row|heading|other` / `menu-blocked` — the two halves of the panel-wide contextmenu
+refusal (the hazard list above), which is the one part of this gesture that used to happen with nothing said. A
+whole successful gesture therefore reads as
+`menu-open > drag-lift > drag-target:after > drag-drop:between a1b2|c3d4 > drag-drop:posted`, or
 `menu-open > drag-released`, or `menu-open > drag-sideways-ignored` — the three outcomes are told apart at a glance, which is the whole
 job of the trace on the device.
 
@@ -698,15 +730,25 @@ success vs failure looks like. The build to install is
          text-selection handle and no Copy / Select-all bar**. The trace reads `menu-open`.
        - Failure: nothing happens (the hold never fires), the row dims instead of the menu opening (an
          old build), or the native selection bar appears (Android's long press won — the CSS suppression
-         is not reaching this row).
+         is not reaching this row), or TWO menus appear / the menu opens twice (Android's own `contextmenu`
+         reached the row; the strip would then be missing its `contextmenu-suppressed:row` line, which is the
+         panel refusing exactly that event). A `contextmenu-suppressed:row` line in the strip is **not** a
+         failure: it is the platform's own long press being turned away, which is the design.
 
     b. **MAKE OR BREAK: keep holding and move UP or DOWN.** From that same hold, without lifting the
        finger, slide it up and down over other rows.
        - Success: the **menu closes**, the row dims and lifts, an insertion line follows the finger
          between rows, the banner reads "before …" / "after …", and the **list itself does not scroll**.
-         The trace reads `menu-open > drag-lift > drag-target:…`.
-       - Failure comes in **three different shapes, with three different fixes**. Read the trace strip
-         before deciding which one you saw, and report the strip verbatim either way.
+         The trace reads `menu-open > drag-lift > drag-target:…`, and a release over a gap adds
+         `drag-drop:between <prev>|<next> > drag-drop:posted` (or `drag-drop:date <YYYY-MM-DD>` onto a heading)
+         — which is what says the write really went, and between which neighbours, rather than only that
+         the finger came up. A `contextmenu-suppressed:row` anywhere in the strip is expected (Android's own
+         long press, refused). A `menu-blocked` means something still tried to open a menu behind the live drag
+         and was turned away: not a failure, but report it, because it says the platform's event got past the
+         capture listener.
+       - Failure comes in **four different shapes, with four different fixes** (the fourth is what the
+         second Pixel round saw, and is already fixed — it is listed so a recurrence is recognised). Read
+         the trace strip before deciding which one you saw, and report the strip verbatim either way.
          1. *The list twitches once, and then the drag takes over anyway* (the trace still reads
             `menu-open > drag-lift > drag-target:…`). This is the **slop margin**, not Android winning:
             the panel prevents nothing for the first 10 px on purpose, and Chromium starts its own pan at
@@ -726,6 +768,16 @@ success vs failure looks like. The build to install is
             short slop still cancels is this a genuine outright steal. Then try the same load-time
             registration; if that changes nothing either, this is **the signal to fall back to a per-row
             drag handle** (documented above as the rejected-but-kept alternative).
+         4. *The row lifts but the menu stays on screen, and the release reschedules nothing.* **This is
+            what the second Pixel round saw**, and its cause was Android's own `contextmenu` firing on the
+            row and re-opening the menu behind the drag through the row's inline handler (§7's first
+            hazard). It is fixed by suppressing `contextmenu` panel-wide on mobile, so if it happens
+            again the strip is the whole report: `contextmenu-suppressed:row` present says the panel saw
+            the event and refused it (so the menu came from somewhere else), `menu-blocked` says an
+            opener was turned away mid-drag, and **neither of them present** says the platform opened
+            that menu by a route the panel never sees at all. Note also whether the release reached
+            `drag-drop:` + `drag-drop:posted` or ended at `drag-release:no-target` (the finger came up
+            over something that is not a gap, which is what a menu sitting under it would cause).
 
     b-bis. **SIDEWAYS first must be left alone.** Hold a to-do row again, and this time move the finger
        **across** the row (left or right) rather than up or down.
