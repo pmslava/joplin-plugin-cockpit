@@ -1306,6 +1306,19 @@ table {
     user-select: none;
 }
 
+/* NO NATIVE HTML5 DRAG FROM A ROW ON MOBILE, and the third Pixel round is why. Android's WebView starts
+ * one from a long press on a draggable element: it fires dragstart, hands the user a translucent copy of
+ * the row as the platform's drag image, and CANCELS the touch sequence - which kills the panel's own 500ms
+ * long press before it can fire, so no context menu opens and the touch drag never arms. The row markup is
+ * the real fix (renderTodoRowHtml's nativeDrag, src/core/formats.ts: a mobile row carries no draggable
+ * attribute and no drag handlers at all), and this is the belt to it: a row that somehow kept the attribute
+ * still cannot be picked up, because -webkit-user-drag:none is what the WebView reads before it starts one.
+ * The third layer is the capturing dragstart listener in panelWebview.js, which traces `native-dragstart`
+ * if the platform ever tries anyway. */
+.cockpit-mobile .todo {
+    -webkit-user-drag: none;
+}
+
 /* The SAME suppression for the search suggestion rows, which are long-pressed to mark them for a multi-select.
  * Without it Android's native long press wins: it starts a text selection on the row's label and raises the
  * system callout, which takes the pointer (a pointercancel abandons the 500ms hold, so no mark is ever made)
@@ -1321,6 +1334,45 @@ table {
     -webkit-user-select: none;
     user-select: none;
     touch-action: pan-y;
+}
+
+/* Drag to reschedule on touch. The insertion line is the desktop one, drawn a pixel thicker: it is being aimed
+ * at with a fingertip rather than a cursor, and it is the only thing that says where the to-do will land. Same
+ * inset box-shadow, so it still adds no height and no row moves under the finger. NOTE what is deliberately NOT
+ * here: a touch-action on .todo. The list must keep scrolling by flick, and the drag stops the pan the only way
+ * that can be turned on and off per gesture - preventDefault() on a non-passive touchmove, attached from the
+ * ARM (the menu-first hold's own 500ms) and taken off at the one end, so the list holds still under a held
+ * finger as well as under a lifted row (see panelWebview.js). A touch-action would apply to every touch on
+ * every row, always. */
+.cockpit-mobile .todo.-drop-before {
+    box-shadow: inset 0 4px 0 -1px var(--cockpit-url-color, #2D6BDC);
+}
+
+.cockpit-mobile .todo.-drop-after {
+    box-shadow: inset 0 -4px 0 -1px var(--cockpit-url-color, #2D6BDC);
+}
+
+/* The drag banner: what is moving and what a release would do with it, pinned to the top of the panel so the
+ * hand holding the row never covers it. Appended to <body> like the toast, so a stray re-render cannot destroy
+ * it, and pointer-events:none so it can never take the finger the drag needs. The -cancel state is the honest
+ * answer for a finger over nothing droppable - the release will do nothing - and says so by dropping the accent
+ * border and dimming, rather than by going blank. Created only by the touch drag, so these rules never match on
+ * desktop. */
+#cockpitDragBanner {
+    position: fixed; left: 12px; right: 12px; top: 12px; z-index: 200;
+    padding: 8px 12px; border-radius: 6px;
+    background-color: var(--cockpit-background-color, #1D2024);
+    border: 1px solid var(--cockpit-url-color, #2D6BDC);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    color: var(--cockpit-color, inherit);
+    font-size: 0.9em; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    pointer-events: none;
+}
+
+#cockpitDragBanner.-cancel {
+    border-color: var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    opacity: 0.8;
 }
 
 /* Tap-target enlargement. Every rule below grows only the touch/hit area to ~40px; the visible box and
@@ -1454,6 +1506,17 @@ table {
 }
 
 #cockpitToast.-show { opacity: 1; }
+
+/* The gesture trace's sticky strip (see traceGesture in panelWebview.js): the same toast element, dressed
+ * as a diagnostic read-out rather than a notice - smaller, monospaced and left-aligned, so a line of codes
+ * reads as a sequence and wraps instead of being centred and clipped. It does not fade on its own; an
+ * ordinary toast takes the class back off and re-arms the fade. */
+#cockpitToast.-trace {
+    font-family: monospace;
+    font-size: 0.75em;
+    text-align: left;
+    word-break: break-word;
+}
 
 /* In-panel overlays (mobile): the notebook / tag / alarm pickers, drawn as a fixed layer over the panel
  * so a native dialog (which opens BEHIND the panel on mobile) is never needed. Appended to <body>, so a

@@ -199,6 +199,9 @@ export async function setupPanel(){
     // suggestion dropdown and inserts a picked (or multi-marked) token - the same module the Node unit tests drive
     // through the insertion / quoting / duplicate-skip cases.
     await joplin.views.panels.addScript(panel, '/ui/panel/searchTokens.js')
+    // The pure band / row-index math of the mobile touch drag (window.TouchDrag), loaded before panelWebview.js
+    // resolves what a finger is over - the same module the Node unit tests drive through the boundaries.
+    await joplin.views.panels.addScript(panel, '/ui/panel/touchDrag.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panelWebview.js')
     await joplin.views.panels.addScript(panel, '/ui/panel/panel.css')
     await joplin.views.panels.onMessage(panel, eventHandler)

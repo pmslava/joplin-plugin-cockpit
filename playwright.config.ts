@@ -24,13 +24,19 @@ export default defineConfig({
   timeout: 240_000,
   // A stuck suite must stop itself before the CI job's timeout-minutes hard-cancels it: a global
   // timeout ends the run gracefully and still writes the HTML report and traces (a hard cancel does
-  // not), so failures stay diagnosable. Kept comfortably under the workflow's 20-minute job cap.
+  // not), so failures stay diagnosable. Kept comfortably under the workflow's 40-minute job cap.
   //
   // globalTimeout covers globalSetup too, so time spent queueing for the machine-wide lock would
   // otherwise come out of the suite's budget. Locally the lock-wait budget is therefore ADDED on top
-  // (the suite still gets its full 18 minutes once its turn comes); on CI each repo has its own VM,
-  // the lock is never contended, and the cap stays exactly where the job's 20-minute limit needs it.
-  globalTimeout: 18 * 60_000 + (process.env.CI ? 0 : LOCK_WAIT_MS),
+  // (the suite still gets its full 30 minutes once its turn comes); on CI each repo has its own VM,
+  // the lock is never contended, and the cap stays exactly where the job's own limit needs it.
+  //
+  // Raised 18 → 25 when the mobile touch-drag spec became the seventeenth file, and 25 → 30 for 2.3.0, where
+  // that spec grew to sixteen cases whose beforeAll seeds ~100 to-dos through the data API: main alone ran 82
+  // tests in ~12 minutes, and each file launches its own Joplin while the gesture cases each wait out a settle
+  // and a panel refresh. A healthy full run is still well under the cap; what the cap is for is a stuck one
+  // ending itself gracefully, with its report and traces written.
+  globalTimeout: 30 * 60_000 + (process.env.CI ? 0 : LOCK_WAIT_MS),
   expect: { timeout: 20_000 },
   // A single Joplin instance at a time.
   fullyParallel: false,

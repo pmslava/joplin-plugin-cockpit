@@ -36,10 +36,21 @@ export { escapeHtml } from "./html";
  * sources: selection is desktop module state that survives re-renders and exists only to power dragging/bulk actions the read-only peek cannot use,   *
  * so a peek row that entered it would otherwise persist and be swept into a later multi-row drag of an ordinary row. Every ordinary row passes         *
  * draggable:true and is byte-for-byte what renderTodoRow emitted before this was extracted.                                                           *
+ *                                                                                                                                                     *
+ * options.nativeDrag === false suppresses the draggable attribute and the two drag handlers AND NOTHING ELSE - the selection onmousedown stays, which  *
+ * is the whole difference between it and draggable:false. It is what an ORDINARY MOBILE ROW passes, and the third Pixel round is why. Android's        *
+ * WebView starts a native HTML5 drag from a long press on a draggable element: it fires dragstart (the desktop handler runs, the row is selected and   *
+ * a translucent copy of it follows the finger as the platform's drag image) and then CANCELS the touch sequence, so the panel's own 500ms long-press   *
+ * timer never fires - no context menu, no armed touch drag, and a heading drop that "works" only because the native drag found the heading's inline    *
+ * ondrop. A row that carries no draggable attribute cannot start one, so the touch gesture gets the finger it was designed around. This repo believed  *
+ * the opposite ("Android fires no HTML5 drag from a touch") until the device screenshots showed the drag image; MOBILE.md 7 records that.              *
  ***************************************************************************************************************************************************/
 function renderTodoRowHtml(todo, label, options?){
     var mobile = !!(options && options.mobile)
     var draggable = !options || options.draggable !== false
+    // Two independent switches, and only the first one touches selection: draggable:false is the peek's row (no drag,
+    // no selection), nativeDrag:false is an ordinary mobile row (no HTML5 drag, selection exactly as on desktop).
+    var nativeDrag = draggable && !(options && options.nativeDrag === false)
     var checkedString = todo.todo_completed ? "checked" : ""
     var checkboxHints = mobile ? "" : "&#10;Left click to tick/untick&#10;Right click to change due"
     var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
@@ -53,8 +64,8 @@ function renderTodoRowHtml(todo, label, options?){
     var total = Number(todo.checkboxTotal) || 0
     var percent = total ? Math.round((Number(todo.checkboxDone) || 0) / total * 100) : 0
     var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
-    var draggableAttr = draggable ? ` draggable="true"` : ""
-    var dragHandlers = draggable
+    var draggableAttr = nativeDrag ? ` draggable="true"` : ""
+    var dragHandlers = nativeDrag
         ? `
                     ondragstart="onTodoDragStart(event, '${todo.id}')"
                     ondragend="onTodoDragEnd(event)"`
@@ -274,8 +285,11 @@ abstract class BaseFormat {
     protected renderTodoRow(todo, label){
         // The row markup lives in the shared renderTodoRowHtml so the read-only "results outside current
         // filters" peek can reuse it verbatim. isMobile is carried in the view state (see panel.ts) and drops
-        // the desktop-only hover action hints; draggable stays true here so ordinary rows are unchanged.
-        return renderTodoRowHtml(todo, label, { mobile: !!(this.viewState && (this.viewState as any).isMobile), draggable: true })
+        // the desktop-only hover action hints; draggable stays true here so ordinary rows are unchanged, while
+        // nativeDrag is off on mobile so Android cannot start its own HTML5 drag from the long press the touch
+        // gesture is built on (see renderTodoRowHtml's header and MOBILE.md 7).
+        var rowMobile = !!(this.viewState && (this.viewState as any).isMobile)
+        return renderTodoRowHtml(todo, label, { mobile: rowMobile, draggable: true, nativeDrag: !rowMobile })
     }
 
     /** getHeadingDropTarget ************************************************************************************************************************
@@ -672,7 +686,9 @@ class WeekFormat extends DateFormat {
      * A card with no due time shows the circle and the pill on the head line, and the title still starts on the second, so the rhythm is the same.     *
      * The wiring is identical to renderTodoRow - same wrapper class, data-todo-id, drag/select/click/contextmenu handlers and the todo-checkbox /       *
      * todo-title / todo-notebook zone classes the panel's handlers key off - so click-to-open, circle behaviours, pill filter/move, drag & drop,        *
-     * selection highlighting and the completed styling all carry over unchanged; only the layout differs.                                               *
+     * selection highlighting and the completed styling all carry over unchanged; only the layout differs. Including the mobile rule: a card is a to-do   *
+     * row like any other, so on mobile it carries no draggable attribute and no drag handlers either, or Android's long press would start its own        *
+     * native HTML5 drag from it and take the finger away from the panel's touch gesture (renderTodoRowHtml's header, and MOBILE.md 7).                    *
      ***********************************************************************************************************************************************/
     protected renderWeekCard(todo){
         var checkedString = todo.todo_completed ? "checked" : ""
@@ -688,14 +704,18 @@ class WeekFormat extends DateFormat {
         var progressTitle = total ? `${todo.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
         var time = todo.todo_due ? this.getTimeString(todo.todo_due) : ""
         var timeString = time ? `<span class="week-card-time">${escapeHtml(time)}</span>` : ""
+        // The same rule renderTodoRowHtml's nativeDrag applies, spelled out here because a card builds its own tag:
+        // no draggable attribute and no drag handlers on mobile, and everything else - selection included - unchanged.
+        var draggableAttr = mobile ? "" : ` draggable="true"`
+        var dragHandlers = mobile ? "" : `
+                    ondragstart="onTodoDragStart(event, '${todo.id}')"
+                    ondragend="onTodoDragEnd(event)"`
         return `
-                <div class="todo -card${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}" draggable="true"
+                <div class="todo -card${todo.todo_completed ? " -completed" : ""}" data-todo-id="${todo.id}"${draggableAttr}
                     onmousedown="onTodoRowMouseDown(event, '${todo.id}')"
                     onclick="onTodoRowClicked(event, '${todo.id}')"
                     ondblclick="onRowDoubleClicked(event, '${todo.id}')"
-                    oncontextmenu="onTodoContextMenu(event, '${todo.id}')"
-                    ondragstart="onTodoDragStart(event, '${todo.id}')"
-                    ondragend="onTodoDragEnd(event)">
+                    oncontextmenu="onTodoContextMenu(event, '${todo.id}')"${dragHandlers}>
                     <div class="week-card-head">
                         <input type="checkbox" class="todo-checkbox${total ? "" : " -plain"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}${checkboxHints}"
                             onchange="onTodoChecked('${todo.id}', this.checked)" ${checkedString}>

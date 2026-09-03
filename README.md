@@ -77,7 +77,7 @@ Regular notes appear in their own "Notes" group, before or after the to-dos, per
 
 ## Due dates
 
-On desktop, drag a to-do onto a calendar day, a week-planner day or a list heading to reschedule it. Onto Today or Tomorrow it becomes due that day; onto a period group — This or Next Week, Month or Year — it becomes due on the **first** day of that group, the earliest day it names rather than its deadline; onto No Due Date its alarm is cleared. Drop into the gap *between* two rows and it lands midway between its new neighbours; drop several and the interval is divided into equal shares in the order you dragged them. That works at a group's edges too, including inside Overdue. While you are dragging, holding the pointer near the top or bottom edge of the list scrolls it, so a heading or a day that is off screen can be reached without letting go. A to-do dragged onto a bare day gets the day start time, 09:00 unless you change it.
+Drag a to-do onto a calendar day, a week-planner day or a list heading to reschedule it. Onto Today or Tomorrow it becomes due that day; onto a period group — This or Next Week, Month or Year — it becomes due on the **first** day of that group, the earliest day it names rather than its deadline; onto No Due Date its alarm is cleared. Drop into the gap *between* two rows and it lands midway between its new neighbours; drop several and the interval is divided into equal shares in the order you dragged them. That works at a group's edges too, including inside Overdue. While you are dragging, holding the pointer near the top or bottom edge of the list scrolls it, so a heading or a day that is off screen can be reached without letting go. A to-do dragged onto a bare day gets the day start time, 09:00 unless you change it. On Android the same thing is done with a finger: hold a to-do for half a second for its menu, keep holding and move it up or down to drag it — an insertion line follows you between the rows, a banner says where it will land, and letting go outside the list cancels.
 
 For an exact time there is the picker: a YYYY-MM-DD date field, an HH:MM time field, and a month grid starting on the profile's first day of the week, with scrolling hour and minute columns pinned flush with it. Two rows of buttons sit above. The first is absolute — Today, Tomorrow, Weekends (the nearest Saturday), Next Monday. The second accumulates as you press it: +hour, +day, +week, +month(day) for the same weekday next month, +month(date) for the same day-of-month, clamped.
 
@@ -227,7 +227,6 @@ Cockpit's settings live in Joplin's own Settings › Plugins › Cockpit.
 - **Excluded notebooks** — see [Search and filtering](#search-and-filtering).
 - **Theme, completed-to-do style, font size, circle size and the six custom colours** — see [Appearance](#appearance).
 - **Show the Cockpit button in the note toolbar** — a gauge button in the note toolbar toggles the panel, and the same command sits in Tools › Cockpit alongside this switch and Set Panel CSS. Joplin cannot add or remove a toolbar button while running, so turning it on or off applies after a restart, and Cockpit says so.
-- **Gesture trace** — a default-off, mobile-only diagnostic that replaces the suggestion list's hint line with the last few touch events, so a touch problem on a real device can be reported precisely.
 
 ## On Android
 
@@ -235,9 +234,11 @@ One .jpl serves both platforms; it detects the platform at runtime. On mobile Co
 
 Every picker — the notebook picker, the tag editor, the date picker, the whole profile editor — is drawn as a touch overlay inside the panel itself, because a plugin dialog on Android is always drawn behind the panel. A half-second press on a row, a group heading or a to-do's circle opens the same menus a desktop right-click does, and to-do rows gain an explicit "Move to date…" entry since an 18 px circle is a hard touch target. Rows get roughly 40 px hit areas, and the create buttons drop to icons so the header can give its width to the profile picker.
 
+That same half-second hold also **arms a drag** behind the menu it opens: keep the finger down and move it **up or down** and the menu closes and the row lifts, to be dropped in the gap between two rows, or onto a group heading, a calendar day or a week-planner column, exactly as a mouse drag does on desktop. Releasing over anything else cancels; a hold you release without moving just leaves the menu open; and a sideways move is left to Joplin's own side-menu swipe.
+
 Android can restart the panel's webview under load, so Cockpit keeps the scroll position, an open picker and an in-progress search — the typed query, the open dropdown and its marks — on the plugin side and rebuilds them.
 
-Desktop-only: drag-and-drop rescheduling, Ctrl/Shift multi-select and the batch actions that follow from it, double-click to open in a new window, custom panel CSS, and the note-toolbar button.
+Desktop-only: Ctrl/Shift multi-select and the batch actions that follow from it, double-click to open in a new window, custom panel CSS, and the note-toolbar button.
 
 ## Build from source
 
