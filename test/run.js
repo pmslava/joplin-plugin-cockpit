@@ -3180,8 +3180,10 @@ async function main() {
         for (const [dx, dy] of [[0, PRESS_SLOP + 1], [PRESS_SLOP + 1, 0], [PRESS_SLOP + 2, PRESS_SLOP + 2],
                                 [0, -LIFT_PX], [LIFT_PX - 1, 0], [0, LIFT_PX], [-LIFT_PX, LIFT_PX]]){
             assert.strictEqual(d(dx, dy), null, `travel of ${dx},${dy} is inside the tolerance and must decide nothing`)
-            assert.strictEqual(TouchDrag.movedBeyond(dx, dy, 0, 0, PRESS_SLOP) && d(dx, dy) === null, TouchDrag.movedBeyond(dx, dy, 0, 0, PRESS_SLOP),
-                `...even though ${dx},${dy} would have passed the press's own ${PRESS_SLOP}px slop`)
+            // ...and the table is only worth anything while every row of it really IS a travel the old gate would
+            // have decided on. This asserts that, rather than re-asserting the line above in a longer form.
+            assert.strictEqual(TouchDrag.movedBeyond(dx, dy, 0, 0, PRESS_SLOP), true,
+                `${dx},${dy} must be past the press's own ${PRESS_SLOP}px slop, or it proves no tolerance at all`)
         }
         // The threshold gate IS movedBeyond, at whatever number the caller passes, so the two cannot drift apart:
         // anything that has moved for one has moved for the other, at every point of a grid straddling both
@@ -3430,6 +3432,14 @@ async function main() {
             'the lift may only rewrite the selection when the pressed row is NOT in it')
         assert.strictEqual((lift.match(/selectedRowIDs\.clear\(\)/g) || []).length, 1,
             '...and exactly once, inside that guard: an unconditional clear is the bug being fixed')
+        // VERBATIM is a claim about what is NOT written as much as about what is. lastClickedRowID and
+        // lastSelectionInteractionID are the anchors a CLICK maintains for a Shift range; no drag of either kind
+        // touches them, and a lift that did would be a second selection mechanism wearing the first one's name.
+        for (const anchor of ['lastClickedRowID', 'lastSelectionInteractionID']){
+            const written = new RegExp(anchor + '\\s*=[^=]')
+            assert.strictEqual(written.test(lift), false, `the lift must not write ${anchor} - the desktop dragstart does not`)
+            assert.strictEqual(written.test(handlerBody('onTodoDragStart')), false, `...and this pin is only honest while onTodoDragStart does not either (${anchor})`)
+        }
         // The desktop dragstart is the reference, so the two are compared here rather than described twice.
         const dragStart = handlerBody('onTodoDragStart')
         assert.ok(/if \(!selectedRowIDs\.has\(todoID\)\)\{/.test(dragStart), 'the desktop dragstart is the semantics being mirrored')
@@ -3493,13 +3503,18 @@ async function main() {
             '...before the lift it is about to make pointless')
     })
 
-    await test('webview touch drag: a stale gesture on the same finger is cleared at the next pointerdown', () => {
+    await test('webview touch drag: a stale gesture is cleared by the next press that begins alone', () => {
         // THE OTHER ROUTE TO "the context menu doesn't appear at all", and it has nothing to do with the lift.
-        // showNoteContextMenu turns every opener away while a gesture is active; the drag's second-pointer
-        // listener ends a gesture only when the new pointer id DIFFERS, so a one-finger re-press carrying the SAME
-        // id used to arrive with a stale `active` and open no menu at all for up to the 15s watchdog.
-        assert.ok(/if \(touchDrag\.active && event\.pointerId === touchDrag\.pointerId\) endTouchDrag\('stale-pointer'\)/.test(webviewSource),
-            'the adapter\'s pointerdown must end a gesture the previous press left running on this same finger')
+        // showNoteContextMenu turns every opener away while a gesture is active, so a gesture whose pointerup was
+        // lost swallows every menu until the 15s watchdog. The reset must NOT be written as a pointer id
+        // comparison: Blink hands every touch point a fresh id, so `event.pointerId === touchDrag.pointerId` is
+        // never true for the ordinary "one finger presses twice" and the reset would be dead code on the device.
+        // What it is written on is isPrimary - a press that begins with no other finger down, which an unfinished
+        // gesture cannot be joined by - and that is a property of the event, not a guess about the platform.
+        assert.ok(/if \(touchDrag\.active && event\.isPrimary\) endTouchDrag\('stale-pointer'\)/.test(webviewSource),
+            'the adapter\'s pointerdown must end a stale gesture on the next press that begins alone')
+        assert.strictEqual(/event\.pointerId === touchDrag\.pointerId\) endTouchDrag\('stale-pointer'\)/.test(webviewSource), false,
+            '...and never on a pointer id the platform does not reuse, which would never fire')
         const adapterStart = webviewSource.indexOf('longPress.fired = false')
         const reset = webviewSource.indexOf("endTouchDrag('stale-pointer')", adapterStart)
         const zoneGate = webviewSource.indexOf("if (!kind) return", adapterStart)
@@ -3514,6 +3529,12 @@ async function main() {
         // that finger armed goes with it), and the two must not be collapsed into one.
         assert.ok(/if \(!touchDrag\.active \|\| event\.pointerId === touchDrag\.pointerId\) return\s*\n\s*cancelLongPress\(\)\s*\n\s*endTouchDrag\('second-pointer'\)/.test(webviewSource),
             'a genuine second finger still ends the gesture as a second finger, and takes its own pending press with it')
+        // ...and the ORDER of the two listeners is what keeps a fresh press alive: the adapter's pointerdown is
+        // registered first, so on a primary press it has already cleared `active` and the second-pointer listener
+        // returns at its own guard instead of cancelling the long press that press just started. Registered the
+        // other way round, the reset above would fix the menu and the cancel below would take it away again.
+        assert.ok(webviewSource.indexOf("endTouchDrag('stale-pointer')") < webviewSource.indexOf("endTouchDrag('second-pointer')"),
+            'the stale reset must be registered before the second-pointer listener, or it cancels the press it just rescued')
     })
 
     await test('webview touch drag: endTouchDrag is ONE end that cannot return before releasing the refresh guard', () => {
@@ -3678,7 +3699,7 @@ async function main() {
         assert.ok(scrolled.includes('updateDragTarget()'), '...and re-resolve what the finger is now over')
         // ...and so must a scroll the drag did not ask for: if the list pans out from under a lifted row without the
         // gesture being taken away, an unsynced index would write neighbours from rows that have scrolled off.
-        assert.ok(/addEventListener\('scroll', function\(\)\{\s*if \(!touchDrag\.active\) return[\s\S]{0,400}if \(syncRowIndex\(\) && touchDrag\.lifted\) updateDragTarget\(\)\s*\}, true\)/.test(webviewSource),
+        assert.ok(/addEventListener\('scroll', function\(\)\{\s*if \(!touchDrag\.active\) return[\s\S]{0,700}if \(syncRowIndex\(\) && touchDrag\.lifted\) updateDragTarget\(\)\s*\}, true\)/.test(webviewSource),
             'any scroll under a live gesture must re-sync the index - and only a LIFTED one has a target to re-resolve or anything to paint')
         // ...and re-aim at the same point, or the helper's idle watchdog stops the list after 800ms: a still
         // FINGER sends no touchmove at all, and holding still at the edge is the entire gesture.
@@ -3697,7 +3718,8 @@ async function main() {
         assert.ok(/var TOUCH_DRAG_WATCHDOG_MS = \d+/.test(webviewSource), 'the watchdog must be a named, tunable constant')
         // THE RELATION, not just the two numbers. The press survives 10px from the press point; if the lift used
         // that same number from that same origin the arm would be born at the edge of its own threshold, which is
-        // the arithmetic behind two of the third Pixel round's four reports. Bigger is the property; 24 is a taste.
+        // the arithmetic behind two of the third Pixel round's four reports. BIGGER is the property that is pinned;
+        // the 20 itself is a taste, and a modest one because Android's own drag - the round's real cause - is gone.
         const slop = Number(/var TOUCH_DRAG_SLOP = (\d+)/.exec(webviewSource)[1])
         const liftPx = Number(/var TOUCH_DRAG_LIFT_PX = (\d+)/.exec(webviewSource)[1])
         assert.ok(liftPx > slop, 'the lift threshold must be LARGER than the slop the press survives on, or the drag decides before the user has')
