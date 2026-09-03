@@ -3055,29 +3055,45 @@ async function main() {
         assert.strictEqual(TouchDrag.movedBeyond(11, 0, 0, 0, 10), true, 'one past the slop on x has')
         assert.strictEqual(TouchDrag.movedBeyond(0, -11, 0, 0, 10), true, 'and so has one past it on y, in either direction')
         assert.strictEqual(TouchDrag.movedBeyond(7, 7, 0, 0, 10), false, 'the rule is per AXIS, not a diagonal distance')
+        // The same arithmetic answers the drag's own, larger question: one function, two thresholds, so "has it
+        // moved" cannot come to mean two different things to the press and to the lift.
+        assert.strictEqual(TouchDrag.movedBeyond(24, 0, 0, 0, 24), false, 'exactly the lift threshold is still held still too')
+        assert.strictEqual(TouchDrag.movedBeyond(0, 25, 0, 0, 24), true, 'and one past it has travelled')
     })
 
-    await test('touchDrag.firstMoveDirection: the slop first, then the axis - and a perfect diagonal lifts', () => {
+    await test('touchDrag.liftDecision: the LIFT threshold first, then the axis - and a perfect diagonal lifts', () => {
         // The whole of the menu-first gesture's decision. The hold opens the context menu with the finger still
         // down; this says what the finger did NEXT, once, and for good: up or down is the drag, across is Joplin's
         // own side-menu swipe and the panel gets out of its way.
-        const d = (dx, dy) => TouchDrag.firstMoveDirection(dx, dy, 10)
+        const d = (dx, dy) => TouchDrag.liftDecision(dx, dy, 24)
         assert.strictEqual(d(0, 0), null, 'a finger that has not moved has decided nothing')
-        assert.strictEqual(d(10, 0), null, 'exactly the slop is still held still, the same as movedBeyond')
-        assert.strictEqual(d(7, 7), null, 'the slop is per AXIS, not a diagonal distance - the long press says the same')
-        assert.strictEqual(d(0, 11), 'vertical', 'down past the slop is the drag')
-        assert.strictEqual(d(0, -11), 'vertical', '...and so is up')
-        assert.strictEqual(d(11, 0), 'sideways', 'across past the slop is the side menu, not ours')
-        assert.strictEqual(d(-11, 0), 'sideways', '...in either direction')
-        assert.strictEqual(d(11, 11), 'vertical', 'a perfect diagonal goes to the drag: a refused swipe is one flick from being re-tried, a refused lift is not')
-        assert.strictEqual(d(12, 11), 'sideways', 'one pixel more across than down is sideways')
-        assert.strictEqual(d(11, 12), 'vertical', 'and one more down than across is vertical')
-        assert.strictEqual(d(-11, 12), 'vertical', 'the two axes are compared by magnitude, never by sign')
-        // The slop gate IS movedBeyond, so the two cannot drift apart: anything that has moved for one has moved
-        // for the other, at every point of a fine grid straddling the boundary in all four quadrants.
-        for (let dx = -14; dx <= 14; dx++) for (let dy = -14; dy <= 14; dy++){
-            assert.strictEqual(d(dx, dy) === null, !TouchDrag.movedBeyond(dx, dy, 0, 0, 10),
-                `the slop gate must agree with movedBeyond at ${dx},${dy}`)
+        assert.strictEqual(d(24, 0), null, 'exactly the threshold is still held still, the same as movedBeyond')
+        assert.strictEqual(d(17, 17), null, 'the threshold is per AXIS, not a diagonal distance')
+        assert.strictEqual(d(0, 25), 'vertical', 'down past the threshold is the drag')
+        assert.strictEqual(d(0, -25), 'vertical', '...and so is up')
+        assert.strictEqual(d(25, 0), 'sideways', 'across past the threshold is the side menu, not ours')
+        assert.strictEqual(d(-25, 0), 'sideways', '...in either direction')
+        assert.strictEqual(d(25, 25), 'vertical', 'a perfect diagonal goes to the drag: a refused swipe is one flick from being re-tried, a refused lift is not')
+        assert.strictEqual(d(26, 25), 'sideways', 'one pixel more across than down is sideways')
+        assert.strictEqual(d(25, 26), 'vertical', 'and one more down than across is vertical')
+        assert.strictEqual(d(-25, 26), 'vertical', 'the two axes are compared by magnitude, never by sign')
+        // THE THIRD PIXEL ROUND'S ARITHMETIC. The press survives on 10px from the press point; if the lift used
+        // that same number the arm would be born at the edge of its own threshold and the smallest drift after the
+        // menu opened would lift the row and close the menu. Everything the OLD gate would have decided, this one
+        // must still call undecided - which is what "some tolerance for hold and move" means as a test.
+        for (const [dx, dy] of [[0, 11], [11, 0], [12, 12], [0, -20], [23, 0], [0, 24], [-24, 24]]){
+            assert.strictEqual(d(dx, dy), null, `travel of ${dx},${dy} is inside the tolerance and must decide nothing`)
+            assert.strictEqual(TouchDrag.movedBeyond(dx, dy, 0, 0, 10) && d(dx, dy) === null, TouchDrag.movedBeyond(dx, dy, 0, 0, 10),
+                `...even though ${dx},${dy} would have passed the press's own 10px slop`)
+        }
+        // The threshold gate IS movedBeyond, at whatever number the caller passes, so the two cannot drift apart:
+        // anything that has moved for one has moved for the other, at every point of a grid straddling both
+        // boundaries in all four quadrants.
+        for (const threshold of [10, 24]){
+            for (let dx = -30; dx <= 30; dx++) for (let dy = -30; dy <= 30; dy++){
+                assert.strictEqual(TouchDrag.liftDecision(dx, dy, threshold) === null, !TouchDrag.movedBeyond(dx, dy, 0, 0, threshold),
+                    `the threshold gate must agree with movedBeyond at ${dx},${dy} (threshold ${threshold})`)
+            }
         }
     })
 
@@ -3267,12 +3283,32 @@ async function main() {
             'the lift closes the menu exactly once, and nothing was added beside it')
     })
 
-    await test('webview touch drag: the FIRST move decides - vertical lifts the row, sideways is left to Android', () => {
+    await test('webview touch drag: the lift is measured from the FIRE point, past a threshold of its own', () => {
+        // THE THIRD PIXEL ROUND'S FIX, in one place. The old decision came from the PRESS point with the PRESS's
+        // own 10px slop, and the long press cancels beyond exactly 10px from exactly that point - so the two gates
+        // were the same number from the same origin and an armed gesture was born one pixel from its own lift. Any
+        // drift after the menu opened lifted the row at once, closing the menu in the frame after it appeared
+        // ("the context menu doesn't appear at all") and dimming the row under a finger that had asked for nothing
+        // ("it is moving a little straight away"). Two halves, and both are pinned: the ORIGIN and the THRESHOLD.
         const move = handlerBody('onTouchDragMove')
-        assert.ok(move.includes('window.TouchDrag.firstMoveDirection(touchDrag.x - touchDrag.startX, touchDrag.y - touchDrag.startY, TOUCH_DRAG_SLOP)'),
-            'the decision must come from the shared module, measured from the press point with the long press\'s own slop')
-        assert.ok(/if \(!firstMove\) return/.test(move), 'inside the slop nothing happens at all - the gesture is still only the open menu')
-        assert.ok(/if \(firstMove === 'sideways'\)\{ endTouchDrag\('sideways'\); return \}/.test(move),
+        assert.ok(move.includes('window.TouchDrag.liftDecision(touchDrag.x - touchDrag.startX, touchDrag.y - touchDrag.startY, TOUCH_DRAG_LIFT_PX)'),
+            'the decision must come from the shared module, measured from the arm origin with the LIFT threshold - never with TOUCH_DRAG_SLOP')
+        assert.ok(!move.includes('TOUCH_DRAG_SLOP'), 'the press\'s own slop has no business in the lift decision')
+        // ...and the arm origin is the FIRE point - where the finger was when the menu opened - which the adapter
+        // keeps in lastX/lastY precisely because the fire has no event of its own to read.
+        const arm = handlerBody('armTouchDrag')
+        assert.ok(/touchDrag\.startX = touchDrag\.x = longPress\.lastX/.test(arm) && /touchDrag\.startY = touchDrag\.y = longPress\.lastY/.test(arm),
+            'the drag must arm from the fire point (longPress.lastX/lastY), not from the press point (longPress.x/y)')
+        assert.ok(/longPress\.lastX = event\.clientX; longPress\.lastY = event\.clientY/.test(webviewSource),
+            'and every move the press survives must keep that fire point up to date')
+        assert.ok(/longPress\.x = longPress\.lastX = event\.clientX; longPress\.y = longPress\.lastY = event\.clientY/.test(webviewSource),
+            '...starting from the press point itself, so a hold that never moves still arms from where the finger is')
+        // The press's OWN gate is untouched and still reads the press point: it asks how far the whole press has
+        // wandered, which is a different question from where the finger has got to.
+        assert.ok(/Math\.abs\(event\.clientX - longPress\.x\) > 10 \|\| Math\.abs\(event\.clientY - longPress\.y\) > 10\) cancelLongPress\(\)/.test(webviewSource),
+            'the long press must still cancel on 10px from the PRESS point')
+        assert.ok(/if \(!decision\) return/.test(move), 'inside the threshold nothing happens at all - the gesture is still only the open menu')
+        assert.ok(/if \(decision === 'sideways'\)\{ endTouchDrag\('sideways'\); return \}/.test(move),
             'a sideways first move must tear the arming down through the one end, and do nothing else whatsoever')
         assert.ok(move.includes('liftTouchDrag()'), 'a vertical first move must lift the row')
         assert.ok(move.indexOf("endTouchDrag('sideways')") < move.indexOf('liftTouchDrag()'),
@@ -3283,17 +3319,48 @@ async function main() {
         assert.ok(lift.includes('hideNoteContextMenu()'), 'the lift must close the menu the press opened, before any target is resolved under it')
         assert.ok(lift.includes("['dialogGuard', true]") && lift.includes('touchDrag.guarded = true'),
             'the lift is where the refresh guard is taken, and where `guarded` starts saying so')
-        // The payload is taken the way the desktop dragstart takes it - the to-dos WITHIN the selection - so it is
-        // the one pressed row today and inherits a mobile multi-select for free if one is ever built. Reading
-        // longPress.id directly would pass every other pin here and quietly lose that.
-        assert.ok(lift.includes('touchDrag.ids = schedulableSelection()'),
-            'the drag payload must come from schedulableSelection(), like the desktop dragstart')
-        assert.ok(lift.includes("classList.add('-dragging')") && lift.includes('showDragBanner('), 'the lift is what shows the row is up')
         assert.ok(!handlerBody('endTouchDrag').includes('NoteContextMenu'),
             'the one end must never touch the context menu: it also ends the gestures whose whole point is that the menu stays')
     })
 
-    await test('webview touch drag: the touchmove listener is NON-PASSIVE, or the preventDefault that stops the pan is ignored', () => {
+    await test('webview touch drag: the lift respects the selection instead of collapsing it, and moves the whole of it', () => {
+        // F2 OF THE THIRD PIXEL ROUND. The old lift ran `selectedRowIDs.clear(); add(id)` on EVERY lift, and the
+        // lift fired on nearly every hold - so a hold left a row painted `-selected` that the user had not
+        // selected and nothing took back. The rule is now onTodoDragStart's, verbatim: a drag from a row OUTSIDE
+        // the selection makes that row the selection; a drag from a row INSIDE it sweeps the whole set untouched.
+        const lift = handlerBody('liftTouchDrag')
+        assert.ok(/if \(!selectedRowIDs\.has\(touchDrag\.id\)\)\{[\s\S]*?selectedRowIDs\.clear\(\)[\s\S]*?selectedRowIDs\.add\(touchDrag\.id\)/.test(lift),
+            'the lift may only rewrite the selection when the pressed row is NOT in it')
+        assert.strictEqual((lift.match(/selectedRowIDs\.clear\(\)/g) || []).length, 1,
+            '...and exactly once, inside that guard: an unconditional clear is the bug being fixed')
+        // The desktop dragstart is the reference, so the two are compared here rather than described twice.
+        const dragStart = handlerBody('onTodoDragStart')
+        assert.ok(/if \(!selectedRowIDs\.has\(todoID\)\)\{/.test(dragStart), 'the desktop dragstart is the semantics being mirrored')
+        assert.ok(lift.includes('touchDrag.ids = schedulableSelection()') && dragStart.includes('schedulableSelection()'),
+            'both gestures take the payload from schedulableSelection() - the to-dos within the selection, in its own order')
+        // The whole selection is what MOVES, and it must look like it: every payload row dims, exactly as the
+        // desktop dragstart dims them, and the banner names the count rather than one of the titles.
+        assert.ok(/var dragged = new Set\(touchDrag\.ids\)/.test(lift) && /dragged\.has\(draggedRow\.dataset\.todoId\)\) draggedRow\.classList\.add\('-dragging'\)/.test(lift),
+            'every row in the payload must dim, not only the one under the finger')
+        assert.ok(/touchDrag\.ids\.length > 1 \? \(touchDrag\.ids\.length \+ ' to-dos'\) : rowLabel\(touchDrag\.row\)/.test(lift),
+            'a multi-row drag must name the COUNT in the banner; a single row keeps its title')
+        assert.ok(lift.includes('showDragBanner('), 'the lift is what shows the rows are up')
+        // ...and the one end undims all of them again, or a row left dim reads as still in flight.
+        const end = handlerBody('endTouchDrag')
+        assert.ok(/for \(var undim of allTodoRows\(\)\) undim\.classList\.remove\('-dragging'\)/.test(end),
+            'the one end must undim every row, not only the pressed one')
+        // The DROP clears the selection, because the desktop drop paths do - and only because they do.
+        for (const name of ['dropTouchDrag', 'onTodoDropped', 'onBetweenDrop']){
+            assert.ok(handlerBody(name).includes('selectedRowIDs.clear()'), `${name} clears the selection after a drop, like every other drop path`)
+        }
+        // ...but nothing else in the touch gesture touches it. The arm takes nothing, and the ends that took
+        // nothing give nothing back: a hold-and-release, a sideways swipe and a cancel must leave the selection
+        // exactly as they found it.
+        assert.ok(!handlerBody('armTouchDrag').includes('selectedRowIDs'), 'the arm must not touch the selection')
+        assert.ok(!handlerBody('endTouchDrag').includes('selectedRowIDs'), 'and neither may the one end')
+    })
+
+    await test('webview touch drag: the touchmove listener is NON-PASSIVE, and prevents the pan from the ARM', () => {
         // A document-level touchmove listener is passive by default in Chrome, and a passive listener's
         // preventDefault() does nothing at all - so this option is the whole gesture on Android.
         assert.ok(/addEventListener\('touchmove', onTouchDragMove, \{ passive: false, capture: true \}\)/.test(webviewSource),
@@ -3303,31 +3370,53 @@ async function main() {
         assert.ok(/removeEventListener\('touchmove', onTouchDragMove, \{ passive: false, capture: true \}\)/.test(webviewSource),
             'the same listener must be removed with matching options')
         const move = handlerBody('onTouchDragMove')
-        assert.ok(move.includes('event.preventDefault()'), 'the move handler must prevent the default (the pan)')
-        // ...but ONLY once the row is lifted. While the drag is merely armed behind the open menu this handler has
-        // to block nothing at all: the move it is about to measure may be Joplin's own side-menu swipe, and a
-        // panel that cancelled it would break the app's navigation to save its own gesture.
-        const first = move.indexOf('event.preventDefault()')
-        assert.strictEqual(move.slice(first - 22, first), 'if (touchDrag.lifted) ',
-            'the first preventDefault must be guarded by the lifted flag - an armed gesture prevents nothing')
-        assert.strictEqual((move.match(/event\.preventDefault\(\)/g) || []).length, 2,
-            'and there must be exactly two: the guarded one, and the lifting move claiming the finger')
-        const second = move.indexOf('event.preventDefault()', first + 1)
-        assert.ok(second > move.indexOf('liftTouchDrag()'),
-            'the second must come AFTER the lift, so the move that lifts the row also stops the list panning under it')
-        assert.ok(move.indexOf('firstMoveDirection') < second,
-            'nothing may be prevented before the direction has been decided')
+        // ONE preventDefault, unguarded, before anything else the handler does. The earlier design guarded it on
+        // `touchDrag.lifted` so a sideways stroke would reach Android whole; the price was that the list panned
+        // under a HELD finger, which drags every row out from under the menu the fire just opened, fires the
+        // document scroll listener that used to close it, and reads as the row already moving - two of the third
+        // Pixel round's four reports. The sideways rule survives because Joplin's side-menu responder is native:
+        // this document's preventDefault cancels this document's default (the pan) and nothing beyond it.
+        assert.strictEqual((move.match(/event\.preventDefault\(\)/g) || []).length, 1,
+            'there must be exactly ONE preventDefault: an armed gesture prevents the pan just as a lifted one does')
+        assert.ok(!/if \(touchDrag\.lifted\) event\.preventDefault\(\)/.test(move),
+            'and it must not be guarded by the lifted flag - that guard IS the un-prevented pre-lift pan')
+        const prevent = move.indexOf('event.preventDefault()')
+        assert.ok(prevent < move.indexOf('touches.length !== 1'),
+            'it must come before the two-finger bail, so even the frame that ends the gesture does not let the list pan')
+        assert.ok(prevent < move.indexOf('liftDecision'), '...and before the decision, which is about direction, not about who owns the finger')
+        assert.ok(move.indexOf('if (!touchDrag.active) return') < prevent,
+            'the one thing it must come after is the not-active guard: a document with no gesture in flight prevents nothing')
         // A preventDefault() on a non-cancelable move is a silent no-op, which is how Chromium reports that it
         // decided the touch sequence's blocking region before this listener existed. Traced at the lift, because
-        // that is the first move the panel actually tries to claim - and because it is the only thing that tells
-        // 18b's "the list panned under the lifted row" apart from "the list twitched inside the slop".
+        // that is the first move whose loss the user would actually see - and because it is the only thing that
+        // tells 18b's "the list panned under the lifted row" apart from "the list twitched inside the tolerance".
         assert.ok(move.includes("if (!event.cancelable) traceGesture('drag-uncancelable')"),
             'a lifting move that arrives non-cancelable must say so in the trace')
-        assert.ok(move.indexOf('drag-uncancelable') < second, '...before the preventDefault it is about to make pointless')
-        // The guarded one is before the two-finger bail, so a lifted drag still does not let a second finger pan
-        // the list out from under it on the frame that ends the gesture.
-        assert.ok(first < move.indexOf('touches.length !== 1'),
-            'a LIFTED drag must prevent the default before the two-finger bail can return')
+        assert.ok(move.indexOf('drag-uncancelable') < move.indexOf('liftTouchDrag()'),
+            '...before the lift it is about to make pointless')
+    })
+
+    await test('webview touch drag: a stale gesture on the same finger is cleared at the next pointerdown', () => {
+        // THE OTHER ROUTE TO "the context menu doesn't appear at all", and it has nothing to do with the lift.
+        // showNoteContextMenu turns every opener away while a gesture is active; the drag's second-pointer
+        // listener ends a gesture only when the new pointer id DIFFERS, so a one-finger re-press carrying the SAME
+        // id used to arrive with a stale `active` and open no menu at all for up to the 15s watchdog.
+        assert.ok(/if \(touchDrag\.active && event\.pointerId === touchDrag\.pointerId\) endTouchDrag\('stale-pointer'\)/.test(webviewSource),
+            'the adapter\'s pointerdown must end a gesture the previous press left running on this same finger')
+        const adapterStart = webviewSource.indexOf('longPress.fired = false')
+        const reset = webviewSource.indexOf("endTouchDrag('stale-pointer')", adapterStart)
+        const zoneGate = webviewSource.indexOf("if (!kind) return", adapterStart)
+        assert.ok(reset > adapterStart && reset < zoneGate,
+            '...before the zone check can early-return, so a press on an unrecognised zone still clears the stale state')
+        assert.ok(webviewSource.indexOf('longPress.timer = setTimeout(onLongPressFire', adapterStart) > reset,
+            '...and before the timer that would fire into it')
+        // It goes through the ONE end, so the stale gesture's refresh guard comes down with it rather than leaking.
+        assert.ok(/endTouchDrag\('stale-pointer'\)/.test(webviewSource) && handlerBody('endTouchDrag').includes("['dialogGuard', false]"),
+            'and through the single end, so a leaked guard cannot survive the reset')
+        // The second-pointer listener keeps its own job: a DIFFERENT finger is a different situation (the press
+        // that finger armed goes with it), and the two must not be collapsed into one.
+        assert.ok(/if \(!touchDrag\.active \|\| event\.pointerId === touchDrag\.pointerId\) return\s*\n\s*cancelLongPress\(\)\s*\n\s*endTouchDrag\('second-pointer'\)/.test(webviewSource),
+            'a genuine second finger still ends the gesture as a second finger, and takes its own pending press with it')
     })
 
     await test('webview touch drag: endTouchDrag is ONE end that cannot return before releasing the refresh guard', () => {
@@ -3361,7 +3450,7 @@ async function main() {
             [/'resize'[\s\S]{0,80}endTouchDrag\('resize'\)/, 'a resize must end the drag'],
             [/'orientationchange'[\s\S]{0,80}endTouchDrag\('orientation'\)/, 'a rotation must end the drag'],
             [/setTimeout\(function\(\)\{ endTouchDrag\('watchdog'\) \}, TOUCH_DRAG_WATCHDOG_MS\)/, 'the watchdog must end the drag'],
-            [/endTouchDrag\(target \? 'dropped' : 'no-target'\)/, 'a release over nothing must end the drag as well as a drop'],
+            [/endTouchDrag\(landed \? 'dropped' : 'no-target'\)/, 'a release over nothing must end the drag as well as a drop'],
             [/endTouchDrag\('multi-touch'\)/, 'a second finger arriving mid-move must end the drag'],
             // The two ends an ARMED gesture has of its own: a finger that came up without travelling, and a first
             // move that went sideways. Both took nothing, and both must still unwind through the same one end -
@@ -3402,27 +3491,75 @@ async function main() {
         assert.ok(handlerBody('liftTouchDrag').includes("['dialogGuard', true]"), 'the lift must take it')
     })
 
-    await test('webview touch drag: a gap with no neighbours in a dateless group is not painted as a target', () => {
-        // betweenBounds returns null for it (nothing to bound the interval, no group date to anchor it), so the
-        // host would write nothing - and an insertion line there would promise a move that never happens.
+    await test('webview touch drag: the GEOMETRY is authoritative for a gap, and nothing floating over the list may veto it', () => {
+        // F3 OF THE THIRD PIXEL ROUND: "moving one note doesn't land between other notes, only on headings".
+        // elementFromPoint is asked exactly two questions - is there a [data-drop] here, is there an h2 here - and
+        // its answer to anything else is not consulted at all. On a phone the banner, the trace strip, a menu and
+        // the dragged row itself all sit over the rows; a resolution that let any of them stand between the finger
+        // and the index would refuse the gaps and keep only the big targets, which is exactly the report.
         const resolve = handlerBody('resolveDragTarget')
-        assert.ok(/info\.groupDate == null/.test(resolve), 'the rule must be limited to a DATELESS group (a dated one spans its own day)')
-        assert.ok(/!neighbours\.prevId && !neighbours\.nextId\) return null/.test(resolve), 'both neighbours absent in a dateless group is not a target')
-        // The big [data-drop] targets are asked of the DOM first: a heading is a SIBLING of the rows, sitting in
-        // the very gap the row index would attribute to the row above it.
-        assert.ok(resolve.indexOf('elementFromPoint') < resolve.indexOf('TouchDrag.rowAtY'),
-            'the whole-row targets must be resolved before the gaps, or a heading would read as the gap above it')
+        assert.strictEqual((resolve.match(/elementFromPoint/g) || []).length, 1, 'the DOM is asked where the finger is exactly once')
+        assert.strictEqual((resolve.match(/under\.closest\(/g) || []).length, 2,
+            'and exactly two questions are asked of what it returned: [data-drop], and h2. A third would be a veto.')
         assert.ok(resolve.includes("closest('[data-drop]')"), 'the whole-row targets are the existing [data-drop] elements')
-        // ...and a heading that accepts NO drop (Overdue and Future name no date) is not the gap above it either:
-        // it is a sibling of the rows, so without this the index would attribute its whole band - and, while it is
-        // stuck to the top of a scrolled list, the rows under it - to a row in the group before it, and write there.
-        assert.ok(/closest\('h2'\)\) return null/.test(resolve),
-            'a drop-refusing heading under the finger must resolve to nothing, not to the gap above it')
         assert.ok(resolve.indexOf("closest('h2')") > resolve.indexOf("closest('[data-drop]')"),
-            'and it must be asked AFTER [data-drop], or the headings that DO accept drops would be refused too')
+            'the heading question must come AFTER [data-drop], or the headings that DO accept drops would be refused too')
+        assert.ok(resolve.indexOf('elementFromPoint') < resolve.indexOf('rowEntryAtY'),
+            'the whole-row targets must be resolved before the gaps, or a heading would read as the gap above it')
         // ...and the rows themselves come from the pure module against the index, never from elementFromPoint.
-        assert.ok(resolve.includes('window.TouchDrag.rowAtY(touchDrag.index'), 'the row must be found geometrically, in the index')
+        assert.ok(handlerBody('rowEntryAtY').includes('window.TouchDrag.rowAtY(touchDrag.index'), 'the row must be found geometrically, in the index')
         assert.ok(resolve.includes('window.TouchDrag.bandSide('), 'and its side by the shared band rule')
+        // EVERY refusal is named. A bare `none` is what made the second strip unable to say why a gap drop did
+        // nothing on the phone while the same drop passed in the mobile-mode e2e.
+        for (const reason of ['outside', 'refused-heading', 'no-row', 'no-info', 'both-null']){
+            assert.ok(resolve.includes(`dragTargetNone('${reason}')`), `the refusal '${reason}' must be named where it is decided`)
+        }
+        assert.strictEqual((resolve.match(/return null/g) || []).length, 0, 'no refusal may leave without saying which one it was')
+        assert.ok(/function dragTargetNone\(reason\)\{\s*return \{ kind: 'none', reason: reason \}/.test(webviewSource),
+            'a refusal is a resolved answer of its own kind, not the absence of one')
+        // The rules those five names stand for are unchanged, and still pinned as rules rather than as spellings.
+        assert.ok(/info\.groupDate == null/.test(resolve), 'both-null must stay limited to a DATELESS group (a dated one spans its own day)')
+        assert.ok(/!neighbours\.prevId && !neighbours\.nextId\) return dragTargetNone\('both-null'\)/.test(resolve),
+            'both neighbours absent in a dateless group is not a target: betweenBounds can form no interval from it')
+        assert.ok(/touchDrag\.y < box\.top \|\| touchDrag\.y >= box\.bottom\) return dragTargetNone\('outside'\)/.test(resolve),
+            "'outside' is the finger leaving the .todos rect - the release the banner offers as a cancel")
+        // Two refusals for different reasons are two different answers, or the strip would show only the first.
+        assert.ok(/if \(a\.kind === 'none'\) return a\.reason === b\.reason/.test(handlerBody('sameDragTarget')),
+            'a change of refusal must re-trace and re-label, not read as "the same nothing"')
+        // The banner and the trace strip are pointer-events:none besides, so they never even reach the first
+        // question - belt and braces, since the resolution above already cannot be vetoed by them.
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        for (const selector of ['#cockpitDragBanner', '#cockpitToast']){
+            const at = css.indexOf(selector + ' {')
+            assert.ok(at >= 0, `panel.css is missing the ${selector} rule`)
+            const rule = css.slice(at, css.indexOf('}', at))
+            assert.ok(/pointer-events:\s*none/.test(rule), `${selector} floats over the list and must never take the finger the drag needs`)
+        }
+    })
+
+    await test('webview touch drag: the index is verified against the screen before a gap is read off it', () => {
+        // The shift in syncRowIndex is exact for a SCROLL and for nothing else, and a mobile panel has other ways
+        // to move a row: a re-render between two frames, a group folding, the soft keyboard. A shifted-but-wrong
+        // index is this gesture's worst failure because it is SILENT - the line paints somewhere plausible and the
+        // drop writes the neighbours of a row the finger was never over.
+        const at = handlerBody('rowEntryAtY')
+        assert.ok(at.includes('rowIndexIsStale(entry)') && at.includes('buildRowIndex()'),
+            'a stale index must be rebuilt on demand, and the search re-run against it')
+        const stale = handlerBody('rowIndexIsStale')
+        assert.ok(/Math\.abs\(entry\.el\.getBoundingClientRect\(\)\.top - entry\.top\) > ROW_INDEX_TOLERANCE_PX/.test(stale),
+            'the check is the CANDIDATE row\'s live box against the one the index holds for it')
+        assert.ok(stale.includes('!entry.el.isConnected'), 'a row that has left the document is stale by definition')
+        // ...and it is the candidate ALONE. A rebuild is a rect plus a walk to the heading for every row in the
+        // list, on every move, on the device - which is the cost the shift exists to avoid.
+        assert.strictEqual((stale.match(/getBoundingClientRect/g) || []).length, 1, 'exactly one rect is measured per lookup')
+        // With no candidate there is no row to check, so the cheap question asked instead is whether the LIST is
+        // still the one that was measured - which keeps a finger parked below the last row from rebuilding the
+        // index on every frame, while a re-render that added or removed rows still forces the rebuild it needs.
+        assert.ok(/if \(!entry\) return document\.querySelectorAll\('\.todo\[data-todo-id\]'\)\.length !== touchDrag\.indexRows/.test(stale),
+            'a no-candidate lookup must re-ask the row COUNT, not rebuild blindly')
+        assert.ok(handlerBody('buildRowIndex').includes("touchDrag.indexRows = document.querySelectorAll('.todo[data-todo-id]').length"),
+            'and the build must record the live count it was measured against')
+        assert.ok(/var ROW_INDEX_TOLERANCE_PX = 2/.test(webviewSource), 'the tolerance must be a named, tunable constant')
     })
 
     await test('webview touch drag: the row index skips the peek, and every scroll shifts it', () => {
@@ -3458,8 +3595,49 @@ async function main() {
     await test('webview touch drag: the two bands are named constants - 0.5 on touch, the desktop 0.4 untouched', () => {
         assert.ok(/var TOUCH_DRAG_BAND = 0\.5/.test(webviewSource), 'the touch band must be a named constant of its own, and 0.5 (no inert middle)')
         assert.ok(/var BETWEEN_BAND = 0\.4/.test(webviewSource), 'the desktop band must still be 0.4, with its inert middle')
-        assert.ok(/var TOUCH_DRAG_SLOP = 10/.test(webviewSource), 'the travel slop must match the long press it lifts out of')
+        assert.ok(/var TOUCH_DRAG_SLOP = 10/.test(webviewSource), 'the press slop must match the long press it lifts out of')
+        assert.ok(/var TOUCH_DRAG_LIFT_PX = 24/.test(webviewSource), 'the lift threshold must be a named constant of its own')
         assert.ok(/var TOUCH_DRAG_WATCHDOG_MS = \d+/.test(webviewSource), 'the watchdog must be a named, tunable constant')
+        // THE RELATION, not just the two numbers. The press survives 10px from the press point; if the lift used
+        // that same number from that same origin the arm would be born at the edge of its own threshold, which is
+        // the arithmetic behind two of the third Pixel round's four reports. Bigger is the property; 24 is a taste.
+        const slop = Number(/var TOUCH_DRAG_SLOP = (\d+)/.exec(webviewSource)[1])
+        const liftPx = Number(/var TOUCH_DRAG_LIFT_PX = (\d+)/.exec(webviewSource)[1])
+        assert.ok(liftPx > slop, 'the lift threshold must be LARGER than the slop the press survives on, or the drag decides before the user has')
+        assert.ok(webviewSource.indexOf('var TOUCH_DRAG_LIFT_PX') > webviewSource.indexOf('var TOUCH_DRAG_SLOP'),
+            'and the two must stay side by side, where the relation between them is readable')
+    })
+
+    await test('webview selection: a touch changes the selection only through the shared rules, and the drag adds no path of its own', () => {
+        // WHAT MAIN'S SEMANTICS ARE, pinned so the touch drag cannot quietly become a second selection mechanism.
+        // A row carries onmousedown and onclick and no touch handler at all (src/core/formats.ts), so on a phone
+        // the selection can only ever be reached through the browser's compatibility mouse events - and both of
+        // those hand the decision to the shared, DOM-free window.RowSelection. Shift and Ctrl are unreachable from
+        // a finger, so pressSelection can only return the pressed row alone or PRESERVE an existing multi-set.
+        assert.deepStrictEqual(RowSelection.pressSelection({ selected: [rowId('a')], lastClicked: null, lastInteraction: null },
+            rowId('b'), {}, [rowId('a'), rowId('b')]).selected, [rowId('b')],
+            'a plain press on another row replaces the selection - a touch cannot accumulate one through this path')
+        assert.deepStrictEqual(RowSelection.pressSelection({ selected: [rowId('a'), rowId('b')], lastClicked: null, lastInteraction: null },
+            rowId('a'), {}, [rowId('a'), rowId('b')]).selected, [rowId('a'), rowId('b')],
+            '...but a press INSIDE a multi-selection preserves it, which is the rule the drag inherits')
+        assert.deepStrictEqual(RowSelection.clickSelection({ selected: [rowId('a'), rowId('b')], lastClicked: null }, rowId('a')).selected,
+            [rowId('a')], 'and a plain click collapses onto the clicked row')
+        for (const name of ['onRowPressed', 'onRowClicked']){
+            assert.ok(handlerBody(name).includes('window.RowSelection.'), `${name} must keep handing the decision to the shared rules`)
+        }
+        // ...and the touch layer writes the selection in exactly ONE place: the lift, under the dragstart guard.
+        // The arm, the move, the ends and the resolution must not touch it at all.
+        for (const name of ['armTouchDrag', 'onTouchDragMove', 'endTouchDrag', 'resolveDragTarget', 'updateDragTarget']){
+            assert.ok(!handlerBody(name).includes('selectedRowIDs'), `${name} must not touch the selection`)
+        }
+        // The two codes that can settle what a phone actually delivers here. Whether the compatibility mouse
+        // events arrive at all after a long press is a platform behaviour this repo cannot read off its own
+        // source, and the third Pixel round reported a selection that grows as the user taps around - so the
+        // strip has to be able to say whether these handlers ever ran, and what the size was after each.
+        assert.ok(handlerBody('onRowPressed').includes("if (IS_MOBILE) traceGesture('row-press:' + traceId(rowID) + ' n=' + selectedRowIDs.size)"),
+            'a mobile press must say so on the strip, with the resulting selection size')
+        assert.ok(handlerBody('onRowClicked').includes("if (IS_MOBILE) traceGesture('row-click:' + traceId(rowID) + ' n=' + selectedRowIDs.size)"),
+            '...and so must a mobile click, so a hold followed by two taps reads as three lines')
     })
 
     await test('webview touch drag: the desktop HTML5 handlers keep their IS_MOBILE gates', () => {
@@ -3483,14 +3661,20 @@ async function main() {
         const toast = handlerBody('showToast')
         assert.ok(/function showToast\(text, sticky\)/.test(toast), 'showToast must take a sticky mode')
         assert.ok(toast.includes('if (sticky) return'), 'a sticky toast must not arm the fade timer')
-        assert.ok(/GESTURE_TRACE_MAX = 10/.test(webviewSource), 'the ring buffer must be long enough to hold a whole drag (arm, retargets, scroll, drop)')
+        assert.ok(/GESTURE_TRACE_MAX = 12/.test(webviewSource),
+            'the ring must hold a whole drag - arm, retargets (each now naming its refusal), scroll, drop - which is why it grew with the reasons')
         // ...and the drag speaks in codes that name what happened, only when the answer CHANGES.
-        for (const code of ['menu-open', 'drag-lift', 'drag-uncancelable', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between '",
+        for (const code of ['menu-open', "'drag-lift n='", 'drag-uncancelable', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between '",
                             "'drag-drop:date '", "'drag-cancel:'", 'drag-released', 'drag-sideways-ignored',
                             // The second Pixel round's three: a contextmenu the panel refused (with the zone it
                             // landed in), a menu opener the live gesture turned away, and the drop path saying
                             // WHAT it wrote rather than only that it wrote something.
-                            "'contextmenu-suppressed:'", "'menu-blocked'", "'drag-drop:posted'", "'drag-release:no-target'"]){
+                            "'contextmenu-suppressed:'", "'menu-blocked'", "'drag-drop:posted'", "'drag-release:no-target'",
+                            // The third round's: every refusal named where it is decided, the stale-gesture reset
+                            // that used to silence the menu, and the two codes that can finally say whether a phone
+                            // delivers the compatibility mouse events a row's selection depends on.
+                            "'drag-target:' + (target.kind === 'none' ? 'none:' + target.reason", "'stale-pointer'",
+                            "'row-press:'", "'row-click:'"]){
             assert.ok(webviewSource.includes(code), `the trace must carry ${code}`)
         }
         // The drop trace names the write, on both branches, BEFORE the message goes and again once it has: a drop
@@ -3517,8 +3701,18 @@ async function main() {
         const end = handlerBody('endTouchDrag')
         assert.ok(end.includes("if (reason === 'released') traceGesture('drag-released')"), 'a release that never moved must trace as itself')
         assert.ok(end.includes("else if (reason === 'sideways') traceGesture('drag-sideways-ignored')"), 'and so must a sideways first move')
-        assert.ok(end.includes("else if (reason === 'no-target') traceGesture('drag-release:no-target')"),
+        assert.ok(end.includes("else if (reason === 'no-target') traceGesture('drag-release:no-target' + noTargetNote)"),
             'a LIFTED drag released over nothing droppable must read as the user\'s own release, not as one of the platform\'s cancels')
+        // ...and it must say WHICH nothing, where the finger was, and how many rows the index held. Five refusals
+        // used to read as one bare line, which is why the second strip could not tell "the gap was refused because
+        // a sticky heading was under the finger" from "the index no longer described the screen".
+        assert.ok(/var noTargetNote = reason !== 'no-target' \? '' :/.test(end), 'the note is built only on the path that says it')
+        assert.ok(end.includes("touchDrag.target.kind === 'none') \? touchDrag.target.reason : 'unresolved'"),
+            'the reason is the standing refusal, and a release before anything was resolved says so rather than guessing')
+        assert.ok(end.includes("' y=' + Math.round(touchDrag.y)") && end.includes("' rows=' + (touchDrag.index ? touchDrag.index.length : 0)"),
+            'with the release point and the size of the index it was read against')
+        assert.ok(end.indexOf('var noTargetNote') < end.indexOf('touchDrag.active = false'),
+            'and it must be read BEFORE the teardown clears the target, the position and the index')
         assert.ok(end.includes("else if (reason !== 'dropped') traceGesture('drag-cancel:' + reason)"), 'everything else is a cancel, and a drop traces its own code')
         assert.strictEqual((end.match(/traceGesture\(/g) || []).length, 4,
             'and every end still speaks exactly once: released, sideways, no-target, or a cancel')
@@ -4423,7 +4617,11 @@ async function main() {
         assert.ok(!/\.context-menu-item[^{]*:focus[^{]*\{[^}]*outline:\s*none/.test(panelCssSource),
             'the suppression must not reach the menu items')
         // The pre-existing in-panel dismissals are untouched.
-        assert.ok(webviewSource.includes("document.addEventListener('scroll', hideNoteContextMenu, true)"), 'the scroll dismissal must stay')
+        // The scroll dismissal stays, with ONE exemption: a hold that has armed the touch drag owns its menu, and
+        // a pan arriving under it must not close it (the third Pixel round's "the context menu doesn't appear at
+        // all"). Desktop never has an armed gesture, so the dismissal there is exactly what it was.
+        assert.ok(/document\.addEventListener\('scroll', function\(\)\{\s*if \(touchDrag && touchDrag\.active && !touchDrag\.lifted\) return\s*hideNoteContextMenu\(\)\s*\}, true\)/.test(webviewSource),
+            'the scroll dismissal must stay, standing aside only for an ARMED (never a lifted, never a desktop) gesture')
         assert.ok(/event\.key === 'Escape'\) hideNoteContextMenu\(\)/.test(webviewSource), 'the Escape dismissal must stay')
     })
 
