@@ -129,7 +129,11 @@ platforms (it draws above the panel on mobile).
 All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click, dblclick,
 `contextmenu` and HTML5 drag are untouched. On mobile `contextmenu` is the one event suppressed
 outright, panel-wide: it is the platform's own long press, and the adapter below is the only thing
-allowed to open a menu from a touch (§7's first hazard).
+allowed to open a menu from a touch (§7's first hazard). The one exemption is a **real editable field**
+(`input, textarea, select, [contenteditable]` — the search box, the notebook filter, the alarm
+overlay's date and time): Android's text-selection handles and its Paste / Select-all bar ride on this
+same event, and in a field on a phone that bar is the only way to paste, while nothing of the panel's
+opens from a press there.
 
 - **Long-press context menus**: a Pointer Events adapter (500 ms; cancelled by >10 px move, pointer
   up/cancel, or a list scroll) synthesises the three desktop context-menu handlers (to-do row, note
@@ -366,8 +370,9 @@ Four hazards this was designed around, each of which cost something to get right
 second Pixel round added:
 
 - **Android's long press fires a real `contextmenu` on the row, and the rows carry inline handlers.** Every to-do
-  row is rendered with `oncontextmenu="onTodoContextMenu(event, id)"` and every note row with
-  `onNoteContextMenu` (`src/core/formats.ts`, the list rows and the week cards), so the platform's own long press
+  row is rendered with `oncontextmenu="onTodoContextMenu(event, id)"`, every note row with
+  `onNoteContextMenu` (`src/core/formats.ts`, the list rows and the week cards) and every group heading with
+  `onHeadingContextMenu` (`src/core/html.ts`) — four inline handlers in all — so the platform's own long press
   could open the panel's context menu with the adapter knowing nothing about it. Its **timing is the device's**,
   not ours — the "Touch & hold delay" accessibility setting plus Chrome's own ~500 ms — so it can land
   *before* the adapter's fire (a menu opening over the menu, which is what the first round reported as a conflict
@@ -385,7 +390,15 @@ second Pixel round added:
   blocked call that tidied up on its way out is the other half of the reported symptom). What makes
   `touchDrag.active` a sufficient test there is the fire's order: the menu opens *before* `armTouchDrag()`, so the
   adapter's own call is the one call that finds the flag false. Desktop returns on the listener's first line and
-  is byte-identical.
+  is byte-identical. The suppression's **one exemption** is a real editable field (`input, textarea, select,
+  [contenteditable]`): the same event carries Android's selection handles and its Paste / Select-all bar, which in
+  the search box, the notebook filter or the alarm overlay's date and time is the only way to paste on a phone —
+  and none of those elements carries an inline `oncontextmenu`, is a drag source, or is a zone the adapter
+  recognises, so exempting them takes nothing away from the fix. Past the desktop line that exemption is the
+  listener's *only* early return, which is what keeps a zone of the panel's from being carved back out of the
+  suppression; the harness pins the count, not the spelling. The belt is asymmetric by design: `onHeadingContextMenu`
+  never reaches `showNoteContextMenu`, so a heading has the capture listener only — a heading is not a drag source
+  and opens the alarm picker rather than a menu.
 - **The non-passive `touchmove` is the whole gesture.** `preventDefault()` on a touchmove is the only
   thing that stops Android panning the list under the lifted row, and a document-level touchmove
   listener is **passive by default** in Chrome — where `preventDefault()` does nothing at all. So the
@@ -471,7 +484,8 @@ up, drag armed), `drag-lift`, `drag-uncancelable` (the lifting move arrived non-
 `drag-sideways-ignored`, `drag-target:before|after|drop|none` (on a **change** only), `drag-autoscroll:up|down` (on a direction
 change only), `drag-drop:between <prev>|<next>` and `drag-drop:date <YYYY-MM-DD>` (**what** the release is
 about to write — four characters of each neighbour id, `-` for the end of a group) followed by
-`drag-drop:posted` (the message went), `drag-release:no-target` (a lifted drag released over nothing droppable:
+`drag-drop:posted` (the call was made — `webviewApi.postMessage` is asynchronous and `void`-prefixed, so this
+says the post was *issued* without throwing, not that the host has written anything yet), `drag-release:no-target` (a lifted drag released over nothing droppable:
 the user's own cancel, deliberately not one of the platform's), `drag-cancel:<reason>` (including `drag-cancel:re-arm`, the
 unreachable-today path where a fire lands on a gesture still in flight and `armTouchDrag` ends it through
 the single end rather than overwriting its state, so a taken guard can never be dropped silently), and
@@ -480,7 +494,10 @@ refusal (the hazard list above), which is the one part of this gesture that used
 whole successful gesture therefore reads as
 `menu-open > drag-lift > drag-target:after > drag-drop:between a1b2|c3d4 > drag-drop:posted`, or
 `menu-open > drag-released`, or `menu-open > drag-sideways-ignored` — the three outcomes are told apart at a glance, which is the whole
-job of the trace on the device.
+job of the trace on the device. **The strip is a ring of 10, and a real drag can overflow it**: a
+`contextmenu-suppressed:row` at the head, plus three or four `drag-target:` changes and an autoscroll or two
+during the glide, will push `menu-open` off the front. A strip that begins mid-drag is the buffer doing its job,
+not a menu that never opened — read the TAIL for the outcome.
 
 **Rejected, and why** — gaps-only targets (the headings are the coarse, forgiving target a finger wants
 and they already exist); a per-row drag handle (a permanent column of chrome on every row for a gesture
@@ -741,8 +758,10 @@ success vs failure looks like. The build to install is
          between rows, the banner reads "before …" / "after …", and the **list itself does not scroll**.
          The trace reads `menu-open > drag-lift > drag-target:…`, and a release over a gap adds
          `drag-drop:between <prev>|<next> > drag-drop:posted` (or `drag-drop:date <YYYY-MM-DD>` onto a heading)
-         — which is what says the write really went, and between which neighbours, rather than only that
-         the finger came up. A `contextmenu-suppressed:row` anywhere in the strip is expected (Android's own
+         — which is what says which neighbours the write was aimed between, and that the post was issued,
+         rather than only that the finger came up. The strip holds **10 lines**, so on a long glide (several
+         `drag-target:` changes, an autoscroll) the HEAD is evicted: a strip starting at `drag-target:` with no
+         `menu-open` in front of it is normal and is **not** a failure — read the tail. A `contextmenu-suppressed:row` anywhere in the strip is expected (Android's own
          long press, refused). A `menu-blocked` means something still tried to open a menu behind the live drag
          and was turned away: not a failure, but report it, because it says the platform's event got past the
          capture listener.
@@ -854,6 +873,16 @@ success vs failure looks like. The build to install is
        - Success: the list scrolls freely, a tap opens the note, a tap on the ring ticks it, a hold on
          the ring opens the date picker. None of these lifts a row.
        - Failure: any of them behaves differently from before 2.3.0.
+
+    j-bis. **Text fields keep their own long press.** Type a word into the panel's search box, then press
+       and hold **inside the field** (repeat in the notebook filter, and in the alarm overlay's date field).
+       - Success: Android's own text-selection handles and the **Paste / Select-all bar** appear, exactly as
+         in any other field on the phone. No context menu of Cockpit's opens, and the trace stays silent —
+         a field is the one thing the panel-wide `contextmenu` suppression exempts (§2, §7), because the
+         selection bar rides on that very event and is the only way to paste on a phone.
+       - Failure: nothing happens on the hold (the exemption is not reaching the field — check whether the
+         press landed on the field or on its wrapper), or a `contextmenu-suppressed:other` line appears in
+         the strip when the press was inside the field.
 
     k. **Trace off.** Turn the Gesture trace setting back off and repeat 18a.
        - Success: **no strip appears at all** at the bottom of the panel, and the drag still works.

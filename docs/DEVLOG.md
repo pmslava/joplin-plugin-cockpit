@@ -1307,6 +1307,26 @@ selection callout, but an inline `oncontextmenu` is a listener like any other an
 dead in the capture phase, at the document, is what makes the long-press adapter the only way a touch can open a
 context menu. Desktop returns on the listener's first line, so a right click there is byte-identical.
 
+The review round that followed found the one thing "panel-wide" swept up that it should not have: **text fields**.
+The panel has real ones on mobile — the search box, the notebook filter, the alarm overlay's date and time — and
+Android raises the text-selection handles and the **Paste / Select-all bar** through this same `contextmenu`
+event, which in a field on a phone is the only way to paste. Cancelling it there would have been a regression on
+exactly the target platform, invisible to the harness and to 18a/18b (the drag would have passed while the search
+box quietly lost its paste). So the listener exempts a *kind of element* rather than a zone of the panel's —
+`input, textarea, select, [contenteditable]` — which costs the fix nothing: none of those carries an inline
+`oncontextmenu`, none is a drag source, and none is a zone the long-press adapter recognises. Past the desktop
+line that exemption is now the listener's ONLY early return, and the pin asserts that count rather than a
+spelling: the version it replaced forbade an `if`-shaped gate, which a ternary early-return would have walked
+straight through while re-introducing exactly the scoping the pin exists to forbid. Step 18 gained a device check
+of its own (18j-bis: hold inside the search box, the Paste bar must appear).
+
+The inline-handler inventory was one short as well: `src/core/html.ts` renders group headings with
+`oncontextmenu="onHeadingContextMenu(event)"`, a fourth handler outside `formats.ts`. The capture listener always
+covered it (zone `heading`), but the pin counted three and the docs named two kinds; both now count four. The
+*belt* stays asymmetric on purpose — `onHeadingContextMenu` never reaches `showNoteContextMenu`, so a heading has
+the capture listener only, which is right for something that is not a drag source and opens the alarm picker
+rather than a menu.
+
 A belt went on those braces at the other end, in `showNoteContextMenu`: while a touch gesture owns the finger —
 armed behind the menu, or lifted into the drag — any other caller is turned away (`menu-blocked`) **before** the
 function's own `hideNoteContextMenu()` can run, which is the other half of the report (the menu that "sometimes
@@ -1318,7 +1338,9 @@ now load-bearing rather than merely tidy, and it is pinned from both sides.
 The drop path got the trace it should have had from the start. `drag-drop:between` and `drag-drop:date` said only
 that a release had resolved *something*; they now carry **what is about to be written** — four characters of each
 neighbour id (`-` for the end of a group), or the `[data-drop]` date verbatim — and are followed by
-`drag-drop:posted` once the message has gone. A drop into the wrong gap, a correct drop that was never posted,
+`drag-drop:posted` once the `postMessage` call has been made (it is asynchronous and `void`-prefixed, so that
+code says the post was issued without throwing, not that the host has written anything — the docs say so in as
+many words, since a device reader must not read a landed write out of it). A drop into the wrong gap, a correct drop that was never posted,
 and a release that reached no target at all were three states with one code between them; they are three codes
 now, the last being `drag-release:no-target`, which is deliberately NOT one of the `drag-cancel:` family: that end
 is the user's own doing (the banner said "release to cancel" and they did), while every remaining cancel is the
@@ -1332,8 +1354,9 @@ stroke. If 18b still fails, the cheap fix (registering the `touchmove` listener 
 first, and only then the drag-handle fallback.
 
 Suite: 351 harness checks, all passing (350 before the SECOND PIXEL ROUND above, plus 1: the panel-wide contextmenu
-suppression and the menu guard, pinned together with the fire order that makes the guard sufficient and with the
-inline handlers in `formats.ts` that are the hazard — the pin asserts those exist, so it retires itself honestly
+suppression and the menu guard, pinned together with the fire order that makes the guard sufficient, the
+editable-field exemption and the fields it exists for, and the four inline handlers (`formats.ts` and
+`html.ts`) that are the hazard — the pin asserts those exist, so it retires itself honestly
 if the markup ever stops emitting them. Two existing pins were rewritten in place rather than added to: the
 suggestion list's contextmenu pin now asserts the ABSENCE of its own old `#searchSuggestions` scope, and the
 trace pin carries the four new codes and the drop path's before/after pair. Four more mutations were run against
@@ -1345,7 +1368,10 @@ oncontextmenu handlers to run"; removing the `showNoteContextMenu` guard fails "
 any other opener of the context menu"; and swapping the fire's order so the arm runs before the menu fails "the
 fire must open the menu BEFORE it arms the drag" twice over — in the new pin and in the redesign's own. That
 last one is the interesting mutation: with the arm first, `touchDrag.active` would be true on the adapter's own
-call and the guard would block the menu the hold exists to open, so the two changes hold each other up.)
+call and the guard would block the menu the hold exists to open, so the two changes hold each other up. A fifth
+was run for the review round's fix — deleting the editable-field exemption fails "that one return is the
+editable-field exemption", and re-scoping it as a ternary instead fails the early-return count, which is the
+mutation the pin it replaced would have missed.)
 
 How the 350 it grew from was reached, and what was already proved by mutation, is unchanged below. 350 (347
 before the redesign, plus 3: one driving the new pure
