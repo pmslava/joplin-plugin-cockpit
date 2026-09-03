@@ -31,6 +31,10 @@ export default defineConfig({
   // (the suite still gets its full 30 minutes once its turn comes); on CI each repo has its own VM,
   // the lock is never contended, and the cap stays exactly where the job's own limit needs it.
   //
+  // Raised 30 -> 34 for 2.5.0's nineteenth file (the note title bar). That file is the only one in the suite that
+  // launches Joplin TWICE - both its settings take effect only after a restart, so the restart is the case - which
+  // makes it worth roughly two ordinary files rather than one. Still comfortably under the workflow's 40-minute cap.
+  //
   // Left at 30 for 2.4.0's eighteenth file (the Whereabouts commands): one more Joplin launch and three short
   // cases, a couple of minutes against a cap a healthy run does not come near.
   //
@@ -39,7 +43,7 @@ export default defineConfig({
   // tests in ~12 minutes, and each file launches its own Joplin while the gesture cases each wait out a settle
   // and a panel refresh. A healthy full run is still well under the cap; what the cap is for is a stuck one
   // ending itself gracefully, with its report and traces written.
-  globalTimeout: 30 * 60_000 + (process.env.CI ? 0 : LOCK_WAIT_MS),
+  globalTimeout: 34 * 60_000 + (process.env.CI ? 0 : LOCK_WAIT_MS),
   expect: { timeout: 20_000 },
   // A single Joplin instance at a time.
   fullyParallel: false,

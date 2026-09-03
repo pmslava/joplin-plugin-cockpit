@@ -658,6 +658,38 @@ export async function setCockpitSetting(win: Page, label: string, value: string)
   await win.waitForTimeout(SETTLE);
 }
 
+/**
+ * Turn one or more of Cockpit's own Bool settings on or off through Joplin's Options screen.
+ *
+ * Same route and same reason as `setCockpitSetting` above - Cockpit's settings live in Joplin's database, so a
+ * spec cannot preset them the way `launchJoplin({ settings })` presets Joplin's own File-storage settings. A Bool
+ * setting is rendered by Joplin as a checkbox with a `<label for>` carrying the setting's registered label, so it
+ * is reached by that label exactly like the enum controls are.
+ *
+ * Several settings are handled in ONE visit to the Options screen, because opening it is by far the slow part.
+ * The keys of `values` are the setting LABELS as registered.
+ */
+export async function setCockpitCheckboxes(win: Page, values: Record<string, boolean>): Promise<void> {
+  const opened = await activateJoplinMenuItem(win, /^(Options|Preferences\.\.\.)$/);
+  if (!opened) throw new Error('Could not open Joplin\'s Options screen from the application menu');
+  const screen = win.locator('.config-screen');
+  await screen.waitFor({ state: 'visible', timeout: 60_000 });
+  await screen.getByRole('tab', { name: 'Cockpit' }).first().click();
+  for (const [label, wanted] of Object.entries(values)) {
+    const control = win.getByLabel(label, { exact: true }).first();
+    await control.waitFor({ state: 'visible', timeout: 30_000 });
+    if ((await control.isChecked()) !== wanted) await control.click();
+    await expect.poll(async () => control.isChecked(), { timeout: 10_000 }).toBe(wanted);
+  }
+  await win.waitForTimeout(500);
+  // Joplin disables OK/Apply while there is nothing to save, so a no-op visit has to leave by Back instead.
+  const ok = screen.locator('.button-bar button', { hasText: 'OK' }).first();
+  if (await ok.isEnabled()) await ok.click();
+  else await screen.locator('.button-bar button', { hasText: 'Back' }).first().click();
+  await expect.poll(async () => configScreenOpen(win), { timeout: 30_000 }).toBe(false);
+  await win.waitForTimeout(SETTLE);
+}
+
 /** One press of the "Move left" arrow on the named pane in "Change application layout". */
 async function pressMoveLeft(win: Page, paneLabel: string): Promise<boolean> {
   const opened = await activateJoplinMenuItem(win, /Change application layout/);
