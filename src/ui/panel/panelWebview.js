@@ -1230,7 +1230,8 @@ async function onTodoDropped(event){
 
 /** Drop BETWEEN rows (desktop, list views) *************************************************************************************************************
  * A second drop kind, alongside the whole-row date targets above: dropping into the GAP between two stacked to-do rows (or at a group's top/bottom     *
- * edge) assigns due datetimes IN BETWEEN the neighbours. This is desktop-only (mobile has no HTML5 drag) and stateless DOM wiring - it reads the        *
+ * edge) assigns due datetimes IN BETWEEN the neighbours. This is desktop-only (a mobile row is not draggable at all - see the dragstart block above)   *
+ * and stateless DOM wiring - it reads the                                                                                                              *
  * existing markup (the row's data-todo-id and its group heading's data-drop date) and posts, holding nothing across renders but the transient indicator *
  * class, which is cleared on every dragover, on dragend and on drop. It lives only in the LIST views: an eligible row is a .todo[data-todo-id] that is a *
  * DIRECT child of the .todos container (week cards sit in .week-day, month/notes/peek rows in their own sections, so those are excluded). A DATED group *

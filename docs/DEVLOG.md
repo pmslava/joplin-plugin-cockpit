@@ -1371,6 +1371,94 @@ now, the last being `drag-release:no-target`, which is deliberately NOT one of t
 is the user's own doing (the banner said "release to cancel" and they did), while every remaining cancel is the
 platform taking the gesture away. Every end of the drag still speaks exactly once.
 
+### The third Pixel round: Android's own drag underneath everything else
+
+Four findings came back, and for a day they read as four bugs: *"the context menu doesn't appear at all on the
+long press"*; *"broken: the mobile multi-selection - long-hold selects one note, then taps on other notes select
+them all too"*; *"moving one note doesn't land between other notes, only on headings, as before"*; and *"some
+tolerance for hold and move is needed: I hold the note and it is moving a little straight away, so it is probably
+always considered as moving"*. The gesture trace was on, and the strip for a failed drag read
+`contextmenu-suppressed:row` and then **nothing** - no `menu-open`, ever. The screenshot showed why: a
+**translucent copy of the pressed row floating below the finger**. That is not anything this panel draws. It is
+Android's own HTML5 **drag image**.
+
+So the belief this feature was built on was simply wrong, and it was written into the source: "Android's WebView
+fires no HTML5 drag at all". It does. A long press on a `draggable` element starts a native drag - `dragstart`
+fires (the desktop `onTodoDragStart` ran, selecting the row and dimming the payload), the platform floats its drag
+image under the finger, and the touch sequence is **cancelled**, which takes the panel's own 500 ms timer with it.
+Every one of the four reports follows from that single fact: no menu opens and nothing arms (finding 1); the row
+"moves a little straight away" because the drag image is following the finger (finding 4); a drop onto a heading
+still works because the NATIVE drag finds the heading's inline `ondrop` - the desktop path - while a gap needs the
+touch path that never started (finding 3); and the pressed row is left selected by `onTodoDragStart`, so later taps
+look like they are adding to a selection (finding 2). The panel had been fighting a phantom for two rounds: the
+gesture was never being read at all on those presses.
+
+The fix is a subtraction in the markup. `renderTodoRowHtml` takes a new `nativeDrag: false` for a mobile row and
+`renderWeekCard` applies the same rule to a card: no `draggable` attribute, no `ondragstart`, no `ondragend`, **and
+nothing else changed** - the selection `onmousedown` stays, which is the whole difference between this and the
+peek's `draggable: false`. The harness proves that difference rather than describing it: a mobile row is asserted
+to be the desktop row **minus exactly those three things, byte for byte**, so a future "no drag on mobile" edit
+cannot quietly take the row's selection, its `oncontextmenu` or its `onclick` with it and disable half the phone's
+panel. Two belts behind the subtraction, because this failure is silent: `-webkit-user-drag: none` on
+`.cockpit-mobile .todo`, which is what the WebView reads before it decides an element can be picked up, and a
+**capturing document `dragstart` listener** that cancels every drag on mobile and traces `native-dragstart`, so the
+next strip says whether Android is still trying. `onTodoDragStart` returns on `IS_MOBILE` before it touches the
+selection.
+
+**The tolerance** (finding 4, and half of finding 1) was a real second bug underneath the first, and it is
+arithmetic. The press survives a hold only within 10 px of the **press point**, and the lift fired at 10 px
+measured from that **same origin** - so at the instant the menu opened the finger could already be sitting one
+pixel from its own lift threshold, and any drift lifted the row and closed the menu in the frame after it appeared.
+Both halves are fixed rather than one. The travel is now measured from the **fire point** - where the finger was
+when the menu opened, kept in `longPress.lastX/lastY` because the fire has no event of its own - and it has to pass
+`TOUCH_DRAG_LIFT_PX`, a threshold of its own. It was set at 24 px while the native drag was still in the picture
+(part of what looked like drift was the platform pulling its drag image around) and is **20** now that it is gone:
+twice the press's own gate, about twice Android's ~8 dp touch slop, and still under half a 40 px mobile row, so a
+deliberate stroke crosses it at once. There is deliberately no settle window - nothing shows the fire itself jitters
+the coordinates, and a window in which travel is ignored is also a window in which a drag cannot be started. The
+armed phase now also `preventDefault()`s **every** touchmove, where it used to prevent nothing until the lift: an
+un-prevented pan drags every row out from under the just-opened menu and fires the document `scroll` listener that
+closes it, which is a second, lift-independent route to "no menu". The sideways rule survives that because Joplin's
+side-menu responder is on the **native** side of the WebView - this document's `preventDefault()` cancels this
+document's own default and nothing beyond it. That is a claim about the platform, so it is written down as one and
+18b-bis is what checks it. And a third route to a missing menu, unrelated to either: the drag's second-pointer
+listener ends a gesture only when the new pointer id DIFFERS, so a one-finger re-press carrying the same id arrived
+with a stale `active` flag and `showNoteContextMenu` turned it away for up to the 15 s watchdog. The adapter's own
+pointerdown now ends that gesture through the single end (`drag-cancel:stale-pointer`).
+
+**The selection** (finding 2) had no feature to repair: there is no mobile multi-select of rows, on this branch or
+on main. A row carries `onmousedown` and `onclick` and no touch handler at all, Shift and Ctrl are unreachable from
+a finger, and the shared `RowSelection` rules therefore answer either "the pressed row alone" or "the multi-set you
+already had", while a click always collapses. What the branch had broken was the other direction: `liftTouchDrag`
+cleared `selectedRowIDs` and put the pressed row in it on **every** lift, and with the lift firing on nearly every
+hold (see the tolerance above) a hold left a row painted `-selected` that the user had not selected and nothing took
+back - sitting there while the editor-tracking highlight moved with each tap, which is what a selection that grows
+looks like. The rule now is `onTodoDragStart`'s, verbatim: a drag from a row **outside** the selection makes that row
+the selection; a drag from a row **inside** it sweeps the whole set and changes nothing. The payload is
+`schedulableSelection()` either way, every payload row dims rather than only the row under the finger, the banner
+says "Moving 3 to-dos" rather than picking one title out of three, and the one end undims them all. The arm touches
+the selection not at all, and neither do the ends that took nothing. Whether a phone even delivers the compatibility
+mouse events those rules run on is a platform question this repo cannot answer from its own source, so `onRowPressed`
+and `onRowClicked` now trace on mobile with the resulting size (`row-press:<id> n=2`), and the next round's strip can
+settle it.
+
+**The gap** (finding 3) was already half-explained by the native drag, but the resolution was tightened to the rule
+it was always meant to have, because the previous strip could not have told us which of five refusals it was hitting.
+The geometry is **authoritative for rows**: `elementFromPoint` is asked exactly two questions - is there a
+`[data-drop]` here, is there an `h2` here - and its answer to anything else vetoes nothing, since on a phone the
+banner, the trace strip, a menu and the dragged row itself all float over the rows. (Both floating elements were
+already `pointer-events: none`; that is now pinned rather than assumed.) Each refusal is named where it is decided -
+`outside`, `refused-heading`, `no-row`, `no-info`, `both-null` - the resolver has no bare `return null` left, a change
+of refusal re-traces (two refusals for different reasons are not the same answer), and the release carries the
+standing one out with it: `drag-release:no-target:no-row y=612 rows=23`. The index is verified before it is read as
+well: `syncRowIndex` shifts the boxes, which is exact for a scroll and for nothing else, so the CANDIDATE row's live
+box is checked against the indexed one - one `getBoundingClientRect()` per lookup - and more than
+`ROW_INDEX_TOLERANCE_PX` apart rebuilds and re-searches; with no candidate the cheap question asked instead is
+whether the list still holds the number of rows it was measured with. The trace ring holds 12 to fit the reasons.
+
+A successful 18b now reads `menu-open > drag-lift n=1 > drag-target:after > drag-drop:between a1b2|c3d4 >
+drag-drop:posted`, and a refused gap says which refusal it was rather than leaving the next round to guess.
+
 **The Pixel round** is step 18 of MOBILE.md's checklist, with the trace ON. 18a is now "the menu opens
 with the finger still down"; **18b** is the one that decides the design — keep holding and move up or
 down: the menu must close, the row must lift, and the list must not scroll; and **18b-bis** is its other
@@ -1378,7 +1466,28 @@ half — move sideways instead, and nothing may lift while the menu stays and th
 stroke. If 18b still fails, the cheap fix (registering the `touchmove` listener once at load) comes
 first, and only then the drag-handle fallback.
 
-Suite: 351 harness checks, all passing (350 before the SECOND PIXEL ROUND above, plus 1: the panel-wide contextmenu
+Suite: 359 harness checks, all passing (351 before the THIRD PIXEL ROUND above, plus 8: three at the MARKUP,
+which is where that round's fix lives - a mobile list row and a mobile week card carry no draggable attribute and
+no drag handlers, nothing anywhere in a mobile panel does, and the mobile row is the desktop row minus exactly
+those and nothing else - one for the two belts behind it (the capturing dragstart listener with its trace code,
+the `-webkit-user-drag` rule, and `onTodoDragStart` refusing before it writes the selection), and four inside the
+three pins the earlier partial commits added for the tolerance, the selection and the geometric gap, which were
+rewritten in place rather than duplicated: the lift measured from `longPress.lastX/lastY` past a threshold of its
+own with `TOUCH_DRAG_SLOP` absent from the decision, the single unguarded `preventDefault()` before the two-finger
+bail, the lift's selection rule compared against `onTodoDragStart`'s rather than described twice, and
+`resolveDragTarget`'s five named refusals with no `return null` left. Both thresholds are now read off the panel
+source by the pure checks, so a change to either cannot leave them proving things about a number the gesture no
+longer uses. Five mutations were run against the round's own pins, each failing exactly what names it: restoring
+`draggable="true"` on mobile rows fails all three markup pins - the list row, the week card, and the byte-for-byte
+difference - each by its own message, which is what says the three are independent rather than one assertion
+written out three times; measuring the lift from the press point again fails "the
+lift is measured from the FIRE point, past a threshold of its own"; dropping the armed `preventDefault()` fails
+"the touchmove listener is NON-PASSIVE, and prevents the pan from the ARM"; collapsing the selection at the lift
+again fails "the lift respects the selection instead of collapsing it"; and letting a non-list element under the
+finger veto the gap fails "the GEOMETRY is authoritative for a gap". The e2e file grew six cases and one constant
+- the lifting step is sized against the new threshold, not the old slop.)
+
+The 351 it grew from: 350 before the SECOND PIXEL ROUND above, plus 1: the panel-wide contextmenu
 suppression and the menu guard, pinned together with the fire order that makes the guard sufficient, the
 editable-field exemption and the fields it exists for, and the four inline handlers (`formats.ts` and
 `html.ts`) that are the hazard — the pin asserts those exist, so it retires itself honestly

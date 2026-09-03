@@ -127,7 +127,10 @@ platforms (it draws above the panel on mobile).
 ### 2. Touch-interaction layer + tap targets + viewport (`panelWebview.js`, `panel.css`)
 
 All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click, dblclick,
-`contextmenu` and HTML5 drag are untouched. On mobile `contextmenu` is the one event suppressed
+`contextmenu` and HTML5 drag are untouched. On mobile there is **no HTML5 drag at all**: a row is
+rendered without its `draggable` attribute and without its drag handlers, because Android starts a
+native drag from a long press on a draggable element and that cancels the touch sequence the whole
+gesture layer below depends on (§7's first hazard). On mobile `contextmenu` is the one event suppressed
 outright, panel-wide: it is the platform's own long press, and the adapter below is the only thing
 allowed to open a menu from a touch (§7's first hazard). The one exemption is a field **text is typed
 into** (`input` — but never a checkbox or a radio — `textarea, select, [contenteditable]`, and never
@@ -328,28 +331,52 @@ byte-identical.
 Shipped in 2.3.0, and the one mobile feature whose make-or-break question is a **device** question
 (step 18b below). The gesture is **menu-first**, which is what the first Pixel round left of the
 original design: a 500 ms press on a to-do row's BODY opens its **context menu, with the finger still
-down**, and arms the drag silently behind it. The **first** travel past the 10 px slop then decides,
-once and for good — **up or down** closes the menu and lifts the row into the drag, **sideways** is left
-entirely alone (that stroke is Joplin's own side-menu swipe, and nothing is `preventDefault()`ed while
-the drag is merely armed, precisely so it reaches the native layer whole). From the lift on, moving
-resolves a drop target on every move and releasing drops it. A release that never moved leaves the menu
-exactly as the press opened it. Everything below the input layer is the desktop drag's own machinery —
+down**, and arms the drag silently behind it. The **first** travel past `TOUCH_DRAG_LIFT_PX` (20 px per
+axis, measured from the **fire point** — where the finger was when the menu opened) then decides, once
+and for good — **up or down** closes the menu and lifts the row into the drag, **sideways** is left
+entirely alone (that stroke is Joplin's own side-menu swipe). Below that threshold **nothing at all
+happens**: nothing painted, nothing closed, no guard taken, no direction decided. From the lift on,
+moving resolves a drop target on every move and releasing drops it. A release that never moved leaves
+the menu exactly as the press opened it.
+
+**Two numbers, two origins, and the third Pixel round is why.** The press survives on `TOUCH_DRAG_SLOP`
+(10 px, from the **press point**, the adapter's own cancel gate); the lift needs `TOUCH_DRAG_LIFT_PX`
+(20 px, from the **fire point**). The build the third round was run against measured both from the press
+point with the press's own slop, so at the instant the menu opened the finger could already be sitting
+one pixel from its own lift threshold: the smallest drift lifted the row and closed the menu in the
+frame after it appeared. That single arithmetic produced two of the four reports — *"the context menu
+doesn't appear at all on the long press"* and *"I hold the note and it is moving a little straight
+away"*. The fire point is kept in `longPress.lastX/lastY`, updated by every move the press survives,
+because the fire has no event of its own to read. There is deliberately **no settle window**: nothing
+shows the fire itself jitters the coordinates, and a window in which travel is ignored is also a window
+in which a deliberate drag cannot be started.
+
+**The list does not pan under a held finger.** From the **arm** onwards every `touchmove` is
+`preventDefault()`ed, not only the lifted ones. An un-prevented pan drags every row out from under the
+menu the fire just opened and fires the document `scroll` listener that closes it — a second,
+lift-independent route to "the menu doesn't appear". The sideways rule survives the change because
+**Joplin's side-menu responder lives on the native side of the WebView**: this document's
+`preventDefault()` cancels this document's own default (the pan) and nothing beyond it, so a
+sideways-first stroke still ends the gesture and still reaches the app. That is a claim about the
+platform rather than about this file, and step 18b is what checks it. Everything below the input layer is the desktop drag's own machinery —
 `betweenGroupInfo`'s eligibility, the neighbour walk, `paintBetweenIndicator` /
 `paintDropTargetHighlight`, the edge auto-scroll helper, and both message shapes
 (`['todosDroppedBetween', ids, prevId, nextId, groupDate, groupEndDate]` and
 `['todosDropped', ids, target]`) — so the host cannot tell a finger from a mouse and there are **no host
-changes** beyond loading the new module.
+changes** beyond loading the new module. The one thing the feature does change in the rendered markup is
+a subtraction: a mobile row carries no `draggable` attribute and no drag handlers (§2, and the first
+hazard below).
 
 **The state machine**, all of it in `panelWebview.js`:
 
 | from | on | to | what happens |
 | --- | --- | --- | --- |
-| the press (the existing long press) | 500 ms elapsed on a row body | **armed** | vibrate, `onTodoContextMenu(synthEvent(...))` opens the menu, then `armTouchDrag()`: pointer capture, the non-passive `touchmove` listener, the row index, a 15 s watchdog. **Nothing visible, nothing guarded, no payload, no selection change.** `trace: menu-open` |
-| armed | the first travel past 10 px, `\|dy\| >= \|dx\|` | **lifted** | `liftTouchDrag()`: `hideNoteContextMenu()`, `['dialogGuard', true]`, the selection collapses onto the row, the payload is `schedulableSelection()`, `.-dragging`, the banner names the row — then a target resolved and painted on every move. `trace: drag-lift` |
-| armed | the first travel past 10 px, `\|dx\| > \|dy\|` | **(torn down)** | `endTouchDrag('sideways')` — the menu is untouched, nothing was prevented, Android's own gesture keeps the stroke. `trace: drag-sideways-ignored` |
+| the press (the existing long press) | 500 ms elapsed on a row body | **armed** | vibrate, `onTodoContextMenu(synthEvent(...))` opens the menu, then `armTouchDrag()`: pointer capture, the non-passive `touchmove` listener (which prevents the pan from here on), the row index, a 15 s watchdog, and the **fire point** as the origin. **Nothing visible, nothing guarded, no payload, no selection change.** `trace: menu-open` |
+| armed | travel past `TOUCH_DRAG_LIFT_PX` from the fire point, `\|dy\| >= \|dx\|` | **lifted** | `liftTouchDrag()`: `hideNoteContextMenu()`, `['dialogGuard', true]`, the selection is settled **exactly as `onTodoDragStart` settles it** (a row outside the selection becomes the selection; a row inside it sweeps the whole set unchanged), the payload is `schedulableSelection()`, every payload row gets `.-dragging`, the banner names the row or the count — then a target resolved and painted on every move. `trace: drag-lift n=<count>` |
+| armed | travel past `TOUCH_DRAG_LIFT_PX` from the fire point, `\|dx\| > \|dy\|` | **(torn down)** | `endTouchDrag('sideways')` — the menu is untouched and the selection with it; the pan was prevented, the side-menu responder is native and unaffected. `trace: drag-sideways-ignored` |
 | armed | release without travelling | **(torn down)** | `endTouchDrag('released')` — the menu the press opened stays open; the synthetic click is swallowed, so no note opens and no menu item runs. `trace: drag-released` |
 | lifted | release over a gap / a `[data-drop]` | **dropped** | the drop message, THEN the guard release, `trace: drag-drop:between <prev>\|<next>` / `drag-drop:date <YYYY-MM-DD>`, then `drag-drop:posted` |
-| lifted | release over nothing | **cancelled** | `endTouchDrag('no-target')` — only a lifted drag can reach this; an armed release is the row above. `trace: drag-release:no-target` (the user's own release, told apart from the platform's `drag-cancel:` ends) |
+| lifted | release over nothing | **cancelled** | `endTouchDrag('no-target')` — only a lifted drag can reach this; an armed release is the row above. `trace: drag-release:no-target:<reason> y=<int> rows=<n>` (the user's own release, told apart from the platform's `drag-cancel:` ends, and carrying **which** refusal was standing) |
 | armed / lifted | a second finger, `pointercancel`, `visibilitychange`, resize, orientation change, the watchdog | **cancelled** | `trace: drag-cancel:<reason>` |
 
 Every one of those ends calls the single `endTouchDrag(reason)`, which takes down the `touchmove`
@@ -361,16 +388,70 @@ it closes it explicitly. `endTouchDrag` has exactly one `return` (the not-active
 line), which is what makes "every exit releases the guard" a property of the shape rather than of a
 reviewer's attention; the harness pins that, and a mutation adding a second `return` fails it.
 
-**The direction rule is a pure function**, `TouchDrag.firstMoveDirection(dx, dy, slop)` in
+**The direction rule is a pure function**, `TouchDrag.liftDecision(dx, dy, threshold)` in
 `touchDrag.js`, so it is driven directly by the harness rather than read: it returns `null` inside the
-slop (the gate is `movedBeyond`'s own, per axis, so "held still" means the same to the press and to the
-drag), and otherwise compares magnitudes. The tie — a perfect diagonal — goes to **vertical**,
+threshold (the gate is `movedBeyond`'s own, per axis — one arithmetic serving both numbers, so "has it
+moved" can never come to mean two different things), and otherwise compares magnitudes. The tie — a perfect diagonal — goes to **vertical**,
 deliberately: a swipe refused here is one flick away from being re-tried, a lift refused here needs the
 finger up and the press made again.
 
-Four hazards this was designed around, each of which cost something to get right — and a fifth the
-second Pixel round added:
+**THE SELECTION CONTRACT.** The third Pixel round reported *"broken: the mobile multi-selection —
+long-hold selects one note, then taps on other notes select them all too"*, so what a touch may do to
+the row selection is written down here rather than inferred:
 
+- **What main defines** — and this branch changes none of it. A row carries `onmousedown` and `onclick`
+  and no touch handler of its own (`src/core/formats.ts`), so on a phone the selection is reached only
+  through the browser's compatibility mouse events, and both handlers hand the decision to the shared,
+  DOM-free `window.RowSelection`. Shift and Ctrl are unreachable from a finger, so `pressSelection` can
+  only answer *the pressed row alone* or *the multi-set you already had*, and `clickSelection` always
+  collapses onto the clicked row. **A touch therefore selects exactly one row, and no sequence of taps
+  can grow that.** The one exception is a long press on a **group heading**, which selects every to-do in
+  the group and opens the alarm picker. (`showNoteContextMenu` and `noteMenu.js` say the same thing from
+  the other end: on mobile the menu is always the single-note menu.)
+- **What the round's build broke, and what fixed it.** `liftTouchDrag` used to clear `selectedRowIDs` and
+  put the pressed row in it on **every** lift — and since the lift fired on very nearly every hold, a
+  hold left a row painted `-selected` that the user had not selected and nothing afterwards took back. It
+  sat there while the editor-tracking highlight moved with each tap, which is what a selection that grows
+  looks like. The lift now applies `onTodoDragStart`'s rule verbatim: **a drag from a row OUTSIDE the
+  selection makes that row the selection; a drag from a row INSIDE it sweeps the WHOLE set and changes
+  nothing.**
+- **What the drag owes an existing selection.** The payload is `schedulableSelection()` either way (the
+  to-dos within the selection, in the selection's own order, notes silently dropped), every payload row
+  dims rather than only the row under the finger, the banner says "Moving 3 to-dos" rather than picking
+  one title out of three, and the one end undims them all. The **arm** touches the selection not at all,
+  and neither do the ends that took nothing: a hold-and-release, a sideways swipe and a cancel leave it
+  exactly as they found it. The **drop** clears it, because every other drop path in the file does.
+- **What is still unknown, and how the strip answers it.** Whether a phone delivers those compatibility
+  mouse events after a long press is a platform behaviour this repo cannot read off its own source. So
+  `onRowPressed` and `onRowClicked` each trace on mobile — `row-press:<id> n=<size>` and
+  `row-click:<id> n=<size>` — and a hold followed by two taps reads as three lines with the resulting
+  size after each. If a device round ever wants a real mobile multi-select, that is the evidence to build
+  it on; it does not exist today.
+
+Four hazards this was designed around, each of which cost something to get right — a fifth the second
+Pixel round added, and a sixth the third round found underneath all of them:
+
+- **Android starts a native HTML5 drag from a long press on a `draggable` element, and this repo believed
+  it did not.** The header of this very gesture used to say "Android's WebView fires no HTML5 drag at
+  all". It does. A long press on a `draggable` row fires `dragstart` (the desktop `onTodoDragStart` runs:
+  the row is selected, the payload dimmed), floats **a translucent copy of the row under the finger** —
+  the platform's drag image — and then **cancels the touch sequence**, which takes the panel's own 500 ms
+  timer with it. So no menu opens, nothing arms, and no touch drag exists; the row appears to move the
+  instant it is held (that is the drag image, not a lift); the only drop that still lands is onto a
+  **heading**, because the native drag finds the heading's inline `ondrop` — the desktop path — while a
+  gap needs the touch path that never started; and the pressed row is left selected, so later taps look
+  like they are adding to a selection. **All four of the third Pixel round's reports, from one cause**,
+  and the evidence was in the screenshots: the strip for a failed drag read `contextmenu-suppressed:row`
+  and then nothing — never `menu-open` — while the picture showed the floating copy of the row. The fix
+  is in the markup: `renderTodoRowHtml` takes `nativeDrag: false` for a mobile row and `renderWeekCard`
+  applies the same rule to a card, which suppresses the `draggable` attribute and the two drag handlers
+  **and nothing else** (the selection `onmousedown` stays — that is the whole difference from the peek's
+  `draggable: false`). Two belts behind it, because the failure is silent: `-webkit-user-drag: none` on
+  `.cockpit-mobile .todo`, which is what the WebView reads before it decides an element can be picked up,
+  and a **capturing document `dragstart` listener** that cancels every drag on mobile and traces
+  `native-dragstart`, so the next device strip says whether Android is still trying. `onTodoDragStart`
+  itself returns on `IS_MOBILE` before it touches the selection (`native-dragstart:handler` — reaching it
+  means the markup gate leaked).
 - **Android's long press fires a real `contextmenu` on the row, and the rows carry inline handlers.** Every to-do
   row is rendered with `oncontextmenu="onTodoContextMenu(event, id)"`, every note row with
   `onNoteContextMenu` (`src/core/formats.ts`, the list rows and the week cards) and every group heading with
@@ -412,23 +493,23 @@ second Pixel round added:
   never reaches `showNoteContextMenu`, so a heading has the capture listener only — a heading is not a drag source
   and opens the alarm picker rather than a menu.
 - **The non-passive `touchmove` is the whole gesture.** `preventDefault()` on a touchmove is the only
-  thing that stops Android panning the list under the lifted row, and a document-level touchmove
-  listener is **passive by default** in Chrome — where `preventDefault()` does nothing at all. So the
-  listener is registered `{ passive: false, capture: true }` and removed with the same options (a
-  mismatch would leave a listener that cancels every touchmove for ever, killing the list's scrolling).
-  It is attached only from the **arm** onwards, and it **prevents nothing while the drag is merely
-  armed** — the move it is about to measure may be the side-menu swipe, and a panel that cancelled that
-  would break the app's navigation to save its own gesture. Which is also why there is deliberately **no
-  `touch-action` on `.todo`**: that would apply to every touch on every row, always, and the list must
-  keep scrolling by flick.
+  thing that stops Android panning the list, and a document-level touchmove listener is **passive by
+  default** in Chrome — where `preventDefault()` does nothing at all. So the listener is registered
+  `{ passive: false, capture: true }` and removed with the same options (a mismatch would leave a
+  listener that cancels every touchmove for ever, killing the list's scrolling). It is attached only from
+  the **arm** onwards, so an ordinary flick is never routed through it — and from the arm it prevents
+  **every** move, armed or lifted. Which is also why there is deliberately **no `touch-action` on
+  `.todo`**: that would apply to every touch on every row, always, and the list must keep scrolling by
+  flick.
   Two distinct things can go wrong on a device, and they need different fixes — 18b separates them, and
   the trace is what tells them apart.
-  - **Before the lift**, in the 0–10 px slop window, the panel deliberately prevents nothing at all, while
-    Chromium starts its own pan at roughly 8 px. A single twitch of the list before the row comes up is
-    therefore the *expected* behaviour of this design on any device, not a fault, and **no amount of
-    listener registration changes it**: the handler is declining to cancel those moves on purpose. The
-    fix, if the twitch is bad enough to matter, is to **lower `TOUCH_DRAG_SLOP`** below the platform's
-    scroll-start threshold (4–6 px), at the cost of lifting on a smaller tremor.
+  - **Before the lift**, the armed phase now cancels the pan at source. The earlier design left it
+    un-prevented so that a sideways stroke would reach Android whole; the price was that the list panned
+    under a held finger, which moved every row out from under the just-opened menu, fired the document
+    `scroll` listener that closed it, and read to the user as the row already moving. The sideways rule
+    did not need that price: **the side-menu responder is native**, and this document's `preventDefault()`
+    reaches only this document's own default. If a device round ever shows the side menu failing to get a
+    sideways stroke, that is the claim to re-open — not the threshold.
   - **After the lift**, `preventDefault()` is the only thing stopping the pan — and *that* is where the
     registration point matters. The listener is attached **mid-gesture**, 500 ms into the touch: Chromium
     decides a touch sequence's blocking-handler region on the compositor, and a handler added late may
@@ -451,10 +532,25 @@ second Pixel round added:
   it would run on every auto-scrolled frame, on the device, in the one phase where the frame budget is
   real. Re-syncing on a scroll the drag did **not** ask for is the insurance against Android panning the
   list without taking the gesture away — see 18b: an unsynced index would write neighbours read off rows
-  that had scrolled off.) The big `[data-drop]` targets are still resolved from the DOM, and **first**,
-  because a heading is a *sibling* of the rows — it sits in the very gap the row index would attribute to
-  the row above it — and because a sticky heading floating over the list (z-index 2, above any
-  overhanging ring) genuinely is what the finger is on.
+  that had scrolled off.) The shift is exact for a scroll **and for nothing else**, and a
+  shifted-but-wrong index is this gesture's worst failure because it is silent — the line paints somewhere
+  plausible and the drop writes the neighbours of a row the finger was never over. So the index is
+  **verified before it is read**: `rowEntryAtY` checks the CANDIDATE row's live box against the indexed
+  one (one `getBoundingClientRect()` per lookup) and rebuilds when they disagree by more than
+  `ROW_INDEX_TOLERANCE_PX` (2 px) or the row has left the document; with no candidate there is no row to
+  check, so the cheap question asked instead is whether the list still holds the number of rows it was
+  measured with, which keeps a finger parked below the last row from rebuilding on every frame.
+
+  **THE GEOMETRY IS AUTHORITATIVE FOR ROWS**, and that is the third Pixel round's *"moving one note
+  doesn't land between other notes, only on headings"*. `document.elementFromPoint` is asked exactly two
+  questions — is there a `[data-drop]` here, is there an `h2` here — and its answer to anything else is
+  **not consulted and vetoes nothing**: on a phone the drag banner, the trace strip, a menu and the
+  dragged row itself all float over the rows, and none of them gets a say in where the rows are. (The
+  banner and the trace strip are `pointer-events: none` in `panel.css` besides, so they never even reach
+  the first question; the harness pins both.) The big `[data-drop]` targets are still resolved from the
+  DOM, and **first**, because a heading is a *sibling* of the rows — it sits in the very gap the row index
+  would attribute to the row above it — and because a sticky heading floating over the list (z-index 2,
+  above any overhanging ring) genuinely is what the finger is on.
 - **A heading that accepts no drop is not the gap above it either.** "Overdue" and "Future" name no date,
   so `getHeadingDropTarget` gives them none and they carry no `data-drop` at all. They miss the
   `[data-drop]` branch — and, being siblings of the rows, they would then fall through to the row index,
@@ -482,6 +578,19 @@ second Pixel round added:
 - **The gap that is not a target.** A gap with *both* neighbours absent in a *dateless* group
   (Overdue/Future) is not painted and not droppable: `betweenBounds` can form no interval for it and the
   host would write nothing, so an insertion line there would promise a move that never happens.
+- **Every refusal is named where it is decided.** Five different things in `resolveDragTarget` can refuse
+  a gap, and until the third round all five left the same bare `drag-target:none`, so a strip from the
+  device could not say which one it was. Each now carries its reason, and the release carries the
+  standing one out with it (`drag-release:no-target:<reason> y=<int> rows=<n>`):
+
+  | reason | what it means | what to do about it |
+  | --- | --- | --- |
+  | `outside` | the finger's y is outside the `.todos` client rect — above or below the list | nothing: this is the "release outside the list to cancel" the banner offers |
+  | `refused-heading` | an `h2` with no `data-drop` is under the finger (Overdue, Future — and a **sticky** one floats over the rows near the top of a scrolled list) | aim a row lower; if a gap in the middle of a group reports this, the heading is covering more than it should |
+  | `no-row` | inside the list, but off either end of the index — the whitespace below the last row | nothing, or the index is stale (compare `rows=` with what is on screen) |
+  | `no-info` | the row under the finger takes no between-drop: the No-Due group, a week card, a month section, anything not a direct child of `.todos` | expected in those views; a *list* row reporting it is a bug in `betweenGroupInfo` |
+  | `both-null` | a gap in a dateless group with no non-dragged neighbour on either side | expected (see the bullet above) |
+  | `unresolved` | released before any target was ever resolved | the finger never moved after the lift |
 
 Feedback is a lifted (dimmed) row, one insertion line **or** one whole-row highlight — never nothing
 silently — and a banner (`#cockpitDragBanner`) that names the resolved target: "before X", "after X",
@@ -490,27 +599,38 @@ second thing to keep in sync with the finger and adds nothing the line does not 
 
 The **gesture trace** was fixed first, as its own commit, because it was blind to this gesture: it wrote
 only into the search suggestion list's hint line, which is closed during a row drag. It now falls back
-to the toast in a sticky mode, and the ring buffer holds 10 entries. Codes: `menu-open` (the hold: menu
-up, drag armed), `drag-lift`, `drag-uncancelable` (the lifting move arrived non-cancelable, so
+to the toast in a sticky mode, and the ring buffer holds **12** entries (it grew with the refusal
+reasons). Codes: `menu-open` (the hold: menu up, drag armed), `drag-lift n=<count>`, `drag-uncancelable` (the lifting move arrived non-cancelable, so
 `preventDefault()` is a no-op from there — 18b's second failure shape), `drag-released`,
-`drag-sideways-ignored`, `drag-target:before|after|drop|none` (on a **change** only), `drag-autoscroll:up|down` (on a direction
+`drag-sideways-ignored`, `drag-target:before|after|drop|none:<reason>` (on a **change** only — and two
+refusals for different reasons are two different answers, so the strip re-traces when the finger crosses
+from one to the other), `drag-autoscroll:up|down` (on a direction
 change only), `drag-drop:between <prev>|<next>` and `drag-drop:date <YYYY-MM-DD>` (**what** the release is
 about to write — four characters of each neighbour id, `-` for the end of a group) followed by
 `drag-drop:posted` (the call was made — `webviewApi.postMessage` is asynchronous and `void`-prefixed, so this
-says the post was *issued* without throwing, not that the host has written anything yet), `drag-release:no-target` (a lifted drag released over nothing droppable:
-the user's own cancel, deliberately not one of the platform's), `drag-cancel:<reason>` (including `drag-cancel:re-arm`, the
+says the post was *issued* without throwing, not that the host has written anything yet),
+`drag-release:no-target:<reason> y=<int> rows=<n>` (a lifted drag released over nothing droppable: the
+user's own cancel, deliberately not one of the platform's, and naming **which** refusal was standing, where
+the finger was, and how many rows the index held), `native-dragstart` / `native-dragstart:handler` (Android
+tried to start its own HTML5 drag, and the panel refused it — see the first hazard below; a strip carrying
+either of these on a build whose rows are not `draggable` means something else in the panel is),
+`row-press:<id> n=<size>` / `row-click:<id> n=<size>` (the compatibility mouse events a phone may or may not
+deliver, with the resulting selection size), `drag-cancel:<reason>` (including `drag-cancel:stale-pointer`,
+the gesture a previous press left running that would otherwise have silenced the next hold's menu) (including `drag-cancel:re-arm`, the
 unreachable-today path where a fire lands on a gesture still in flight and `armTouchDrag` ends it through
 the single end rather than overwriting its state, so a taken guard can never be dropped silently), and
 `contextmenu-suppressed:row|note|heading|other` (which zone the refused event landed in — a to-do row or week
 card, a note row, a heading with ids on it, or anything else, the tick circle counting as its row) / `menu-blocked` — the two halves of the panel-wide contextmenu
 refusal (the hazard list above), which is the one part of this gesture that used to happen with nothing said. A
 whole successful gesture therefore reads as
-`menu-open > drag-lift > drag-target:after > drag-drop:between a1b2|c3d4 > drag-drop:posted`, or
+`menu-open > drag-lift n=1 > drag-target:after > drag-drop:between a1b2|c3d4 > drag-drop:posted`, or
 `menu-open > drag-released`, or `menu-open > drag-sideways-ignored` — the three outcomes are told apart at a glance, which is the whole
 job of the trace on the device. **The strip is a ring of 10, and a real drag can overflow it**: a
 `contextmenu-suppressed:row` at the head, plus three or four `drag-target:` changes and an autoscroll or two
 during the glide, will push `menu-open` off the front. A strip that begins mid-drag is the buffer doing its job,
-not a menu that never opened — read the TAIL for the outcome.
+not a menu that never opened — read the TAIL for the outcome. The one shape that is **not** the buffer doing its
+job is a strip that reads `contextmenu-suppressed:row` and then nothing at all: that is a touch sequence that was
+cancelled before the 500 ms, which is what Android's native drag used to do (first hazard below).
 
 **Rejected, and why** — gaps-only targets (the headings are the coarse, forgiving target a finger wants
 and they already exist); a per-row drag handle (a permanent column of chrome on every row for a gesture
@@ -764,15 +884,25 @@ success vs failure looks like. The build to install is
          reached the row; the strip would then be missing its `contextmenu-suppressed:row` line, which is the
          panel refusing exactly that event). A `contextmenu-suppressed:row` line in the strip is **not** a
          failure: it is the platform's own long press being turned away, which is the design.
+       - **Failure, the third Pixel round's shape — and the one to recognise on sight: a translucent COPY
+         of the row appears and follows the finger, and no menu opens.** That copy is Android's own HTML5
+         **drag image**: the platform started a native drag from the long press and cancelled the touch
+         sequence, so the panel's 500 ms timer never fired. The strip then reads `contextmenu-suppressed:row`
+         and **nothing after it** — no `menu-open`. On this build a mobile row carries no `draggable`
+         attribute at all, so it should be impossible; if it happens, look for `native-dragstart` in the
+         strip (the capturing listener refusing one) and report which view the row was in — a list row and
+         a week card are rendered by different code (`renderTodoRowHtml` / `renderWeekCard`).
 
     b. **MAKE OR BREAK: keep holding and move UP or DOWN.** From that same hold, without lifting the
        finger, slide it up and down over other rows.
        - Success: the **menu closes**, the row dims and lifts, an insertion line follows the finger
          between rows, the banner reads "before …" / "after …", and the **list itself does not scroll**.
-         The trace reads `menu-open > drag-lift > drag-target:…`, and a release over a gap adds
+         Crucially the row does **not** start moving the moment it is held: the first ~20 px of travel from
+         where the menu appeared do nothing at all, and the menu stays up through them.
+         The trace reads `menu-open > drag-lift n=1 > drag-target:…`, and a release over a gap adds
          `drag-drop:between <prev>|<next> > drag-drop:posted` (or `drag-drop:date <YYYY-MM-DD>` onto a heading)
          — which is what says which neighbours the write was aimed between, and that the post was issued,
-         rather than only that the finger came up. The strip holds **10 lines**, so on a long glide (several
+         rather than only that the finger came up. The strip holds **12 lines**, so on a long glide (several
          `drag-target:` changes, an autoscroll) the HEAD is evicted: a strip starting at `drag-target:` with no
          `menu-open` in front of it is normal and is **not** a failure — read the tail. A `contextmenu-suppressed:row` anywhere in the strip is expected (Android's own
          long press, refused). A `menu-blocked` means something still tried to open a menu behind the live drag
@@ -782,24 +912,26 @@ success vs failure looks like. The build to install is
          second Pixel round saw, and is already fixed — it is listed so a recurrence is recognised). Read
          the trace strip before deciding which one you saw, and report the strip verbatim either way.
          1. *The list twitches once, and then the drag takes over anyway* (the trace still reads
-            `menu-open > drag-lift > drag-target:…`). This is the **slop margin**, not Android winning:
-            the panel prevents nothing for the first 10 px on purpose, and Chromium starts its own pan at
-            roughly 8. Registering the listener at load does **not** help here. The fix is to lower
-            `TOUCH_DRAG_SLOP` (panelWebview.js) to 4–6 px and repeat 18b. Report how far the finger had to
-            travel before the row lifted.
+            `menu-open > drag-lift n=1 > drag-target:…`). Since the third round the **armed** phase cancels
+            the pan at source, so this should no longer happen at all: a twitch now means the moves are
+            arriving non-cancelable from the very start (shape 2's cause, before the lift rather than
+            after it) or that something is dismissing the listener. Report how far the finger travelled
+            before the row lifted, and whether `drag-uncancelable` is in the strip. Do **not** lower
+            `TOUCH_DRAG_LIFT_PX` for this: the threshold is the tolerance the third round asked for, and
+            shrinking it brings back "the row moves as soon as I hold it".
          2. *The row lifts, but the list keeps scrolling under it* — and the trace shows
             `drag-uncancelable` right after `drag-lift`. The moves are arriving **non-cancelable**, so the
             `preventDefault()` that stops the pan is a silent no-op. **This is the cheap fix's case**
             (§7, the non-passive bullet): register the `touchmove` listener once at load instead of
             mid-gesture, so the touch sequence is blocking from its `touchstart`, then repeat 18b and 18j.
          3. *The row never lifts at all*, or the trace ends at `menu-open > drag-cancel:pointercancel`
-            with no `drag-lift`. Android's compositor took the pointer away outright — but note **where** it
-            took it: if the stroke was clearly vertical, the likeliest cause is that the compositor claimed
-            the sequence inside the un-prevented 10 px slop window, which is shape 1 arriving as a cancel
-            rather than as a twitch. So try `TOUCH_DRAG_SLOP` at 4–6 px **first** and repeat 18b; only if a
-            short slop still cancels is this a genuine outright steal. Then try the same load-time
-            registration; if that changes nothing either, this is **the signal to fall back to a per-row
-            drag handle** (documented above as the rejected-but-kept alternative).
+            with no `drag-lift`. Android's compositor took the pointer away outright. Check first that the
+            stroke really did pass the ~20 px threshold — a finger that moved 15 px has decided nothing on
+            purpose, and that is not this shape. Then try the load-time registration described in shape 2,
+            so the touch sequence is blocking from its `touchstart` rather than from the arm; if that
+            changes nothing, this is **the signal to fall back to a per-row drag handle** (documented above
+            as the rejected-but-kept alternative). A `pointercancel` with **no** `menu-open` before it is a
+            different failure entirely — see 18a's third-round shape (the native drag).
          4. *The row lifts but the menu stays on screen, and the release reschedules nothing.* **This is
             what the second Pixel round saw**, and its cause was Android's own `contextmenu` firing on the
             row and re-opening the menu behind the drag through the row's inline handler (§7's first
@@ -808,8 +940,11 @@ success vs failure looks like. The build to install is
             the event and refused it (so the menu came from somewhere else), `menu-blocked` says an
             opener was turned away mid-drag, and **neither of them present** says the platform opened
             that menu by a route the panel never sees at all. Note also whether the release reached
-            `drag-drop:` + `drag-drop:posted` or ended at `drag-release:no-target` (the finger came up
-            over something that is not a gap, which is what a menu sitting under it would cause).
+            `drag-drop:` + `drag-drop:posted` or ended at `drag-release:no-target:<reason>` (the finger came
+            up over something that is not a gap, which is what a menu sitting under it would cause — and the
+            reason says which: `refused-heading` for a menu or heading over the rows, `outside` for a finger
+            off the list, `no-row`/`no-info`/`both-null` for the three ways a gap can be no gap; §7 has the
+            table and what to do about each).
 
     b-bis. **SIDEWAYS first must be left alone.** Hold a to-do row again, and this time move the finger
        **across** the row (left or right) rather than up or down.
@@ -821,17 +956,35 @@ success vs failure looks like. The build to install is
          longer opens from a held row (the panel is preventing something it should not), or the panel
          stops refreshing afterwards (a guard taken on a path that must not take one).
        - **Not** a failure: the menu closing while nothing lifts and the trace still reads
-         `menu-open > drag-sideways-ignored`. A stroke with any vertical component pans the list (the armed
-         state prevents nothing on purpose), and *any* scroll dismisses the context menu through the
-         panel's own `document`-level `scroll` listener — which predates this feature and is not the drag's
-         doing. Only "the row lifted" and "the guard was taken" decide this step.
+         `menu-open > drag-sideways-ignored`. The gesture ends on the sideways decision, and the menu is
+         then nobody's to protect — a scroll after that point dismisses it through the panel's own
+         `document`-level `scroll` listener, which predates this feature. (**During** the armed phase the
+         menu is protected: the pan is cancelled, and that listener stands aside for an armed gesture. So a
+         menu vanishing BEFORE anything is decided is a failure, and belongs to 18b's shape 1.) Only "the
+         row lifted" and "the guard was taken" decide this step.
+       - Report either way whether the side menu opened. That stroke reaching Joplin is the claim the
+         armed `preventDefault()` rests on (§7: the responder is native, so cancelling this document's own
+         default cannot reach it), and this step is the only thing that can test it.
 
-    c. **Aim.** Drop a to-do into the gap two rows away from where it started. Repeat the same aim five
-       times.
+    c. **Aim, and above all: a GAP, not only a heading.** Drop a to-do into the gap two rows away from
+       where it started. Repeat the same aim five times, and do it once with the finger high in the list,
+       where the drag banner floats over the rows.
        - Success: at least 4 of 5 land in the gap you aimed at, and the to-do's time is between its two
-         new neighbours' times.
+         new neighbours' times. The banner reads "before …" / "after …" throughout.
        - Failure: it lands one row off more than once — the row index or the 0.5 band needs a look
          (report which direction it is consistently off by).
+       - **Failure, the third Pixel round's shape: the drop only ever works onto a HEADING, and a gap does
+         nothing.** Report the strip verbatim. Every refusal now names itself, and the name is the whole
+         diagnosis: `drag-target:none:refused-heading` while the finger is between two rows means a
+         heading (probably a *sticky* one, at the top of a scrolled list) is covering the gap;
+         `none:no-info` means the row under the finger takes no between-drop (the No-Due group, a week
+         card); `none:no-row` means the index has nothing at that y — compare `rows=<n>` on the release
+         line with the number of rows on screen, since a wrong count is a stale index; `none:outside`
+         means the y was outside the list's own box. The release line carries the standing reason,
+         the finger's y and the row count: `drag-release:no-target:no-row y=612 rows=23`.
+       - Not a failure: nothing floating over the list can veto a gap any more (the banner and the trace
+         strip are `pointer-events: none`, and only a `[data-drop]` or an `h2` is consulted at all), so a
+         gap under the banner must still land. That is what the "finger high in the list" repeat is for.
 
     d. **Auto-scroll.** Grab a to-do near the bottom of a long list, hold the finger in the strip at the
        **top** edge of the list and keep it still.
@@ -867,6 +1020,35 @@ success vs failure looks like. The build to install is
          longer being swallowed), an item fires by itself (the same click reaching the menu), or the menu
          opens and vanishes a moment later (that would mean the refresh guard was taken on a path that
          never lifts — report it, it is the one thing this design is careful about).
+
+    f-bis. **The selection, and a drag that moves several rows.** (New in the third Pixel round, which
+       reported "long-hold selects one note, then taps on other notes select them all too".)
+       - **Taps must not accumulate.** Hold a row until the menu opens, release, close the menu, then tap
+         two other rows in turn.
+         - Success: **at most one row is highlighted at a time**. A tap replaces the highlight or leaves
+           it alone; it never adds. (Two rows can be lit for a moment — the selected one and the one the
+           editor has open — but never three, and never one more with every tap.)
+         - Failure: the highlight accumulates. Report the strip: `row-press:<id> n=<size>` and
+           `row-click:<id> n=<size>` after each tap say whether the phone delivers the compatibility mouse
+           events at all and what the size was after each, which is the only way to tell a broken rule
+           from a platform that never runs it.
+         - Report the `n=` values either way, even on success. Whether those two handlers run at all on
+           Android is still an open question in this repo (§7, the selection contract), and this step is
+           the only instrument for it.
+       - **A multi-row drag.** The one way a phone can build a multi-selection today is a **long press on
+         a group heading**, which selects every to-do in that group and opens the alarm picker. Pick a
+         small group, do that, cancel the picker, then hold one of that group's rows and drag it into a
+         gap in another group.
+         - Success: **every** row of the group dims (not just the one under the finger), the banner reads
+           "Moving N to-dos", and the release moves all N, keeping their order. The strip reads
+           `drag-lift n=N`.
+         - Failure: only one row dims or only one moves (the payload is being taken after a collapse
+           rather than from the selection), or the selection is silently thrown away by the hold.
+       - **A drag from OUTSIDE a selection.** With that selection still standing, hold a row that is
+         **not** in it and drag it.
+         - Success: that row alone lifts and moves, and the rows that were selected are left where they
+           are. This is the desktop rule exactly (`onTodoDragStart`), and it is deliberate: anything else
+           would move rows the finger never touched.
 
     g. **The guard does not leak.** Cancel a drag by releasing over the panel's header, then **wait two
        minutes** doing nothing.
