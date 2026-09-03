@@ -84,11 +84,14 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
 
   // THE TWO TRAVELS EVERY CASE HERE IS SIZED BY, both against the panel's own TOUCH_DRAG_LIFT_PX (20 px per axis
   // from the fire point, panelWebview.js). A step of 28 px is unambiguously past it - a lift that "worked" at 21 px
-  // would be one rounding away from the threshold it is meant to prove - while DRIFT_PX is unambiguously inside
-  // it, and is what a hand does while holding a phone: the tolerance case moves the finger by it and demands that
-  // NOTHING happens. Both are a per-axis travel at a constant x, so neither can be read as sideways.
+  // would be one rounding away from the threshold it is meant to prove - while DRIFT_PX is inside it, and is what
+  // a hand does while holding a phone: the tolerance case moves the finger by it and demands that NOTHING happens.
+  // 13 rather than 12 so the case proves BOTH halves of the fix: it is inside the threshold measured from the fire
+  // point (13 < 20) and outside it measured from the press point (8 px of pre-fire wander + 13 = 21 > 20, and
+  // movedBeyond is strictly greater), so a build that kept the number and regressed only the ORIGIN lifts here.
+  // Both are a per-axis travel at a constant x, so neither can be read as sideways.
   const LIFT_STEP = 28;
-  const DRIFT_PX = 12;
+  const DRIFT_PX = 13;
 
   // The Today anchors the gap cases aim between, at three widely separated clock times.
   const LO = `td-lo-${stamp}`;
@@ -113,23 +116,26 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   const ALARM = `td-alarm-${stamp}`;
   const TOMORROW = `td-tomorrow-${stamp}`;
   const PEEK = `td-peek-${stamp}`;
-  // The three rows the third Pixel round's multi-selection case moves as ONE. They are seeded at the very top of
-  // the Overdue group (the earliest dues sort first) so they are on screen whatever the list has grown to, and
-  // they are the ONLY rows this round adds - see the aliases below for why that number matters.
-  const MULTI_A = `td-multi-a-${stamp}`;
-  const MULTI_B = `td-multi-b-${stamp}`;
-  const MULTI_C = `td-multi-c-${stamp}`;
-  // EVERY OTHER ROW THIS ROUND NEEDS IS A ROW ALREADY HERE, and that is a deliberate constraint rather than
-  // thrift. This list is as tall as the panel: the case that drops onto the "No Due Date" heading needs that
-  // heading to be ON SCREEN at scrollTop 0, and every row seeded above it pushes it down. So the cases below
-  // reuse rows whose own case wrote nothing at all - each alias used by exactly ONE new case, so no new case
-  // depends on another having run, and each aliased row's due date is untouched at the moment its new case
-  // starts. A case that WRITES a due takes a row whose earlier case only read one.
+  // EVERY ROW THIS ROUND NEEDS IS A ROW ALREADY HERE, and that is a deliberate constraint rather than thrift.
+  // This list is as tall as the panel: the case that drops onto the "No Due Date" heading needs that heading to be
+  // ON SCREEN at scrollTop 0, and EVERY dated row seeded above it pushes it down (the undated filler sits below
+  // it and costs nothing). So this round seeds nothing at all and the geometry is exactly the one the file was
+  // last proven green on. The rows below are reused from cases whose own case wrote no due date, and each row's
+  // due is untouched at the moment its new case starts: a case that WRITES a due takes a row whose earlier cases
+  // only read one, and no case above it in the file depends on the due this one leaves behind.
   const TOLERANCE = MENU;                      // held, drifted, lifted, cancelled: writes nothing, before or after
   const TAP_A = CTX, TAP_B = CANCEL, TAP_C = REFUSE;   // tapped, which only opens a note
   const LONER = SWIPE;                         // dragged from outside a selection
   const VETO = TAP;                            // dragged into a gap under a floating overlay
   const NATIVE = ALARM;                        // the row a dragstart is dispatched at, then dragged for real
+  // The three rows the multi-selection case moves as ONE, in the order they are in the DOM (the payload is the
+  // selection in its own order, and the case asserts that order). All three are Overdue with dues no earlier case
+  // wrote, so "all three moved into the gap" is a visible change rather than three numbers that were already
+  // there; every case that used them before - the menu-open case, the contextmenu case, the header-cancel case,
+  // the taps case - sits ABOVE this one in the file and reads no due of theirs afterwards. The two cases below it
+  // that name these rows read them exactly as this one leaves them: one checks the dues it did NOT write, the
+  // other only borrows the ids for a selection.
+  const MULTI_A = MENU, MULTI_B = CTX, MULTI_C = CANCEL;
   // Where Joplin's editor is parked before the two cases that have to see it NOT move. A plain note, so it never
   // reaches the panel and can never be mistaken for a row, and seeded LAST: the note list sorts by
   // `user_updated_time` reversed (`notes.sortOrder.field` / `.reverse` defaults), so the newest note is the first
@@ -222,12 +228,6 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     // The peek case's row lives in ANOTHER notebook, so filtering to this one and searching for it produces the
     // read-only "results outside current filters" section.
     ids[PEEK] = await createTodoViaApi(PEEK, outsideFolderId, yesterdayAt(17));
-    // The three that move together, at three DIFFERENT early-morning overdue times: "the order was preserved" is
-    // then an assertion about three distinct dues rather than about three identical numbers, and being the
-    // earliest overdue to-dos they sit directly under the Overdue heading.
-    ids[MULTI_A] = await createTodoViaApi(MULTI_A, folderId, yesterdayAt(3));
-    ids[MULTI_B] = await createTodoViaApi(MULTI_B, folderId, yesterdayAt(4));
-    ids[MULTI_C] = await createTodoViaApi(MULTI_C, folderId, yesterdayAt(5));
     for (let i = 0; i < FILLER; i++) await createTodoViaApi(filler(i), folderId);
     ids[PARK] = await createNoteViaApi(PARK, folderId);
 
@@ -1375,8 +1375,9 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       await win.waitForTimeout(500); // past the 500ms from the press: the menu opens under the finger, HERE
       await expect(panel.locator('#noteContextMenu'), 'the hold must open the menu - every hold must').toBeVisible();
       expect((await dragState()).dragging, 'and the hold alone lifts nothing').toBe(0);
-      // A drift of 12 px from the fire point. Measured from the PRESS point it is 20 - twice the old gate - so a
-      // build that regressed to the press point lifts here and this case sees it.
+      // A drift of DRIFT_PX from the fire point, and the fire point is 8 px below the press point: measured from
+      // the PRESS point this travel is 21, past the threshold, so a build that regressed to the press point lifts
+      // here and this case sees it. Measured from where the menu opened it is 13, and nothing may happen at all.
       let at = fire;
       for (let step = 1; step <= 3; step++) {
         at = { x: fire.x, y: fire.y + (DRIFT_PX * step) / 3 };
@@ -1474,6 +1475,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     // the banner, and the three dues the host writes.
     const { win } = joplin;
     await settle();
+    // In DOM order, because the payload is the selection in the panel's own order and this case asserts it whole.
     const wanted = [ids[MULTI_A], ids[MULTI_B], ids[MULTI_C]];
     await waitForPanelTodo(win, MULTI_B);
     await setSelection(wanted);
@@ -1506,8 +1508,9 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     const between = posted.find((m) => m[0] === 'todosDroppedBetween');
     expect(between, 'the drop must post the between-drop message').toBeTruthy();
     expect(between![1], "and its payload is the whole selection, in the selection's own order").toEqual(wanted);
-    // All three dues are rewritten into the gap, and their ORDER is preserved (the host spreads them in payload
-    // order): three separate device-visible facts, and the one a "moves the whole selection" claim rests on.
+    // All three dues are rewritten into the gap - all three start Overdue, so landing in Today between 08:00 and
+    // 12:00 is a visible move for each - and their ORDER is preserved (the host spreads them in payload order):
+    // three separate device-visible facts, and the ones a "moves the whole selection" claim rests on.
     const dues: number[] = [];
     for (const marker of [MULTI_A, MULTI_B, MULTI_C]) {
       dues.push(await dueSettles(marker, (d) => d > todayAt(8) && d < todayAt(12)));
@@ -1559,6 +1562,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     await armMessageLog(win);
     const panel = await agendaPanel(win);
     const finger = await newFinger(win);
+    let floats: { id: string; present: boolean; events: string }[] = [];
     try {
       const from = await rowPoint(win, VETO, 0.5);
       await finger.down(from);
@@ -1582,6 +1586,17 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       const aiming = await dragState();
       console.log('TOUCH VETO AIMING', JSON.stringify(aiming));
       expect(aiming.before + aiming.after, 'the gap must resolve from the rows, whatever is floating over them').toBe(1);
+      // ...and the two things that genuinely DO float over the rows during every drag are pointer-events:none, so
+      // they never even reach the question the cover above is asking. Read HERE, with the row still lifted: the
+      // banner exists only between the lift and the one end, and the trace strip only while the setting is on, so
+      // a read after the release would find neither and assert nothing at all. `present` is asserted first for
+      // exactly that reason - the banner must BE there, or its computed style says nothing about it.
+      floats = await panel.evaluate(() =>
+        ['cockpitDragBanner', 'cockpitToast'].map((id) => {
+          const el = document.getElementById(id);
+          return { id, present: !!el, events: el ? getComputedStyle(el).pointerEvents : 'missing' };
+        })
+      );
       await finger.up();
     } finally {
       await panel.evaluate(() => document.getElementById('e2eDragCover')?.remove());
@@ -1591,17 +1606,15 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     console.log('TOUCH VETO POSTED', JSON.stringify(posted));
     expect(names(posted), 'and the drop must land').toContain('todosDroppedBetween');
     await dueSettles(VETO, (d) => d > todayAt(12) && d < todayAt(20));
-    // ...and the two things that genuinely DO float over the rows during every drag are pointer-events:none, so
-    // they never even reach the question above.
-    const floats = await panel.evaluate(() =>
-      ['cockpitDragBanner', 'cockpitToast'].map((id) => {
-        const el = document.getElementById(id);
-        return { id, present: !!el, events: el ? getComputedStyle(el).pointerEvents : 'none' };
-      })
-    );
-    for (const float of floats) {
-      expect(float.events, `${float.id} floats over the list and must never take a finger`).toBe('none');
-    }
+    console.log('TOUCH VETO FLOATS', JSON.stringify(floats));
+    const banner = floats.find((f) => f.id === 'cockpitDragBanner');
+    expect(banner?.present, 'the banner is up for the whole of a lift, so this case can only be read while one is').toBe(true);
+    expect(banner?.events, 'and it floats over the rows, so it must never take a finger').toBe('none');
+    // The trace strip is only in the DOM when the gesture-trace setting is on, which it is not here; its own
+    // pointer-events rule is pinned in the harness (test/run.js reads panel.css), and asserting it against an
+    // element that is not on the page would be asserting nothing.
+    const toast = floats.find((f) => f.id === 'cockpitToast');
+    if (toast?.present) expect(toast.events, 'and so must the trace strip, whenever it is up').toBe('none');
   });
 
   test('a dragstart on a row is cancelled and lifts nothing, and never touches the selection', async () => {
