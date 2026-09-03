@@ -1633,7 +1633,7 @@ document.addEventListener('dragstart', function(event){
  * to do whatever it does.                                                                                                                              *
  *                                                                                                                                                      *
  * THE TOLERANCE, which is the third Pixel round's whole subject. The travel is measured from the FIRE point - where the finger was when the menu        *
- * opened - and it has to pass TOUCH_DRAG_LIFT_PX (24), not the 10px slop the PRESS survives on. The previous build measured from the press point with  *
+ * opened - and it has to pass TOUCH_DRAG_LIFT_PX (20), not the 10px slop the PRESS survives on. The previous build measured from the press point with  *
  * the press's own slop, so the two gates were the same number from the same origin and an armed gesture was born one pixel from its own lift: the      *
  * smallest drift closed the menu in the frame after it opened and dimmed the row under a finger that had asked for nothing. That one arithmetic        *
  * produced two of the round's four reports - "the context menu doesn't appear at all on the long press" and "it is moving a little straight away".      *
@@ -1676,7 +1676,9 @@ document.addEventListener('dragstart', function(event){
  ***************************************************************************************************************************************************/
 var TOUCH_DRAG_BAND = 0.5              // mobile: the whole row is live - the top half inserts before it, the bottom half after
 var TOUCH_DRAG_SLOP = 10               // px per axis the long PRESS survives, measured from the press point (the adapter's own cancel gate)
-var TOUCH_DRAG_LIFT_PX = 24            // ...and px per axis from the FIRE point before the armed gesture decides anything at all
+var TOUCH_DRAG_LIFT_PX = 20            // ...and px per axis from the FIRE point before the armed gesture decides anything at all: twice the press's
+                                       // own gate and about twice Android's ~8dp touch slop, so a held finger's drift can never decide for the user,
+                                       // while a deliberate stroke crosses it within half a 40px mobile row
 var TOUCH_DRAG_WATCHDOG_MS = 15000     // last resort: no gesture lasts this long, and a stuck one must not hold the guard
 var ROW_INDEX_TOLERANCE_PX = 2         // how far a row's indexed box may disagree with its live one before the index is rebuilt
 
