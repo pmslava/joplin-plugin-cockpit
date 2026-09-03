@@ -424,19 +424,6 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   }
 
   /**
-   * How far the lifting step below may travel, measured from BOTH edges of the scroller - and the bound is not
-   * merely "does the point stay inside the list". The drag's own edge auto-scroll arms inside a band at the top and
-   * the bottom of the scroller, max(32, min(72, 0.15 x height)) px deep (AUTOSCROLL_BAND_* in panelWebview.js), and
-   * a finger parked in that band starts the list scrolling on the very move that lifts the row - under a finger
-   * that then holds still, since `onTouchDragScrolled` re-aims and keeps the loop alive by itself. The aim that
-   * follows would glide over a moving list and the drop would land wherever the list had got to. So the step is
-   * taken TOWARDS the middle of the list, and if even that leaves it inside a band the case fails here, naming the
-   * band - rather than later, looking like a bad aim (which is exactly the misdiagnosis this file's header warns
-   * about).
-   */
-  const AUTOSCROLL_BAND_CLEARANCE = 80;
-
-  /**
    * The move that turns the open menu into a lifted row. The gesture is decided by the FIRST travel past the 10 px
    * slop and by nothing else: |dy| >= |dx| lifts, |dx| > |dy| is refused as Joplin's side-menu swipe. So the lift
    * is one deliberate 24 px step at a CONSTANT x - unambiguously vertical, well past the slop, and the same move a
@@ -459,19 +446,51 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     return at;
   }
 
-  /** The signed 24 px step, towards whichever edge of the list is further away, checked against both bands. */
+  /**
+   * The signed 24 px step, and where it may not land. The bound is not merely "does the point stay inside the
+   * list": the drag's own edge auto-scroll arms inside a band at the top and the bottom of the scroller, and a
+   * finger parked in a band starts the list scrolling on the very move that lifts the row - under a finger that
+   * then holds still, since `onTouchDragScrolled` re-aims and keeps the loop alive by itself. The aim that follows
+   * would glide over a moving list and the drop would land wherever the list had got to. So the step is taken
+   * towards whichever edge is further away, the other direction is taken when only IT is clear, and only when
+   * neither is does the case fail here, naming the band - rather than later, looking like a bad aim (which is
+   * exactly the misdiagnosis this file's header warns about).
+   *
+   * Two things make the bound the panel's own rather than a guessed margin:
+   *  - the band is computed with edgeAutoscrollStep's arithmetic verbatim (AUTOSCROLL_BAND_* in panelWebview.js),
+   *    including the min(height/2, ...) clamp that keeps the two bands from overlapping in a short list;
+   *  - a band is only LIVE where the scroller can still move that way. `edgeAutoscrollTick` stops the loop on the
+   *    first frame that does not change scrollTop, so the top band scrolls nothing at scrollTop 0 - which is
+   *    exactly where `settle()` puts every case, and where the first rows of the first group sit - and the bottom
+   *    band scrolls nothing once the list is at its end. Refusing an inert band would fail the cases whose source
+   *    row is near the top of an unscrolled list, for a hazard that provably cannot happen to them.
+   */
   async function verticalLiftStep(win: Page, from: Point): Promise<number> {
     const list = await listBox(win);
+    const metrics = await listMetrics();
+    const height = list.bottom - list.top;
+    const band = Math.min(height / 2, Math.max(32, Math.min(72, height * 0.15)));
+    const inLiveBand = (y: number) =>
+      (y - list.top < band && metrics.scrollTop > 0) ||
+      (list.bottom - y < band && metrics.scrollTop < metrics.maxScroll);
     const clearance = (y: number) => Math.min(y - list.top, list.bottom - y);
-    const step = clearance(from.y + 24) >= clearance(from.y - 24) ? 24 : -24;
-    await assertOnScreen(win, `the ${step > 0 ? 'downward' : 'upward'} lifting step`, from.y + step);
-    const room = clearance(from.y + step);
-    if (room < AUTOSCROLL_BAND_CLEARANCE) {
+    // One predicate for both bounds, so the throw below is the only exit: on screen at all (the `assertOnScreen`
+    // test, folded in rather than run separately, since a step that failed it would have been rejected here), and
+    // not inside a band that can actually run.
+    const usable = (y: number) => y >= list.top && y <= list.bottom && !inLiveBand(y);
+    // Towards the middle of the list first, and the other way only if the preferred landing point is unusable.
+    const order = clearance(from.y + 24) >= clearance(from.y - 24) ? [24, -24] : [-24, 24];
+    const step = order.find((s) => usable(from.y + s));
+    if (step === undefined) {
       throw new Error(
-        `the lifting step lands ${Math.round(room)}px from an edge of the list (${Math.round(list.top)}..${Math.round(
-          list.bottom
-        )}), inside the drag's edge auto-scroll band - the list would scroll under the still finger and the drop ` +
-          `would land wherever it got to. Not the gesture's fault: the source row is too near an edge for this case.`
+        `neither lifting step is usable from y=${Math.round(from.y)}: the list is ${Math.round(
+          list.top
+        )}..${Math.round(list.bottom)}, its edge auto-scroll band is ${Math.round(
+          band
+        )}px deep, and it is scrolled to ${metrics.scrollTop} of ${metrics.maxScroll} - so both +24 and -24 land ` +
+          `off-screen or inside a band that CAN scroll, where the list would move under the still finger and the ` +
+          `drop would land wherever it got to. Not the gesture's fault: the source row is too near an edge for ` +
+          `this case.`
       );
     }
     return step;
@@ -822,8 +841,14 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     const finger = await newFinger(win);
     try {
       // Both points are on the SAME row at the same y, so the stroke is exactly horizontal: dy is 0 and every
-      // step of it is unambiguously sideways, which is the input the rule is written for.
-      const from = await rowPoint(win, SWIPE, 0.5, 0.75);
+      // step of it is unambiguously sideways, which is the input the rule is written for. The press must land on
+      // the row BODY: `.todo` is a flex row whose last child is the notebook pill, `flex-shrink: 0; max-width:
+      // 38%`, rendered for every to-do that has a notebook - so the right ~38% of the row is the pill, which
+      // `canLiftRow` refuses and whose own long press opens the notebook overlay instead of the menu. A press
+      // there would arm nothing and the case would pass or fail on something that is not the first-move rule.
+      // Mid-row is clear of both the pill and the tick circle; the ~35% of the row width to x=0.15 is still an
+      // order of magnitude past the 10px slop.
+      const from = await rowPoint(win, SWIPE, 0.5, 0.5);
       const to = await rowPoint(win, SWIPE, 0.5, 0.15);
       await finger.down(from);
       await win.waitForTimeout(700);
@@ -1071,6 +1096,12 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       await finger.down(from);
       await win.waitForTimeout(700);
       expect((await dragState()).dragging, 'a peek row must never be lifted - it is not a reschedule source').toBe(0);
+      // Its long press keeps doing what it always did: the single-note menu for the peeked note. Asserted HERE,
+      // before the step, and not after it: the step is an unbounded 24px pan that the armed state deliberately
+      // does not preventDefault, so if this search render's list overflows at all the pan scrolls it, and any
+      // scroll runs `hideNoteContextMenu` (the document-level capture listener in panelWebview.js). The menu would
+      // then be gone for a reason this case is not about.
+      await expect(panel.locator('#noteContextMenu')).toBeVisible();
       // ...and it arms nothing either, so even the move that WOULD lift an ordinary row does nothing here. The
       // unbounded step again: nothing is aimed at afterwards, and the list under this case is a search render.
       await liftByMovingUpOrDown(finger, from, win, false);
@@ -1079,8 +1110,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     } finally {
       await finger.dispose();
     }
-    // Its long press keeps doing what it always did: the single-note menu for the peeked note.
-    await expect(panel.locator('#noteContextMenu')).toBeVisible();
+    expect((await dragState()).dragging, 'and the release leaves nothing lifted behind it either').toBe(0);
     const posted = await postedMessages(win);
     expect(names(posted), 'and no drag machinery runs for it').not.toContain('dialogGuard');
     await panel.locator('body').press('Escape');
