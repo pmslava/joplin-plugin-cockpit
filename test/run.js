@@ -3165,8 +3165,11 @@ async function main() {
         const formatsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'formats.ts'), 'utf8')
         assert.ok(formatsSource.includes('oncontextmenu="onTodoContextMenu(event,'), 'a to-do row must still carry its inline contextmenu handler (the hazard this suppression exists for)')
         assert.ok(formatsSource.includes('oncontextmenu="onNoteContextMenu(event,'), 'and so must a note row')
-        assert.strictEqual((formatsSource.match(/oncontextmenu=/g) || []).length, 3,
-            'the list row, the week card and the note row: three inline handlers, none of which may run on mobile')
+        const htmlSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'html.ts'), 'utf8')
+        assert.ok(htmlSource.includes('oncontextmenu="onHeadingContextMenu(event)"'),
+            'and so must a group heading - the fourth inline handler, in src/core/html.ts rather than formats.ts, which an inventory that reads only formats.ts would miss')
+        assert.strictEqual((formatsSource.match(/oncontextmenu=/g) || []).length + (htmlSource.match(/oncontextmenu=/g) || []).length, 4,
+            'the list row, the week card, the note row and the group heading: four inline handlers, none of which may run on mobile')
         // The suppression, and its SCOPE: any target at all, not just the search suggestion list it started as.
         const block = /document\.addEventListener\('contextmenu', function\(event\)\{([\s\S]*?)\}, true\)/.exec(webviewSource)
         assert.ok(block, 'the panel must still handle contextmenu in the capture phase, at the document')
@@ -3175,11 +3178,33 @@ async function main() {
             'desktop must return on the FIRST line: a right click there - on a row, in the list, anywhere - is byte-identical to before')
         assert.ok(!body.includes("closest('#searchSuggestions')"),
             'the suppression must NOT be scoped to the suggestion list any more - a row is exactly what it has to cover')
-        assert.ok(!/\bif\b[\s\S]*\bclosest\(/.test(body.slice(body.indexOf('return') + 6)),
-            '...and to no other zone either: past the desktop return, nothing may gate the suppression on where the press landed')
+        // What may gate the suppression, and what may not. Past the desktop line there is EXACTLY one early
+        // return - the editable-field exemption - so no zone of the panel's can be carved back out of the
+        // suppression, by an `if` or by a ternary (an earlier version of this pin forbade only the `if` shape,
+        // and a ternary early-return would have walked straight through it).
+        const past = body.slice(body.indexOf('if (!IS_MOBILE) return') + 'if (!IS_MOBILE) return'.length)
+        assert.strictEqual((past.match(/\breturn\b/g) || []).length, 1,
+            '...and to no zone of the panel\'s: past the desktop line exactly one early return may stand, and nothing else may gate the suppression on where the press landed')
+        assert.ok(past.includes("if (el && el.closest('input, textarea, select, [contenteditable]')) return"),
+            'that one return is the editable-field exemption: Android raises the text-selection handles and the Paste / Select-all bar through this same event, and in a field on a phone that bar is the only way to paste')
+        // The fields it exempts are real, and are the ones a finger is held down in on mobile.
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        assert.ok(panelSource.includes('<input id="searchFilter"'), 'the search box is an input, so the exemption reaches it')
+        assert.ok(panelSource.includes('class="notebook-filter-input"'), '...and so is the notebook filter')
+        assert.ok(webviewSource.includes('<input id="alarmDate"') && webviewSource.includes('<input id="alarmTime"'),
+            '...and so are the mobile alarm overlay\'s date and time, which are typed into with the panel in mobile mode')
         assert.ok(body.includes('event.preventDefault()'), 'the native callout / selection bar must be cancelled')
         assert.ok(body.includes('event.stopImmediatePropagation()'),
             'and the event must be stopped dead, or preventDefault alone leaves the inline oncontextmenu handlers to run - which IS the bug')
+        // ...and the refusal itself stands at the listener's top level, unconditional. That is the SHAPE a
+        // zone-scoped rewrite would have to break, asserted positively rather than by forbidding one spelling.
+        const indentOf = text => /^\s*/.exec(text)[0].length
+        const bodyLines = body.split('\n').filter(text => text.trim())
+        const topLevel = indentOf(bodyLines.find(text => text.includes('if (!IS_MOBILE) return')))
+        for (const call of ['event.preventDefault()', 'event.stopImmediatePropagation()']){
+            assert.strictEqual(indentOf(bodyLines.find(text => text.includes(call))), topLevel,
+                `${call} must stand at the listener's top level, on every event the exemption did not return on - nested in a branch it would be scoped all over again`)
+        }
         assert.ok(body.includes("traceGesture('contextmenu-suppressed:"),
             'a suppressed contextmenu must say so in the trace, with the zone it landed in - the device round had no way to see this happening')
         for (const zone of ["'row'", "'heading'", "'other'"]) assert.ok(body.includes(zone), `the zone word must be able to read ${zone}`)
