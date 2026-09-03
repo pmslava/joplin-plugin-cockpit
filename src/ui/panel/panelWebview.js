@@ -894,6 +894,10 @@ function requestAlarm(ids){
  ***************************************************************************************************************************************************/
 var longPress = { timer: null, x: 0, y: 0, fired: false, target: null, el: null, kind: null, id: null, pointerId: null }
 
+// ONLY the timer. The touch drag below reads longPress.target/el/id AFTER this has run - the adapter's own
+// pointerup listener is registered first and so cancels the press before the drag's release handler opens the
+// deferred context menu with that same press point. Clearing anything else here would hand that menu a
+// synthEvent(null, ...) instead, and no drag path would notice.
 function cancelLongPress(){
     if (longPress.timer){ clearTimeout(longPress.timer); longPress.timer = null }
 }
@@ -1551,10 +1555,11 @@ document.addEventListener('dragleave', onPanelDragLeave, false)
  * settle: whether Android's own gesture arbitration lets the panel keep the finger is the make-or-break device question (MOBILE.md, step 2).          *
  *                                                                                                                                                     *
  * WHY THE ROW IS FOUND BY GEOMETRY. The mobile checkbox ring is a ~40px box overhanging a ~26px row, so document.elementFromPoint in the left column   *
- * returns the NEIGHBOUR row about as often as the right one. The rows' boxes are indexed at lift time (and rebuilt after every auto-scrolled frame,    *
- * since they move), and the finger's y is searched against that index by the pure window.TouchDrag. The big [data-drop] targets are still resolved     *
- * from the DOM: a heading is a SIBLING of the rows, sitting in the gap where the index would attribute it to the row above, and a sticky heading       *
- * floating over the list is genuinely what the finger is on (z-index 2 puts it above any ring overhanging from below).                                 *
+ * returns the NEIGHBOUR row about as often as the right one. The rows' boxes are indexed at lift time (and shifted by every scroll, since they move),    *
+ * and the finger's y is searched against that index by the pure window.TouchDrag. The big [data-drop] targets are still resolved from the DOM: a       *
+ * heading is a SIBLING of the rows, sitting in the gap where the index would attribute it to the row above, and a sticky heading floating over the     *
+ * list is genuinely what the finger is on (z-index 2 puts it above any ring overhanging from below) - which is why a heading under the finger ends the *
+ * resolution either way, as its own target or as no target at all.                                                                                     *
  *                                                                                                                                                     *
  * THE REFRESH GUARD, AND WHY IT IS TAKEN ON THE FIRST MOVE RATHER THAN AT THE LIFT. A mobile refresh is a full webview RELOAD, which would destroy a   *
  * drag in progress, so a real drag holds ['dialogGuard', true] and releases it on every exit path. It is deliberately NOT taken at the lift, because   *
@@ -1575,6 +1580,7 @@ var touchDrag = {
     row: null,              // the lifted row element
     title: '',              // ...and its title, for the banner
     index: null,            // [{ el, top, bottom, info }] - the rows' boxes, searched by y
+    indexTop: 0,            // ...and the list's scrollTop when they were measured, so a scroll can shift them
     moved: false,           // has the finger travelled past the slop yet (a lift that never does opens the menu)
     startX: 0, startY: 0,
     x: 0, y: 0,             // the finger's last position, which the auto-scroll re-resolves against
@@ -1594,6 +1600,11 @@ function canLiftRow(target, row){
     if (target.classList.contains('todo-notebook')) return false             // the pill moves the note
     if (target.closest && target.closest('.outside-results')) return false   // the read-only peek never drags
     return true
+}
+
+// The one scroller the drag cares about: .todos is the only thing in a list view that scrolls.
+function touchDragScroller(){
+    return currentTodosEl || document.querySelector('.todos')
 }
 
 // A label short enough for one line of the banner.
@@ -1617,7 +1628,8 @@ function dropTargetLabel(el){
 /** buildRowIndex ***********************************************************************************************************************************
  * The rows' live boxes, in document order, with the between-eligibility each one already resolves to (null for the No-Due group, for a week card and *
  * for anything outside the .todos list - see betweenGroupInfo). The read-only peek's rows are left out entirely: they are not a target of any kind.  *
- * Rebuilt at the lift and after every auto-scrolled frame, because the boxes move while the finger holds still.                                      *
+ * Measured once at the lift; every later scroll SHIFTS it (see syncRowIndex) rather than re-measuring, because   *
+ * the boxes move while the finger holds still.                                                                                                       *
  ***************************************************************************************************************************************************/
 function buildRowIndex(){
     var rows = []
@@ -1628,6 +1640,25 @@ function buildRowIndex(){
         rows.push({ el: row, top: rect.top, bottom: rect.bottom, info: betweenGroupInfo(row) })
     }
     touchDrag.index = rows
+    var scroller = touchDragScroller()
+    touchDrag.indexTop = scroller ? scroller.scrollTop : 0
+}
+
+/** syncRowIndex ************************************************************************************************************************************
+ * The index after the list has scrolled - the drag's own auto-scroll, or anything else that moves it. A scroll moves every row by the SAME delta and *
+ * changes nothing else about them (not a height, not an order, not a group), so the boxes are SHIFTED rather than re-measured: a rebuild is one       *
+ * getBoundingClientRect() plus betweenGroupInfo's walk back to the heading for every row in the list, and it would run on every auto-scrolled frame,  *
+ * on the device, in the one phase of the gesture where the frame budget is real. Answers whether anything actually moved, so a scroll that changed    *
+ * nothing costs no repaint.                                                                                                                          *
+ ***************************************************************************************************************************************************/
+function syncRowIndex(){
+    var scroller = touchDragScroller()
+    if (!scroller || !touchDrag.index) return false
+    var delta = scroller.scrollTop - touchDrag.indexTop
+    if (!delta) return false
+    touchDrag.indexTop = scroller.scrollTop
+    for (var entry of touchDrag.index){ entry.top -= delta; entry.bottom -= delta }
+    return true
 }
 
 /** resolveDragTarget *******************************************************************************************************************************
@@ -1641,6 +1672,13 @@ function resolveDragTarget(){
     var under = document.elementFromPoint(touchDrag.x, touchDrag.y)
     var drop = (under && under.closest) ? under.closest('[data-drop]') : null
     if (drop) return { kind: 'drop', el: drop }
+    // A heading that accepts no drop (Overdue and Future name no date, so getHeadingDropTarget gives them none)
+    // is not a target - and it is not the gap above it either. It is a SIBLING of the rows, so the index, which
+    // by design gives everything between one row's top and the next row's to the row above, would otherwise
+    // attribute the heading's whole band - and, while it is stuck to the top of a scrolled list, the rows it is
+    // floating over as well - to a row in the group BEFORE it, and write the drop there. The desktop drag is
+    // inert on exactly this point (betweenTargetAt starts from a closest('.todo'), which a heading is not).
+    if (under && under.closest && under.closest('h2')) return null
     var entry = window.TouchDrag.rowAtY(touchDrag.index, touchDrag.y)
     if (!entry || !entry.info) return null
     var before = window.TouchDrag.bandSide(touchDrag.y - entry.top, entry.bottom - entry.top, TOUCH_DRAG_BAND) === 'before'
@@ -1750,7 +1788,7 @@ function onTouchDragMove(event){
     // The shared edge auto-scroll, fed the finger's own coordinates: inside a band at the top or bottom of the
     // list it scrolls, and re-resolves the target after every frame that moved (the rows travel, the finger does
     // not). Outside both bands the same call stops it.
-    edgeAutoscrollUpdate(currentTodosEl || document.querySelector('.todos'), touchDrag.x, touchDrag.y, onTouchDragScrolled)
+    edgeAutoscrollUpdate(touchDragScroller(), touchDrag.x, touchDrag.y, onTouchDragScrolled)
     var direction = edgeAutoscrollRunning() ? (autoscrollStep < 0 ? -1 : 1) : 0
     if (direction !== touchDrag.autoscroll){
         touchDrag.autoscroll = direction
@@ -1759,10 +1797,10 @@ function onTouchDragMove(event){
     updateDragTarget()
 }
 
-// After a scrolled frame the boxes are all in new places, so the index is rebuilt before the target is re-asked.
+// After a scrolled frame the boxes are all in new places, so the index is shifted before the target is re-asked.
 function onTouchDragScrolled(clientX, clientY){
     if (!touchDrag.active) return
-    buildRowIndex()
+    syncRowIndex()
     updateDragTarget()
     // ...and RE-AIM at the same point, which is what keeps the loop alive under a finger that is holding still -
     // the whole gesture an edge scroll exists for. The helper stops itself after AUTOSCROLL_IDLE_MS without an
@@ -1771,7 +1809,7 @@ function onTouchDragScrolled(clientX, clientY){
     // still FINGER sends no touchmove at all, so without this the list would stop after 800ms and only move again
     // if the user wiggled. Nothing is lost by it: a touch drag has real ends of its own, and every one of them
     // calls endTouchDrag, which stops the loop - with the 15s drag watchdog behind them all.
-    edgeAutoscrollUpdate(currentTodosEl || document.querySelector('.todos'), clientX, clientY, onTouchDragScrolled)
+    edgeAutoscrollUpdate(touchDragScroller(), clientX, clientY, onTouchDragScrolled)
 }
 
 /** dropTouchDrag ***********************************************************************************************************************************
@@ -1823,6 +1861,9 @@ function endTouchDrag(reason){
     touchDrag.target = null
     touchDrag.ids = []
     touchDrag.autoscroll = 0
+    touchDrag.moved = false
+    touchDrag.pointerId = null
+    touchDrag.title = ''
     if (reason !== 'dropped' && reason !== 'menu') traceGesture('drag-cancel:' + reason)
     var guarded = touchDrag.guarded
     touchDrag.guarded = false
@@ -1856,6 +1897,15 @@ document.addEventListener('pointerdown', function(event){
     if (!touchDrag.active || event.pointerId === touchDrag.pointerId) return
     cancelLongPress()
     endTouchDrag('second-pointer')
+}, true)
+
+// ANY scroll of the list while a row is lifted, not only the drag's own auto-scroll (which re-syncs in its own
+// callback, so this one finds nothing left to do). If Android pans the list out from under a gesture without
+// taking the gesture away - the 18b failure mode, in the sub-case where no pointercancel follows - the boxes the
+// index was measured from stop describing the screen, and a release would write neighbours from rows that have
+// scrolled off. Re-syncing turns that silent wrong write into a correct one.
+document.addEventListener('scroll', function(){
+    if (touchDrag.active && syncRowIndex()) updateDragTarget()
 }, true)
 
 // The app going to the background, and a rotation or resize: the boxes the index was built from are gone or about
