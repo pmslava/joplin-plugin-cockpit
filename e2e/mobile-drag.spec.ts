@@ -893,12 +893,24 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       if (!row) return null;
       const event = new MouseEvent('contextmenu', { button: 2, bubbles: true, cancelable: true });
       const notCancelled = row.dispatchEvent(event);
+      // ...and the ONE exemption, on the same event: a real editable field. Android raises the text-selection
+      // handles and the Paste / Select-all bar through `contextmenu`, and in the search box on a phone that bar
+      // is the only way to paste - so the panel-wide refusal must stop at the field's edge.
+      const field = document.getElementById('searchFilter');
+      let fieldPrevented: boolean | null = null;
+      if (field) {
+        const fieldEvent = new MouseEvent('contextmenu', { button: 2, bubbles: true, cancelable: true });
+        const fieldNotCancelled = field.dispatchEvent(fieldEvent);
+        fieldPrevented = !fieldNotCancelled || fieldEvent.defaultPrevented;
+      }
       return {
         // The hazard, asserted rather than assumed: the row really does carry the handler that would have opened
         // the menu. The day the markup stops emitting it, this case is testing nothing and should say so.
         inline: row.getAttribute('oncontextmenu') || '',
         prevented: !notCancelled || event.defaultPrevented,
         menus: document.querySelectorAll('#noteContextMenu').length,
+        hasField: !!field,
+        fieldPrevented,
       };
     }, CTX);
     console.log('TOUCH CTXMENU', JSON.stringify(seen));
@@ -910,6 +922,11 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       true
     );
     expect(seen!.menus, 'and the inline handler must never run: the adapter alone opens the menu').toBe(0);
+    expect(seen!.hasField, 'the panel must have its search box - the exemption is about real editable fields').toBe(true);
+    expect(
+      seen!.fieldPrevented,
+      'a contextmenu in a text field must NOT be cancelled: the selection handles and the Paste / Select-all bar ride on it, and nothing in the field opens a menu of ours'
+    ).toBe(false);
     // ...and the same row still opens its menu the way it is supposed to, on a real hold: the suppression removes
     // the platform's route in without touching the panel's own.
     const finger = await newFinger(win);
