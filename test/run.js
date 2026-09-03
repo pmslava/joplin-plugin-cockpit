@@ -3150,6 +3150,60 @@ async function main() {
             '...and it must do so BEFORE clearing the guard flag, or the release would be lost exactly as it is today')
     })
 
+    await test("webview touch drag: Android's long-press contextmenu never reaches a row - the adapter alone opens the menu", () => {
+        // THE SECOND PIXEL ROUND'S BUG. The hold opened the menu (18a) and the vertical move lifted the row, but
+        // the menu did not close and the release never rescheduled anything. The cause is not in the drag at all:
+        // every to-do row carries an inline oncontextmenu="onTodoContextMenu(event, id)" and every note row an
+        // onNoteContextMenu (src/core/formats.ts), and Android's native long press fires a REAL contextmenu on the
+        // row. Its timing is the device's - the "Touch & hold delay" setting plus Chrome's own ~500ms - so it can
+        // land before the adapter's fire (a menu over a menu) or after the lift (a menu re-opening over a lifted
+        // row, which then eats the release that should have reached a gap). None of it was traced, because a
+        // row's inline handler is on no traced path.
+        //
+        // First: the hazard is real, and stays real - the inline handlers are what the panel's own rendering
+        // emits, and this pin is worthless the day they are gone.
+        const formatsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'formats.ts'), 'utf8')
+        assert.ok(formatsSource.includes('oncontextmenu="onTodoContextMenu(event,'), 'a to-do row must still carry its inline contextmenu handler (the hazard this suppression exists for)')
+        assert.ok(formatsSource.includes('oncontextmenu="onNoteContextMenu(event,'), 'and so must a note row')
+        assert.strictEqual((formatsSource.match(/oncontextmenu=/g) || []).length, 3,
+            'the list row, the week card and the note row: three inline handlers, none of which may run on mobile')
+        // The suppression, and its SCOPE: any target at all, not just the search suggestion list it started as.
+        const block = /document\.addEventListener\('contextmenu', function\(event\)\{([\s\S]*?)\}, true\)/.exec(webviewSource)
+        assert.ok(block, 'the panel must still handle contextmenu in the capture phase, at the document')
+        const body = block[1]
+        assert.ok(/^\s*if \(!IS_MOBILE\) return/.test(body),
+            'desktop must return on the FIRST line: a right click there - on a row, in the list, anywhere - is byte-identical to before')
+        assert.ok(!body.includes("closest('#searchSuggestions')"),
+            'the suppression must NOT be scoped to the suggestion list any more - a row is exactly what it has to cover')
+        assert.ok(!/\bif\b[\s\S]*\bclosest\(/.test(body.slice(body.indexOf('return') + 6)),
+            '...and to no other zone either: past the desktop return, nothing may gate the suppression on where the press landed')
+        assert.ok(body.includes('event.preventDefault()'), 'the native callout / selection bar must be cancelled')
+        assert.ok(body.includes('event.stopImmediatePropagation()'),
+            'and the event must be stopped dead, or preventDefault alone leaves the inline oncontextmenu handlers to run - which IS the bug')
+        assert.ok(body.includes("traceGesture('contextmenu-suppressed:"),
+            'a suppressed contextmenu must say so in the trace, with the zone it landed in - the device round had no way to see this happening')
+        for (const zone of ["'row'", "'heading'", "'other'"]) assert.ok(body.includes(zone), `the zone word must be able to read ${zone}`)
+        assert.strictEqual((body.match(/traceGesture\(/g) || []).length, 1, 'and exactly once per event, or one long press would flood the strip')
+
+        // Second: the belt to those braces, inside the menu itself. A gesture that owns the finger - armed behind
+        // the menu the fire opened, or lifted - blocks every other route into showNoteContextMenu.
+        const show = handlerBody('showNoteContextMenu')
+        assert.ok(show.includes("if (touchDrag.active){ traceGesture('menu-blocked'); return }"),
+            'a live touch gesture must block any other opener of the context menu, and say so in the trace')
+        assert.ok(show.indexOf('touchDrag.active') < show.indexOf('hideNoteContextMenu()'),
+            '...and block it BEFORE hideNoteContextMenu runs: a blocked call that closed the open menu on its way out is the other half of the reported symptom ("the menu vanishes")')
+        // What makes `touchDrag.active` a SUFFICIENT guard is the fire's order, so the order is pinned here too,
+        // from the other side: the adapter's own call reaches the menu while the flag is still false, and every
+        // later one - a native contextmenu that got past the capture listener, a stray handler - finds it true.
+        const fire = handlerBody('onLongPressFire')
+        assert.ok(fire.indexOf('onTodoContextMenu(ev') < fire.indexOf('armTouchDrag()'),
+            'the fire must open the menu BEFORE it arms the drag, or the guard above would block the adapter\'s own menu and the hold would open nothing at all')
+        assert.ok(!handlerBody('armTouchDrag').includes('showNoteContextMenu'), 'and the arm must open no menu of its own')
+        // The lift still closes the menu itself, and gains nothing else: the suppression is what keeps it closed.
+        assert.strictEqual((handlerBody('liftTouchDrag').match(/hideNoteContextMenu\(\)/g) || []).length, 1,
+            'the lift closes the menu exactly once, and nothing was added beside it')
+    })
+
     await test('webview touch drag: the FIRST move decides - vertical lifts the row, sideways is left to Android', () => {
         const move = handlerBody('onTouchDragMove')
         assert.ok(move.includes('window.TouchDrag.firstMoveDirection(touchDrag.x - touchDrag.startX, touchDrag.y - touchDrag.startY, TOUCH_DRAG_SLOP)'),
@@ -3368,17 +3422,43 @@ async function main() {
         assert.ok(toast.includes('if (sticky) return'), 'a sticky toast must not arm the fade timer')
         assert.ok(/GESTURE_TRACE_MAX = 10/.test(webviewSource), 'the ring buffer must be long enough to hold a whole drag (arm, retargets, scroll, drop)')
         // ...and the drag speaks in codes that name what happened, only when the answer CHANGES.
-        for (const code of ['menu-open', 'drag-lift', 'drag-uncancelable', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between'",
-                            "'drag-drop:date'", "'drag-cancel:'", 'drag-released', 'drag-sideways-ignored']){
+        for (const code of ['menu-open', 'drag-lift', 'drag-uncancelable', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between '",
+                            "'drag-drop:date '", "'drag-cancel:'", 'drag-released', 'drag-sideways-ignored',
+                            // The second Pixel round's three: a contextmenu the panel refused (with the zone it
+                            // landed in), a menu opener the live gesture turned away, and the drop path saying
+                            // WHAT it wrote rather than only that it wrote something.
+                            "'contextmenu-suppressed:'", "'menu-blocked'", "'drag-drop:posted'", "'drag-release:no-target'"]){
             assert.ok(webviewSource.includes(code), `the trace must carry ${code}`)
         }
+        // The drop trace names the write, on both branches, BEFORE the message goes and again once it has: a drop
+        // into the wrong gap and a correct drop that was never posted read identically otherwise, and the device
+        // round has nothing but this strip to tell them apart.
+        const drop = handlerBody('dropTouchDrag')
+        assert.ok(drop.includes("traceGesture('drag-drop:between ' + traceId(neighbours.prevId) + '|' + traceId(neighbours.nextId))"),
+            'a gap drop must trace the two neighbours it is about to write between')
+        assert.ok(drop.includes("traceGesture('drag-drop:date ' + (target.el.dataset.drop || '?'))"),
+            'a whole-row drop must trace the date it is about to write')
+        assert.strictEqual((drop.match(/traceGesture\('drag-drop:posted'\)/g) || []).length, 2,
+            'and each branch must confirm the postMessage returned - one code per branch, and only after the post')
+        for (const branch of ["'todosDroppedBetween'", "'todosDropped'"]){
+            assert.ok(drop.indexOf('drag-drop:between ') < drop.indexOf(branch) || drop.indexOf('drag-drop:date ') < drop.indexOf(branch),
+                `the ${branch} branch must trace what it is writing before it writes it`)
+            assert.ok(drop.indexOf(branch) < drop.lastIndexOf("traceGesture('drag-drop:posted')"),
+                `...and confirm it after`)
+        }
+        assert.ok(handlerBody('traceId').includes("String(id).slice(0, 4)"),
+            'the ids in that trace are cut short: the whole strip is one line on a phone')
         // The trace is the whole of what the device round can report, and the menu-first gesture's three outcomes
         // have to be told apart in it: the row went up, the finger let go with the menu still open, or the stroke
         // was the side menu's. So none of the three shares the cancel code.
         const end = handlerBody('endTouchDrag')
         assert.ok(end.includes("if (reason === 'released') traceGesture('drag-released')"), 'a release that never moved must trace as itself')
         assert.ok(end.includes("else if (reason === 'sideways') traceGesture('drag-sideways-ignored')"), 'and so must a sideways first move')
+        assert.ok(end.includes("else if (reason === 'no-target') traceGesture('drag-release:no-target')"),
+            'a LIFTED drag released over nothing droppable must read as the user\'s own release, not as one of the platform\'s cancels')
         assert.ok(end.includes("else if (reason !== 'dropped') traceGesture('drag-cancel:' + reason)"), 'everything else is a cancel, and a drop traces its own code')
+        assert.strictEqual((end.match(/traceGesture\(/g) || []).length, 4,
+            'and every end still speaks exactly once: released, sideways, no-target, or a cancel')
         assert.ok(handlerBody('updateDragTarget').includes('if (sameDragTarget(touchDrag.target, target)){ touchDrag.target = target; return }'),
             'the target trace must fire on a CHANGE only, or one move would flood the whole buffer')
     })
@@ -5206,13 +5286,16 @@ async function main() {
         assert.ok(down.includes("closest('#searchSuggestions .dropdown-item')"),
             'and must only arm on a row of the OPEN suggestion list')
 
-        // (c) contextmenu inside the list is suppressed on mobile - the belt to the CSS braces - and left alone
-        // on desktop, where a right-click in the list is unchanged.
+        // (c) contextmenu on mobile is suppressed PANEL-WIDE since the second Pixel round (the rows' own inline
+        // handlers were opening the context menu behind the touch drag's back - see the touch-drag block's
+        // "Android's long-press contextmenu never reaches a row" pin), so this list is covered a fortiori and
+        // what is left to check here is that it still IS covered and that desktop still is not.
         const menuBlock = /document\.addEventListener\('contextmenu', function\(event\)\{([\s\S]*?)\}, true\)/.exec(webviewSource)
-        assert.ok(menuBlock, 'contextmenu inside the suggestion list must be handled')
+        assert.ok(menuBlock, 'the contextmenu suppression must still be there')
         assert.ok(menuBlock[1].includes('if (!IS_MOBILE) return'), 'and only on mobile - desktop right-click is untouched')
-        assert.ok(menuBlock[1].includes("closest('#searchSuggestions')") && menuBlock[1].includes('preventDefault()'),
-            'the native menu must be prevented inside the list')
+        assert.ok(menuBlock[1].includes('preventDefault()'), 'the native menu must be prevented over this list too')
+        assert.ok(!menuBlock[1].includes("closest('#searchSuggestions')"),
+            '...and no longer ONLY over this list: scoping it back to the suggestions is exactly what let Android open a row menu behind the drag')
     })
 
     await test('mobile long press: the synthetic click is swallowed, as the to-do adapter has always done (1.9.10)', () => {
