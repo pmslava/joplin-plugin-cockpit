@@ -3084,9 +3084,14 @@ async function main() {
         // ...and the fourth guard is one layer up, in the adapter that arms the press: an event inside an open
         // overlay is the overlay's own and never arms anything.
         assert.ok(/closest\('#cockpitOverlay'\)\) return/.test(webviewSource), 'a press inside an in-panel overlay must not arm the press at all')
-        // The branch itself: only kind 'todo', and only when the zone allows it.
-        assert.ok(/if \(longPress\.kind === 'todo'\)\{[\s\S]{0,900}if \(canLiftRow\(longPress\.target, longPress\.el\)\) armTouchDrag\(\)/.test(handlerBody('onLongPressFire')),
+        // The branch itself: only kind 'todo', and only when the zone allows it. Asserted as an ORDERING rather
+        // than as one regex spanning both lines, so a comment growing between them cannot silently retire the pin.
+        const fire = handlerBody('onLongPressFire')
+        assert.ok(fire.includes("if (longPress.kind === 'todo'){"), 'the arm must sit inside the to-do branch of the fire')
+        assert.ok(fire.includes('if (canLiftRow(longPress.target, longPress.el)) armTouchDrag()'),
             'only a to-do row body arms the drag; note rows, headings and the sync button reach their own handlers untouched')
+        assert.ok(fire.indexOf("if (longPress.kind === 'todo'){") < fire.indexOf('armTouchDrag()'),
+            '...and it must be inside that branch, not after it')
     })
 
     await test('webview touch drag: the hold opens the MENU first and only arms the drag behind it', () => {
@@ -3097,7 +3102,7 @@ async function main() {
         const fire = handlerBody('onLongPressFire')
         assert.ok(fire.includes('onTodoContextMenu(ev, longPress.id)'), 'a held to-do row must open its menu at the fire, as it always did')
         assert.ok(fire.indexOf('onTodoContextMenu(ev') < fire.indexOf('armTouchDrag()'),
-            'the menu must open BEFORE the arm, which indexes the rows - and the menu is the one thing on screen that could still move them')
+            'the menu must open BEFORE the arm: the arm is what indexes the rows, and it may only measure a list that already carries everything the fire puts on screen (the menu is position:fixed and moves no row, which is what makes this order safe rather than merely tidy)')
         assert.strictEqual((fire.match(/\breturn\b/g) || []).length, 0,
             'no kind may short-circuit the fire any more: every one of the four opens its own menu')
         // The arm takes NOTHING. A release from there has to leave the menu standing, and a guard release would
@@ -3115,14 +3120,19 @@ async function main() {
         assert.ok(arm.includes('setPointerCapture'), 'the arm must capture the finger, so a re-render cannot take the moves away')
         assert.ok(arm.includes('buildRowIndex()'), 'the arm must index the rows, while the list is certainly still')
         assert.ok(arm.includes('TOUCH_DRAG_WATCHDOG_MS'), 'the arm must start the watchdog')
+        // ...and it snapshots the whole of what the press hands over, the id included. The lift can run many
+        // seconds later, on a touchmove, and must not reach back into a longPress object that has moved on.
+        assert.ok(arm.includes('touchDrag.id = longPress.id'), 'the arm must snapshot the pressed row\'s id')
+        assert.strictEqual(handlerBody('liftTouchDrag').includes('longPress.'), false,
+            'and the lift must read that snapshot, never longPress itself')
     })
 
     await test('webview touch drag: the FIRST move decides - vertical lifts the row, sideways is left to Android', () => {
         const move = handlerBody('onTouchDragMove')
         assert.ok(move.includes('window.TouchDrag.firstMoveDirection(touchDrag.x - touchDrag.startX, touchDrag.y - touchDrag.startY, TOUCH_DRAG_SLOP)'),
             'the decision must come from the shared module, measured from the press point with the long press\'s own slop')
-        assert.ok(/if \(!direction\) return/.test(move), 'inside the slop nothing happens at all - the gesture is still only the open menu')
-        assert.ok(/if \(direction === 'sideways'\)\{ endTouchDrag\('sideways'\); return \}/.test(move),
+        assert.ok(/if \(!firstMove\) return/.test(move), 'inside the slop nothing happens at all - the gesture is still only the open menu')
+        assert.ok(/if \(firstMove === 'sideways'\)\{ endTouchDrag\('sideways'\); return \}/.test(move),
             'a sideways first move must tear the arming down through the one end, and do nothing else whatsoever')
         assert.ok(move.includes('liftTouchDrag()'), 'a vertical first move must lift the row')
         assert.ok(move.indexOf("endTouchDrag('sideways')") < move.indexOf('liftTouchDrag()'),
@@ -3167,6 +3177,13 @@ async function main() {
             'the second must come AFTER the lift, so the move that lifts the row also stops the list panning under it')
         assert.ok(move.indexOf('firstMoveDirection') < second,
             'nothing may be prevented before the direction has been decided')
+        // A preventDefault() on a non-cancelable move is a silent no-op, which is how Chromium reports that it
+        // decided the touch sequence's blocking region before this listener existed. Traced at the lift, because
+        // that is the first move the panel actually tries to claim - and because it is the only thing that tells
+        // 18b's "the list panned under the lifted row" apart from "the list twitched inside the slop".
+        assert.ok(move.includes("if (!event.cancelable) traceGesture('drag-uncancelable')"),
+            'a lifting move that arrives non-cancelable must say so in the trace')
+        assert.ok(move.indexOf('drag-uncancelable') < second, '...before the preventDefault it is about to make pointless')
         // The guarded one is before the two-finger bail, so a lifted drag still does not let a second finger pan
         // the list out from under it on the frame that ends the gesture.
         assert.ok(first < move.indexOf('touches.length !== 1'),
@@ -3328,8 +3345,8 @@ async function main() {
         assert.ok(toast.includes('if (sticky) return'), 'a sticky toast must not arm the fade timer')
         assert.ok(/GESTURE_TRACE_MAX = 10/.test(webviewSource), 'the ring buffer must be long enough to hold a whole drag (arm, retargets, scroll, drop)')
         // ...and the drag speaks in codes that name what happened, only when the answer CHANGES.
-        for (const code of ['menu-open', 'drag-lift', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between'", "'drag-drop:date'",
-                            "'drag-cancel:'", 'drag-released', 'drag-sideways-ignored']){
+        for (const code of ['menu-open', 'drag-lift', 'drag-uncancelable', "'drag-target:'", "'drag-autoscroll:'", "'drag-drop:between'",
+                            "'drag-drop:date'", "'drag-cancel:'", 'drag-released', 'drag-sideways-ignored']){
             assert.ok(webviewSource.includes(code), `the trace must carry ${code}`)
         }
         // The trace is the whole of what the device round can report, and the menu-first gesture's three outcomes
@@ -3355,9 +3372,11 @@ async function main() {
         assert.ok(!release.includes('ContextMenu'), 'the release must neither open nor close a menu: the press opened it 500ms ago and it stays')
         assert.ok(!release.includes('synthEvent'), '...so it needs no synthetic event of its own any more')
         // The synthetic click that follows is what would otherwise dismiss that menu (the capture dismiss listener)
-        // or open the note (tap-to-open), and both are held off by longPress.fired still being set. Which is why
-        // the adapter's cancel must tidy up its TIMER and nothing else: clearing `fired` there would let the click
-        // through and the menu would vanish the instant the finger came up.
+        // or open the note (tap-to-open), and both are held off by longPress.fired still being set. That flag is
+        // read AFTER cancelLongPress has run on the release, which is why the cancel must tidy up its TIMER and
+        // nothing else: clearing `fired` there would let the click through and the menu would vanish the instant
+        // the finger came up. It is the only field of longPress that outlives the press - the drag snapshots
+        // everything it needs at the arm - so this pin is what keeps the cancel from growing a second job.
         const cancel = handlerBody('cancelLongPress')
         assert.strictEqual(cancel.replace(/longPress\.timer/g, '').includes('longPress.'), false,
             'cancelLongPress must touch longPress.timer and nothing else - the click swallower and the menu-dismiss bail both read longPress.fired after it has run')
