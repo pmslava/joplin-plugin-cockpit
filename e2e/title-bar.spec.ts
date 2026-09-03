@@ -1,6 +1,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { launchJoplin, closeJoplin, createProfile as createJoplinProfile, JoplinInstance } from './launch';
 import {
+  createNotebook,
   createTodo,
   selectNote,
   setAlarm,
@@ -90,6 +91,9 @@ test.describe('The note title bar (due date on hover, and the bell opening Cockp
       'spellChecker.languages': ['en-GB'],
     });
     joplin = await launchJoplin({ profileDir });
+    // A fresh profile has no notebook, and Joplin only draws the note list's "New to-do" button once one
+    // exists - without this the to-do below can never be created.
+    await createNotebook(joplin.win, 'Cockpit E2E');
     await createTodo(joplin.win, bellTodo);
     // An alarm is what makes Joplin print the due date inside the button (-has-title), which is the whole subject
     // of feature A - and it is set here through Joplin's own prompt, while that prompt is still what the bell opens.
