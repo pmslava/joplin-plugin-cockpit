@@ -965,8 +965,10 @@ every row, unmissable, immune to Android's gesture arbitration. Rejected because
 on every row of a list whose whole point is density, for a gesture that should be discoverable by
 holding, and because the 500 ms press is already the panel's "this row, deliberately" on mobile. It is
 kept, explicitly, as the documented fallback: if the device round shows Android taking the gesture, the
-handle is what ships instead. The press is now *speculative*: it lifts the row, and a release that
-never travelled hands the context menu back exactly as before, so nothing was taken away to add this.
+handle is what ships instead. The press was made *speculative* — it lifted the row, and a release that
+never travelled handed the context menu back exactly as before, so nothing was taken away to add this.
+**The first Pixel round then broke that half of it, and the redesign below is the answer**; the other
+three decisions are untouched by it.
 
 *Payload: `schedulableSelection()` after collapsing onto the dragged row.* Which is `[thatOneRow]`
 today — mobile has no multi-select — but it is the same call the desktop `dragstart` makes, so a mobile
@@ -1036,15 +1038,16 @@ nothing, a second finger, a `pointercancel`, `visibilitychange`, a resize, an or
 15 s watchdog. It has a single `return`, the not-active guard on its first line, which is what makes
 "every exit releases the guard" a property of the shape rather than of a reviewer's attention.
 
-The one deviation from the approved design is *when* the guard is taken: on the first MOVE, not at the
-lift. The host answers the last guard coming down by repainting (`panel.ts`'s `dialogGuard` branch runs
-`refreshPanelData`), and a mobile repaint is a webview reload — so on the no-travel path the release
-would have reloaded the panel out from under the very context menu it had just opened, breaking a
-gesture that works today. Taking it on the first move keeps the pair strictly inside the drag proper: a
-hold-and-release never touches the guard at all. The price is that a refresh landing in the gap between
-the lift and the first move ends the drag by reloading — nothing is held, so that is the harmless
-direction. The drop message is posted BEFORE the release, for the same repaint reason in reverse:
-guard-first would reload once for the release and again for the write.
+The one deviation from the approved design is *when* the guard is taken: at the LIFT, not when the
+press first commits to the gesture. The host answers the last guard coming down by repainting
+(`panel.ts`'s `dialogGuard` branch runs `refreshPanelData`), and a mobile repaint is a webview reload —
+so on any path that ends with the context menu still open, the release would have reloaded the panel out
+from under that menu, breaking a gesture that works today. Taking it at the lift keeps the pair strictly
+inside the drag proper: a hold-and-release, and (after the redesign below) a hold-and-swipe, never touch
+the guard at all. The price is that a refresh landing in the gap before the lift ends the gesture by
+reloading — nothing is held, so that is the harmless direction. The drop message is posted BEFORE the
+release, for the same repaint reason in reverse: guard-first would reload once for the release and again
+for the write.
 
 *A still finger sends nothing at all.* The edge auto-scroll helper stops itself after 800 ms without an
 `update()` — a watchdog sized for the HTML5 drag, which re-fires `dragover` every ~350 ms even for a
@@ -1064,9 +1067,12 @@ into the search suggestion list's hint line, and every gesture on a to-do row ha
 closed. The one diagnostic built for exactly this kind of device question was blind to the gesture it
 was needed for. It now falls back to the toast in a sticky mode when there is no hint line, the ring
 buffer holds 10 rather than 6 (a drag arms, retargets, scrolls and drops), and the drag speaks in
-`drag-arm`, `drag-target:before|after|drop|none`, `drag-autoscroll:up|down`, `drag-drop:between|date`,
-`drag-cancel:<reason>` and `menu-on-release` — target and scroll traced on a CHANGE only, or one move
-would flood the buffer it is meant to fill.
+`menu-open`, `drag-lift`, `drag-released`, `drag-sideways-ignored`,
+`drag-target:before|after|drop|none`, `drag-autoscroll:up|down`, `drag-drop:between|date` and
+`drag-cancel:<reason>` — target and scroll traced on a CHANGE only, or one move would flood the buffer
+it is meant to fill. A whole gesture reads as `menu-open > drag-lift > drag-target:after >
+drag-drop:between`, or `menu-open > drag-released`, or `menu-open > drag-sideways-ignored`, so the three
+outcomes of the redesigned first-move rule are told apart at a glance.
 
 **Tests.** The pure module is driven directly: the midline (which goes *before*, so the split is total),
 a zero-height row, the gap that belongs to the row above, both ends of the list, an empty index, and the
@@ -1097,14 +1103,16 @@ browser's own input layer produces the compatibility mouse events, the synthetic
 to eat, and a pan the drag has to stop. A third helper wraps `webviewApi.postMessage` and records what
 the panel posted, which is what makes the negatives real — "nothing was written" is otherwise
 indistinguishable from "the write has not landed yet", and the guard pair is invisible from outside the
-webview entirely, since the desktop host consults the guard only when `mobile`. Eleven cases: a gap drop
-read back from Joplin's own record, the two halves of ONE row resolving to two different gaps, a dated
-heading that keeps the time of day, the No Due Date heading that clears it, a drop-refusing heading that
-must write nothing at all (the review round's find, and the only case whose failure would be a WRONG
-write rather than no write), the menu a release without travel hands back (with the note not opening
-behind it), a 300 ms press that pans the list and writes nothing, a tap that opens the note, the ring's
-two gestures, a peek row that never lifts but still gets its menu, and a cancel over the header whose
-balanced guard pair is the leak check.
+webview entirely, since the desktop host consults the guard only when `mobile`. Twelve cases (eleven
+before the redesign): a gap drop read back from Joplin's own record, the two halves of ONE row resolving
+to two different gaps, a dated heading that keeps the time of day, the No Due Date heading that clears
+it, a drop-refusing heading that must write nothing at all (the review round's find, and the only case
+whose failure would be a WRONG write rather than no write), the menu that is up WHILE the finger is
+still down and survives a release that never moved (with the note not opening behind it and no menu item
+firing on the synthetic click), a hold whose first move goes SIDEWAYS and must lift nothing, write
+nothing and never take the guard, a 300 ms press that pans the list and writes nothing, a tap that opens
+the note, the ring's two gestures, a peek row that never lifts but still gets its menu, and a cancel over
+the header whose balanced guard pair is the leak check.
 
 Four of those cases were only apparently passing, which is the useful half of what the round found in
 this file. The pan case leaves the list scrolled 220 px and nothing put it back, so every case after it
@@ -1146,12 +1154,63 @@ condition is the filter the panel itself reports as `-current`, with both clicks
 swallowed, since the raised error would otherwise end the poll on the very race it was written to ride
 out.
 
-**The Pixel round** is step 18 of MOBILE.md's checklist, twelve sub-steps with the trace ON, and 18b is
-the one that decides the design: hold, then move without lifting — if the list scrolls under the finger,
-or the trace shows `drag-cancel:pointercancel`, Android's gesture arbitration won and the drag-handle
-fallback is what ships.
+### The first Pixel round, and the menu-first redesign
 
-Suite: 347 harness checks, all passing (329 before this, plus 18: five driving the pure module, twelve
-pinning the gesture's shape and the CSS, one on the module's registration — the review round's pins were
-added to those same blocks, so the count is unchanged and what each block proves is not). Playwright:
-`e2e/mobile-drag.spec.ts` is eleven new tests, not run in this pass — the verifier's.
+The device answered before the checklist could be worked through: **the drag did not work**, and the
+reason was not the one every hazard above was written for. It was not Android refusing the non-passive
+`touchmove`, and not the row index. It was that a lift at the 500 ms fire lands *inside Joplin's own
+side-menu gesture* — a hold near the left of the screen followed by any movement is how the app's drawer
+opens — and the two gestures fought over the same touch sequence. Neither won. The half of the design
+that had felt safest, "the 500 ms press already means this row deliberately, so let it lift", was the
+half that was wrong: on this device that press is not exclusively the panel's to interpret.
+
+Slava's call, and the shape it takes: **the gesture becomes menu-first**, and the panel gives the
+sideways stroke back.
+
+- The hold does exactly what it did *before* this feature existed: it opens the to-do's context menu,
+  with the finger still down. That gesture was never in question — it has worked on the Pixel since the
+  mobile phase — so nothing that already worked is being risked to add a drag.
+- Behind that menu the drag is **armed** silently, by `armTouchDrag()`: pointer capture, the non-passive
+  `touchmove` listener, the row index, the 15 s watchdog. Nothing visible, no payload, no selection
+  change, and above all no refresh guard.
+- The **first** travel past the 10 px slop decides, once and for good. `|dy| >= |dx|` → `liftTouchDrag()`:
+  the menu closes, the guard is taken, the selection collapses, the payload is resolved, the row dims and
+  the banner goes up, and everything from there is the drag exactly as it was already built.
+  `|dx| > |dy|` → `endTouchDrag('sideways')`: the arming is thrown away, the menu is left standing, and —
+  the point of the whole change — **nothing was ever `preventDefault()`ed**, so the stroke reaches
+  Android's own arbitration untouched and the side menu can have it.
+- A release without travel is now the *cheapest* path rather than the interesting one: `endTouchDrag('released')`
+  takes the listener, the capture and the watchdog back off, and the menu the press opened simply stays.
+
+Three consequences worth naming. First, `preventDefault()` moved behind a `touchDrag.lifted` gate: an
+armed gesture blocks nothing at all, which is the only way a sideways move can reach the native layer,
+and the harness pins that the first `preventDefault` in `onTouchDragMove` is the guarded one and the only
+other is after `liftTouchDrag()`. Second, `endTouchDrag` must never touch the context menu — it is now
+the end of two gestures whose whole point is that the menu stays open, and closing it is the *lift's* job,
+done explicitly in `liftTouchDrag`. Third, the direction rule is a pure function,
+`TouchDrag.firstMoveDirection(dx, dy, slop)`, built on `movedBeyond` so the slop gate cannot drift from
+the long press's; the tie (a perfect diagonal) goes to vertical, because a refused swipe is one flick from
+being re-tried and a refused lift is not.
+
+The synthetic click needed nothing new, which is the quiet evidence that this order is the old one: the
+adapter's swallower already eats the click after a fired long press, which is what keeps the note from
+opening AND — since it `stopPropagation()`s at the document — what keeps that click from reaching the
+menu now sitting under the finger and running one of its items.
+
+**The Pixel round** is step 18 of MOBILE.md's checklist, with the trace ON. 18a is now "the menu opens
+with the finger still down"; **18b** is the one that decides the design — keep holding and move up or
+down: the menu must close, the row must lift, and the list must not scroll; and **18b-bis** is its other
+half — move sideways instead, and nothing may lift while the menu stays and the side menu gets its
+stroke. If 18b still fails, the cheap fix (registering the `touchmove` listener once at load) comes
+first, and only then the drag-handle fallback.
+
+Suite: 350 harness checks, all passing (347 before the redesign, plus 3: one driving the new pure
+`firstMoveDirection` — including a grid sweep proving its slop gate cannot disagree with `movedBeyond` —
+and two pinning the new order, the menu-before-arm fire with an arm that takes nothing, and the
+first-move rule with the lift that closes the menu and takes the guard; the pins that encoded the old
+order were rewritten in place, so the rest of the count is unchanged). Four mutations were run against
+it and each failed the pins that name it: taking the guard at the arm instead of at the lift, prevent-
+`Default`ing while merely armed, treating a sideways-first move as vertical (both in the module and by
+deleting the panel's bail), and letting a release-without-travel skip `endTouchDrag` so the `touchmove`
+listener outlives the gesture. Playwright: `e2e/mobile-drag.spec.ts` is twelve tests, not run in this
+pass — the verifier's.
