@@ -68,10 +68,14 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   const TOMORROW = `td-tomorrow-${stamp}`;
   const PEEK = `td-peek-${stamp}`;
   // Where Joplin's editor is parked before the two cases that have to see it NOT move. A plain note, so it never
-  // reaches the panel and can never be mistaken for a row, and seeded LAST: a fresh profile sorts its note list
-  // by `user_updated_time` reversed, so the newest note is the first one, and Joplin renders that list a viewport
-  // at a time. Parking on an early fixture instead would aim at a row fifty places down that is not in the DOM at
-  // all. `parkEditor` below checks the assumption rather than trusting it.
+  // reaches the panel and can never be mistaken for a row, and seeded LAST: the note list sorts by
+  // `user_updated_time` reversed (`notes.sortOrder.field` / `.reverse` defaults), so the newest note is the first
+  // one, and Joplin renders that list a viewport at a time. Parking on an early fixture instead would aim at a row
+  // fifty places down that is not in the DOM at all.
+  // That "newest is first" only holds because `beforeAll` turns OFF `uncompletedTodosOnTop`: Joplin GROUPS before
+  // it sorts, and with the default (true) every uncompleted to-do outranks every plain note - which put this one
+  // note last behind 55 to-dos, outside the virtualised list, and hung both cases that need it.
+  // `parkEditor` below still checks the assumption rather than trusting it.
   const PARK = `td-park-${stamp}`;
   // Undated filler: the "No Due Date" heading needs rows under it, and the scroll case needs the list to overflow.
   const FILLER = 40;
@@ -107,7 +111,16 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     // machine, and a hook timeout hides which step actually went wrong.
     test.setTimeout(420_000);
     joplin = await launchJoplin({
-      settings: { 'clipperServer.autoStart': true, 'api.token': API_TOKEN, 'api.port': API_PORT },
+      settings: {
+        'clipperServer.autoStart': true,
+        'api.token': API_TOKEN,
+        'api.port': API_PORT,
+        // File-storage, default TRUE, and it groups the note list before sorting it: every uncompleted to-do
+        // above every plain note. This spec seeds 55 to-dos and ONE plain note (PARK) that it has to click, so
+        // the default buried PARK at the bottom of a virtualised list. Off, the list is a plain
+        // newest-`user_updated_time`-first order and the last-seeded note is the first row.
+        'uncompletedTodosOnTop': false,
+      },
     });
     const { win } = joplin;
     // The OUTSIDE notebook FIRST and this spec's own second, because `createNotebook` leaves the notebook it just

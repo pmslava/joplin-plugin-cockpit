@@ -1132,7 +1132,12 @@ going to contain it, and each spent its whole 240-second budget doing so. The ou
 created first and this spec's second; the park itself moved off `td-lo` — an early fixture, and
 therefore at the bottom of a fifty-six-note list Joplin renders a viewport of at a time — onto a plain
 note seeded last, which a fresh profile's newest-first sort puts at the top where no virtualisation can
-hide it, and which the panel never lists at all because it is not a to-do. A `parkEditor` helper checks
+hide it, and which the panel never lists at all because it is not a to-do. That premise needed one more
+thing to be true, and the `parkEditor` assertion is what said so out loud: Joplin GROUPS the list before
+it sorts it, and `uncompletedTodosOnTop` — default on, File-storage — ranks every uncompleted to-do above
+every plain note, so the very property that made the park note safe also sank it below fifty-five to-dos
+and back out of the rendered viewport; the spec now presets that setting off in the settings it launches
+Joplin with, the same way it presets the data API. A `parkEditor` helper checks
 the row is there before clicking it and checks the editor followed afterwards, so the next fixture that
 cannot be reached says which notebook is showing, in seconds, rather than hanging. The peek case's
 notebook filter was one open-and-click and flaked on exactly the race that shape invites — a repaint
