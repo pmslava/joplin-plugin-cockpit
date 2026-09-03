@@ -3409,6 +3409,28 @@ async function main() {
         const swallow = webviewSource.indexOf('if (longPress.fired){ longPress.fired = false; event.preventDefault(); event.stopPropagation() }')
         assert.ok(dismiss >= 0 && swallow > dismiss,
             'the menu-dismiss click listener must be registered before the swallower, so it sees fired still set and stands aside')
+        // ...and the flag that click consumes is reset at the START of the next touch press, ABOVE every early
+        // return in the adapter's pointerdown. It has to be, because a fired press does not always get a click to
+        // consume it: one that travelled past the browser's tap slop afterwards synthesises none (a hold on the
+        // tick circle and then a move, a drag that lifted - its touchmove is preventDefault()ed), so `fired`
+        // outlives its own gesture. What keeps that from costing the NEXT tap is this reset running before the
+        // zone check and before the `#cockpitOverlay` return - so even a press this adapter wants nothing to do
+        // with still clears it. The e2e ring case leans on exactly that: it dismisses the date picker with a
+        // finger, whose pointerdown lands inside the overlay and clears the flag on the way to returning.
+        const downAt = webviewSource.indexOf("document.addEventListener('pointerdown', function(event){\n    if (!IS_MOBILE) return")
+        assert.ok(downAt >= 0, "the long-press adapter's pointerdown listener must still be there")
+        const down = webviewSource.slice(downAt, webviewSource.indexOf('}, true)', downAt))
+        // Statements only: every anchor below carries its own newline and indent, because the comment above the
+        // reset quotes two of these lines verbatim and a bare substring would match the prose instead of the code.
+        const reset = down.indexOf('\n    longPress.fired = false')
+        assert.ok(reset >= 0, 'the touch pointerdown must clear a stale fired flag')
+        for (const [bail, what] of [["\n    if (event.target.closest('#cockpitOverlay')) return", 'the overlay return'],
+                                    ['\n    if (!event.target.closest) return', 'the closest() guard'],
+                                    ['\n    if (!kind) return', 'the unrecognised-zone return']]){
+            const at = down.indexOf(bail)
+            assert.ok(at >= 0, 'the pointerdown must still have ' + what)
+            assert.ok(reset < at, 'the reset must come before ' + what + ', or a press that returns there strands the flag for the next tap')
+        }
     })
 
     await test('panel.css touch drag: a thicker insertion line, a banner, and NO touch-action on .todo', () => {
