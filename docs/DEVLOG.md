@@ -1634,3 +1634,108 @@ depends on, and the population is mobile users who deliberately enabled a diagno
 names the case instead of fixing it. And the dev-build recipe now says why it stops at `npm run dist`: with
 `public: true` in place the harness pin that holds the setting off the Settings screen fails BY DESIGN, which
 is a confused minute saved for whoever runs the next round.
+
+## 2026-09-03 — v2.4.0: commands for Whereabouts
+
+Cockpit gains two commands it never calls itself. The Whereabouts plugin puts a notebook chip under the note
+title; its left click runs core's `openNote` and then fires `joplin.commands.execute('cockpit.filterByNotebook',
+folderId)`, its double click reveals the note in Joplin's own list and then fires
+`joplin.commands.execute('cockpit.revealNote', noteId)`. Both are fire-and-forget over there and every failure is
+swallowed — `CommandService` throws on an unknown name, and Whereabouts must work identically with and without
+Cockpit — so **the two names ARE the contract**. Renaming one here does not break a build anywhere; it silently
+stops the integration working, which is why the harness pins the two strings verbatim with a comment saying who
+calls them, and pins the whole registration set beside them so a command added or dropped is a deliberate edit of
+one line. They are namespaced (`cockpit.`, unlike the three plain names this plugin has carried since Agenda),
+labelled so the command palette can reach them, and given no menu or toolbar item: neither is useful without an
+argument.
+
+**`cockpit.filterByNotebook` is the dropdown, without the dropdown.** The panel's own `notebookFilterChanged`
+branch used to write the three lines of state itself; it and the command now share one exported
+`setNotebookFilter`, so the two routes cannot drift apart — a source pin asserts the branch calls it and assigns
+nothing. `""` or a missing argument clears the filter, exactly as the dropdown's own "All notebooks" row does. An
+id the notebook map does not hold is a **no-op, not a clear**: a caller that has lost track of a notebook (a
+deleted one, a stale chip) must not silently blank the filter the user is working in, and the panel is not
+repainted for it either. The saved profile is untouched — the filter is where the user has navigated to, not a
+setting — and since the whole thing is state plus one refresh, with no panel show or hide anywhere in it, it
+behaves identically on the mobile panel tab.
+
+**`cockpit.revealNote` is a cascade, and the last step is the interesting one.** Desktop only, for exactly the
+reason `togglePanelVisibility` is: on mobile the panel is a tab inside Joplin's own plugin-panel dialog, which
+the user opens and closes, so a plugin that shows or hides it there is fighting the app — a mobile reveal
+therefore does nothing at all rather than half of it. On desktop the note is read first (five fields), so an id
+that resolves to nothing leaves everything exactly as it was; a hidden panel is then shown, because
+`refreshPanelData` does no work while the panel is hidden and every render below would otherwise paint nothing.
+Then: (a) the note already renders — nothing about the view changes; (b) it does not, so the filter switches to
+the note's OWN notebook and the typed search is cleared (the two live states the panel's own controls write; no
+profile is switched and none is written); (c) it *still* cannot be listed, and this is the case the owner had to
+call.
+
+A plain note under a to-dos-only profile, a completed to-do the completed switches hide, an item the profile's
+own `searchCriteria` excludes, a note inside an excluded notebook: no filter can put any of those on screen. The
+two obvious answers were **do nothing** — which leaves the user staring at a panel that did not answer a request
+they made deliberately from another plugin — and **a toast**, which tells them about a note instead of showing
+it. The owner chose neither: the note is **pinned below the list as the same read-only peek row the "results
+outside current filters" section already draws**, under its own heading, taking the muted `-excluded` heading
+variant when it lives in an excluded notebook — the one case where the panel is showing something the user
+deliberately hid, and should say so. It is not draggable, not selectable, and openable, exactly like every other
+peek row, because it is literally `renderPeekRows`.
+
+**"Would render" is never re-implemented.** The membership question — profile search criteria, typed search text,
+notebook filter with its descendants, the exclusion boundary, `showNotes`, the four completed switches — already
+has one answer in this codebase, and a second copy of it in the reveal would rot within a release. So each step
+of the cascade simply *renders* and then asks the produced markup whether the row is in it
+(`renderedRowIsListed`, a substring test on `lastRenderedHtml`, which holds the current markup whether the paint
+happened or the equality guard suppressed it). The cost is up to three renders for the worst case and exactly one
+for the common one; the benefit is that the reveal cannot disagree with the panel about what the panel shows.
+
+**The flash rides in the markup, not in a message.** The revealed row is scrolled to centre and flashed for ~1.5s
+with `.todo.-revealed` — distinct from `.-selected` on purpose, since the revealed note is usually *also* the
+note the editor just opened and therefore already wears that highlight (Whereabouts' left click opens it, which
+reaches the panel through `trackEditorNoteSelection` as it always has). The obvious implementation — post a
+message after the render — races the render it is about: the row may only exist in a paint that has not landed
+yet, and on mobile a `setHtml` is a full webview reload that eats the message. So the host embeds
+`data-reveal-id` (a sequence number) and `data-reveal-note` on the `.todos` container, and `reconcile()` consumes
+a marker **once, and only on a render that actually holds the row** — the earlier paints of the cascade carry the
+same marker without the row and deliberately leave it unclaimed. The marker is part of the equality-compared
+content, so a new reveal gets past the guard even when the view is otherwise byte-identical, while an unchanged
+marker leaves the guard exactly as strict as it was. The scroll waits two frames, because `restoreTodosScroll`
+puts the list back where the user had it on the next frame and would otherwise undo it, and then records itself
+as the remembered position so the following background refresh does not take the revealed row straight back off
+screen.
+
+**The pin's lifecycle is the user's, not the timer's.** It is host-held state re-emitted by every render, so a
+sync landing, a tick or the 60-second backstop leave it alone; it goes when the user moves on — a profile switch,
+a notebook change (from either route), a search commit, the next reveal, and opening the pinned row itself, which
+is the one clear that needs a repaint of its own since opening a note mutates nothing.
+
+**e2e turned out to be feasible, which was not the expectation.** A plugin command that takes an ARGUMENT has no
+in-app trigger a spec can click: Joplin's command palette runs a registered command but passes it nothing, and
+the renderer is a webpack bundle whose own services `window.require` cannot reach — it resolves real node modules
+(`electron`, `@electron/remote`, which is how `activateJoplinMenuItem` already works) but any `@joplin` module
+would come back as a second, unconnected copy whose singletons know nothing of the running app. Reading the
+packaged AppImage settled it: Joplin publishes the running instances itself — `window.joplin = { commandService,
+pluginService, bridge, ... }` — in an app-startup step gated on `Setting.value('env') === 'dev'`, and `--env dev`
+is a flag its own parser accepts. So `launchJoplin` grew an `envDev` option used by this one spec, and one helper
+executes a command through the very `CommandService` entry point a plugin's `joplin.commands.execute` lands in.
+`e2e/whereabouts-commands.spec.ts` holds three cases: `filterByNotebook` filters the panel and `""` clears it;
+`revealNote` on a note outside the filter switches the filter to its notebook and its row is seen carrying the
+flash class (watched with a `MutationObserver` installed before the call, since ~1.5s is too short to poll for);
+and `revealNote` on a plain note under a to-dos-only profile pins the peek row. **None of it has been run here** —
+e2e is the verifier's, and this spec is the first in the suite to start Joplin with a Joplin flag, so it is also
+the first thing to look at if the file misbehaves; the owner has Whereabouts installed and checks the pair by
+hand besides.
+
+Suite: 375 harness checks (sixteen new), all passing. Sixteen because the reveal is mostly *behaviour*: the two
+command names and the full registration set; four for `filterByNotebook` (filter and mark, `""` and no argument,
+the unknown-id no-op, and the shared write plus "no setting or profile written"); eight for `revealNote` (already
+in view, the notebook switch with the search cleared, the pinned peek row, the `-excluded` heading, survival
+across a sync refresh, all five clears, the hidden panel, the unresolvable id) plus the mobile case; and two
+source pins for what the Node harness cannot execute — that `reconcile()` claims the marker after the
+row-not-found return and never twice, and that the flash class is distinct from `-selected` and changes no row
+box. `panels.visible`/`show` became stateful in `test/harness.js` (an unknown handle is still visible, as it
+always answered), which is what made the hidden-panel case writable. Five mutations were run against the pins and
+each was caught: renaming a command (the contract pin, plus every case that executes it), making
+`filterByNotebook` write `profile.notebook` (the "neither touches the profile" pin), making `revealNote` clear
+the filter instead of switching it to the note's notebook, dropping the pin on a background refresh, and letting
+`revealNote` act on mobile — the last three each by exactly the one pin written for them. Playwright: 112 tests in
+18 files now (105 run, 7 opt-in showcase captures), three of them new here and none of them run in this pass.

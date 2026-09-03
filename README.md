@@ -174,6 +174,10 @@ New note and New to-do create in the notebook the panel is filtered to and open 
 
 Move, tag and duplicate run Joplin's own dialogs on desktop — the native tag dialog with its autocomplete and common-tags behaviour, Joplin's move dialog, Joplin's duplicateNote. On mobile Cockpit does each itself: a notebook picker it draws, a comma-separated tag field prefilled with the note's current tags (attaching and detaching exactly the difference), and a field-by-field copy into a fresh note in the same notebook.
 
+## Works with Whereabouts
+
+[Whereabouts](https://github.com/pmslava/joplin-plugin-whereabouts) puts a small notebook chip under the note title. With Cockpit installed the chip also drives the panel: a **left click** points the panel at that notebook, a **double click** reveals the note in the panel — filtering to its notebook if it is not already listed, and pinning it below the list as a read-only row when the active profile cannot show it at all (a plain note in a to-dos-only profile, say). The revealed row is scrolled into view and flashes briefly. Neither plugin needs the other: without Cockpit the chip is silent, without Whereabouts nothing here changes.
+
 ## Overview notes
 
 Give a profile the id of a note and Cockpit keeps that note filled with the profile's list as Markdown — a heading per group, each to-do a checkbox linked back to itself — so the plan is readable in any Joplin client, including ones that cannot show the panel.
@@ -239,6 +243,15 @@ That same half-second hold also **arms a drag** behind the menu it opens: keep t
 Android can restart the panel's webview under load, so Cockpit keeps the scroll position, an open picker and an in-progress search — the typed query, the open dropdown and its marks — on the plugin side and rebuilds them.
 
 Desktop-only: Ctrl/Shift multi-select and the batch actions that follow from it, double-click to open in a new window, custom panel CSS, and the note-toolbar button.
+
+## Commands for other plugins
+
+Cockpit registers two commands with no menu item of their own, for other plugins (or the command palette) to call. Both take a plain id string, ignore an id that no longer resolves, and never throw back at the caller.
+
+| Command | Argument | What it does |
+| --- | --- | --- |
+| `cockpit.filterByNotebook` | a notebook id; `""` or no argument | Points the panel at that notebook, exactly as picking it in the notebook dropdown does. `""` (or no argument) clears the filter back to all notebooks. An unknown id is ignored rather than treated as a clear. The saved profile is not changed. Works on desktop and mobile. |
+| `cockpit.revealNote` | a note id | Shows that note in the panel: a hidden panel is shown first, then the note is shown where it already is, or the filter switches to its notebook and the typed search is cleared, or — when the active profile cannot list it at all — it is pinned below the list as a read-only "Revealed" row. The revealed row is scrolled into view and flashed. The pin goes when you switch profile, change the notebook, commit a search, reveal something else or open the row. **Desktop only**: on mobile the panel is a tab in Joplin's own plugin-panel screen, which is yours to open and close, so a reveal there does nothing. |
 
 ## Build from source
 
