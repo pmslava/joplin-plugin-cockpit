@@ -61,6 +61,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   const ONTO_CLEAR = `td-onto-clear-${stamp}`;
   const MENU = `td-menu-${stamp}`;
   const CANCEL = `td-cancel-${stamp}`;
+  const REFUSE = `td-refuse-${stamp}`;
   const TAP = `td-tap-${stamp}`;
   const TICK = `td-tick-${stamp}`;
   const ALARM = `td-alarm-${stamp}`;
@@ -122,6 +123,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     ids[ONTO_CLEAR] = await createTodoViaApi(ONTO_CLEAR, folderId, todayAt(16, 45));
     ids[MENU] = await createTodoViaApi(MENU, folderId, yesterdayAt(12));
     ids[CANCEL] = await createTodoViaApi(CANCEL, folderId, yesterdayAt(13));
+    ids[REFUSE] = await createTodoViaApi(REFUSE, folderId, yesterdayAt(13, 30));
     ids[TAP] = await createTodoViaApi(TAP, folderId, yesterdayAt(14));
     ids[TICK] = await createTodoViaApi(TICK, folderId, yesterdayAt(15));
     ids[ALARM] = await createTodoViaApi(ALARM, folderId, yesterdayAt(16));
@@ -307,6 +309,40 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     return { x: box.x, y: box.y };
   }
 
+  /**
+   * Every point below is checked to be INSIDE the scroller's visible box before it is handed to a finger.
+   * `.todos` keeps its scroll position across renders, so a case that leaves the list scrolled (the pan case does,
+   * deliberately) would otherwise send the next case's touches into the panel header or clean out of the iframe -
+   * and it would fail on the gesture, naming the wrong cause. `settle()` puts the list back at the top; this
+   * throws with the list's own metrics when a point still lands off-screen. It deliberately does NOT scroll
+   * anything into view itself: `dragRowTo` resolves its target point AFTER the row has been lifted, and a
+   * coordinate helper that scrolled the list would be moving the target out from under a finger mid-gesture.
+   */
+  async function assertOnScreen(win: Page, what: string, y: number): Promise<void> {
+    const list = await listBox(win);
+    if (y >= list.top && y <= list.bottom) return;
+    const metrics = await listMetrics();
+    throw new Error(
+      `${what} is not inside the visible list (y=${Math.round(y)}, list ${Math.round(list.top)}..${Math.round(
+        list.bottom
+      )}, scrollTop ${metrics.scrollTop} of ${metrics.maxScroll}) - the list is scrolled or too short, not the gesture's fault`
+    );
+  }
+
+  /** The scroller's own visible box, in TOP-LEVEL coordinates. */
+  async function listBox(win: Page): Promise<{ top: number; bottom: number }> {
+    const panel = await agendaPanel(win);
+    const box = await panel.evaluate(() => {
+      const el = document.querySelector('.todos') as HTMLElement | null;
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    });
+    if (!box) throw new Error('the panel has no .todos scroller');
+    const origin = await panelOrigin(win);
+    return { top: origin.y + box.top, bottom: origin.y + box.bottom };
+  }
+
   /** A point inside a to-do row, given as fractions of its box, in TOP-LEVEL coordinates. */
   async function rowPoint(win: Page, marker: string, fractionY: number, fractionX = 0.6): Promise<Point> {
     const panel = await agendaPanel(win);
@@ -319,22 +355,28 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     }, marker);
     if (!box) throw new Error(`no row on screen for ${marker}`);
     const origin = await panelOrigin(win);
-    return { x: origin.x + box.x + box.width * fractionX, y: origin.y + box.y + box.height * fractionY };
+    const at = { x: origin.x + box.x + box.width * fractionX, y: origin.y + box.y + box.height * fractionY };
+    await assertOnScreen(win, `the row for ${marker}`, at.y);
+    return at;
   }
 
-  /** The centre of a group heading, in TOP-LEVEL coordinates. */
-  async function headingPoint(win: Page, text: string): Promise<Point> {
+  /** The centre of a group heading, in TOP-LEVEL coordinates. `dropped` picks between the headings that accept a
+   *  drop (they carry data-drop) and the ones that refuse every drop (Overdue and Future name no date). */
+  async function headingPoint(win: Page, text: string, dropped = true): Promise<Point> {
     const panel = await agendaPanel(win);
-    const box = await panel.evaluate((t) => {
-      const heads = Array.from(document.querySelectorAll('.todos h2[data-drop]')) as HTMLElement[];
+    const box = await panel.evaluate(([t, withDrop]) => {
+      const selector = withDrop ? '.todos h2[data-drop]' : '.todos h2:not([data-drop])';
+      const heads = Array.from(document.querySelectorAll(selector)) as HTMLElement[];
       const head = heads.find((h) => (h.textContent || '').trim() === t);
       if (!head) return null;
       const rect = head.getBoundingClientRect();
       return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    }, text);
-    if (!box) throw new Error(`no group heading "${text}" on screen`);
+    }, [text, dropped] as [string, boolean]);
+    if (!box) throw new Error(`no ${dropped ? 'droppable' : 'drop-refusing'} group heading "${text}" on screen`);
     const origin = await panelOrigin(win);
-    return { x: origin.x + box.x, y: origin.y + box.y };
+    const at = { x: origin.x + box.x, y: origin.y + box.y };
+    await assertOnScreen(win, `the "${text}" heading`, at.y);
+    return at;
   }
 
   /** The centre of a to-do's checkbox ring, in TOP-LEVEL coordinates. */
@@ -350,7 +392,9 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     }, marker);
     if (!box) throw new Error(`no checkbox for ${marker}`);
     const origin = await panelOrigin(win);
-    return { x: origin.x + box.x, y: origin.y + box.y };
+    const at = { x: origin.x + box.x, y: origin.y + box.y };
+    await assertOnScreen(win, `the checkbox for ${marker}`, at.y);
+    return at;
   }
 
   /** ------------------------------------------------------------------------------------------
@@ -365,22 +409,29 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
    */
   async function armMessageLog(win: Page): Promise<void> {
     const panel = await agendaPanel(win);
-    await panel.evaluate(() => {
+    const wrapped = await panel.evaluate(() => {
       const w = window as any;
+      const original = w.__cockpitPostOriginal || w.webviewApi.postMessage;
       if (!w.__cockpitPostWrapped) {
-        const original = w.webviewApi.postMessage.bind(w.webviewApi);
+        w.__cockpitPostOriginal = w.webviewApi.postMessage;
+        const through = w.webviewApi.postMessage.bind(w.webviewApi);
         w.webviewApi.postMessage = function (message: any) {
           try {
             w.__cockpitPosted.push(JSON.parse(JSON.stringify(message)));
           } catch {
             w.__cockpitPosted.push(['<unserialisable>']);
           }
-          return original(message);
+          return through(message);
         };
         w.__cockpitPostWrapped = true;
       }
       w.__cockpitPosted = [];
+      // The wrap ITSELF is the thing every negative below rests on: if `postMessage` were ever non-writable, an
+      // accessor, or reinstated by a re-render, the assignment would no-op and "nothing was posted" would be true
+      // of an empty log rather than of the panel. Answer whether the function in place is the one we installed.
+      return w.webviewApi.postMessage !== original && w.__cockpitPostWrapped === true;
     });
+    expect(wrapped, 'the postMessage wrap must be in place, or every negative here passes vacuously').toBe(true);
   }
 
   async function postedMessages(win: Page): Promise<any[][]> {
@@ -405,7 +456,14 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   }
 
   /** What the panel is showing MID-GESTURE: the lifted row, the painted indicators, the banner. */
-  async function dragState(): Promise<{ dragging: number; before: number; after: number; over: number; banner: string | null }> {
+  async function dragState(): Promise<{
+    dragging: number;
+    before: number;
+    after: number;
+    over: number;
+    banner: string | null;
+    bannerCancel: boolean;
+  }> {
     const panel = await agendaPanel(joplin.win);
     return panel.evaluate(() => {
       const banner = document.getElementById('cockpitDragBanner');
@@ -415,6 +473,10 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
         after: document.querySelectorAll('.todo.-drop-after').length,
         over: document.querySelectorAll('.-drop-over').length,
         banner: banner ? banner.textContent : null,
+        // The lift banner already ENDS in the word "cancel" ("release outside the list to cancel"), so the text
+        // alone cannot tell a resolved cancel state from a banner that was never re-labelled at all. The class is
+        // what updateDragTarget actually toggles.
+        bannerCancel: !!banner && banner.classList.contains('-cancel'),
       };
     });
   }
@@ -440,6 +502,15 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   async function settle(): Promise<void> {
     await joplin.win.waitForTimeout(2500);
     await forceMobilePanel(joplin.win);
+    // ...and put the list back at the top. The panel deliberately preserves its scroll position across renders,
+    // so the pan case's 220px would otherwise still be there for every case after it, and their rows would be
+    // aimed at off-screen. Done AFTER the wait, so a late render cannot restore the old position over it.
+    const panel = await agendaPanel(joplin.win);
+    await panel.evaluate(() => {
+      const list = document.querySelector('.todos') as HTMLElement | null;
+      if (list) list.scrollTop = 0;
+    });
+    await joplin.win.waitForTimeout(150);
   }
 
   /** ------------------------------------------------------------------------------------------
@@ -528,6 +599,45 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     expect(after, 'the "clear" target must clear the due date outright').toBe(0);
   });
 
+  test('a heading that refuses every drop is not the gap above it either', async () => {
+    const { win } = joplin;
+    await settle();
+    // "Overdue" and "Future" name no date, so getHeadingDropTarget gives them no data-drop and they accept
+    // nothing. They are also SIBLINGS of the rows, sitting in the gap the row index attributes to the row above -
+    // and, being sticky, they float over rows in a scrolled list. Without the resolver's own bail on a heading,
+    // aiming at one would silently write the to-do into the group BEFORE it. The desktop drag is inert here.
+    const before = await todoDue(REFUSE);
+    await waitForPanelTodo(win, REFUSE);
+    await armMessageLog(win);
+    const finger = await newFinger(win);
+    try {
+      const from = await rowPoint(win, REFUSE, 0.5);
+      await finger.down(from);
+      await win.waitForTimeout(700);
+      expect((await dragState()).dragging, 'the row must be lifted by the hold').toBe(1);
+      // headingPoint with `dropped: false` asserts the heading really carries no data-drop, so this case cannot
+      // quietly become a test of a droppable heading.
+      const to = await headingPoint(win, 'Overdue', false);
+      await finger.glide(from, to);
+      const aiming = await dragState();
+      console.log('TOUCH REFUSED HEADING', JSON.stringify(aiming));
+      expect(aiming.before + aiming.after + aiming.over, 'a heading that refuses drops must paint nothing at all').toBe(0);
+      expect(aiming.bannerCancel, 'and the banner must say a release would cancel').toBe(true);
+      await finger.up();
+    } finally {
+      await finger.dispose();
+    }
+    const posted = await postedMessages(win);
+    console.log('TOUCH REFUSED POSTED', JSON.stringify(posted));
+    expect(names(posted), 'a drop-refusing heading must write nothing at all').not.toContain('todosDropped');
+    expect(names(posted), 'and above all must not write the gap above it').not.toContain('todosDroppedBetween');
+    expect(
+      posted.filter((m) => m[0] === 'dialogGuard').map((m) => m[1]),
+      'the guard is still taken and released, like any other travelled drag'
+    ).toEqual([true, false]);
+    expect(await todoDue(REFUSE), 'and the due date is untouched').toBe(before);
+  });
+
   test('a hold and a release WITHOUT moving still opens the context menu, and opens no note', async () => {
     const { win } = joplin;
     await settle();
@@ -570,8 +680,14 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       const from = await rowPoint(win, LO, 0.5);
       await finger.down(from);
       await win.waitForTimeout(300); // well short of the 500ms hold: this is a pan, not a lift
+      // The first move goes in IMMEDIATELY after the wait, before any probe: a `dragState()` evaluate that took
+      // 200ms on a loaded machine would let the 500ms hold fire, and the case would silently become a drag test
+      // that fails on its own assertions. Past the 10px slop, this move also cancels the pending press outright,
+      // so the probe after it can no longer race anything.
+      const panned = { x: from.x, y: from.y - 30 };
+      await finger.move(panned);
       expect((await dragState()).dragging, 'nothing may be lifted before the hold fires').toBe(0);
-      await finger.glide(from, { x: from.x, y: from.y - 220 }, 12, 25);
+      await finger.glide(panned, { x: from.x, y: from.y - 220 }, 10, 25);
       await finger.up();
     } finally {
       await finger.dispose();
@@ -583,6 +699,9 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       before.scrollTop
     );
     const posted = await postedMessages(win);
+    // A scrolled list posts its new position, so the log is NOT empty here - which is what stops the three
+    // negatives below from passing on a log that never recorded anything in the first place.
+    expect(names(posted), 'the pan must have posted its new scroll position').toContain('scrollChanged');
     for (const forbidden of ['todosDropped', 'todosDroppedBetween', 'dialogGuard']) {
       expect(names(posted), `a pan must not post ${forbidden}`).not.toContain(forbidden);
     }
@@ -657,7 +776,10 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       const cancelling = await dragState();
       console.log('TOUCH CANCEL STATE', JSON.stringify(cancelling));
       expect(cancelling.before + cancelling.after + cancelling.over, 'nothing may be painted as a target').toBe(0);
-      expect(cancelling.banner, 'and the banner must say so').toContain('cancel');
+      expect(cancelling.bannerCancel, 'and the banner must be in its cancel state, not merely still up').toBe(true);
+      for (const named of ['before ', 'after ', 'onto ']) {
+        expect(cancelling.banner, 'a cancel banner must name no target').not.toContain(named);
+      }
       await finger.up();
     } finally {
       await finger.dispose();

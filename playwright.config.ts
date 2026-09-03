@@ -29,8 +29,13 @@ export default defineConfig({
   // globalTimeout covers globalSetup too, so time spent queueing for the machine-wide lock would
   // otherwise come out of the suite's budget. Locally the lock-wait budget is therefore ADDED on top
   // (the suite still gets its full 18 minutes once its turn comes); on CI each repo has its own VM,
-  // the lock is never contended, and the cap stays exactly where the job's 20-minute limit needs it.
-  globalTimeout: 18 * 60_000 + (process.env.CI ? 0 : LOCK_WAIT_MS),
+  // the lock is never contended, and the cap stays exactly where the job's own limit needs it.
+  //
+  // Raised from 18 to 25 minutes when the mobile touch-drag spec became the seventeenth file: each file launches
+  // its own Joplin, and this one seeds ~55 to-dos through the data API and then runs eleven gesture cases that
+  // each wait out a settle and a panel refresh. A healthy full run is still well under the cap; what the cap is
+  // for is a stuck one ending itself gracefully, with its report and traces written.
+  globalTimeout: 25 * 60_000 + (process.env.CI ? 0 : LOCK_WAIT_MS),
   expect: { timeout: 20_000 },
   // A single Joplin instance at a time.
   fullyParallel: false,
