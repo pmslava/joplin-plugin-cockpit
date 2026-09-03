@@ -67,6 +67,12 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   const ALARM = `td-alarm-${stamp}`;
   const TOMORROW = `td-tomorrow-${stamp}`;
   const PEEK = `td-peek-${stamp}`;
+  // Where Joplin's editor is parked before the two cases that have to see it NOT move. A plain note, so it never
+  // reaches the panel and can never be mistaken for a row, and seeded LAST: a fresh profile sorts its note list
+  // by `user_updated_time` reversed, so the newest note is the first one, and Joplin renders that list a viewport
+  // at a time. Parking on an early fixture instead would aim at a row fifty places down that is not in the DOM at
+  // all. `parkEditor` below checks the assumption rather than trusting it.
+  const PARK = `td-park-${stamp}`;
   // Undated filler: the "No Due Date" heading needs rows under it, and the scroll case needs the list to overflow.
   const FILLER = 40;
   const filler = (i: number) => `td-fill-${String(i).padStart(2, '0')}-${stamp}`;
@@ -104,8 +110,13 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       settings: { 'clipperServer.autoStart': true, 'api.token': API_TOKEN, 'api.port': API_PORT },
     });
     const { win } = joplin;
-    await createNotebook(win, book);
+    // The OUTSIDE notebook FIRST and this spec's own second, because `createNotebook` leaves the notebook it just
+    // made selected in the app - and two cases below park Joplin's editor on a note by clicking it in the note
+    // list, which only ever lists the SELECTED notebook. Created the other way round the app sat on the outside
+    // notebook, whose list holds one note, and those two cases spent their whole 240s budget waiting for a row
+    // that was never going to be there.
     await createNotebook(win, outsideBook);
+    await createNotebook(win, book);
     await apiReady(win);
     const folderId = await folderIdByTitle(book);
     const outsideFolderId = await folderIdByTitle(outsideBook);
@@ -133,6 +144,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     // read-only "results outside current filters" section.
     ids[PEEK] = await createTodoViaApi(PEEK, outsideFolderId, yesterdayAt(17));
     for (let i = 0; i < FILLER; i++) await createTodoViaApi(filler(i), folderId);
+    ids[PARK] = await createNoteViaApi(PARK, folderId);
 
     await waitForPanelTodo(win, LO);
     await waitForPanelTodo(win, HI);
@@ -207,6 +219,13 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       ...(dueMs === undefined ? {} : { todo_due: dueMs }),
     });
     if (made.status !== 200) throw new Error(`the data API refused a to-do: ${made.status} ${made.text}`);
+    return JSON.parse(made.text).id;
+  }
+
+  /** One PLAIN note (never a to-do, so the panel never lists it); returns its id. */
+  async function createNoteViaApi(title: string, folderId: string): Promise<string> {
+    const made = await apiRequest('POST', `/notes?token=${API_TOKEN}`, { title, parent_id: folderId });
+    if (made.status !== 200) throw new Error(`the data API refused a note: ${made.status} ${made.text}`);
     return JSON.parse(made.text).id;
   }
 
@@ -513,6 +532,25 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     await joplin.win.waitForTimeout(150);
   }
 
+  /**
+   * Park Joplin's editor on the plain fixture note, which is what makes "the note did not open" and "the tap DID
+   * open it" observable at all. It checks the row is in the note list before clicking it and checks the editor
+   * followed afterwards: a park that cannot happen - the wrong notebook selected, or a note too far down a
+   * virtualised list to be rendered - then fails in seconds, by name, instead of hanging a case on a click that
+   * waits out its whole budget.
+   */
+  async function parkEditor(win: Page): Promise<void> {
+    const row = win.locator('.note-list-item .title span', { hasText: PARK }).first();
+    await expect(
+      row,
+      `${PARK} must be rendered in the note list - is Joplin showing ${book}, newest note first?`
+    ).toBeVisible({ timeout: 30_000 });
+    await selectNote(win, PARK);
+    await expect
+      .poll(async () => win.locator('input.title-input').inputValue(), { timeout: 30_000 })
+      .toContain(PARK);
+  }
+
   /** ------------------------------------------------------------------------------------------
    * The cases
    * --------------------------------------------------------------------------------------- */
@@ -642,7 +680,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     const { win } = joplin;
     await settle();
     // Park the editor somewhere else, so "the note did not open" is observable.
-    await selectNote(win, LO);
+    await parkEditor(win);
     const before = await todoDue(MENU);
     await armMessageLog(win);
     const finger = await newFinger(win);
@@ -665,7 +703,9 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     expect(names(posted), 'and must write nothing').not.toContain('todosDroppedBetween');
     expect(names(posted), 'and the synthetic click must not open the note').not.toContain('todoClicked');
     expect(await todoDue(MENU), 'the due date is untouched').toBe(before);
-    await expect.poll(async () => win.locator('input.title-input').inputValue(), { timeout: 30_000 }).toContain(LO);
+    await expect
+      .poll(async () => win.locator('input.title-input').inputValue(), { timeout: 30_000 })
+      .toContain(PARK);
     await panel.locator('body').press('Escape');
     await expect(panel.locator('#noteContextMenu')).toHaveCount(0);
   });
@@ -710,7 +750,8 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   test('a tap still opens the note', async () => {
     const { win } = joplin;
     await settle();
-    await selectNote(win, LO);
+    // Off the tapped to-do first, or "the tap opened it" is true of an editor that never moved.
+    await parkEditor(win);
     await waitForPanelTodo(win, TAP);
     const finger = await newFinger(win);
     try {
@@ -815,9 +856,40 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
         { timeout: PANEL_REFRESH_TIMEOUT }
       )
       .toBeGreaterThan(0);
-    await panel.locator('.dropdown-toggle[onclick*="notebookMenu"]').click();
-    await expect(panel.locator('#notebookMenu')).toBeVisible();
-    await panel.locator('#notebookMenu .dropdown-item', { hasText: book }).locator('.dropdown-label').first().click();
+    // Opening the menu and choosing from it is a POLL, not one pass. The panel repaints itself on every refresh
+    // and a repaint landing between the two closes the menu with nothing chosen - which is how this case failed
+    // its first attempt in the review round, on a `#notebookMenu` that was hidden again by the time it was read.
+    // The loop's exit condition is the filter the panel actually holds (its own `-current` item), so a lost click
+    // is simply retried rather than being discovered later as a peek that never appeared.
+    await expect
+      .poll(
+        async () => {
+          const current = panel.locator('#notebookMenu .dropdown-item.-current .dropdown-label');
+          const nowOn = async () =>
+            (await current.count()) ? ((await current.first().textContent()) || '').trim() : '';
+          if ((await nowOn()) === book) return book;
+          // Both clicks are attempted with a short timeout and swallowed: the failure mode being defended against
+          // IS a repaint pulling the element out from under the click, and a raised error would end the poll on
+          // the very race it exists to ride out. The next turn simply starts again from whatever is on screen.
+          try {
+            if (!(await panel.locator('#notebookMenu').isVisible())) {
+              await panel.locator('.dropdown-toggle[onclick*="notebookMenu"]').click({ timeout: 5_000 });
+              await win.waitForTimeout(400);
+            }
+            await panel
+              .locator('#notebookMenu .dropdown-item', { hasText: book })
+              .locator('.dropdown-label')
+              .first()
+              .click({ timeout: 5_000 });
+            await win.waitForTimeout(1000);
+          } catch {
+            /* a repaint took the menu away mid-click; try again from the top */
+          }
+          return nowOn();
+        },
+        { timeout: PANEL_REFRESH_TIMEOUT, intervals: [800, 1500, 2500] }
+      )
+      .toBe(book);
     const search = panel.locator('#searchFilter');
     await expect
       .poll(
