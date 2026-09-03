@@ -1123,6 +1123,24 @@ asserts the one message that MUST be there, its own `scrollChanged`. Playwright'
 from 18 to 25 minutes and the CI job's cap from 20 to 28: this spec is the seventeenth file, each file
 launches its own Joplin, and a suite that overruns is hard-cancelled without a report.
 
+The first full e2e run of the file then found what only a real run could: two cases red, both for the
+same reason, and neither of them about the gesture. `beforeAll` creates two notebooks — this spec's own
+and an outside one the peek case needs — and `createNotebook` leaves the notebook it just made selected
+in the app, so Joplin sat on the outside one, whose note list holds a single note. The two cases that
+park the editor before judging whether a note opened were clicking for a row in a list that was never
+going to contain it, and each spent its whole 240-second budget doing so. The outside notebook is now
+created first and this spec's second; the park itself moved off `td-lo` — an early fixture, and
+therefore at the bottom of a fifty-six-note list Joplin renders a viewport of at a time — onto a plain
+note seeded last, which a fresh profile's newest-first sort puts at the top where no virtualisation can
+hide it, and which the panel never lists at all because it is not a to-do. A `parkEditor` helper checks
+the row is there before clicking it and checks the editor followed afterwards, so the next fixture that
+cannot be reached says which notebook is showing, in seconds, rather than hanging. The peek case's
+notebook filter was one open-and-click and flaked on exactly the race that shape invites — a repaint
+between the two, leaving `#notebookMenu` hidden with nothing chosen; it is now a bounded poll whose exit
+condition is the filter the panel itself reports as `-current`, with both clicks short-timed and
+swallowed, since the raised error would otherwise end the poll on the very race it was written to ride
+out.
+
 **The Pixel round** is step 18 of MOBILE.md's checklist, twelve sub-steps with the trace ON, and 18b is
 the one that decides the design: hold, then move without lifting — if the list scrolls under the finger,
 or the trace shows `drag-cancel:pointercancel`, Android's gesture arbitration won and the drag-handle
