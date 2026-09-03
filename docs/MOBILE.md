@@ -348,15 +348,39 @@ Four hazards this was designed around, each of which cost something to get right
   It is attached only for the duration of a lift, which is why there is deliberately **no
   `touch-action` on `.todo`**: that would apply to every touch on every row, always, and the list must
   keep scrolling by flick.
+  The listener is registered **mid-gesture**, 500 ms into the touch, and that is the part the device
+  round tests: Chromium decides a touch sequence's blocking-handler region on the compositor and a
+  handler added late may arrive after that decision, in which case the moves are delivered
+  *non-cancelable* and `preventDefault()` is a silent no-op — which looks exactly like 18b's failure.
+  **The cheaper thing to try before falling back to a drag handle** is to register the same listener
+  once at load (mobile only) with `if (!touchDrag.active) return` as its first line: identical behaviour,
+  but the region is blocking from `touchstart` onward. It is not the default because it routes every
+  ordinary flick through a main-thread handler, so its cost has to be measured on the device (18j), not
+  assumed away.
 - **The checkbox ring overhangs its row.** The mobile tap-target rules grow the 18 px ring to a 40 px
   content box and cancel the growth with an equal negative margin, so the box sticks out of a ~26 px
   row without moving anything. `document.elementFromPoint` in the left column therefore returns the
   **neighbour** row about as often as the right one. Rows are found geometrically instead: an index of
-  `{ el, top, bottom, info }` built at the lift and rebuilt after every auto-scrolled frame, searched by
-  the pure `window.TouchDrag.rowAtY`. The big `[data-drop]` targets are still resolved from the DOM, and
-  **first**, because a heading is a *sibling* of the rows — it sits in the very gap the row index would
-  attribute to the row above it — and because a sticky heading floating over the list (z-index 2, above
-  any overhanging ring) genuinely is what the finger is on.
+  `{ el, top, bottom, info }` built at the lift and **shifted** by every later scroll — the drag's own
+  auto-scroll and any other, since a scroll moves every row by the same delta and changes nothing else
+  about them — searched by the pure `window.TouchDrag.rowAtY`. (Shifted rather than re-measured because a
+  rebuild is a `getBoundingClientRect()` plus `betweenGroupInfo`'s walk back to the heading *per row*, and
+  it would run on every auto-scrolled frame, on the device, in the one phase where the frame budget is
+  real. Re-syncing on a scroll the drag did **not** ask for is the insurance against Android panning the
+  list without taking the gesture away — see 18b: an unsynced index would write neighbours read off rows
+  that had scrolled off.) The big `[data-drop]` targets are still resolved from the DOM, and **first**,
+  because a heading is a *sibling* of the rows — it sits in the very gap the row index would attribute to
+  the row above it — and because a sticky heading floating over the list (z-index 2, above any
+  overhanging ring) genuinely is what the finger is on.
+- **A heading that accepts no drop is not the gap above it either.** "Overdue" and "Future" name no date,
+  so `getHeadingDropTarget` gives them none and they carry no `data-drop` at all. They miss the
+  `[data-drop]` branch — and, being siblings of the rows, they would then fall through to the row index,
+  which by design gives everything between one row's top and the next row's to the row **above**. A finger
+  on the "Future" heading would have written the to-do into the group before it, and a *sticky* one
+  floating over a scrolled list would have written a row the user could not even see the line on. So the
+  resolver bails on any `h2` under the finger, **after** the `[data-drop]` test (the headings that do
+  accept drops have already returned by then). The desktop drag is inert on exactly this point:
+  `betweenTargetAt` starts from a `closest('.todo')`, which a heading is not.
 - **A leaked `dialogGuard` freezes mobile refreshes for the life of the webview.** Hence the single end
   above, the 15 s watchdog, and the flag that keeps taking and releasing paired. The guard is taken on
   the **first move**, not at the lift, and that is a deliberate departure from the first design: the
@@ -369,7 +393,7 @@ Four hazards this was designed around, each of which cost something to get right
   `AUTOSCROLL_IDLE_MS` (800 ms) without an `update()` — a watchdog sized for the HTML5 drag, which
   re-fires `dragover` every ~350 ms even for a stationary pointer. A finger holding at the edge, which is
   the entire gesture an edge scroll exists for, emits no `touchmove` whatsoever, so the touch drag
-  re-aims the loop from its own scroll callback (`onTouchDragScrolled`) after rebuilding the index.
+  re-aims the loop from its own scroll callback (`onTouchDragScrolled`) after re-syncing the index.
   Nothing is lost: a touch drag has real ends of its own and every one of them calls `endTouchDrag`,
   which stops the loop, with the 15 s watchdog behind them all.
 - **The gap that is not a target.** A gap with *both* neighbours absent in a *dateless* group
@@ -635,8 +659,11 @@ success vs failure looks like. The build to install is
          "after …", and the **list itself does not scroll**.
        - Failure: the list scrolls under the finger, or the trace shows `drag-cancel:pointercancel`.
          Either means Android's compositor took the gesture rather than honouring the non-passive
-         `touchmove`. **That is the signal to fall back to a per-row drag handle** (documented above as
-         the rejected-but-kept alternative) — report it before anything else.
+         `touchmove`. Report it before anything else. **Try the cheap fix first** (§7, the non-passive
+         bullet): register the `touchmove` listener once at load instead of mid-gesture, so the touch
+         sequence is blocking from its `touchstart`, then repeat 18b and 18j. Only if that changes
+         nothing is this **the signal to fall back to a per-row drag handle** (documented above as the
+         rejected-but-kept alternative).
 
     c. **Aim.** Drop a to-do into the gap two rows away from where it started. Repeat the same aim five
        times.
@@ -647,10 +674,23 @@ success vs failure looks like. The build to install is
 
     d. **Auto-scroll.** Grab a to-do near the bottom of a long list, hold the finger in the strip at the
        **top** edge of the list and keep it still.
-       - Success: the list scrolls up under the finger, the insertion line keeps following what arrives,
-         the trace shows `drag-autoscroll:up`, and releasing over a group above actually reschedules it
-         there.
-       - Failure: the list does not move, or it moves but the drop lands nowhere.
+       - Success: the list scrolls up under the finger, the trace shows `drag-autoscroll:up`, and
+         releasing over a group above actually reschedules it there. **What is under the finger decides
+         what is painted**, and near the very top of the list that is usually the *pinned* group heading
+         (it is sticky, and the scroll band starts at the list's top edge): a highlighted heading rather
+         than an insertion line is correct there, and the desktop drag does the same. Slide down a few
+         millimetres, still inside the band, and the line follows the rows arriving.
+       - Failure: the list does not move, or it moves but the drop lands nowhere, or the line/highlight
+         lags the arriving rows by more than a moment (that would be the row index not re-syncing).
+
+    d-bis. **Watch each drop land.** On any successful drop, look at the list the moment it repaints.
+       - Success: the to-do appears in its new place, once.
+       - Report it (not a failure, a measurement): if the list first flashes the to-do back where it
+         started and only then shows it moved, that is the two mobile renders the fire-and-forget guard
+         release allows — the drop message and `['dialogGuard', false]` are both posted without waiting,
+         so the host can repaint once before the write has landed. Awaiting the drop would collapse it to
+         one render at the price of a guard that leaks if that promise never settles, which is why it is
+         not done blind. This step is the evidence that would justify changing it.
 
     e. **A heading drop keeps the time of day.** Note a to-do's due time, then drop it on the "Tomorrow"
        heading (or a calendar day).

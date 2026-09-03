@@ -988,20 +988,45 @@ would leave a listener cancelling every touchmove for ever, which is the list's 
 life of the webview. What is deliberately NOT used is `touch-action` on `.todo`: it would apply to
 every touch on every row, always, and the rows must still flick-scroll. This is also the one thing no
 test here can settle — whether Android's compositor honours the cancel rather than starting a fling is
-a device fact, and it is the make-or-break step of the Pixel round.
+a device fact, and it is the make-or-break step of the Pixel round. The review round added the one thing
+worth knowing before that step: the listener goes on MID-GESTURE, 500 ms into the touch, and Chromium
+decides a sequence's blocking-handler region on the compositor, so a late handler can be handed
+non-cancelable moves — which looks exactly like the failure 18b is watching for. Registering the same
+listener once at load with `if (!touchDrag.active) return` as its first line has identical behaviour and
+a region that is blocking from `touchstart`; it is not the default because it routes every ordinary
+flick through a main-thread handler, so it is written down as the cheap thing to try BEFORE the
+drag-handle fallback, with its own cost to be measured on the device rather than assumed away.
 
 *The checkbox ring overhangs its own row.* The mobile tap-target rules grow the 18 px ring to a 40 px
 content box and cancel the growth with an equal negative margin, so the box sticks out of a ~26 px row
 without moving anything on screen. `elementFromPoint` anywhere in the left column therefore returns the
 NEIGHBOUR row about as often as the right one — a gesture that would have rescheduled the wrong to-do
 roughly half the time it was aimed near a circle. Rows are found geometrically instead: an index of the
-rows' boxes, built at the lift and rebuilt after every auto-scrolled frame, searched by y. That search
+rows' boxes, built at the lift and shifted by every scroll, searched by y. That search
 is the part that would be wrong on a device and invisible in review, so it lives in a pure module
 (`src/ui/panel/touchDrag.js`, `window.TouchDrag`, the `between.js` pattern) the harness requires
 directly. The big `[data-drop]` targets are still asked of the DOM, and asked FIRST, for a reason that
 took a second look to see: a heading is a *sibling* of the rows, so it sits in the very gap the row
 index would attribute to the row above it — resolve the gaps first and a drop on "Tomorrow" becomes a
 between-drop under the last Overdue row.
+
+Asking `[data-drop]` first turned out to be only half of that, and the review round found the other
+half: not every heading HAS a `data-drop`. "Overdue" and "Future" name no date, so `getHeadingDropTarget`
+gives them none and `dropTargetAttributes` emits nothing — they missed the `[data-drop]` branch and fell
+straight through to the row index, which handed the heading's whole band to the row above it. A finger on
+"Future" would have rescheduled the to-do into the group BEFORE it, silently, at a point where the mouse
+drag is completely inert (`betweenTargetAt` starts from a `closest('.todo')`, and a heading is not one).
+Worse while scrolled: headings are sticky, so a dateless one floats over the rows, and the insertion line
+would have been painted behind it on a row nobody aimed at. The resolver now bails on any `h2` under the
+finger, after the `[data-drop]` test — the headings that do accept drops have already returned by then.
+The row index picked up a second correction in the same round. It was rebuilt from scratch after every
+auto-scrolled frame: one `getBoundingClientRect()` plus `betweenGroupInfo`'s walk back to the heading for
+every row in the list, at 60 fps, on the device, in the one phase of the gesture where the frame budget
+is real — when a scroll moves every row by the same delta and changes nothing else about them. It is
+shifted by that delta instead, and shifted from ANY scroll rather than only the drag's own: if Android
+pans the list without taking the gesture away (18b's failure mode, in the sub-case where no
+`pointercancel` follows), an index measured before the pan would have written neighbours read off rows
+that had scrolled away.
 
 *The guard, and where it is taken.* Every in-panel overlay brackets itself with `['dialogGuard', true/
 false]`, and a leaked `true` freezes every mobile refresh for the life of the webview. A drag needs
@@ -1054,6 +1079,16 @@ above the drop message fails "the drop message is posted BEFORE the guard releas
 path accept a `.todo-checkbox` press fails "the lift refuses the tick circle, the notebook pill and the
 read-only peek". Each fails exactly one check, with the message that names it.
 
+The review round added seven more, each also failing exactly one check: deleting the `h2` bail fails the
+resolver check; rebuilding the index instead of shifting it, and dropping the re-sync on a foreign
+scroll, both fail the index check; taking the payload from `longPress.id` instead of
+`schedulableSelection()` fails the payload check — the Q3 decision had been the only one with no test at
+all, since both e2e payload assertions read the same single id either way; letting `cancelLongPress` tidy
+up anything besides its timer, and removing the adapter's own `pointerup` registration, each fail the
+deferred-menu check, which now pins the two orderings that menu quietly rests on; and a `touch-action`
+smuggled in under `.todo.-dragging` fails the CSS check, which used to look only for the one selector
+spelling the feature happened to use and now scans every rule whose selector mentions a row.
+
 `e2e/mobile-drag.spec.ts` runs the MOBILE panel under the desktop app — `forceMobilePanel` injects the
 `#cockpitPlatform` marker onto `<body>` (so it survives every `setHtml`) and re-runs the panel's own
 `applyPlatformClass`, which is the whole switch, no code path faked — and drives it with REAL CDP touch
@@ -1062,18 +1097,38 @@ browser's own input layer produces the compatibility mouse events, the synthetic
 to eat, and a pan the drag has to stop. A third helper wraps `webviewApi.postMessage` and records what
 the panel posted, which is what makes the negatives real — "nothing was written" is otherwise
 indistinguishable from "the write has not landed yet", and the guard pair is invisible from outside the
-webview entirely, since the desktop host consults the guard only when `mobile`. Ten cases: a gap drop
+webview entirely, since the desktop host consults the guard only when `mobile`. Eleven cases: a gap drop
 read back from Joplin's own record, the two halves of ONE row resolving to two different gaps, a dated
-heading that keeps the time of day, the No Due Date heading that clears it, the menu a release without
-travel hands back (with the note not opening behind it), a 300 ms press that pans the list and writes
-nothing, a tap that opens the note, the ring's two gestures, a peek row that never lifts but still gets
-its menu, and a cancel over the header whose balanced guard pair is the leak check.
+heading that keeps the time of day, the No Due Date heading that clears it, a drop-refusing heading that
+must write nothing at all (the review round's find, and the only case whose failure would be a WRONG
+write rather than no write), the menu a release without travel hands back (with the note not opening
+behind it), a 300 ms press that pans the list and writes nothing, a tap that opens the note, the ring's
+two gestures, a peek row that never lifts but still gets its menu, and a cancel over the header whose
+balanced guard pair is the leak check.
 
-**The Pixel round** is step 18 of MOBILE.md's checklist, eleven sub-steps with the trace ON, and 18b is
+Four of those cases were only apparently passing, which is the useful half of what the round found in
+this file. The pan case leaves the list scrolled 220 px and nothing put it back, so every case after it
+was aiming at rows that had moved off screen — `settle()` now returns the scroller to the top, and every
+point helper asserts its y is inside the `.todos` box and, when it is not, says so with the list's own
+metrics instead of failing on the gesture. The cancel case asserted the banner "contains cancel", which
+the LIFT banner ("release outside the list to cancel") also does, so it could not fail the way it was
+named; it now reads the `-cancel` class the painter actually toggles and asserts the text names no
+target. The pan case took a `dragState()` evaluate 300 ms into a 500 ms hold, and an evaluate slow
+enough on a loaded machine would have let the row lift and turned the case into its own opposite; the
+first move now goes in immediately after the wait, past the slop, which cancels the press outright
+before anything is probed. And `armMessageLog` now returns whether its wrap actually took: every
+negative in the file rests on that wrap, and a `postMessage` that had become non-writable would have
+made "nothing was posted" true of an empty log rather than of the panel — the pan case additionally
+asserts the one message that MUST be there, its own `scrollChanged`. Playwright's `globalTimeout` went
+from 18 to 25 minutes and the CI job's cap from 20 to 28: this spec is the seventeenth file, each file
+launches its own Joplin, and a suite that overruns is hard-cancelled without a report.
+
+**The Pixel round** is step 18 of MOBILE.md's checklist, twelve sub-steps with the trace ON, and 18b is
 the one that decides the design: hold, then move without lifting — if the list scrolls under the finger,
 or the trace shows `drag-cancel:pointercancel`, Android's gesture arbitration won and the drag-handle
 fallback is what ships.
 
 Suite: 347 harness checks, all passing (329 before this, plus 18: five driving the pure module, twelve
-pinning the gesture's shape and the CSS, one on the module's registration). Playwright:
-`e2e/mobile-drag.spec.ts` is ten new tests, not run in this pass — the verifier's.
+pinning the gesture's shape and the CSS, one on the module's registration — the review round's pins were
+added to those same blocks, so the count is unchanged and what each block proves is not). Playwright:
+`e2e/mobile-drag.spec.ts` is eleven new tests, not run in this pass — the verifier's.
