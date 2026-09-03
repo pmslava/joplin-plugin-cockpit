@@ -17,6 +17,7 @@ import { setupMenu } from './ui/menu/menu'
 import { setupEditor } from './ui/editor/editor'
 import { setupToolbar } from './ui/toolbar/toolbar'
 import { setupChromeCss } from './ui/chrome/chrome'
+import { setupTitleBar } from './ui/titlebar/titleBar'
 import { setupStyler } from './ui/styler/styler'
 
 /** Plugin Registration *****************************************************************************************************************************
@@ -35,8 +36,10 @@ joplin.plugins.register({ onStart: setupPlugin })
     await setupMenu()
     await setupStyler()
     await setupAlarmDialog()
-    // A note-title-bar feature (v2.5.0), settings-gated and desktop only.
+    // The two note-title-bar features (v2.5.0), both settings-gated and desktop only. The bell intercept is set up
+    // AFTER the alarm dialog, because its message handler opens that dialog and the dialog is created there.
     await setupChromeCss()
+    await setupTitleBar()
     await setupPanel()
     await setupEditor()
     await setupTimer()
