@@ -1248,6 +1248,28 @@ why 18b-bis now names one thing that is **not** a failure: a stroke with any ver
 list and closes the menu without the drag having touched it, so only "the row lifted" and "the guard was
 taken" decide that step.
 
+A third round put the whole spec through Playwright for the first time since the redesign, and one case
+came back red - the spec's, not the panel's. `the checkbox ring keeps its own gestures` opens the date
+picker with a hold on the tick circle and then makes a vertical move, to prove the ring arms nothing
+behind its menu. That move carries the touch past Chromium's tap slop, so the release synthesises no
+click at all - and `longPress.fired`, which is cleared by the click the swallower eats, outlives its own
+gesture. The case then dismissed the picker with Playwright's `.click()`, a MOUSE click: the adapter's
+`pointerdown` returns on `event.pointerType === 'mouse'` before it can reset anything, so the stale flag
+was still standing when that click arrived and the swallower ate the Cancel press instead. The overlay
+stayed open and the case timed out on it.
+
+The panel was left alone on purpose. On a phone the stale flag costs nothing, because every input that
+can reach the swallower is a touch and the adapter clears `fired` at the very top of each touch
+`pointerdown` - above the zone check and above the `#cockpitOverlay` return - so whatever the next tap
+lands on, it consumes the leftover before it can be eaten. Releasing the flag earlier, on the
+`pointerup`, the way the search suggestion list releases its own click arm (1.9.10), would buy nothing
+there and would stake the make-or-break gesture on it: 18a needs `fired` STILL set when the release's
+synthesised click arrives, or the menu the press had just opened would vanish under the finger. A mouse
+click landing in the panel after a touch gesture is a desktop-host artefact and nothing a Pixel can
+produce, so the fix is in the spec - the ring case dismisses the picker with a finger now, which is what
+the device does anyway - and a new pin holds that reset above every early return in the `pointerdown`,
+since the case rests on the ordering rather than merely benefiting from it.
+
 **The Pixel round** is step 18 of MOBILE.md's checklist, with the trace ON. 18a is now "the menu opens
 with the finger still down"; **18b** is the one that decides the design — keep holding and move up or
 down: the menu must close, the row must lift, and the list must not scroll; and **18b-bis** is its other
@@ -1259,10 +1281,11 @@ Suite: 350 harness checks, all passing (347 before the redesign, plus 3: one dri
 `firstMoveDirection` — including a grid sweep proving its slop gate cannot disagree with `movedBeyond` —
 and two pinning the new order, the menu-before-arm fire with an arm that takes nothing, and the
 first-move rule with the lift that closes the menu and takes the guard; the pins that encoded the old
-order were rewritten in place, so the rest of the count is unchanged; the two review rounds added
-assertions inside those blocks rather than blocks of their own, so 350 has held since). Nine mutations
+order were rewritten in place, so the rest of the count is unchanged; the review rounds added
+assertions inside those blocks rather than blocks of their own, so 350 has held since). Ten mutations
 were run against it - six kinds in the first pass (seven edits: the sideways one was tried in two
-places) and three more for the pins the review rounds changed - and each failed the pins that name it:
+places), three more for the pins the second round changed, and one for the third's - and each failed the
+pins that name it:
 taking the guard at the arm instead of at the lift ("the hold opens the MENU first...", "the FIRST move
 decides...", "the drop message is posted BEFORE the guard release"), calling `preventDefault()` while merely armed ("the touchmove listener is NON-PASSIVE..."),
 treating a sideways-first move as vertical both in the module ("touchDrag.firstMoveDirection...") and by
@@ -1271,9 +1294,12 @@ a release-without-travel skip `endTouchDrag` so the `touchmove` listener outlive
 routes through that one end", "a release that never moved tears the arming down..."), dropping the
 `drag-uncancelable` trace on the lifting move ("the touchmove listener is NON-PASSIVE...", "the trace falls
 back to the sticky toast...") and having the lift read `longPress.id` instead of the arm's snapshot ("the
-hold opens the MENU first..."). The review rounds' three: moving `armTouchDrag()` out of the fire's
+hold opens the MENU first..."), and moving the `pointerdown`'s `fired` reset below its `#cockpitOverlay`
+return ("a release that never moved tears the arming down..."). The second round's three: moving `armTouchDrag()` out of the fire's
 `todo` branch into the else-if chain, which the old ordering-only pin let through and the containment
 slice now catches ("the arm refuses the tick circle..."); deleting the arm's `endTouchDrag('re-arm')`
 ("the hold opens the MENU first..."); and giving `.todo.-dragging` a `padding-left`, which would move
 every row under the index the arm had already measured ("panel.css touch drag..."). Playwright:
-`e2e/mobile-drag.spec.ts` is twelve tests, not run in this pass — the verifier's.
+`e2e/mobile-drag.spec.ts` is twelve tests. The verifier ran the file for the first time since the
+redesign and got eleven of them green, the ring case red for the spec reason above; it is not re-run
+here - that is the verifier's.
