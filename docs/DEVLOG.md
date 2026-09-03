@@ -1411,7 +1411,9 @@ measured from that **same origin** - so at the instant the menu opened the finge
 pixel from its own lift threshold, and any drift lifted the row and closed the menu in the frame after it appeared.
 Both halves are fixed rather than one. The travel is now measured from the **fire point** - where the finger was
 when the menu opened, kept in `longPress.lastX/lastY` because the fire has no event of its own - and it has to pass
-`TOUCH_DRAG_LIFT_PX`, a threshold of its own. It was set at 24 px while the native drag was still in the picture
+`TOUCH_DRAG_LIFT_PX`, a threshold of its own. The pure rule the first round introduced as
+`firstMoveDirection(dx, dy, slop)` is `liftDecision(dx, dy, threshold)` now: the same arithmetic under a name that
+says which of the two thresholds it is being asked about. It was set at 24 px while the native drag was still in the picture
 (part of what looked like drift was the platform pulling its drag image around) and is **20** now that it is gone:
 twice the press's own gate, about twice Android's ~8 dp touch slop, and still under half a 40 px mobile row, so a
 deliberate stroke crosses it at once. There is deliberately no settle window - nothing shows the fire itself jitters
@@ -1484,8 +1486,12 @@ written out three times; measuring the lift from the press point again fails "th
 lift is measured from the FIRE point, past a threshold of its own"; dropping the armed `preventDefault()` fails
 "the touchmove listener is NON-PASSIVE, and prevents the pan from the ARM"; collapsing the selection at the lift
 again fails "the lift respects the selection instead of collapsing it"; and letting a non-list element under the
-finger veto the gap fails "the GEOMETRY is authoritative for a gap". The e2e file grew six cases and one constant
-- the lifting step is sized against the new threshold, not the old slop.)
+finger veto the gap fails "the GEOMETRY is authoritative for a gap". The e2e file grew six cases and two travel
+constants - the lifting step is sized against the new threshold rather than the old slop, and a drift constant
+that must decide nothing. One thing that file deliberately does NOT claim is the markup: the row HTML is rendered
+by the host from its own `isMobile`, and the host under that spec is a desktop Joplin, so its native-drag case
+takes the harder half instead - a row that really is draggable, in a webview that believes it is mobile, where a
+dragstart must still be cancelled, lift nothing, and never reach the selection rewrite.)
 
 The 351 it grew from: 350 before the SECOND PIXEL ROUND above, plus 1: the panel-wide contextmenu
 suppression and the menu guard, pinned together with the fire order that makes the guard sufficient, the
