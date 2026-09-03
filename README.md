@@ -180,7 +180,7 @@ Move, tag and duplicate run Joplin's own dialogs on desktop — the native tag d
 
 [Whereabouts](https://github.com/pmslava/joplin-plugin-whereabouts) puts a small notebook chip under the note title. With Cockpit installed the chip also drives the panel: a **left click** points the panel at that notebook, a **double click** reveals the note in the panel — filtering to its notebook if it is not already listed, and pinning it below the list as a read-only row when the active profile cannot show it at all (a plain note in a to-dos-only profile, say). The revealed row is scrolled into view and flashes briefly. Neither plugin needs the other: without Cockpit the chip is silent, without Whereabouts nothing here changes.
 
-Both plugins reach into Joplin's note title bar, and they do not collide: Whereabouts mounts its chip below the title, while Cockpit's two title-bar settings touch only the alarm bell inside Joplin's own button row (`.note-title-info-group`), which the chip never enters. Run both with everything switched on and each does its own thing.
+Both plugins reach into Joplin's note title bar, and they do not collide: Whereabouts mounts its chip below the title, while Cockpit's two title-bar settings touch only the alarm bell inside Joplin's own button row (`.note-title-info-group`) — matched by the bell's own icon, so the other buttons in that row keep their appearance and their clicks — and the chip never enters that row. Run both with everything switched on and each does its own thing.
 
 ## Overview notes
 

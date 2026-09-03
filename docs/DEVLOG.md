@@ -1755,12 +1755,27 @@ setting is on, with `joplin.window.loadChromeCssFile(`${installDir}/ui/chrome/du
 was needed: the webpack `CopyPlugin` already ships every non-`.ts` file under `src/` into `dist/` verbatim, so the
 path inside the installed plugin mirrors the source tree.
 
-**Why the selector is provably the bell and nothing else.** Every rule is scoped to
-`.note-title-info-group button.toolbar-button.-has-title`. `-has-title` (and the second text `<span>`) appear on a
-`ToolbarButton` only when its command supplies a `mapStateToTitle`, and `editAlarm` is the only title-bar command
-in Joplin that has one — that callback *is* what prints the due date. Plugin buttons never get a title, so
-Cockpit's own gauge is untouched, and the spellcheck, layout and note-properties buttons are icon-only. Whereabouts'
-notebook chip is mounted outside `.note-title-info-group` entirely. So there is no second thing this can catch.
+**Why the selector is the bell and nothing else — the correction that cost this feature its first draft.** The
+first version scoped every rule to `.note-title-info-group button.toolbar-button.-has-title` on the reasoning that
+`-has-title` (and the second text `<span>`) appear on a `ToolbarButton` only when its command supplies a
+`mapStateToTitle`, and that `editAlarm` is the only title-bar command that has one. **That last step is false**,
+and reading the packaged bundle rather than trusting the reasoning is what caught it. `NoteToolbar`'s
+`mapStateToProps` builds the row from `["showSpellCheckerMenu", "editAlarm", "toggleVisiblePanes",
+"showNoteProperties"]`, and `showSpellCheckerMenu` *also* has a `mapStateToTitle` — it returns the enabled
+dictionary languages, `"en"`. It is not a corner case either: `spellChecker.enabled` defaults to true and
+`SpellCheckerService.setupDefaultLanguage()` fills the language list on first run, so on an ordinary profile that
+button carries `-has-title` and a text span. The first draft would have hidden the spell checker's language label
+too and turned it into a hover bubble — a change the setting's own label does not promise anyone.
+
+So every rule additionally carries `:has(span.toolbar-icon.icon-alarm)`. That discriminator is exact, and
+structurally so: `ToolbarButton` renders an icon name of the form `fa …`/`fas …` as an `<i>` and anything else as a
+`<span>`, so the spell checker's `fas fa-globe` is an `<i class="toolbar-icon">` and cannot match
+`span.toolbar-icon` at all, while the bell's `icon-alarm` is a `<span>`. The layout and note-properties buttons
+have no title, and Cockpit's own gauge (`fas fa-tachometer-alt`) is excluded on both counts. Whereabouts' notebook
+chip is mounted outside `.note-title-info-group` entirely. `:has()` wants Chromium 105+; every Joplin that has this
+DOM ships far newer (3.6 is on Electron 40, Chromium ~140), and on anything older the selector is simply inert —
+the same no-op as leaving the setting off, which is the safe direction to fail in. The pin now asserts the
+discriminator on every rule, so the narrow selector cannot be widened back by accident.
 
 **B. The bell opening Cockpit's picker.** Clicking the bell runs `CommandService.execute('editAlarm')`, which
 opens Joplin's `PromptDialog` — a bare `datetime-local` field. Cockpit already has a much better picker for
@@ -1779,7 +1794,7 @@ typings, and regenerating the whole API surface for an intercept that touches no
 diff, so the script declares the three shapes it uses locally — no `@codemirror` dependency is needed to add a
 click listener.
 
-**The three constraints that make the intercept correct**, each of them a mistake that would pass review:
+**The four constraints that make the intercept correct**, each of them a mistake that would pass review:
 
 1. **Bind on `.note-editor-wrapper`, never on the button.** The bell's React key embeds the due-date text, so the
    button element is *remounted every time the alarm changes*. A listener bound to it would be thrown away by the
@@ -1792,6 +1807,17 @@ click listener.
    container, so a bubble-phase listener anywhere below it fires too late. A capture-phase listener on a stable
    ancestor below that root, calling `stopPropagation()` (with `preventDefault()` and `stopImmediatePropagation()`
    as belt and braces), is what reliably keeps Joplin's `editAlarm` from running.
+4. **A listener whose editor has been destroyed must stand aside** — the constraint the first draft missed, and the
+   one the stability of constraint 1 quietly creates. `.note-editor-wrapper` is created by the *layout renderer*,
+   wrapped around `<NoteEditor>`; it therefore **outlives** the CodeMirror instance, while `plugin()` runs once per
+   editor **mount**. Toggle a note to the Rich Text editor and back and there are now two listeners on that wrapper,
+   the older one holding a destroyed `EditorView` whose `state` still answers with the note it died on. Because this
+   listener *stops the event*, the stale one is first in the capture list and **wins**: click the bell on to-do B
+   and Cockpit writes the alarm on to-do A, with nothing on screen to contradict it — the dialog shows no note
+   title. The guard is that a destroyed view's DOM is detached, so `view.dom.isConnected` is the test; a stale
+   listener returns without touching the event (the live one then handles it) and unbinds itself, so a session of
+   editor toggles cannot accumulate them. Whereabouts disposes via a CodeMirror `ViewPlugin` lifecycle extension
+   instead, which is the fuller fix but needs the `@codemirror/view` dependency this script otherwise does without.
 
 Two more details that are easy to get wrong. `plugin()` runs once per **editor mount**, not once per note —
 switching notes reuses the same CodeMirror instance — so the open note's id is read from
@@ -1827,13 +1853,20 @@ span's computed `display` is not `none`, a real click on
 it turns both settings on through the Options screen, **closes Joplin and relaunches against the same profile** —
 the restart is the feature, not a workaround for it — and asserts the ON behaviour: the span computes to `none`
 and to `block` under a real `hover()`, and the same click opens Cockpit's picker (a plugin webview iframe carrying
-`#alarmForm`) while `.prompt-dialog` stays away. Cockpit's settings live in Joplin's database, not in the profile's
+`#alarmForm`) while `.prompt-dialog` stays away. Both cases also assert that the **spell checker's** language label
+in that same row is untouched — the collateral the first draft of the selector caused — and the spec's profile
+presets `spellChecker.enabled` and `spellChecker.languages` (both File-storage settings) so that label is
+deterministically there rather than depending on what the runner's dictionary set happens to be. Cockpit's settings live in Joplin's database, not in the profile's
 `settings.json`, so they cannot be preset the way `launchJoplin({ settings })` presets Joplin's own File-storage
 settings; the Options screen is the only route a user has and so it is the route the spec takes, through a new
 `setCockpitCheckboxes` helper (Joplin renders a Bool setting as a checkbox with a `<label for>` carrying the
-registered label, so it is reached exactly as the enum controls are). This is the only file in the suite that
-launches Joplin twice, which is why `globalTimeout` went 30 → 34 minutes, still well under the workflow's 40-minute
-job cap. **None of it has been run here** — e2e is the verifier's.
+registered label, so it is reached exactly as the enum controls are; it and `setCockpitSetting` now share their
+open/close half through one `withCockpitOptions` wrapper rather than carrying two copies of it). This is the only
+file in the suite that launches Joplin twice, which is why `globalTimeout` went 30 → 34 minutes, still well under the workflow's 40-minute
+job cap. Its `restarted` latch is safe under `retries: 1`: Playwright discards the worker process on failure and
+starts a fresh one for the retry, so `beforeAll` runs again against a new profile and `restarted` is false again —
+a retried first case can never meet a profile whose settings were already turned on. **None of it has been run
+here** — e2e is the verifier's.
 
 Suite: 388 harness checks (thirteen new), all passing. Thirteen because most of this is registration and refusal:
 one for the two settings themselves (public, Bool, default OFF, Cockpit's section, and the restart, desktop and
@@ -1842,10 +1875,11 @@ installation directory when on; never when off; never on mobile), three for the 
 `codeMirrorPlugin`/`cockpit-title-bar`/`./contentScripts/titleBar.js` with its handler, and with that file proven
 present in `dist/`; never when off; never on mobile), four for the handler (an uncompleted to-do opens the dialog
 and OK writes one numeric `todo_due`; a plain note and a completed to-do are each refused with nothing written; an
-unknown id and five malformed payloads all come back `{ ok: false }` rather than throwing), and two source pins for
-what a Node harness cannot execute — the three intercept constraints in the content script, and the four scoped
-rules in the stylesheet. Five mutations were run and each was caught by exactly the pin written for it: binding the
-listener to the button and dropping the `icon-alarm` discriminator (both by the content-script source pin),
-removing the mobile gate on the registration, removing the `is_todo` gate in the handler, and loading the
-stylesheet with the setting off. Playwright: 114 tests in 19 files now (107 run, 7 opt-in showcase captures), two
+unknown id and six malformed payloads all come back `{ ok: false }` rather than throwing), and two source pins for
+what a Node harness cannot execute — the four intercept constraints in the content script, and the four rules in
+the stylesheet (each scoped to the row **and** narrowed to the bell's own icon). Seven mutations were run and each
+was caught by exactly the pin written for it: binding the listener to the button, dropping the `icon-alarm`
+discriminator, and removing the stale-listener guard (all three by the content-script source pin), removing the
+`:has(span.toolbar-icon.icon-alarm)` discriminator from the stylesheet (by the CSS pin), removing the mobile gate
+on the registration, removing the `is_todo` gate in the handler, and loading the stylesheet with the setting off. Playwright: 114 tests in 19 files now (107 run, 7 opt-in showcase captures), two
 of them new here and neither run in this pass.
