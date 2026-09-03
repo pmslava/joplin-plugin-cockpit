@@ -71,6 +71,13 @@ function makeJoplin(options) {
         timeouts: [],
         // Set to a DialogResult to make the next dialogs.open() return it instead of a cancel.
         dialogResult: null,
+        // Panel visibility, as the host would hold it: views.panels.show writes here and views.panels.visible
+        // reads it back, so a test can hide the panel and then prove that a command shows it again. An unknown
+        // handle is visible, which is the state a freshly created panel is in and what the stub answered before
+        // it became stateful, so every existing check is unaffected.
+        panelVisibility: {},
+        // Every views.panels.show call, in order, as { handle, visible }.
+        panelShows: [],
     }
 
     const notes = options.notes || {}
@@ -158,8 +165,8 @@ function makeJoplin(options) {
                 // the plugin told the panel, e.g. which note the editor is showing.
                 postMessage: (handle, message) => { state.panelMessages.push(message) },
                 setHtml: async (handle, html) => { state.setHtmlCalls++; state.callLog.push('setHtml'); state.panelHtml[handle] = html },
-                show: async () => {},
-                visible: async () => true,
+                show: async (handle, visible) => { state.panelShows.push({ handle, visible: visible !== false }); state.panelVisibility[handle] = visible !== false },
+                visible: async (handle) => state.panelVisibility[handle] !== false,
             },
             dialogs: {
                 create: async (id) => { state.dialogs.push(id); return `dialog-${id}` },

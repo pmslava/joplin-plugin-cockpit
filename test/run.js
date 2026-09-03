@@ -6387,6 +6387,327 @@ async function main() {
             'the toast is not gated on the mobile class, so the desktop panel can show it too')
     })
 
+    // ============================================ the Whereabouts contract (v2.4.0): two commands for other plugins
+    // Cockpit registers two commands that exist for ANOTHER PLUGIN to call. The Whereabouts plugin puts a notebook
+    // chip under the note title: a left click runs core's openNote and then executes 'cockpit.filterByNotebook' with
+    // the folder id, a double click reveals the note in Joplin's list and then executes 'cockpit.revealNote' with the
+    // note id. Both are fire-and-forget over there and every failure is swallowed, so a name changed here does not
+    // break anything loudly - the integration just silently stops working. The two NAMES are therefore pinned as the
+    // cross-plugin contract, and what each promises is pinned with them.
+    const nbAlpha = 'a1'.repeat(16)
+    const nbBeta = 'b2'.repeat(16)
+    const nbSecret = 'c3'.repeat(16)
+    const revealFolders = [
+        { id: nbAlpha, title: 'Alpha', parent_id: '', updated_time: 1 },
+        { id: nbBeta, title: 'Beta', parent_id: '', updated_time: 2 },
+        { id: nbSecret, title: 'Secret', parent_id: '', updated_time: 3 },
+    ]
+    const todoAlpha = 'd4'.repeat(16)
+    const todoBeta = 'e5'.repeat(16)
+    const todoSecret = 'f6'.repeat(16)
+    const notePlain = '07'.repeat(16)
+    const revealTodos = [
+        { id: todoAlpha, title: 'Alpha task', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: nbAlpha },
+        { id: todoBeta, title: 'Beta task', todo_completed: 0, todo_due: Date.now() + 7200000, parent_id: nbBeta },
+        { id: todoSecret, title: 'Secret task', todo_completed: 0, todo_due: Date.now() + 10800000, parent_id: nbSecret },
+    ]
+    // The single note record of each item, as the reveal's own read gets it back (it asks for exactly
+    // id/parent_id/is_todo/todo_completed/title, and the harness serves only the fields a caller asks for).
+    const revealNotes = {
+        [todoAlpha]: { id: todoAlpha, parent_id: nbAlpha, is_todo: 1, todo_completed: 0, title: 'Alpha task', body: '' },
+        [todoBeta]: { id: todoBeta, parent_id: nbBeta, is_todo: 1, todo_completed: 0, title: 'Beta task', body: '' },
+        [todoSecret]: { id: todoSecret, parent_id: nbSecret, is_todo: 1, todo_completed: 0, title: 'Secret task', body: '' },
+        [notePlain]: { id: notePlain, parent_id: nbAlpha, is_todo: 0, todo_completed: 0, title: 'Alpha plain note', body: '' },
+    }
+    // A to-dos-only profile (showNotes false): that is what makes revealing a plain NOTE fall all the way through to
+    // the pinned peek row, and it keeps the notes section out of every other case here.
+    const revealProfileData = JSON.stringify({
+        nextID: 2,
+        profiles: [{
+            id: 1, name: 'Tasks', searchCriteria: '', noteID: '',
+            showCompleted: true, showNoDue: true, showNotes: false,
+            displayFormat: 'interval', yearFormat: 'numeric', monthFormat: 'long', dayFormat: 'numeric',
+            weekdayFormat: 'short', timeIs12Hour: true, sortOrder: 0, noDueDatesAtEnd: false,
+        }],
+    })
+    let revealRunSeq = 0
+    const runReveal = (extra) => run(Object.assign({
+        dataDir: path.join(tmp, 'reveal-' + (++revealRunSeq)),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: revealTodos,
+        folders: revealFolders,
+        notes: revealNotes,
+        initialSettings: { profileData: revealProfileData, currentProfileID: 1 },
+    }, extra))
+    const panelOf = (state) => state.panelHtml['panel-panel']
+    // Which notebook the panel's own dropdown says is current, as the id it would filter by ("" for the
+    // "All notebooks" row). Read from the -current row of the notebook menu itself (the profile dropdown above it
+    // marks a -current row of its own, and the sort menu below it another).
+    const currentNotebookID = (html) => {
+        const menu = html.slice(html.indexOf('id="notebookMenu"'), html.indexOf('id="sortMenu"'))
+        const at = menu.indexOf('dropdown-item -current')
+        if (at < 0) return null
+        const row = menu.slice(at, menu.indexOf('</div>', at))
+        if (row.includes('data-notebook-all')) return ''
+        return (row.match(/'notebookFilterChanged', '([^']*)'/) || [])[1] || null
+    }
+    const revealIDOf = (html) => (html.match(/data-reveal-id="([^"]*)"/) || [])[1] || ''
+    const listsRow = (html, id) => html.includes(`data-todo-id="${id}"`) || html.includes(`data-note-id="${id}"`)
+    const executeCommand = async (state, name, ...args) => {
+        const command = state.commands.find(c => c.name === name)
+        assert.ok(command, `the ${name} command is not registered`)
+        return await command.execute(...args)
+    }
+
+    await test('whereabouts contract: exactly the two command names Whereabouts calls are registered, with palette labels and no menu item', async () => {
+        const state = await runReveal({})
+        const names = state.commands.map(c => c.name)
+        // THE contract. Whereabouts executes these two strings verbatim (its src/index.ts) and swallows the
+        // failure when they are absent, so renaming one here is a silent breakage - which is what this pins.
+        assert.ok(names.includes('cockpit.filterByNotebook'), "the notebook-chip left click executes 'cockpit.filterByNotebook'")
+        assert.ok(names.includes('cockpit.revealNote'), "the notebook-chip double click executes 'cockpit.revealNote'")
+        // The full registration set, so a command added or dropped is a deliberate edit of this line.
+        assert.deepStrictEqual(names.sort(), [
+            'cockpit.filterByNotebook', 'cockpit.revealNote', 'showStylerDialog', 'toggleCockpitToolbarButton', 'togglePanelVisibility',
+        ])
+        const labelled = (name) => state.commands.find(c => c.name === name).label
+        assert.strictEqual(labelled('cockpit.filterByNotebook'), 'Cockpit: filter by notebook')
+        assert.strictEqual(labelled('cockpit.revealNote'), 'Cockpit: reveal note')
+        // Neither is useful without an argument, so neither gets a menu or toolbar item of its own: the desktop
+        // registers exactly the one toolbar button and the one Tools menu it always had.
+        assert.strictEqual(state.toolbarButtons.length, 1, 'no new toolbar button may appear for these commands')
+        assert.strictEqual(state.menus.length, 1, 'no new menu may appear for these commands')
+    })
+
+    await test('cockpit.filterByNotebook: an id filters the panel to that notebook, marks it current, and repaints once', async () => {
+        const state = await runReveal({})
+        assert.ok(listsRow(panelOf(state), todoBeta), 'precondition: unfiltered, every notebook is listed')
+        const paintsBefore = state.setHtmlCalls
+        await executeCommand(state, 'cockpit.filterByNotebook', nbAlpha)
+        const html = panelOf(state)
+        assert.ok(listsRow(html, todoAlpha), 'the filtered-to notebook keeps its rows')
+        assert.ok(!listsRow(html, todoBeta), 'another notebook\'s rows are gone')
+        assert.strictEqual(currentNotebookID(html), nbAlpha, 'the notebook dropdown must mark the filtered notebook -current')
+        assert.strictEqual(state.setHtmlCalls - paintsBefore, 1, 'the command does exactly one repaint')
+    })
+
+    await test('cockpit.filterByNotebook: "" clears the filter back to all notebooks (and so does no argument)', async () => {
+        const state = await runReveal({})
+        await executeCommand(state, 'cockpit.filterByNotebook', nbAlpha)
+        assert.strictEqual(currentNotebookID(panelOf(state)), nbAlpha, 'precondition: filtered')
+        await executeCommand(state, 'cockpit.filterByNotebook', '')
+        assert.ok(listsRow(panelOf(state), todoBeta), 'an empty id means all notebooks')
+        assert.strictEqual(currentNotebookID(panelOf(state)), '', 'the All notebooks row is current again')
+        // A caller that passes nothing at all means the same thing, and must not throw back into it.
+        await executeCommand(state, 'cockpit.filterByNotebook', nbBeta)
+        assert.strictEqual(currentNotebookID(panelOf(state)), nbBeta, 'precondition: filtered again')
+        await executeCommand(state, 'cockpit.filterByNotebook')
+        assert.strictEqual(currentNotebookID(panelOf(state)), '', 'a missing argument clears the filter too')
+    })
+
+    await test('cockpit.filterByNotebook: an unknown notebook id is a no-op - no clear, no repaint, no throw', async () => {
+        const state = await runReveal({})
+        await executeCommand(state, 'cockpit.filterByNotebook', nbAlpha)
+        const paintsBefore = state.setHtmlCalls
+        // A stale chip pointing at a deleted notebook must not blank the filter the user is working in.
+        await executeCommand(state, 'cockpit.filterByNotebook', 'deadbeef'.repeat(4))
+        assert.strictEqual(state.setHtmlCalls, paintsBefore, 'an unknown id must not repaint the panel')
+        assert.strictEqual(currentNotebookID(panelOf(state)), nbAlpha, 'an unknown id must leave the filter alone')
+    })
+
+    await test('cockpit.filterByNotebook: the panel dropdown and the command share ONE state write, and neither touches the profile', async () => {
+        const state = await runReveal({})
+        const writesBefore = state.settingWrites.length
+        await executeCommand(state, 'cockpit.filterByNotebook', nbAlpha)
+        // The saved profile keeps its own notebook: the filter is where the user has navigated to, not a setting.
+        assert.strictEqual(state.settingWrites.length, writesBefore, 'the command must write no setting or profile')
+        // ... and the command is the dropdown: both routes go through the one exported setNotebookFilter, so they
+        // cannot drift apart (the dropdown's branch used to assign the state itself).
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const branch = panelSource.slice(panelSource.indexOf("message[0] == 'notebookFilterChanged'"), panelSource.indexOf("message[0] == 'searchTitleSuggestions'"))
+        assert.ok(branch.includes('setNotebookFilter(message[1])'), 'the notebookFilterChanged branch must call setNotebookFilter')
+        assert.ok(!/notebookFilter\s*=/.test(branch), 'and must not write the filter state itself')
+        const command = panelSource.slice(panelSource.indexOf('export async function filterByNotebook'), panelSource.indexOf('function renderedRowIsListed'))
+        assert.ok(command.includes('setNotebookFilter(id)'), 'the command must go through the same setNotebookFilter')
+        assert.ok(!/notebookFilter\s*=/.test(command), 'and must not write the filter state itself either')
+    })
+
+    await test('cockpit.revealNote: a note already in view is flashed where it is - no filter change, one reveal marker', async () => {
+        const state = await runReveal({})
+        const before = currentNotebookID(panelOf(state))
+        await executeCommand(state, 'cockpit.revealNote', todoAlpha)
+        const html = panelOf(state)
+        assert.ok(listsRow(html, todoAlpha), 'the row is listed')
+        assert.strictEqual(revealIDOf(html), '1', 'the render must carry the reveal marker')
+        assert.ok(html.includes(`data-reveal-note="${todoAlpha}"`), 'the marker must name the note it points at')
+        assert.strictEqual(currentNotebookID(html), before, 'a note already in view changes no filter')
+        assert.ok(!html.includes('Revealed - outside current filters'), 'and needs no pinned peek row')
+    })
+
+    await test('cockpit.revealNote: a note in another notebook switches the filter to it and clears the typed search', async () => {
+        const state = await runReveal({})
+        await executeCommand(state, 'cockpit.filterByNotebook', nbAlpha)
+        await state.panelMessageHandler(['searchFilterChanged', 'unrelated text'])
+        assert.ok(panelOf(state).includes('value="unrelated text"'), 'precondition: a search is committed')
+        await executeCommand(state, 'cockpit.revealNote', todoBeta)
+        const html = panelOf(state)
+        assert.strictEqual(currentNotebookID(html), nbBeta, 'the filter must switch to the note\'s OWN notebook, not clear')
+        assert.ok(listsRow(html, todoBeta), 'the revealed row is now listed')
+        assert.ok(html.includes('id="searchFilter"') && !html.includes('value="unrelated text"'), 'the typed search is cleared')
+        assert.ok(html.includes(`data-reveal-note="${todoBeta}"`), 'the render that lists it carries the marker')
+        // The live view changed; the stored profile did not.
+        const stored = JSON.parse(state.settings.profileData).profiles[0]
+        assert.ok(!stored.notebook, 'the profile must not be given the revealed notebook')
+    })
+
+    await test('cockpit.revealNote: a plain note under a to-dos-only profile is pinned as a "Revealed" peek row', async () => {
+        const state = await runReveal({})
+        await executeCommand(state, 'cockpit.revealNote', notePlain)
+        const html = panelOf(state)
+        // The profile hides notes, so no filter can ever list it: it is pinned below the list instead.
+        assert.ok(html.includes('Revealed - outside current filters (1)'), 'the pinned peek section is missing')
+        assert.ok(!html.includes('outside-results-heading -excluded'), 'a kept notebook uses the ordinary heading')
+        const section = html.slice(html.lastIndexOf('<section class="outside-results">'))
+        assert.ok(section.includes(`data-note-id="${notePlain}"`), 'the pinned row must be the revealed note')
+        assert.strictEqual((section.match(/data-(?:todo|note)-id=/g) || []).length, 1, 'exactly one row is pinned')
+        assert.ok(!section.includes('onNoteRowMouseDown('), 'the pinned row is read-only, like every peek row')
+        assert.ok(html.includes(`data-reveal-note="${notePlain}"`), 'the render carries the reveal marker for it')
+    })
+
+    await test('cockpit.revealNote: a note inside an excluded notebook is pinned under the muted -excluded heading', async () => {
+        const state = await runReveal({})
+        await state.setSetting('excludedNotebooks', 'Secret')
+        await executeCommand(state, 'cockpit.revealNote', todoSecret)
+        const html = panelOf(state)
+        assert.ok(html.includes('outside-results-heading -excluded'), 'an excluded notebook must use the muted heading variant')
+        assert.ok(html.includes('Revealed - outside current filters (1)'), 'under the same "Revealed" wording')
+        assert.ok(html.includes(`data-todo-id="${todoSecret}"`), 'the excluded note is shown as its own kind of row')
+    })
+
+    await test('cockpit.revealNote: the pin survives a background refresh', async () => {
+        const state = await runReveal({})
+        await executeCommand(state, 'cockpit.revealNote', notePlain)
+        assert.ok(panelOf(state).includes('Revealed - outside current filters'), 'precondition: pinned')
+        // A sync landing repaints the panel from scratch. The pin is host-held state re-emitted by every render,
+        // so it must still be there afterwards - it goes when the USER moves on, not when the timer fires.
+        await state.syncCompleteHandler({})
+        assert.ok(panelOf(state).includes('Revealed - outside current filters'), 'a background refresh must not drop the pin')
+        assert.ok(panelOf(state).includes(`data-note-id="${notePlain}"`), 'nor the pinned row')
+    })
+
+    await test('cockpit.revealNote: the pin is cleared by a profile switch, a notebook change, a search commit, a new reveal and opening the row', async () => {
+        const pinned = async () => {
+            const state = await runReveal({})
+            await executeCommand(state, 'cockpit.revealNote', notePlain)
+            assert.ok(panelOf(state).includes('Revealed - outside current filters'), 'precondition: pinned')
+            return state
+        }
+        // A profile switch: a different view entirely.
+        const switched = await pinned()
+        await switched.panelMessageHandler(['profilesDropdownChanged', 1])
+        assert.ok(!panelOf(switched).includes('Revealed - outside current filters'), 'a profile switch must clear the pin')
+        // The notebook dropdown: the user has asked a different question.
+        const filtered = await pinned()
+        await filtered.panelMessageHandler(['notebookFilterChanged', nbBeta])
+        assert.ok(!panelOf(filtered).includes('Revealed - outside current filters'), 'a notebook change must clear the pin')
+        // A committed search: likewise.
+        const searched = await pinned()
+        await searched.panelMessageHandler(['searchFilterChanged', 'anything'])
+        assert.ok(!panelOf(searched).includes('Revealed - outside current filters'), 'a search commit must clear the pin')
+        // The next reveal replaces it, marker and all.
+        const revealed = await pinned()
+        await executeCommand(revealed, 'cockpit.revealNote', todoAlpha)
+        assert.ok(!panelOf(revealed).includes('Revealed - outside current filters'), 'a new reveal must replace the pin')
+        assert.strictEqual(revealIDOf(panelOf(revealed)), '2', 'and carry a NEW marker, so the flash fires again')
+        // Opening the pinned row is the user acting on the reveal: it has served its purpose.
+        const opened = await pinned()
+        await opened.panelMessageHandler(['todoClicked', notePlain])
+        assert.ok(!panelOf(opened).includes('Revealed - outside current filters'), 'opening the pinned row must clear the pin')
+    })
+
+    await test('mobile: revealNote does nothing at all, while filterByNotebook still works', async () => {
+        const state = await runReveal({ versionInfo: { version: '3.7.0', platform: 'mobile' }, require: mobileRequire })
+        const before = panelOf(state)
+        const showsBefore = state.panelShows.length
+        await executeCommand(state, 'cockpit.revealNote', todoBeta)
+        const html = panelOf(state)
+        // The mobile panel is a tab inside Joplin's own plugin-panel dialog, which the user opens and closes: a
+        // plugin that shows or hides it there is fighting the app (the same reason togglePanelVisibility returns).
+        assert.strictEqual(state.panelShows.length, showsBefore, 'no panel show/hide may happen on mobile')
+        assert.strictEqual(revealIDOf(html), '', 'no reveal marker is rendered on mobile')
+        assert.strictEqual(currentNotebookID(html), currentNotebookID(before), 'and no filter changes')
+        assert.ok(!html.includes('Revealed - outside current filters'), 'and nothing is pinned')
+        // The other half of the contract is pure state plus a refresh, so it works on both platforms.
+        await executeCommand(state, 'cockpit.filterByNotebook', nbAlpha)
+        assert.strictEqual(currentNotebookID(panelOf(state)), nbAlpha, 'filterByNotebook still filters on mobile')
+    })
+
+    await test('cockpit.revealNote: a hidden desktop panel is shown first, and the render then carries the marker', async () => {
+        const state = await runReveal({})
+        await executeCommand(state, 'togglePanelVisibility')
+        assert.strictEqual(state.panelShows[state.panelShows.length - 1].visible, false, 'precondition: the panel is hidden')
+        const paintsWhileHidden = state.setHtmlCalls
+        await executeCommand(state, 'cockpit.revealNote', todoAlpha)
+        const shown = state.panelShows[state.panelShows.length - 1]
+        assert.deepStrictEqual(shown, { handle: 'panel-panel', visible: true }, 'the reveal must show the hidden panel')
+        assert.ok(state.setHtmlCalls > paintsWhileHidden, 'and repaint it (refreshPanelData does no work while hidden)')
+        const html = panelOf(state)
+        assert.ok(listsRow(html, todoAlpha) && revealIDOf(html) === '1', 'the shown panel carries the reveal marker for the row')
+    })
+
+    await test('cockpit.revealNote: a note id that resolves to nothing changes nothing', async () => {
+        const state = await runReveal({})
+        const before = panelOf(state)
+        const paintsBefore = state.setHtmlCalls
+        await executeCommand(state, 'cockpit.revealNote', 'ffffffff'.repeat(4))
+        assert.strictEqual(state.setHtmlCalls, paintsBefore, 'an unknown note id must not repaint the panel')
+        assert.strictEqual(panelOf(state), before, 'nor change anything in it')
+        await executeCommand(state, 'cockpit.revealNote')
+        assert.strictEqual(state.setHtmlCalls, paintsBefore, 'and neither must a missing argument')
+    })
+
+    await test('the reveal marker is consumed exactly once, by the render that actually holds the row (webview source)', () => {
+        const webviewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panelWebview.js'), 'utf8')
+        const at = webviewSource.indexOf('function applyPendingReveal(')
+        assert.ok(at >= 0, 'the webview must have the reveal consumer')
+        const body = webviewSource.slice(at, webviewSource.indexOf('\nfunction restoreTodosScroll', at))
+        assert.ok(body.includes('dataset.revealId') && body.includes('dataset.revealNote'),
+            'it reads the marker off the rendered markup, not off a message that would race the render')
+        // The cascade paints up to three times with the SAME marker; the paints before the row exists must leave
+        // it unconsumed, so the row-not-found return has to come BEFORE the marker is claimed.
+        const notFound = body.indexOf('if (!row) return')
+        const claim = body.indexOf('consumedRevealID = revealID')
+        assert.ok(notFound >= 0 && claim > notFound, 'a render without the row must not consume the marker')
+        assert.ok(body.includes("revealID === consumedRevealID"), 'and a marker already flashed is never flashed again')
+        assert.ok(/scrollIntoView\(\{ block: 'center' \}\)/.test(body), 'the revealed row is scrolled into view, centered')
+        assert.ok(body.includes("classList.add('-revealed')"), 'and flashed with its own class')
+        assert.ok(/setTimeout\(function\(\)\{ row\.classList\.remove\('-revealed'\) \}, REVEAL_FLASH_MS\)/.test(body),
+            'which a timer takes off again')
+        assert.ok(/var REVEAL_FLASH_MS = 15\d\d/.test(webviewSource), 'the flash is short (~1.5s)')
+        // It runs from reconcile, i.e. once per real re-render, after the scroll restore it must not be undone by.
+        const reconcile = webviewSource.slice(webviewSource.indexOf('function reconcile()'), webviewSource.indexOf('function startPanelObserver'))
+        const restore = reconcile.indexOf('restoreTodosScroll(el)')
+        const apply = reconcile.indexOf('applyPendingReveal(el, nonce)')
+        assert.ok(restore >= 0 && apply > restore, 'the reveal must be applied from reconcile, after the scroll restore')
+    })
+
+    await test('the reveal flash is a distinct, purely visual class (panel.css source)', () => {
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        const at = css.indexOf('.todo.-revealed {')
+        assert.ok(at >= 0, 'panel.css must style the reveal flash')
+        const body = css.slice(css.indexOf('{', at) + 1, css.indexOf('}', at))
+        // Distinct from the selection highlight: the revealed note is usually ALSO the open note, so a flash that
+        // reused .-selected's look would be invisible exactly when it matters most.
+        assert.ok(/outline/.test(body), 'the flash must be visible on a row that is already -selected')
+        assert.ok(/animation/.test(body), 'and fade rather than stay')
+        // Purely visual, like every other row-state class: nothing here may change a row's box.
+        assert.ok(!/(^|[\s;])(margin|padding|width|height|display|position|border-width|font-size)\s*:/.test(body),
+            'the flash must not change the row box')
+        assert.ok(/var\(--cockpit-/.test(body), 'and it must take its colours from the theme variables')
+    })
+
     await test('sandbox proxy: no joplin.* member is ever read without being called in the same expression', () => {
         // THE golden rule, enforced over the whole source tree. `joplin` is sandboxProxy(wrappedTarget): its
         // handler.get pushes the property onto a SHARED __joplinNamespace array and only handler.apply pops one
