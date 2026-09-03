@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getTodos, getNotes, getNotebookMap, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks } from "./joplin";
+import { getTodos, getNotes, getExcludedNotebookIdSet, getNotebookMap, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks } from "./joplin";
 import { viewKeyFor } from "./optimistic";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
@@ -887,6 +887,31 @@ export async function renderOutsideResultsSection(profile, viewState, searchText
     return `
         <section class="outside-results">
             <p class="outside-results-message">No matches for "${escaped}" anywhere.</p>
+        </section>
+    `
+}
+
+/** renderRevealedNoteSection ***********************************************************************************************************************
+ * The pinned single row behind cockpit.revealNote's last step: a note another plugin asked the panel to show which the active profile cannot list -   *
+ * a plain note in a to-dos-only profile, a completed to-do the completed switches hide, an item the profile's own searchCriteria excludes, or a note   *
+ * living in an excluded notebook. It is the SAME read-only row the "results outside current filters" peek draws (renderPeekRows: not draggable, not    *
+ * selectable, a to-do drawn as a to-do and a note as a note), under its own heading so the user can tell why it is there, and it takes the muted       *
+ * -excluded heading variant when the note is inside an excluded notebook - the one case where the panel is showing something the user has deliberately *
+ * hidden, and should say so.                                                                                                                          *
+ *                                                                                                                                                     *
+ * It runs NO search: the record was read once by the reveal itself and is passed in. A copy is drawn, because renderPeekRows attaches the notebook     *
+ * title/path onto the items it is given and the pinned record outlives this render.                                                                    *
+ ***************************************************************************************************************************************************/
+export async function renderRevealedNoteSection(note, viewState){
+    var mobile = !!(viewState && viewState.isMobile)
+    var notebooks = await getNotebookMap()
+    var excluded = await getExcludedNotebookIdSet()
+    var peek = renderPeekRows([{ ...note }], false, notebooks, mobile)
+    var excludedVariant = excluded.has(note.parent_id) ? " -excluded" : ""
+    return `
+        <section class="outside-results">
+            <h2 class="outside-results-heading${excludedVariant}">Revealed - outside current filters (1)</h2>
+            ${peek.rows}
         </section>
     `
 }

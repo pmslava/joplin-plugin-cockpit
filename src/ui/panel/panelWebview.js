@@ -64,6 +64,43 @@ function queueScrollPost(el, nonce){
     }, 300)
 }
 
+/** The one-shot reveal (cockpit.revealNote) ********************************************************************************************************
+ * The host embeds a reveal marker on the .todos container of the render that answers a reveal: data-reveal-id is the reveal's own sequence number and *
+ * data-reveal-note the note it points at. It rides in the MARKUP rather than arriving as a message because a message races the render it is about -   *
+ * the row it names may only exist in a render that has not landed yet, and on mobile a setHtml is a full webview reload that would swallow it - while  *
+ * markup arrives together with the row.                                                                                                               *
+ *                                                                                                                                                     *
+ * Consumed exactly once, and only by a render that actually HOLDS the row: the reveal cascade paints up to three times (as it widens the filter and    *
+ * then pins the note), and the earlier paints carry the same id without the row, so ignoring those is what leaves the id for the paint that finally    *
+ * lists it. Once flashed the id is remembered, so every later render re-emitting the same marker - a background refresh, a tick - is a no-op.          *
+ ***************************************************************************************************************************************************/
+var consumedRevealID = ''
+var REVEAL_FLASH_MS = 1500
+
+function applyPendingReveal(el, nonce){
+    var revealID = (el.dataset && el.dataset.revealId) || ''
+    var revealNoteID = (el.dataset && el.dataset.revealNote) || ''
+    if (!revealID || revealID === consumedRevealID) return
+    var row = allRows().filter(function(candidate){ return rowIDOf(candidate) === revealNoteID })[0]
+    if (!row) return                       // not in THIS render: leave the marker unconsumed for the next one
+    // Claimed synchronously, on the render that holds the row, so nothing below can run twice for one reveal.
+    consumedRevealID = revealID
+    row.classList.add('-revealed')
+    setTimeout(function(){ row.classList.remove('-revealed') }, REVEAL_FLASH_MS)
+    // The scroll waits two frames: restoreTodosScroll puts the list back where the user had it on the NEXT
+    // frame (it needs a laid-out container to clamp against), so scrolling before that would simply be undone.
+    // Afterwards the revealed position is recorded as the remembered one - by hand, because this scroll is our
+    // own and the container's handler deliberately ignores those - otherwise the following re-render would
+    // restore the old offset and take the revealed row straight back off screen.
+    requestAnimationFrame(function(){
+        requestAnimationFrame(function(){
+            if (row.scrollIntoView) row.scrollIntoView({ block: 'center' })
+            savedTodosScrollTop = el.scrollTop
+            queueScrollPost(el, nonce)
+        })
+    })
+}
+
 function restoreTodosScroll(el){
     restoringScroll = true
     requestAnimationFrame(() => {
@@ -436,6 +473,9 @@ function reconcile(){
         if (IS_MOBILE) savedTodosScrollTop = savedTodosScrollTop || Number(el.dataset.scrollTop || 0)
         restoreTodosScroll(el)
         paintTodoSelection()
+        // The reveal marker this render may carry (cockpit.revealNote). After the scroll restore, so the
+        // revealed row's own position is the one that survives rather than being overwritten by it.
+        applyPendingReveal(el, nonce)
         // The controls were replaced with this render, so the create buttons are back at their widest;
         // re-measure which stage fits. Done here (a real re-render) rather than on every mutation, so the
         // class it sets - itself a mutation - cannot drive the observer round again.

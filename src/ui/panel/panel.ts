@@ -14,7 +14,7 @@ import { refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../co
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
-import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, stepCalendarAnchor } from "../../core/formats";
+import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
@@ -160,6 +160,38 @@ var notebookFilter = ""
  * extra filtering. Held in memory for the same reason as the notebook filter.                                                                       *
  ***************************************************************************************************************************************************/
 var searchFilter = ""
+
+/** revealedNote / revealID (cockpit.revealNote) ****************************************************************************************************
+ * The state behind the reveal command Whereabouts calls. Both live in memory beside the notebook and search filters, for the same reason: they are   *
+ * where the user has been sent rather than anything the profile stores.                                                                              *
+ *                                                                                                                                                    *
+ * revealedNote is the PIN: the note record of an item the panel cannot list in the current view even after the filter switch - a plain note under a   *
+ * profile that hides notes, a completed to-do the completed switches hide, an item the profile's own searchCriteria excludes, a note in an excluded   *
+ * notebook. Rather than silently doing nothing (the user asked for this note by name from another plugin) it is pinned below the list as a read-only  *
+ * peek row, exactly the shape the "results outside current filters" peek already uses. It survives background refreshes - every render re-emits it -  *
+ * and is dropped by the things that mean the user has moved on: a profile switch, a notebook change, a search commit, the next reveal, and opening    *
+ * the pinned row itself.                                                                                                                              *
+ *                                                                                                                                                    *
+ * revealID is the ONE-SHOT FLASH marker, embedded in the rendered markup (data-reveal-id / data-reveal-note on the .todos container) rather than       *
+ * pushed as a message. A push would race the render it is about - on mobile a setHtml is a full webview reload, and even on desktop the row it points  *
+ * at may only exist in the render that has not landed yet - whereas markup arrives WITH the row. The webview consumes an id once, and only on a render *
+ * that actually holds the row (see reconcile in panelWebview.js), so the intermediate renders of the cascade below leave it unconsumed for the render   *
+ * that finally lists the note. The sequence number makes revealing the same note twice a new id.                                                       *
+ ***************************************************************************************************************************************************/
+var revealedNote = null
+var revealID = ""
+var revealNoteID = ""
+var revealSeq = 0
+
+/** clearReveal *************************************************************************************************************************************
+ * Drops both the pin and the flash marker. Called from every deliberate view change that means the reveal is spent (a profile switch, a notebook      *
+ * change, a search commit) and from the start of the next reveal. It only writes state - the caller's own refresh paints the result.                  *
+ ***************************************************************************************************************************************************/
+function clearReveal(){
+    revealedNote = null
+    revealID = ""
+    revealNoteID = ""
+}
 
 /** Sort state **************************************************************************************************************************************
  * How items sharing a due time (and the notes group) are ordered. Kept in settings so it survives restarts, mirrored here for rendering.            *
@@ -338,6 +370,12 @@ async function eventHandler(message){
         return
     } else if (message[0] == 'todoClicked'){
         await openTodo(message[1])
+        // Opening the pinned row IS the user acting on the reveal, so the pin has done its job and goes. It
+        // takes a repaint of its own: opening a note mutates nothing, so no other lane would remove the row.
+        if (revealedNote && String(message[1] || "") === revealedNote.id){
+            clearReveal()
+            await refreshPanelData()
+        }
     } else if (message[0] == 'openInNewWindow'){
         await runAppCommand('openNoteInNewWindow', String(message[1] || ""))
     } else if (message[0] == 'newNoteClicked' || message[0] == 'newTodoClicked'){
@@ -385,6 +423,9 @@ async function eventHandler(message){
         await setCurrentProfileID(message[1])
         // Another profile may show a different calendar, so start it at today rather than wherever the previous one was scrolled to.
         resetCalendarViewState()
+        // A switched-to profile is a different view entirely, so a note pinned by a reveal into the previous
+        // one does not carry over (nor does its pending flash).
+        clearReveal()
         // The profile carries its own header state: notebook filter, search and sorting.
         applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
         // Paint the switched-to view immediately, then fill the rings from note bodies in the background.
@@ -401,15 +442,18 @@ async function eventHandler(message){
         // narrows the window in which a stale cross-view optimistic entry could be observed after a switch.
         await refreshPanelData()
     } else if (message[0] == 'notebookFilterChanged'){
-        notebookFilter = String(message[1] || "")
-        lastScrollTop = 0
-        await refreshPanelData()
+        // The dropdown and cockpit.filterByNotebook share ONE state write (see setNotebookFilter), so the
+        // command a sibling plugin calls can never drift from what the panel's own control does.
+        await setNotebookFilter(message[1])
     } else if (message[0] == 'searchTitleSuggestions'){
         // A two-way round-trip: the webview awaits this handler's return value (title: autocomplete).
         return await searchTitleSuggestions(String(message[1] || ""))
     } else if (message[0] == 'searchFilterChanged'){
         searchFilter = String(message[1] || "").trim()
         lastScrollTop = 0
+        // A committed search is a new question about the vault; a note pinned by an earlier reveal is not
+        // part of its answer.
+        clearReveal()
         // message[2] is set only by the webview's empty-field auto-reset, and asks for the render to happen even
         // though the mobile search-focus hold is armed. The hold exists so a setHtml cannot wipe the field
         // mid-typing, but this commit IS the user finishing with the field - they have emptied it and there is
@@ -883,6 +927,122 @@ export async function togglePanelVisibility() {
     if (!visibility) await refreshPanelData();
 }
 
+/** setNotebookFilter *******************************************************************************************************************************
+ * Points the panel at one notebook (or at all of them, for "" / undefined) and repaints. THE single state write behind both routes into the notebook  *
+ * filter: the panel's own dropdown (the notebookFilterChanged message) and the cockpit.filterByNotebook command another plugin executes. They share    *
+ * this function rather than each writing the state, so the two can never drift - the command is the dropdown, without the dropdown.                    *
+ *                                                                                                                                                     *
+ * It writes the SESSION state only: the saved profile is untouched (its stored notebook is where a profile switch starts from, not where the user has  *
+ * navigated to since), exactly as clicking the dropdown has always behaved. lastScrollTop is zeroed because this is a deliberate view change, and any  *
+ * note pinned by an earlier reveal is dropped, since the user has just asked a different question of the panel.                                        *
+ ***************************************************************************************************************************************************/
+export async function setNotebookFilter(folderID){
+    clearReveal()
+    notebookFilter = String(folderID || "")
+    lastScrollTop = 0
+    await refreshPanelData()
+}
+
+/** filterByNotebook (cockpit.filterByNotebook) *****************************************************************************************************
+ * The command half of the notebook filter, and half of the contract the Whereabouts plugin calls (see commands.ts). The argument is a plain notebook  *
+ * id string; "" or a missing argument means "all notebooks", which is the same clear the dropdown's own "All notebooks" row performs.                  *
+ *                                                                                                                                                     *
+ * An id the notebook map does not hold is a NO-OP - not a clear: a caller that has lost track of a notebook (a deleted one, a stale chip) must not     *
+ * silently blank the user's filter, and the panel must not be repainted for it either. The caller's execute() never throws whatever it passes, which   *
+ * matters because Whereabouts fires this and forgets it.                                                                                              *
+ *                                                                                                                                                     *
+ * Both platforms: this is pure state plus one refresh, with no panel show/hide of any kind, so it behaves identically on the mobile panel tab.         *
+ ***************************************************************************************************************************************************/
+export async function filterByNotebook(folderID?){
+    var id = String(folderID == null ? "" : folderID)
+    if (id){
+        var notebooks = await getNotebookMap()
+        if (!notebooks.has(id)){
+            console.warn("Cockpit: filterByNotebook was given a notebook id that does not exist", id)
+            return
+        }
+    }
+    await setNotebookFilter(id)
+}
+
+/** renderedRowIsListed *****************************************************************************************************************************
+ * Whether the markup the panel has just rendered actually holds a row for this note, of either kind. This is how revealNote decides whether the note   *
+ * "would render" in the current view: it asks the render itself instead of re-deriving the answer from the filters. The alternative - re-implementing  *
+ * the profile's search criteria, the typed search text, the notebook filter, the exclusion boundary and the completed switches - is exactly the        *
+ * duplicate that would rot. lastRenderedHtml is the content of the last paint (refreshPanelData leaves it holding the current markup whether it        *
+ * painted or was suppressed by its equality guard), so it is the honest answer to "is that row on screen".                                             *
+ ***************************************************************************************************************************************************/
+function renderedRowIsListed(noteID){
+    if (!lastRenderedHtml || !noteID) return false
+    return lastRenderedHtml.includes(`data-todo-id="${noteID}"`) || lastRenderedHtml.includes(`data-note-id="${noteID}"`)
+}
+
+/** revealNote (cockpit.revealNote) *****************************************************************************************************************
+ * Show the user a particular note IN THE PANEL, wherever it is: the other half of the Whereabouts contract (a double click on its notebook chip). The  *
+ * argument is a plain note id string.                                                                                                                 *
+ *                                                                                                                                                     *
+ * DESKTOP ONLY, and for the same reason togglePanelVisibility is: on mobile the panel is a tab inside Joplin's own plugin-panel dialog, which the user  *
+ * opens and closes themselves, so a plugin that shows or hides it there is fighting the app. A mobile reveal therefore does nothing at all - no show,   *
+ * no filter change, no flash - rather than half of it.                                                                                                 *
+ *                                                                                                                                                     *
+ * The cascade, cheapest step first, stopping at the first one that puts the row on screen:                                                             *
+ *   (a) the note already renders in the current view - nothing about the view changes;                                                                 *
+ *   (b) it does not, so the filter switches to the note's own notebook and the typed search is cleared (the same two live states the panel's own       *
+ *       controls write; the stored profile is never touched and no profile is ever switched);                                                          *
+ *   (c) it STILL cannot be listed - a plain note under a to-dos-only profile, a completed to-do the completed switches hide, an item the profile's own  *
+ *       searchCriteria excludes, a note inside an excluded notebook - so it is PINNED below the list as a read-only peek row. The owner's call: doing   *
+ *       nothing leaves the user staring at a panel that did not answer, and a toast tells them about a note instead of showing it; the peek is the      *
+ *       shape this panel already uses for "here is a note your filters hide".                                                                          *
+ * Each step ends in one render, and the step's own verdict is read off that render (renderedRowIsListed) rather than re-derived from the filters.       *
+ *                                                                                                                                                     *
+ * The flash marker is armed BEFORE the first render, so whichever render finally lists the row carries it; the webview consumes it on that render and   *
+ * ignores the ones without the row (see reconcile in panelWebview.js). The open note's own persistent highlight is untouched - Whereabouts' left click   *
+ * opens the note, which reaches the panel through trackEditorNoteSelection as it always has.                                                            *
+ ***************************************************************************************************************************************************/
+export async function revealNote(noteID){
+    if (await isMobile()) return
+    if (!panel) return
+    var id = String(noteID || "")
+    if (!id){
+        console.warn("Cockpit: revealNote was called without a note id")
+        return
+    }
+    // Read the note BEFORE anything is shown or changed, so an id that does not resolve leaves the panel exactly
+    // as it was. The field list is the whole of what the reveal needs: where the note lives (the filter switch),
+    // which kind of row it would be and whether it is completed (the pinned peek row), and its title.
+    var note = null
+    try {
+        note = await joplin.data.get(['notes', id], { fields: ['id', 'parent_id', 'is_todo', 'todo_completed', 'title'] })
+    } catch (error) {
+        note = null
+    }
+    if (!note || !note.id){
+        console.warn("Cockpit: revealNote was given a note id that does not exist", id)
+        return
+    }
+    // This reveal supersedes any earlier one, pin and flash alike.
+    clearReveal()
+    revealSeq++
+    revealID = String(revealSeq)
+    revealNoteID = id
+    // A hidden panel is shown first, exactly as togglePanelVisibility does it - refreshPanelData does no work
+    // while the panel is hidden, so the renders below would otherwise paint nothing.
+    var visibility = await joplin.views.panels.visible(panel)
+    if (!visibility) await joplin.views.panels.show(panel, true)
+    // (a) Does the current view already list it?
+    await refreshPanelData()
+    if (renderedRowIsListed(id)) return
+    // (b) Point the panel at the note's own notebook and drop the typed search.
+    notebookFilter = String(note.parent_id || "")
+    searchFilter = ""
+    lastScrollTop = 0
+    await refreshPanelData()
+    if (renderedRowIsListed(id)) return
+    // (c) The profile itself hides it: pin it below the list instead.
+    revealedNote = { id: String(note.id), parent_id: String(note.parent_id || ""), is_todo: note.is_todo, todo_completed: note.todo_completed, title: String(note.title || "") }
+    await refreshPanelData()
+}
+
 /** refreshPanelData ********************************************************************************************************************************
  * Displays all todos in the panel, according to the formatting specified by the profile and format. The panel is only updated when the markup has   *
  * actually changed, as replacing it resets the scroll position and any in progress interaction.                                                    *
@@ -1014,6 +1174,13 @@ export async function togglePanelVisibility() {
     if (outsideSearchText && filteredViewIsEmpty){
         todosHtml += await renderOutsideResultsSection(profile, panelViewState, outsideSearchText)
     }
+    // The revealed pin (revealNote's step (c)): a note the active profile cannot list, kept below the list as
+    // a read-only peek row until the user moves on. It is re-emitted by EVERY render, which is what carries it
+    // through the background refreshes, and it runs no search of its own - the record is already in hand, so
+    // the section costs one (TTL-cached) notebook-map read and the exclusion set the heading picks its wording
+    // from. The two peeks cannot collide in practice: a reveal clears the typed search, which is the ordinary
+    // peek's own trigger, and committing a search clears the pin.
+    if (revealedNote) todosHtml += await renderRevealedNoteSection(revealedNote, panelViewState)
     var controlsHtml = await getControlsHTML(profileID)
     // The theme block is rebuilt on every render (never memoised) so that a theme-setting change
     // alters the markup and gets past the equality guard below. It sits before the custom CSS, which
@@ -1044,7 +1211,13 @@ export async function togglePanelVisibility() {
     var searchStateIsland = (mobile && openSearchState)
         ? `<script id="cockpitSearchState" type="application/json">${JSON.stringify(openSearchState).replace(/</g, "\\u003c")}</script>`
         : ''
+    // The one-shot reveal marker, embedded in the markup rather than pushed as a message (see revealedNote /
+    // revealID). It is part of the equality-compared content on purpose: a NEW reveal has to get past the guard
+    // even when the view it lands in is otherwise byte-identical to the one on screen, while an UNCHANGED marker
+    // leaves the guard exactly as strict as it was. The webview consumes it once, on the render that holds the row.
+    var revealAttributes = revealID ? ` data-reveal-id="${escapeHtml(revealID)}" data-reveal-note="${escapeHtml(revealNoteID)}"` : ''
     var contentHtml = panelTemplate
+        .replace("<<REVEAL>>", () => revealAttributes)
         .replace("<<THEME_CSS>>", () => themeCss)
         .replace("<<CUSTOM_CSS>>", () => customCss)
         .replace("<<ROOT_MARKER>>", () => rootMarker)

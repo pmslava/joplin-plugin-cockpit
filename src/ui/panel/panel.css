@@ -743,6 +743,24 @@ h2 {
     opacity: 0.45;
 }
 
+/* The one-shot flash a revealed row gets (cockpit.revealNote, called by the Whereabouts chip). It has to be
+ * DISTINCT from .-selected, because the revealed note is usually also the note the editor has just opened and
+ * therefore already wears that highlight: this adds an inset outline that fades with a tint, so the row is
+ * picked out of the list for about a second and a half and then goes back to looking like every other row.
+ * Inset outline rather than a border or padding: it paints over the row without changing its box, so a flash
+ * cannot shift the list under a drag or an in-flight click. The webview removes the class on the same timing.
+ * The colours come from the same theme variables the selection uses, with the panel's own fallbacks. */
+.todo.-revealed {
+    outline: 2px solid var(--cockpit-current-item-background-color, var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35)));
+    outline-offset: -2px;
+    animation: cockpit-reveal-flash 1.5s ease-out 1;
+}
+
+@keyframes cockpit-reveal-flash {
+    from { background-color: var(--cockpit-current-item-background-color, var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35))); }
+    to { background-color: transparent; }
+}
+
 /* Group headings, calendar days and week columns light up while to-dos are dragged over them */
 .-drop-over {
     background-color: var(--cockpit-selected-color2, rgba(45, 107, 220, 0.35)) !important;
