@@ -6866,12 +6866,12 @@ async function main() {
         // 1. The listener goes on the stable wrapper, NEVER on the button: the bell's React key embeds the due-date
         //    text, so the button is remounted the moment an alarm changes and a listener on it would be dropped.
         assert.ok(/closest\('\.note-editor-wrapper'\)/.test(code), "the listener's host must be found with closest('.note-editor-wrapper')")
-        assert.ok(/root\.addEventListener\('click',/.test(code), 'and the listener must be bound to that wrapper')
+        assert.ok(/root\.addEventListener\('click', onClick, true\)/.test(code), 'and the listener must be bound to that wrapper')
         assert.ok(!/button\.addEventListener|btn\.addEventListener/.test(code), 'never to the button, which remounts on every alarm change')
         // 3. Capture phase, and the event is stopped there - React 18 delegates onClick from a BUBBLE listener on
         //    its root container, so only a capture-phase stop below that root keeps Joplin's editAlarm from running.
-        const listener = code.slice(code.indexOf("root.addEventListener('click'"))
-        assert.ok(/\}, true\)/.test(listener), 'the listener must be registered with capture: true')
+        const listener = code.slice(code.indexOf('var onClick = '))
+        assert.ok(/root\.addEventListener\('click', onClick, true\)/.test(listener), 'the listener must be registered with capture: true')
         assert.ok(/event\.stopPropagation\(\)/.test(listener), 'and stop the event')
         assert.ok(/event\.preventDefault\(\)/.test(listener), 'and prevent its default')
         assert.ok(/stopImmediatePropagation/.test(listener), 'with stopImmediatePropagation as the belt to that braces')
@@ -6885,26 +6885,44 @@ async function main() {
         // The disabled bell dispatches no click at all; the early return is what makes that explicit and leaves
         // such an event untouched rather than swallowing it.
         assert.ok(/if \(button\.disabled\) return/.test(listener), 'a disabled bell must be left entirely alone')
+        // 4. A listener whose editor was destroyed must stand aside. .note-editor-wrapper is created by the layout
+        //    renderer AROUND <NoteEditor>, so it OUTLIVES the CodeMirror instance while plugin() runs once per editor
+        //    MOUNT: a Markdown -> Rich Text -> Markdown round trip leaves an older listener bound, holding a destroyed
+        //    view whose state still answers with the note it died on. It is FIRST in the capture list and stops the
+        //    event, so without this guard it would win and open the picker on the WRONG note.
+        assert.ok(/view\.dom\.isConnected/.test(listener), 'a stale listener must detect its destroyed view by its detached DOM')
+        assert.ok(/removeEventListener\('click', onClick, true\)/.test(listener), 'and unbind itself rather than accumulate')
+        const staleGuard = listener.slice(0, listener.indexOf('event.target'))
+        assert.ok(/isConnected/.test(staleGuard), 'and that check must come BEFORE the event is inspected or stopped')
         // The note id is a facet read INSIDE the listener: plugin() runs once per editor MOUNT, not once per note,
         // so an id captured at mount time would be the first note the editor ever showed, forever.
         assert.ok(/noteIdFacet/.test(code), 'the note id must come from the editor\'s noteIdFacet')
-        assert.ok(/var noteId = currentNoteId\(\)/.test(listener), 'and be read at click time, not at mount time')
-        assert.ok(/postMessage\(\{ type: 'openAlarm', noteId: noteId \}\)/.test(listener), 'the message shape the plugin handler answers')
+        // Structural, not literal: `const`/`let` and the `{ noteId }` shorthand are the same code, and a pin that
+        // failed on them would be pinning the author's typing rather than the behaviour.
+        assert.ok(/(?:var|let|const)\s+noteId\s*=\s*currentNoteId\(\)/.test(listener),
+            'and be read at click time, not at mount time')
+        assert.ok(/postMessage\(\{\s*type:\s*'openAlarm',\s*noteId(?:\s*:\s*noteId)?\s*\}\)/.test(listener),
+            'the message shape the plugin handler answers')
     })
 
-    await test('due date on hover (A): the stylesheet is the owner\'s block, scoped to the title-bar row and keyed on -has-title', () => {
+    await test('due date on hover (A): the stylesheet is the owner\'s block, scoped to the title-bar row and to the BELL by its own icon', () => {
         const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'chrome', 'dueOnHover.css'), 'utf8')
         const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
         // Every selector is scoped to the note title bar's own row: this file is loaded into the WHOLE app window,
         // so an unscoped rule would hide text in every toolbar Joplin has.
         const selectors = rules.split('}').map(part => part.slice(0, part.indexOf('{')).trim()).filter(Boolean)
         assert.strictEqual(selectors.length, 4, 'the owner\'s block is four rules')
+        // -has-title alone does NOT make the selector the bell. The row is built from
+        // ["showSpellCheckerMenu", "editAlarm", "toggleVisiblePanes", "showNoteProperties"], and showSpellCheckerMenu
+        // ALSO carries a mapStateToTitle (the enabled dictionary languages, "en"), which on an ordinary profile is
+        // non-empty - so it too gets -has-title and a text span. Hiding that label is not what this setting promises.
+        // The bell's own icon is the discriminator that holds, so EVERY rule must carry it as well as the row scope.
         for (const selector of selectors){
             assert.ok(selector.startsWith('.note-title-info-group button.toolbar-button.-has-title'),
                 `every rule must be scoped to the title-bar bell, "${selector}" is not`)
+            assert.ok(selector.includes(':has(span.toolbar-icon.icon-alarm)'),
+                `every rule must be narrowed to the bell's own icon, "${selector}" is not - it would also catch the spell checker's language label`)
         }
-        // -has-title is what makes the selector the BELL and nothing else: editAlarm is the only title-bar command
-        // with a mapStateToTitle, so it is the only button Joplin ever gives a text title to.
         assert.ok(/> span:not\(\.toolbar-icon\) \{\s*display: none/.test(rules), 'the due-date text span is the thing hidden')
         assert.ok(/:hover > span:not\(\.toolbar-icon\)/.test(rules), 'and hover is what brings it back')
         assert.ok(/overflow: visible/.test(rules), 'the button must stop clipping, or the hover bubble is cut off')
