@@ -13,12 +13,22 @@ import {
 /**
  * Real-app cover for the MOBILE touch drag, which is MENU-FIRST since the first Pixel round: a 500 ms press on a
  * to-do row opens its context menu with the finger still down and arms the drag silently behind it; the first
- * travel past the 10 px slop then decides, once - UP or DOWN closes the menu, lifts the row and enters the drag
+ * travel past TOUCH_DRAG_LIFT_PX (20 px per axis, measured from where the finger was when the MENU OPENED, not
+ * from where the press began) then decides, once - UP or DOWN closes the menu, lifts the row and enters the drag
  * proper, SIDEWAYS is left to Android (that stroke is Joplin's own side-menu swipe) and the arming is thrown away.
+ * Below that threshold nothing happens at all: the menu stays up, nothing is lifted and no guard is taken, which
+ * is the tolerance the third Pixel round asked for and the `LIFT_STEP` below is sized against.
  * A release that never moved leaves the menu exactly as the press opened it. From the lift on, moving resolves a
  * target on every move and releasing drops into the gap between two rows or onto a [data-drop] target (a group
  * heading, a calendar day, a week column) - the same two messages, and the same host writes, the desktop drag
  * produces.
+ *
+ * NO NATIVE HTML5 DRAG EXISTS ON A MOBILE ROW, and that is the third Pixel round's root cause rather than a
+ * detail. Android's WebView starts its own drag from a long press on a `draggable` element - it fires dragstart,
+ * floats a translucent copy of the row under the finger and CANCELS the touch sequence, so the panel's 500 ms
+ * timer never fires and none of the gesture above ever begins. Mobile rows therefore carry no draggable attribute
+ * and no drag handlers at all (src/core/formats.ts), and the case at the end of this file holds that line: the
+ * attribute is absent and a dragstart dispatched at a row is cancelled and lifts nothing.
  *
  * Because of that order, no case here lifts a row by holding alone: every drag case holds, checks the menu is up
  * and nothing is lifted, then makes ONE deliberate vertical step (`liftByMovingUpOrDown`) and only then aims.
@@ -52,8 +62,8 @@ import {
  * Xvfb happily lets a non-passive `touchmove` cancel the pan; whether the Android WebView's compositor hands the
  * gesture over at all - rather than starting a fling and delivering non-cancelable moves, or raising the native
  * text-selection callout over the row - is a property of the device, not of this harness. Nor can it prove the
- * other half of the new order: that a SIDEWAYS stroke, which this panel now deliberately does not prevent, really
- * does reach Joplin's side menu. Both are checklist step 18b in docs/MOBILE.md, and they are what decides between
+ * other half of the new order: that a SIDEWAYS stroke, which the panel answers by throwing its own arming away,
+ * really does reach Joplin's side menu even though an armed touchmove now cancels this document's own default. Both are checklist step 18b in docs/MOBILE.md, and they are what decides between
  * this gesture and the drag-handle fallback.
  */
 test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
@@ -66,6 +76,14 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   // Joplin the developer happens to be running - or a stray process from another spec - is never talked to.
   const API_TOKEN = `cockpit-e2e-${stamp}`;
   const API_PORT = 41197;
+
+  // THE TWO TRAVELS EVERY CASE HERE IS SIZED BY, both against the panel's own TOUCH_DRAG_LIFT_PX (20 px per axis
+  // from the fire point, panelWebview.js). A step of 28 px is unambiguously past it - a lift that "worked" at 21 px
+  // would be one rounding away from the threshold it is meant to prove - while DRIFT_PX is unambiguously inside
+  // it, and is what a hand does while holding a phone: the tolerance case moves the finger by it and demands that
+  // NOTHING happens. Both are a per-axis travel at a constant x, so neither can be read as sideways.
+  const LIFT_STEP = 28;
+  const DRIFT_PX = 12;
 
   // The Today anchors the gap cases aim between, at three widely separated clock times.
   const LO = `td-lo-${stamp}`;
@@ -90,6 +108,23 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   const ALARM = `td-alarm-${stamp}`;
   const TOMORROW = `td-tomorrow-${stamp}`;
   const PEEK = `td-peek-${stamp}`;
+  // The three rows the third Pixel round's multi-selection case moves as ONE. They are seeded at the very top of
+  // the Overdue group (the earliest dues sort first) so they are on screen whatever the list has grown to, and
+  // they are the ONLY rows this round adds - see the aliases below for why that number matters.
+  const MULTI_A = `td-multi-a-${stamp}`;
+  const MULTI_B = `td-multi-b-${stamp}`;
+  const MULTI_C = `td-multi-c-${stamp}`;
+  // EVERY OTHER ROW THIS ROUND NEEDS IS A ROW ALREADY HERE, and that is a deliberate constraint rather than
+  // thrift. This list is as tall as the panel: the case that drops onto the "No Due Date" heading needs that
+  // heading to be ON SCREEN at scrollTop 0, and every row seeded above it pushes it down. So the cases below
+  // reuse rows whose own case wrote nothing at all - each alias used by exactly ONE new case, so no new case
+  // depends on another having run, and each aliased row's due date is untouched at the moment its new case
+  // starts. A case that WRITES a due takes a row whose earlier case only read one.
+  const TOLERANCE = MENU;                      // held, drifted, lifted, cancelled: writes nothing, before or after
+  const TAP_A = CTX, TAP_B = CANCEL, TAP_C = REFUSE;   // tapped, which only opens a note
+  const LONER = SWIPE;                         // dragged from outside a selection
+  const VETO = TAP;                            // dragged into a gap under a floating overlay
+  const NATIVE = ALARM;                        // the row a dragstart is dispatched at, then dragged for real
   // Where Joplin's editor is parked before the two cases that have to see it NOT move. A plain note, so it never
   // reaches the panel and can never be mistaken for a row, and seeded LAST: the note list sorts by
   // `user_updated_time` reversed (`notes.sortOrder.field` / `.reverse` defaults), so the newest note is the first
@@ -182,6 +217,12 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     // The peek case's row lives in ANOTHER notebook, so filtering to this one and searching for it produces the
     // read-only "results outside current filters" section.
     ids[PEEK] = await createTodoViaApi(PEEK, outsideFolderId, yesterdayAt(17));
+    // The three that move together, at three DIFFERENT early-morning overdue times: "the order was preserved" is
+    // then an assertion about three distinct dues rather than about three identical numbers, and being the
+    // earliest overdue to-dos they sit directly under the Overdue heading.
+    ids[MULTI_A] = await createTodoViaApi(MULTI_A, folderId, yesterdayAt(3));
+    ids[MULTI_B] = await createTodoViaApi(MULTI_B, folderId, yesterdayAt(4));
+    ids[MULTI_C] = await createTodoViaApi(MULTI_C, folderId, yesterdayAt(5));
     for (let i = 0; i < FILLER; i++) await createTodoViaApi(filler(i), folderId);
     ids[PARK] = await createNoteViaApi(PARK, folderId);
 
@@ -438,15 +479,16 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   }
 
   /**
-   * The move that turns the open menu into a lifted row. The gesture is decided by the FIRST travel past the 10 px
-   * slop and by nothing else: |dy| >= |dx| lifts, |dx| > |dy| is refused as Joplin's side-menu swipe. So the lift
-   * is one deliberate 24 px step at a CONSTANT x - unambiguously vertical, well past the slop, and the same move a
-   * finger makes when it starts dragging a row. Returns where the finger now is, which is what the aim glides from.
+   * The move that turns the open menu into a lifted row. The gesture is decided by the FIRST travel past
+   * TOUCH_DRAG_LIFT_PX and by nothing else: |dy| >= |dx| lifts, |dx| > |dy| is refused as Joplin's side-menu
+   * swipe. So the lift is one deliberate `LIFT_STEP` at a CONSTANT x - unambiguously vertical, comfortably past
+   * the threshold, and the same move a finger makes when it starts dragging a row. Returns where the finger now
+   * is, which is what the aim glides from.
    *
    * `bounded` is for the cases that MUST NOT lift anything (the tick circle, a read-only peek row): there is no
    * target to aim at afterwards, the finger may be standing over an open overlay or a search render, and consulting
    * the `.todos` scroller there buys nothing while adding a way to fail on the list's metrics rather than on the
-   * gesture. Those take the plain 24 px step downwards.
+   * gesture. Those take the plain step downwards.
    */
   async function liftByMovingUpOrDown(
     finger: { move: (at: Point) => Promise<unknown> },
@@ -454,14 +496,14 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     win: Page,
     bounded = true
   ): Promise<Point> {
-    const at = { x: from.x, y: from.y + (bounded ? await verticalLiftStep(win, from) : 24) };
+    const at = { x: from.x, y: from.y + (bounded ? await verticalLiftStep(win, from) : LIFT_STEP) };
     await finger.move(at);
     await win.waitForTimeout(80);
     return at;
   }
 
   /**
-   * The signed 24 px step, and where it may not land. The bound is not merely "does the point stay inside the
+   * The signed `LIFT_STEP`, and where it may not land. The bound is not merely "does the point stay inside the
    * list": the drag's own edge auto-scroll arms inside a band at the top and the bottom of the scroller, and a
    * finger parked in a band starts the list scrolling on the very move that lifts the row - under a finger that
    * then holds still, since `onTouchDragScrolled` re-aims and keeps the loop alive by itself. The aim that follows
@@ -493,7 +535,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     // not inside a band that can actually run.
     const usable = (y: number) => y >= list.top && y <= list.bottom && !inLiveBand(y);
     // Towards the middle of the list first, and the other way only if the preferred landing point is unusable.
-    const order = clearance(from.y + 24) >= clearance(from.y - 24) ? [24, -24] : [-24, 24];
+    const order = clearance(from.y + LIFT_STEP) >= clearance(from.y - LIFT_STEP) ? [LIFT_STEP, -LIFT_STEP] : [-LIFT_STEP, LIFT_STEP];
     const step = order.find((s) => usable(from.y + s));
     if (step === undefined) {
       throw new Error(
@@ -501,7 +543,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
           list.top
         )}..${Math.round(list.bottom)}, its edge auto-scroll band is ${Math.round(
           band
-        )}px deep, and it is scrolled to ${metrics.scrollTop} of ${metrics.maxScroll} - so both +24 and -24 land ` +
+        )}px deep, and it is scrolled to ${metrics.scrollTop} of ${metrics.maxScroll} - so both +${LIFT_STEP} and -${LIFT_STEP} land ` +
           `off-screen or inside a band that CAN scroll, where the list would move under the still finger and the ` +
           `drop would land wherever it got to. Not the gesture's fault: the source row is too near an edge for ` +
           `this case.`
@@ -658,6 +700,47 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       }
       return null;
     }, marker);
+  }
+
+  /**
+   * THE SELECTION AS THE WEBVIEW HOLDS IT, which is not the same thing as the selection as it is PAINTED:
+   * `paintTodoSelection` also lights the note Joplin currently has open (`pickedNoteID`), so a painted count can
+   * be 1 with nothing selected at all. Every selection assertion below therefore reads the set itself, and uses
+   * the painted count only where the two are meant to agree.
+   */
+  async function selectionIDs(): Promise<string[]> {
+    const panel = await agendaPanel(joplin.win);
+    return panel.evaluate(() => Array.from((window as any).selectedRowIDs || []) as string[]);
+  }
+
+  async function paintedSelection(): Promise<number> {
+    const panel = await agendaPanel(joplin.win);
+    return panel.evaluate(() => document.querySelectorAll('.todo.-selected').length);
+  }
+
+  /**
+   * Put a multi-row selection in place directly, and say so loudly: a FINGER cannot build one. A row carries
+   * onmousedown/onclick and no touch handler of its own, Shift and Ctrl are unreachable from a touch, and the
+   * shared RowSelection rules therefore answer either "the pressed row alone" (pressSelection) or "collapse onto
+   * the clicked row" (clickSelection) - which is exactly what the selection case below asserts. So a multi-row
+   * selection on a phone can only come from somewhere else (a heading's long press selects its whole group and
+   * opens the alarm picker; a desktop session's selection survives into a mobile render of the same panel), and
+   * what the drag owes it is that it MOVES it rather than collapsing it. Seeding the set is the only way to put
+   * that under test in this harness, and it seeds the panel's own state through the panel's own painter.
+   */
+  async function setSelection(rowIDs: string[]): Promise<string[]> {
+    const panel = await agendaPanel(joplin.win);
+    const got = await panel.evaluate((wanted: string[]) => {
+      const w = window as any;
+      if (!w.selectedRowIDs) return null;
+      w.selectedRowIDs.clear();
+      for (const id of wanted) w.selectedRowIDs.add(id);
+      w.paintTodoSelection();
+      return Array.from(w.selectedRowIDs) as string[];
+    }, rowIDs);
+    expect(got, 'the panel must expose its selection set, or nothing here is testing the panel').not.toBe(null);
+    expect(got, 'the seeded selection must be exactly what was asked for').toEqual(rowIDs);
+    return got as string[];
   }
 
   /** Settle between cases: each drop provokes a host render, and a gesture started into one would be measuring a
@@ -1073,7 +1156,7 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       // `canLiftRow` refuses and whose own long press opens the notebook overlay instead of the menu. A press
       // there would arm nothing and the case would pass or fail on something that is not the first-move rule.
       // Mid-row is clear of both the pill and the tick circle; the ~35% of the row width to x=0.15 is still an
-      // order of magnitude past the 10px slop.
+      // order of magnitude past TOUCH_DRAG_LIFT_PX, which is the travel the first move is decided at.
       const from = await rowPoint(win, SWIPE, 0.5, 0.5);
       const to = await rowPoint(win, SWIPE, 0.5, 0.15);
       await finger.down(from);
@@ -1263,6 +1346,312 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     await waitForPanelTodo(win, later);
   });
 
+  test('a drift after the hold decides nothing, and the travel that lifts is measured from where the menu opened', async () => {
+    // THE THIRD PIXEL ROUND'S TOLERANCE, both halves of it. "Some tolerance for hold and move is needed: I hold
+    // the note and it is moving a little straight away." The previous build measured the lift from the PRESS
+    // point with the press's own 10 px slop, so an armed gesture was born one pixel from its own threshold and
+    // the smallest drift lifted the row and closed the menu in the frame after it opened. This case drifts the
+    // finger BEFORE the fire (inside the press's cancel gate, which moves the fire point) and again after it, and
+    // demands that nothing at all happens until the travel FROM THE FIRE POINT passes TOUCH_DRAG_LIFT_PX.
+    const { win } = joplin;
+    await settle();
+    const before = await todoDue(TOLERANCE);
+    await armMessageLog(win);
+    const panel = await agendaPanel(win);
+    const finger = await newFinger(win);
+    try {
+      const from = await rowPoint(win, TOLERANCE, 0.5);
+      await finger.down(from);
+      // ...a small wander DURING the hold, well inside the 10 px the press survives on, so the press lives and
+      // the fire point moves with the finger. This is what makes the two origins different at all.
+      await win.waitForTimeout(250);
+      const fire = { x: from.x, y: from.y + 8 };
+      await finger.move(fire);
+      await win.waitForTimeout(500); // past the 500ms from the press: the menu opens under the finger, HERE
+      await expect(panel.locator('#noteContextMenu'), 'the hold must open the menu - every hold must').toBeVisible();
+      expect((await dragState()).dragging, 'and the hold alone lifts nothing').toBe(0);
+      // A drift of 12 px from the fire point. Measured from the PRESS point it is 20 - twice the old gate - so a
+      // build that regressed to the press point lifts here and this case sees it.
+      let at = fire;
+      for (let step = 1; step <= 3; step++) {
+        at = { x: fire.x, y: fire.y + (DRIFT_PX * step) / 3 };
+        await finger.move(at);
+        await win.waitForTimeout(60);
+      }
+      const drifted = await dragState();
+      console.log('TOUCH TOLERANCE DRIFTED', JSON.stringify(drifted), JSON.stringify(await listMetrics()));
+      expect(drifted.dragging, 'a drift inside the threshold must lift nothing').toBe(0);
+      expect(drifted.banner, 'and put up no banner').toBe(null);
+      await expect(
+        panel.locator('#noteContextMenu'),
+        'and above all it must not close the menu the hold just opened - that is F1'
+      ).toBeVisible();
+      // ...nor may the list have panned under the held finger: an ARMED touchmove cancels this document's default,
+      // which is the other route to a menu that vanishes (a scroll closes it).
+      expect((await listMetrics()).scrollTop, 'the list must not pan under a held finger').toBe(0);
+      // Now a real travel from the fire point, past the threshold: THIS is what lifts, and only this.
+      const lift = { x: fire.x, y: fire.y + LIFT_STEP };
+      await finger.move(lift);
+      await win.waitForTimeout(80);
+      const lifted = await dragState();
+      console.log('TOUCH TOLERANCE LIFTED', JSON.stringify(lifted));
+      expect(lifted.dragging, 'a travel past the threshold must lift the row').toBe(1);
+      await expect(panel.locator('#noteContextMenu'), 'and only THAT closes the menu').toHaveCount(0);
+      // Out over the panel header, so this case writes nothing and leaves no due to explain.
+      const origin = await panelOrigin(win);
+      await finger.glide(lift, { x: lift.x, y: origin.y + 12 }, 10, 40);
+      await finger.up();
+    } finally {
+      await finger.dispose();
+    }
+    const posted = await postedMessages(win);
+    console.log('TOUCH TOLERANCE POSTED', JSON.stringify(posted));
+    expect(names(posted), 'a cancelled drag writes nothing').not.toContain('todosDroppedBetween');
+    expect(names(posted), 'a cancelled drag writes nothing').not.toContain('todosDropped');
+    expect(
+      posted.filter((m) => m[0] === 'dialogGuard').map((m) => m[1]),
+      'the guard is taken at the lift and released at the end, once each'
+    ).toEqual([true, false]);
+    expect(await todoDue(TOLERANCE), 'and the due date is untouched').toBe(before);
+  });
+
+  test('a hold and then taps never accumulate a selection - and the drag code changed nothing about that', async () => {
+    // "Broken: the mobile multi-selection - long-hold selects one note, then taps on other notes select them all
+    // too." What main defines is the opposite of a multi-select: pressSelection can only return the pressed row
+    // alone (Shift and Ctrl are unreachable from a finger) and clickSelection collapses onto the clicked row, so a
+    // touch selects exactly ONE row and no sequence of taps can grow that. The build the round was run against
+    // broke it from the other side: the lift collapsed the selection onto the pressed row on EVERY lift, and the
+    // lift fired on very nearly every hold, so a hold left a row selected that the user had not selected and
+    // nothing took back. This case is the property itself - hold, tap, tap, and the set never holds more than one.
+    const { win } = joplin;
+    await settle();
+    await armMessageLog(win);
+    const panel = await agendaPanel(win);
+    await setSelection([]);
+    const finger = await newFinger(win);
+    try {
+      await finger.down(await rowPoint(win, TAP_A, 0.5));
+      await win.waitForTimeout(700);
+      await expect(panel.locator('#noteContextMenu'), 'the hold opens the menu').toBeVisible();
+      await finger.up();
+    } finally {
+      await finger.dispose();
+    }
+    const held = await selectionIDs();
+    console.log('TOUCH SELECTION AFTER HOLD', JSON.stringify(held));
+    expect(held.length, 'a hold may leave at most the row it was on selected').toBeLessThanOrEqual(1);
+    for (const id of held) expect(id, 'and never a row the finger was not on').toBe(ids[TAP_A]);
+    await panel.locator('body').press('Escape');
+    await expect(panel.locator('#noteContextMenu')).toHaveCount(0);
+    // Two taps on two other rows. Each one either replaces the selection or leaves it alone; neither may add.
+    for (const marker of [TAP_B, TAP_C]) {
+      await tapAt(win, await rowPoint(win, marker, 0.5));
+      await win.waitForTimeout(500);
+      const now = await selectionIDs();
+      console.log('TOUCH SELECTION AFTER TAP', marker, JSON.stringify(now));
+      expect(now.length, `tapping ${marker} must never GROW the selection - that is the report`).toBeLessThanOrEqual(1);
+    }
+    // The PAINT, which is what the report was actually about ("taps on other notes select them all too"). Two
+    // rows can legitimately be lit at once and no more: the selected row, and the row whose note Joplin has open
+    // (`pickedNoteID`), which the taps above have been moving and which the editor may still be catching up with.
+    // Three is the failure being tested for.
+    await expect
+      .poll(async () => paintedSelection(), { timeout: 15_000, intervals: [500, 1000, 2000] })
+      .toBeLessThanOrEqual(2);
+    const posted = await postedMessages(win);
+    expect(names(posted), 'and none of it touches the refresh guard - nothing was ever lifted').not.toContain('dialogGuard');
+  });
+
+  test('a drag started inside a multi-row selection moves the WHOLE selection', async () => {
+    // The rule is onTodoDragStart's, verbatim, so a touch drag and a mouse drag are one operation: a drag from a
+    // row INSIDE the selection sweeps the whole set. The set is seeded here (see setSelection - a finger cannot
+    // build one), and what is under test is everything the touch layer does with it: the payload, the dimming,
+    // the banner, and the three dues the host writes.
+    const { win } = joplin;
+    await settle();
+    const wanted = [ids[MULTI_A], ids[MULTI_B], ids[MULTI_C]];
+    await waitForPanelTodo(win, MULTI_B);
+    await setSelection(wanted);
+    await armMessageLog(win);
+    const panel = await agendaPanel(win);
+    const finger = await newFinger(win);
+    try {
+      // ...from the MIDDLE row of the three, so "the row under the finger" and "the payload" cannot be confused.
+      const from = await rowPoint(win, MULTI_B, 0.5);
+      await finger.down(from);
+      await win.waitForTimeout(700);
+      await expect(panel.locator('#noteContextMenu'), 'the hold still opens the menu first').toBeVisible();
+      const at = await liftByMovingUpOrDown(finger, from, win);
+      const lifted = await dragState();
+      console.log('TOUCH MULTI LIFTED', JSON.stringify(lifted));
+      expect(lifted.dragging, 'every row of the selection must dim, not only the one under the finger').toBe(3);
+      expect(lifted.banner, 'and the banner must name the COUNT rather than pick one title out of three').toContain('3 to-dos');
+      expect(await selectionIDs(), 'the lift must leave a selection it started inside exactly as it found it').toEqual(wanted);
+      // Into the gap under the 08:00 anchor, which is between it and the 12:00 one.
+      await finger.glide(at, await rowPoint(win, LO, 0.8));
+      const aiming = await dragState();
+      console.log('TOUCH MULTI AIMING', JSON.stringify(aiming));
+      expect(aiming.before + aiming.after, 'exactly one insertion line must be painted').toBe(1);
+      await finger.up();
+    } finally {
+      await finger.dispose();
+    }
+    const posted = await postedMessages(win);
+    console.log('TOUCH MULTI POSTED', JSON.stringify(posted));
+    const between = posted.find((m) => m[0] === 'todosDroppedBetween');
+    expect(between, 'the drop must post the between-drop message').toBeTruthy();
+    expect(between![1], "and its payload is the whole selection, in the selection's own order").toEqual(wanted);
+    // All three dues are rewritten into the gap, and their ORDER is preserved (the host spreads them in payload
+    // order): three separate device-visible facts, and the one a "moves the whole selection" claim rests on.
+    const dues: number[] = [];
+    for (const marker of [MULTI_A, MULTI_B, MULTI_C]) {
+      dues.push(await dueSettles(marker, (d) => d > todayAt(8) && d < todayAt(12)));
+    }
+    console.log('TOUCH MULTI DUES', dues.map((d) => new Date(d).toString()));
+    for (const due of dues) {
+      expect(due, 'each moved to-do lands strictly after the 08:00 neighbour').toBeGreaterThan(todayAt(8));
+      expect(due, 'and strictly before the 12:00 one').toBeLessThan(todayAt(12));
+    }
+    expect(dues[0], 'the payload order is kept: A is not written after B').toBeLessThanOrEqual(dues[1]);
+    expect(dues[1], '...and B not after C').toBeLessThanOrEqual(dues[2]);
+  });
+
+  test('a drag started OUTSIDE a selection takes only its own row, exactly as the desktop dragstart does', async () => {
+    // The other half of the same rule, and the reason the lift is not simply "never touch the selection": a drag
+    // from a row that is NOT in the selection makes that row the selection and moves it alone. Anything else
+    // would move rows the finger never touched. Main's onTodoDragStart says exactly this, and the touch lift is
+    // pinned against it in the harness rather than described twice.
+    const { win } = joplin;
+    await settle();
+    const others = [ids[MULTI_A], ids[MULTI_C]];
+    const untouched = [await todoDue(MULTI_A), await todoDue(MULTI_C)];
+    await waitForPanelTodo(win, LONER);
+    await setSelection(others);
+    await armMessageLog(win);
+    // The bottom half of the 12:00 anchor, which is the roomiest gap Today still has by this point in the file -
+    // every case above has been dropping into the one under the 08:00 anchor.
+    await dragRowTo(LONER, () => rowPoint(win, MID, 0.85));
+    const posted = await postedMessages(win);
+    console.log('TOUCH LONER POSTED', JSON.stringify(posted));
+    const between = posted.find((m) => m[0] === 'todosDroppedBetween');
+    expect(between, 'the drop must post the between-drop message').toBeTruthy();
+    expect(between![1], 'the payload is the dragged row ALONE - the old selection is not swept along').toEqual([ids[LONER]]);
+    await dueSettles(LONER, (d) => d > todayAt(12) && d < todayAt(20));
+    expect(await todoDue(MULTI_A), 'a row that was merely selected must not have moved').toBe(untouched[0]);
+    expect(await todoDue(MULTI_C), '...nor the other').toBe(untouched[1]);
+  });
+
+  test('nothing floating over the list can veto a gap', async () => {
+    // "Moving one note doesn't land between other notes, only on headings, as before." A heading drop resolves
+    // through elementFromPoint; a gap resolves through the row index, and on a phone the finger aiming at one is
+    // very often over something floating - the drag banner, the trace strip, a menu. The rule is that the
+    // GEOMETRY is authoritative for rows: elementFromPoint is asked only whether there is a [data-drop] or an h2
+    // under the finger, and anything else it returns vetoes nothing. This case puts a full-screen element over
+    // the list mid-drag - which is a harsher version of the banner, since it is not even pointer-events:none -
+    // and demands the gap still resolves and the drop still lands.
+    const { win } = joplin;
+    await settle();
+    await armMessageLog(win);
+    const panel = await agendaPanel(win);
+    const finger = await newFinger(win);
+    try {
+      const from = await rowPoint(win, VETO, 0.5);
+      await finger.down(from);
+      await win.waitForTimeout(700);
+      const at = await liftByMovingUpOrDown(finger, from, win);
+      expect((await dragState()).dragging, 'the row must be lifted before the overlay goes on').toBe(1);
+      const covered = await panel.evaluate(() => {
+        const cover = document.createElement('div');
+        cover.id = 'e2eDragCover';
+        cover.style.cssText = 'position:fixed;inset:0;z-index:900;background:transparent';
+        document.body.appendChild(cover);
+        // Prove it really is what elementFromPoint answers with over the list, or this case proves nothing.
+        const list = document.querySelector('.todos') as HTMLElement | null;
+        if (!list) return false;
+        const box = list.getBoundingClientRect();
+        const under = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+        return !!under && under.id === 'e2eDragCover';
+      });
+      expect(covered, 'the cover must be what the DOM answers with over the list, or nothing is being vetoed').toBe(true);
+      await finger.glide(at, await rowPoint(win, MID, 0.85));
+      const aiming = await dragState();
+      console.log('TOUCH VETO AIMING', JSON.stringify(aiming));
+      expect(aiming.before + aiming.after, 'the gap must resolve from the rows, whatever is floating over them').toBe(1);
+      await finger.up();
+    } finally {
+      await panel.evaluate(() => document.getElementById('e2eDragCover')?.remove());
+      await finger.dispose();
+    }
+    const posted = await postedMessages(win);
+    console.log('TOUCH VETO POSTED', JSON.stringify(posted));
+    expect(names(posted), 'and the drop must land').toContain('todosDroppedBetween');
+    await dueSettles(VETO, (d) => d > todayAt(12) && d < todayAt(20));
+    // ...and the two things that genuinely DO float over the rows during every drag are pointer-events:none, so
+    // they never even reach the question above.
+    const floats = await panel.evaluate(() =>
+      ['cockpitDragBanner', 'cockpitToast'].map((id) => {
+        const el = document.getElementById(id);
+        return { id, present: !!el, events: el ? getComputedStyle(el).pointerEvents : 'none' };
+      })
+    );
+    for (const float of floats) {
+      expect(float.events, `${float.id} floats over the list and must never take a finger`).toBe('none');
+    }
+  });
+
+  test('a mobile row is not draggable, and a dragstart on it is cancelled and lifts nothing', async () => {
+    // THE ROOT CAUSE OF THE THIRD PIXEL ROUND. Android's WebView starts a native HTML5 drag from a long press on
+    // a draggable element - dragstart fires, a translucent copy of the row follows the finger, and the touch
+    // sequence is CANCELLED, so the 500 ms timer never fires: no menu, no arm, no touch drag, and the only drop
+    // that still lands is onto a heading through the native drag's own inline ondrop. The fix is that a mobile
+    // row is not draggable at all. The attribute is checked in the markup, and the belts behind it are exercised
+    // by dispatching the event the platform would have sent.
+    const { win } = joplin;
+    await settle();
+    await waitForPanelTodo(win, NATIVE);
+    await armMessageLog(win);
+    const panel = await agendaPanel(win);
+    const markup = await panel.evaluate((marker: string) => {
+      const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
+      const row = rows.find((r) => (r.textContent || '').includes(marker));
+      if (!row) return null;
+      return {
+        draggable: row.getAttribute('draggable'),
+        ondragstart: row.getAttribute('ondragstart'),
+        ondragend: row.getAttribute('ondragend'),
+        userDrag: (getComputedStyle(row) as any).webkitUserDrag || null,
+        // Nothing anywhere in a mobile panel may be draggable, or the platform has another way in.
+        anyDraggable: document.querySelectorAll('#joplin-plugin-content [draggable]').length,
+      };
+    }, NATIVE);
+    console.log('TOUCH NATIVE MARKUP', JSON.stringify(markup));
+    expect(markup, 'the row must be on screen').not.toBe(null);
+    expect(markup!.draggable, 'a mobile to-do row must carry no draggable attribute').toBe(null);
+    expect(markup!.ondragstart, 'nor a dragstart handler').toBe(null);
+    expect(markup!.ondragend, 'nor a dragend handler').toBe(null);
+    expect(markup!.anyDraggable, 'and nothing in a mobile panel may be draggable').toBe(0);
+    // The belt: even a dragstart aimed straight at the row is cancelled, and starts nothing.
+    const dispatched = await panel.evaluate((marker: string) => {
+      const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
+      const row = rows.find((r) => (r.textContent || '').includes(marker));
+      if (!row) return null;
+      const event = new Event('dragstart', { bubbles: true, cancelable: true });
+      row.dispatchEvent(event);
+      return { prevented: event.defaultPrevented, dragging: document.querySelectorAll('.todo.-dragging').length };
+    }, NATIVE);
+    console.log('TOUCH NATIVE DRAGSTART', JSON.stringify(dispatched));
+    expect(dispatched!.prevented, 'a dragstart on mobile must be cancelled before it can become a drag').toBe(true);
+    expect(dispatched!.dragging, 'and it must lift nothing').toBe(0);
+    expect(names(await postedMessages(win)), 'and take no refresh guard').not.toContain('dialogGuard');
+    // ...and the gesture the row is FOR still works, on the very same row: hold, lift, drop into a gap.
+    await armMessageLog(win);
+    await dragRowTo(NATIVE, () => rowPoint(win, MID, 0.85));
+    expect(names(await postedMessages(win)), 'the touch drag itself is untouched by any of this').toContain(
+      'todosDroppedBetween'
+    );
+    await dueSettles(NATIVE, (d) => d > todayAt(12) && d < todayAt(20));
+  });
+
   test('a read-only peek row is never lifted, and still opens its menu', async () => {
     const { win } = joplin;
     await settle();
@@ -1333,10 +1722,11 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       await win.waitForTimeout(700);
       expect((await dragState()).dragging, 'a peek row must never be lifted - it is not a reschedule source').toBe(0);
       // Its long press keeps doing what it always did: the single-note menu for the peeked note. Asserted HERE,
-      // before the step, and not after it: the step is an unbounded 24px pan that the armed state deliberately
-      // does not preventDefault, so if this search render's list overflows at all the pan scrolls it, and any
-      // scroll runs `hideNoteContextMenu` (the document-level capture listener in panelWebview.js). The menu would
-      // then be gone for a reason this case is not about.
+      // before the step, and not after it: a peek row ARMS NOTHING (canLiftRow refuses it), so no touchmove
+      // listener is attached and nothing cancels the pan - the step is an unbounded pan that scrolls this search
+      // render's list if it overflows at all, and a scroll runs `hideNoteContextMenu` (the document-level capture
+      // listener in panelWebview.js, which stands aside only for an ARMED gesture). The menu would then be gone
+      // for a reason this case is not about.
       await expect(panel.locator('#noteContextMenu')).toBeVisible();
       // ...and it arms nothing either, so even the move that WOULD lift an ordinary row does nothing here. The
       // unbounded step again: nothing is aimed at afterwards, and the list under this case is a search render.
