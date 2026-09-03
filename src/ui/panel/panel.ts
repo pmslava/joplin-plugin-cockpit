@@ -1032,7 +1032,10 @@ export async function revealNote(noteID){
     // (a) Does the current view already list it?
     await refreshPanelData()
     if (renderedRowIsListed(id)) return
-    // (b) Point the panel at the note's own notebook and drop the typed search.
+    // (b) Point the panel at the note's own notebook and drop the typed search. The three state writes are
+    // setNotebookFilter's, spelled out here rather than called, for two reasons: that function ends in a render
+    // of its own (this step needs exactly one, and (c) may still follow) and it CLEARS the reveal, which is
+    // right for every other caller and would undo the marker this reveal has just armed.
     notebookFilter = String(note.parent_id || "")
     searchFilter = ""
     lastScrollTop = 0
