@@ -5745,7 +5745,7 @@ async function main() {
         assert.ok(swallower, 'the swallower must be registered in the capture phase')
     })
 
-    await test('mobile diagnostic: the gesture trace is a mobile-only, default-off setting (1.9.10)', () => {
+    await test('mobile diagnostic: the gesture trace is a mobile-only, default-off, HIDDEN setting (1.9.10, hidden in 2.3.0)', () => {
         // After two device rounds spent guessing, the next one can report what actually fired.
         const settingsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settings.ts'), 'utf8')
         assert.ok(/gestureTraceSettingKey = "gestureTrace"/.test(settingsSource), 'the setting must exist')
@@ -5753,6 +5753,15 @@ async function main() {
         assert.ok(block, 'the setting must be registered')
         assert.ok(/value: false/.test(block[1]), 'and default to OFF')
         assert.ok(/type: SettingItemType\.Bool/.test(block[1]), 'as a Bool')
+        // HIDDEN, not removed (2.3.0, the owner's call once the mobile drag rounds were done): the mobile drag
+        // shipped, so a diagnostic strip has no place on a user's Settings screen - but every line of the
+        // machinery below stays, so a future device round only flips this one word in a dev build. public: false
+        // keeps the setting registered, readable and default-off; everything the rest of this pin asserts is
+        // exactly what it asserted while the setting was public, which is the point of hiding it rather than
+        // deleting it.
+        assert.ok(/public: false/.test(block[1]),
+            'and it must be OFF the Settings screen - public: false, so it stays readable without being offered')
+        assert.ok(!/public: true/.test(block[1]), 'with no public: true left in the block to contradict that')
         // Reaches the webview through the island it already reads - no new plumbing, no extra round-trip.
         const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
         assert.ok(/gestureTrace: gestureTrace,/.test(panelSource), 'it must ride in the search-data island')
