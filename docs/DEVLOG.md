@@ -1492,7 +1492,12 @@ half — move sideways instead, and nothing may lift while the menu stays and th
 stroke. If 18b still fails, the cheap fix (registering the `touchmove` listener once at load) comes
 first, and only then the drag-handle fallback.
 
-Suite: 359 harness checks, all passing (the review round above rewrote three of them in place and added no new
+Suite: 359 harness checks, all passing - the closing round below rewrote one more in place (the gesture-trace
+pin, which now pins `public: false` as well) and added none - and Playwright's `globalTimeout` went 25 → 30
+minutes with the CI job's cap 28 → 40, because `e2e/mobile-drag.spec.ts` has since grown to twenty cases whose
+`beforeAll` seeds ~100 to-dos while main alone already ran 82 tests in ~12 minutes: the same relationship as
+before, the suite's own cap ending a stuck run gracefully with its report written, the job's cap only the
+backstop behind it. (The review round above rewrote three checks in place and added no new
 ones - the stale reset pinned on `isPrimary` and refused on the pointer id, the registration order the rescued
 press depends on, the two selection anchors the lift must not write, and a table row in the `liftDecision` pin that
 had reduced to `X === X` and now asserts what it meant). Two further mutations were run for those: restoring the
@@ -1586,3 +1591,22 @@ produces it on the device is Android's and no harness of ours can make Chromium 
 halves are real CDP touch as everywhere else in the file.) Of the twelve that came before, the verifier ran the
 file for the first time since the redesign and got eleven green, the ring case red for the spec reason above and
 fixed there; the file is not re-run here — that is the verifier's, and the two new cases have never been run.
+
+**The fourth Pixel round passed, and the trace goes quiet.** 18a: the hold opens the to-do's context menu
+with the finger still down. 18b, the step the whole design rested on: keep holding and move, and the row
+lifts — Android's compositor honours the cancelled `touchmove`, the list does not pan under the finger, and
+neither the cheap fix (registering the listener once at load) nor the drag-handle fallback is needed. And a
+gap drop landed: the to-do came back from Joplin due strictly between its new neighbours. That is the
+gesture end to end on a real device, which is what four rounds were for.
+
+So the diagnostic that got us there leaves the Settings screen at the owner's request. `gestureTrace` is now
+registered `public: false` in `src/core/settings.ts`: Joplin keeps the setting, it still defaults to OFF,
+`panel.ts` still reads it into the search-data island and every trace point in `panelWebview.js` is still
+compiled in — it is simply never offered to a user, who has no reason to be shown a strip of `drag-target:`
+codes. **Nothing was deleted.** The next device round turns the public flag back on in a dev build, rebuilds
+and sideloads, and the trace is exactly what it was for these four rounds; MOBILE.md §7 and every checklist
+step that said "Settings → Cockpit" now say that instead. The harness pin for the setting was rewritten in
+place rather than dropped — it asserts the hidden shape (`public: false`, and no enabled spelling left in the
+block to contradict it) on top of everything it already asserted about the default, the type, the island and
+the reader — so the count stays at 359, and README's settings list, which describes the Settings screen,
+loses the bullet that is no longer on it.

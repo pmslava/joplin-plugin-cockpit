@@ -227,7 +227,6 @@ Cockpit's settings live in Joplin's own Settings › Plugins › Cockpit.
 - **Excluded notebooks** — see [Search and filtering](#search-and-filtering).
 - **Theme, completed-to-do style, font size, circle size and the six custom colours** — see [Appearance](#appearance).
 - **Show the Cockpit button in the note toolbar** — a gauge button in the note toolbar toggles the panel, and the same command sits in Tools › Cockpit alongside this switch and Set Panel CSS. Joplin cannot add or remove a toolbar button while running, so turning it on or off applies after a restart, and Cockpit says so.
-- **Gesture trace** — a default-off, mobile-only diagnostic that replaces the suggestion list's hint line with the last few touch events, so a touch problem on a real device can be reported precisely.
 
 ## On Android
 
