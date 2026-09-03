@@ -1176,6 +1176,11 @@ function isPanelDragEvent(event){
 }
 
 function onTodoDragStart(event, todoID){
+    // Mobile rows carry no ondragstart (formats.ts) and the capturing dragstart listener above cancels any drag the
+    // platform starts anyway, so this cannot run on a phone - and if it ever does, the markup gate has leaked and
+    // the strip must say so. What must NOT happen is the desktop path running there: it would rewrite the selection,
+    // dim the payload and hand Android a drag image while the touch gesture is trying to hold the same finger.
+    if (IS_MOBILE){ traceGesture('native-dragstart:handler'); return }
     if (!selectedRowIDs.has(todoID)){
         selectedRowIDs.clear()
         selectedRowIDs.add(todoID)
@@ -1592,10 +1597,31 @@ document.addEventListener('drop', endPanelDrag, false)
 document.addEventListener('dragend', endPanelDrag, false)
 document.addEventListener('dragleave', onPanelDragLeave, false)
 
+/** No native HTML5 drag on mobile, ever ************************************************************************************************************
+ * ANDROID STARTS A NATIVE DRAG FROM A LONG PRESS ON A DRAGGABLE ELEMENT, and the third Pixel round is where this repo found that out. The owner's     *
+ * screenshot of a failed drag shows a translucent COPY of the pressed row floating below his finger - the platform's own drag image - and the gesture *
+ * strip for that press reads `contextmenu-suppressed:row` and then nothing: no `menu-open`, because the WebView fired dragstart and CANCELLED the     *
+ * touch sequence, and a cancelled sequence takes the 500ms long-press timer with it. No menu, no arm, no touch drag. The one drop that still worked   *
+ * was onto a heading, because the NATIVE drag found the heading's inline ondrop - the desktop path - while a gap needs the touch path that never       *
+ * started. Four device reports, one cause.                                                                                                             *
+ *                                                                                                                                                      *
+ * The fix is in the markup: a mobile row carries no draggable attribute and no drag handlers (renderTodoRowHtml's nativeDrag and renderWeekCard, in     *
+ * src/core/formats.ts), so there is nothing for the platform to pick up. This listener is the belt to that: whatever else in the panel might one day    *
+ * be draggable, on mobile no dragstart is allowed to become a drag, and one that is attempted is NAMED on the strip so the next device round can say   *
+ * whether Android still tries. Capture at the document, so it runs before any inline ondragstart and before anything can stop it on the way up.        *
+ * Desktop returns on the first line and its drag is untouched.                                                                                          *
+ ***************************************************************************************************************************************************/
+document.addEventListener('dragstart', function(event){
+    if (!IS_MOBILE) return
+    traceGesture('native-dragstart')
+    event.preventDefault()
+}, true)
+
 /** Drag to reschedule on touch (mobile) ************************************************************************************************************
  * The same two drops the desktop drag offers - into the GAP between two rows, and onto a whole-row [data-drop] target (a group heading including "No  *
- * Due Date", a calendar day, a week column) - reached by a finger. Android's WebView fires no HTML5 drag at all, so none of the machinery above can   *
- * be used directly; what IS reused, unchanged, is everything below the input layer: betweenGroupInfo's eligibility, the neighbour walk, the two       *
+ * Due Date", a calendar day, a week column) - reached by a finger. A finger cannot drive the HTML5 drag above - and the drag Android DOES start from a *
+ * long press is the enemy of this gesture rather than a way into it, which is why mobile rows carry no draggable attribute at all (see the block just  *
+ * above). So none of the machinery above can be used directly; what IS reused, unchanged, is everything below the input layer: betweenGroupInfo's eligibility, the neighbour walk, the two       *
  * indicator painters, the edge auto-scroll helper, and both message shapes - so a touch drop and a mouse drop are the same operation, and the host    *
  * cannot tell them apart.                                                                                                                             *
  *                                                                                                                                                     *

@@ -1926,6 +1926,95 @@ async function main() {
         assert.ok(!noteTag.includes('onmousedown'), 'the peek note row must not be selectable (no onmousedown on its root)')
     })
 
+    // ============================================================ no native HTML5 drag on a mobile row
+    // THE THIRD PIXEL ROUND'S ROOT CAUSE. Android's WebView starts a native HTML5 drag from a LONG PRESS on a
+    // draggable element: it fires dragstart (the desktop onTodoDragStart runs and hands the user a translucent
+    // copy of the row as the platform's drag image) and then cancels the touch sequence, which takes the panel's
+    // own 500ms long-press timer with it - so no context menu opens, the touch drag never arms, and the only drop
+    // that still lands is onto a heading, through the NATIVE drag's inline ondrop. Four device reports, one cause,
+    // and the fix is that a mobile row is not draggable in the first place. Pinned as three things: the mobile row
+    // has neither the attribute nor the handlers, the desktop row still has both, and the mobile row is the
+    // desktop row with exactly those and nothing else removed (selection, opening, the menu and the tick circle
+    // all carry on unchanged - the phone's whole panel would otherwise go with them).
+    const mobileRowState = await run({
+        dataDir: path.join(tmp, 'nativedrag-interval-data'),
+        installationDir: path.join(tmp, 'nativedrag-mobile-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: [{ id: rowTodoId, title: 'Interval row to-do', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: rowFolder, user_updated_time: 1 }],
+        searchNotes: [{ id: rowNoteId, title: 'A plain note row', is_todo: 0, todo_completed: 0, parent_id: rowFolder, user_updated_time: 2 }],
+        folders: [{ id: rowFolder, title: 'Inbox', parent_id: '', updated_time: 1 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [
+                { ...baseProfile, id: 1, name: 'Rows', searchCriteria: '', showNotes: true, notesPosition: 'after', noteID: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    const mobileWeekState = await run({
+        dataDir: path.join(tmp, 'nativedrag-week-data'),
+        installationDir: path.join(tmp, 'nativedrag-week-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos: [{ id: rowTodoId, title: 'Week card to-do', todo_completed: 0, todo_due: Date.now(), parent_id: rowFolder, user_updated_time: 1 }],
+        folders: [{ id: rowFolder, title: 'Inbox', parent_id: '', updated_time: 1 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [
+                { ...baseProfile, id: 1, name: 'Wk', displayFormat: 'week', searchCriteria: '', noteID: '' },
+            ] }),
+            currentProfileID: 1,
+        },
+    })
+    // The drag attribute and the two handlers, and nothing else: what a mobile row must not have, and what taking
+    // them off a desktop row must leave behind.
+    const withoutNativeDrag = (tag) => tag.replace(' draggable="true"', '').replace(/\s*ondragstart="[^"]*"\s*ondragend="[^"]*"/, '')
+
+    await test('row markup (mobile): a to-do row is not draggable - Android must not start a native drag from the long press', () => {
+        const tag = rootOpenTag(mobileRowState.panelHtml['panel-panel'], 'data-todo-id="' + rowTodoId + '"')
+        assert.ok(!tag.includes('draggable'), 'a mobile to-do row must carry no draggable attribute')
+        assert.ok(!tag.includes('ondragstart') && !tag.includes('ondragend'), 'nor either drag handler')
+        // ...and everything a phone actually uses is still there. This is the half that makes the change safe:
+        // the long press (oncontextmenu), the tap (onclick), the selection the desktop drag shares (onmousedown)
+        // and the double tap are all untouched, because only the HTML5 drag was ever the problem.
+        assert.ok(tag.includes(`oncontextmenu="onTodoContextMenu(event, '${rowTodoId}')"`), 'the row keeps its context-menu handler')
+        assert.ok(tag.includes(`onclick="onTodoRowClicked(event, '${rowTodoId}')"`), 'the row keeps its open handler')
+        assert.ok(tag.includes(`onmousedown="onTodoRowMouseDown(event, '${rowTodoId}')"`), 'the row keeps its selection handler - nativeDrag is not draggable:false')
+        assert.ok(tag.includes(`ondblclick="onRowDoubleClicked(event, '${rowTodoId}')"`), 'the row keeps its double-click handler')
+    })
+
+    await test('row markup (mobile): a week planner card is under the same rule', () => {
+        const html = mobileWeekState.panelHtml['panel-panel']
+        assert.ok(html.includes('week-planner'), 'precondition: the week planner rendered')
+        const tag = rootOpenTag(html, 'data-todo-id="' + rowTodoId + '"')
+        assert.ok(tag.includes('class="todo -card'), 'precondition: this is the week card')
+        assert.ok(!tag.includes('draggable'), 'a mobile week card must carry no draggable attribute either')
+        assert.ok(!tag.includes('ondragstart') && !tag.includes('ondragend'), 'nor either drag handler')
+        assert.ok(tag.includes(`onmousedown="onTodoRowMouseDown(event, '${rowTodoId}')"`), 'and it keeps its selection handler')
+        // The whole mobile panel, not just this row: nothing anywhere in it may be draggable, or Android has a
+        // way back in through whatever was missed.
+        assert.ok(!html.includes('draggable='), 'no element of a mobile panel may be draggable')
+        assert.ok(!html.includes('ondragstart'), 'and none may carry a dragstart handler')
+        assert.ok(!mobileRowState.panelHtml['panel-panel'].includes('draggable='), '...the interval panel included')
+    })
+
+    await test('row markup (desktop): the drag is untouched, and the mobile row is that row minus exactly it', () => {
+        for (const [what, state] of [['list row', rowState], ['week card', weekCardState]]){
+            const tag = rootOpenTag(state.panelHtml['panel-panel'], 'data-todo-id="' + rowTodoId + '"')
+            assert.ok(tag.includes(' draggable="true"'), `the desktop ${what} must still be draggable`)
+            assert.ok(tag.includes(`ondragstart="onTodoDragStart(event, '${rowTodoId}')"`), `the desktop ${what} must keep its dragstart`)
+            assert.ok(tag.includes('ondragend="onTodoDragEnd(event)"'), `the desktop ${what} must keep its dragend`)
+        }
+        // The DIFFERENCE is exactly the drag: strip the attribute and the two handlers from the desktop tag and
+        // what is left is the mobile tag, byte for byte. Anything else that had quietly changed with the platform
+        // - a lost onmousedown, a reordered attribute, a dropped id - fails here rather than on the device.
+        assert.strictEqual(withoutNativeDrag(rootOpenTag(rowState.panelHtml['panel-panel'], 'data-todo-id="' + rowTodoId + '"')),
+            rootOpenTag(mobileRowState.panelHtml['panel-panel'], 'data-todo-id="' + rowTodoId + '"'),
+            'a mobile list row must be the desktop list row minus exactly the drag attribute and its two handlers')
+        assert.strictEqual(withoutNativeDrag(rootOpenTag(weekCardState.panelHtml['panel-panel'], 'data-todo-id="' + rowTodoId + '"')),
+            rootOpenTag(mobileWeekState.panelHtml['panel-panel'], 'data-todo-id="' + rowTodoId + '"'),
+            'and a mobile week card must be the desktop week card minus exactly the same')
+    })
+
     // (d) The zone markup a click distinguishes - the tick circle, the title anchor and the notebook pill - is
     // byte-stable for a representative row: the fix lives entirely in the row-level click handler, so no zone
     // gained or lost markup. Targeted fragment checks, not a brittle whole-row snapshot.
@@ -3050,6 +3139,12 @@ async function main() {
         }
     })
 
+    // The two thresholds AS SHIPPED, read from the panel rather than repeated here, so the pure checks below can
+    // never go on proving things about numbers the gesture no longer uses. Their values and their RELATION are
+    // pinned by name further down ('the two bands are named constants').
+    const PRESS_SLOP = Number(/var TOUCH_DRAG_SLOP = (\d+)/.exec(webviewSource)[1])
+    const LIFT_PX = Number(/var TOUCH_DRAG_LIFT_PX = (\d+)/.exec(webviewSource)[1])
+
     await test('touchDrag.movedBeyond: per axis, and exactly the slop is still held still', () => {
         assert.strictEqual(TouchDrag.movedBeyond(10, 0, 0, 0, 10), false, 'exactly the slop has not moved (the long press says the same)')
         assert.strictEqual(TouchDrag.movedBeyond(11, 0, 0, 0, 10), true, 'one past the slop on x has')
@@ -3057,39 +3152,41 @@ async function main() {
         assert.strictEqual(TouchDrag.movedBeyond(7, 7, 0, 0, 10), false, 'the rule is per AXIS, not a diagonal distance')
         // The same arithmetic answers the drag's own, larger question: one function, two thresholds, so "has it
         // moved" cannot come to mean two different things to the press and to the lift.
-        assert.strictEqual(TouchDrag.movedBeyond(24, 0, 0, 0, 24), false, 'exactly the lift threshold is still held still too')
-        assert.strictEqual(TouchDrag.movedBeyond(0, 25, 0, 0, 24), true, 'and one past it has travelled')
+        assert.strictEqual(TouchDrag.movedBeyond(LIFT_PX, 0, 0, 0, LIFT_PX), false, 'exactly the lift threshold is still held still too')
+        assert.strictEqual(TouchDrag.movedBeyond(0, LIFT_PX + 1, 0, 0, LIFT_PX), true, 'and one past it has travelled')
     })
 
     await test('touchDrag.liftDecision: the LIFT threshold first, then the axis - and a perfect diagonal lifts', () => {
         // The whole of the menu-first gesture's decision. The hold opens the context menu with the finger still
         // down; this says what the finger did NEXT, once, and for good: up or down is the drag, across is Joplin's
         // own side-menu swipe and the panel gets out of its way.
-        const d = (dx, dy) => TouchDrag.liftDecision(dx, dy, 24)
+        const d = (dx, dy) => TouchDrag.liftDecision(dx, dy, LIFT_PX)
+        const past = LIFT_PX + 1
         assert.strictEqual(d(0, 0), null, 'a finger that has not moved has decided nothing')
-        assert.strictEqual(d(24, 0), null, 'exactly the threshold is still held still, the same as movedBeyond')
-        assert.strictEqual(d(17, 17), null, 'the threshold is per AXIS, not a diagonal distance')
-        assert.strictEqual(d(0, 25), 'vertical', 'down past the threshold is the drag')
-        assert.strictEqual(d(0, -25), 'vertical', '...and so is up')
-        assert.strictEqual(d(25, 0), 'sideways', 'across past the threshold is the side menu, not ours')
-        assert.strictEqual(d(-25, 0), 'sideways', '...in either direction')
-        assert.strictEqual(d(25, 25), 'vertical', 'a perfect diagonal goes to the drag: a refused swipe is one flick from being re-tried, a refused lift is not')
-        assert.strictEqual(d(26, 25), 'sideways', 'one pixel more across than down is sideways')
-        assert.strictEqual(d(25, 26), 'vertical', 'and one more down than across is vertical')
-        assert.strictEqual(d(-25, 26), 'vertical', 'the two axes are compared by magnitude, never by sign')
+        assert.strictEqual(d(LIFT_PX, 0), null, 'exactly the threshold is still held still, the same as movedBeyond')
+        assert.strictEqual(d(LIFT_PX - 1, LIFT_PX - 1), null, 'the threshold is per AXIS, not a diagonal distance')
+        assert.strictEqual(d(0, past), 'vertical', 'down past the threshold is the drag')
+        assert.strictEqual(d(0, -past), 'vertical', '...and so is up')
+        assert.strictEqual(d(past, 0), 'sideways', 'across past the threshold is the side menu, not ours')
+        assert.strictEqual(d(-past, 0), 'sideways', '...in either direction')
+        assert.strictEqual(d(past, past), 'vertical', 'a perfect diagonal goes to the drag: a refused swipe is one flick from being re-tried, a refused lift is not')
+        assert.strictEqual(d(past + 1, past), 'sideways', 'one pixel more across than down is sideways')
+        assert.strictEqual(d(past, past + 1), 'vertical', 'and one more down than across is vertical')
+        assert.strictEqual(d(-past, past + 1), 'vertical', 'the two axes are compared by magnitude, never by sign')
         // THE THIRD PIXEL ROUND'S ARITHMETIC. The press survives on 10px from the press point; if the lift used
         // that same number the arm would be born at the edge of its own threshold and the smallest drift after the
         // menu opened would lift the row and close the menu. Everything the OLD gate would have decided, this one
         // must still call undecided - which is what "some tolerance for hold and move" means as a test.
-        for (const [dx, dy] of [[0, 11], [11, 0], [12, 12], [0, -20], [23, 0], [0, 24], [-24, 24]]){
+        for (const [dx, dy] of [[0, PRESS_SLOP + 1], [PRESS_SLOP + 1, 0], [PRESS_SLOP + 2, PRESS_SLOP + 2],
+                                [0, -LIFT_PX], [LIFT_PX - 1, 0], [0, LIFT_PX], [-LIFT_PX, LIFT_PX]]){
             assert.strictEqual(d(dx, dy), null, `travel of ${dx},${dy} is inside the tolerance and must decide nothing`)
-            assert.strictEqual(TouchDrag.movedBeyond(dx, dy, 0, 0, 10) && d(dx, dy) === null, TouchDrag.movedBeyond(dx, dy, 0, 0, 10),
-                `...even though ${dx},${dy} would have passed the press's own 10px slop`)
+            assert.strictEqual(TouchDrag.movedBeyond(dx, dy, 0, 0, PRESS_SLOP) && d(dx, dy) === null, TouchDrag.movedBeyond(dx, dy, 0, 0, PRESS_SLOP),
+                `...even though ${dx},${dy} would have passed the press's own ${PRESS_SLOP}px slop`)
         }
         // The threshold gate IS movedBeyond, at whatever number the caller passes, so the two cannot drift apart:
         // anything that has moved for one has moved for the other, at every point of a grid straddling both
         // boundaries in all four quadrants.
-        for (const threshold of [10, 24]){
+        for (const threshold of [PRESS_SLOP, LIFT_PX]){
             for (let dx = -30; dx <= 30; dx++) for (let dy = -30; dy <= 30; dy++){
                 assert.strictEqual(TouchDrag.liftDecision(dx, dy, threshold) === null, !TouchDrag.movedBeyond(dx, dy, 0, 0, threshold),
                     `the threshold gate must agree with movedBeyond at ${dx},${dy} (threshold ${threshold})`)
@@ -3596,7 +3693,7 @@ async function main() {
         assert.ok(/var TOUCH_DRAG_BAND = 0\.5/.test(webviewSource), 'the touch band must be a named constant of its own, and 0.5 (no inert middle)')
         assert.ok(/var BETWEEN_BAND = 0\.4/.test(webviewSource), 'the desktop band must still be 0.4, with its inert middle')
         assert.ok(/var TOUCH_DRAG_SLOP = 10/.test(webviewSource), 'the press slop must match the long press it lifts out of')
-        assert.ok(/var TOUCH_DRAG_LIFT_PX = 24/.test(webviewSource), 'the lift threshold must be a named constant of its own')
+        assert.ok(/var TOUCH_DRAG_LIFT_PX = 20/.test(webviewSource), 'the lift threshold must be a named constant of its own')
         assert.ok(/var TOUCH_DRAG_WATCHDOG_MS = \d+/.test(webviewSource), 'the watchdog must be a named, tunable constant')
         // THE RELATION, not just the two numbers. The press survives 10px from the press point; if the lift used
         // that same number from that same origin the arm would be born at the edge of its own threshold, which is
@@ -3642,7 +3739,8 @@ async function main() {
 
     await test('webview touch drag: the desktop HTML5 handlers keep their IS_MOBILE gates', () => {
         // The touch gesture is an ADDITION: nothing about the desktop drag moved, and the mobile early-returns
-        // that were there before this feature are still there (there is no HTML5 drag on Android to gate).
+        // that were there before this feature are still there. They are not decoration: Android DOES fire an
+        // HTML5 drag (see the block below), so every one of these is a live gate rather than a dead one.
         assert.ok(/function onBetweenDragOver\(event\)\{\s*if \(IS_MOBILE \|\| !isPanelDragEvent\(event\)\) return/.test(webviewSource), 'onBetweenDragOver stays desktop-gated')
         assert.ok(/async function onBetweenDrop\(event\)\{\s*if \(IS_MOBILE\) return/.test(webviewSource), 'onBetweenDrop stays desktop-gated')
         assert.ok(/function onDragAutoscroll\(event\)\{\s*if \(IS_MOBILE \|\| !isPanelDragEvent\(event\)\) return/.test(webviewSource), 'onDragAutoscroll stays desktop-gated')
@@ -3650,6 +3748,29 @@ async function main() {
         // The neighbour walk is now shared by both gestures rather than copied into the new one.
         assert.ok(handlerBody('onBetweenDrop').includes('betweenNeighboursAt(target.row, target.before'), 'the desktop drop must use the shared neighbour resolution')
         assert.ok(handlerBody('dropTouchDrag').includes('betweenNeighboursAt(target.row, target.before'), 'and so must the touch drop, so the two cannot disagree about a gap')
+    })
+
+    await test('webview touch drag: on mobile no dragstart becomes a drag, whoever started it', () => {
+        // The markup gate (a mobile row carries no draggable attribute - pinned in the row-markup block above) is
+        // the fix; these are its two belts, and both exist because the failure they prevent is silent. Android
+        // starting its own HTML5 drag from a long press cancels the touch sequence, so the panel's 500ms timer
+        // never fires and the user sees no menu at all - with nothing on the gesture strip to say why, which is
+        // exactly how the third Pixel round's strip read.
+        assert.ok(/document\.addEventListener\('dragstart', function\(event\)\{\s*if \(!IS_MOBILE\) return\s*traceGesture\('native-dragstart'\)\s*event\.preventDefault\(\)\s*\}, true\)/.test(webviewSource),
+            'a capturing document dragstart listener must cancel every drag on mobile, and name it on the strip')
+        // Capture, and at the document: it has to run before any inline ondragstart a row might still carry, and
+        // before anything on the way up can stop it.
+        const dragStart = handlerBody('onTodoDragStart')
+        assert.ok(dragStart.includes("if (IS_MOBILE){ traceGesture('native-dragstart:handler'); return }"),
+            'the desktop dragstart handler must refuse to run on mobile, and say so')
+        assert.ok(dragStart.indexOf('IS_MOBILE') < dragStart.indexOf('selectedRowIDs'),
+            'and it must refuse BEFORE it touches the selection - a native drag that rewrote the selection is half the report')
+        assert.ok(dragStart.indexOf('IS_MOBILE') < dragStart.indexOf("classList.add('-dragging')"),
+            '...and before it dims anything')
+        // The CSS belt, which is what the WebView reads before it decides whether an element can be picked up.
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        assert.ok(/\.cockpit-mobile \.todo \{\s*-webkit-user-drag: none;/.test(css),
+            'a mobile row must be -webkit-user-drag:none as well as un-draggable in the markup')
     })
 
     await test('webview touch drag: the trace falls back to the sticky toast when no suggestion hint is on screen', () => {
@@ -3674,7 +3795,10 @@ async function main() {
                             // that used to silence the menu, and the two codes that can finally say whether a phone
                             // delivers the compatibility mouse events a row's selection depends on.
                             "'drag-target:' + (target.kind === 'none' ? 'none:' + target.reason", "'stale-pointer'",
-                            "'row-press:'", "'row-click:'"]){
+                            "'row-press:'", "'row-click:'",
+                            // ...and the round's root cause: a native HTML5 drag the platform started behind the
+                            // gesture's back, which is invisible from inside the panel unless it is named.
+                            "'native-dragstart'", "'native-dragstart:handler'"]){
             assert.ok(webviewSource.includes(code), `the trace must carry ${code}`)
         }
         // The drop trace names the write, on both branches, BEFORE the message goes and again once it has: a drop
