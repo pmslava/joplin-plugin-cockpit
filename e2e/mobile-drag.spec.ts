@@ -40,6 +40,14 @@ import {
  * rules and the tap-versus-hold timing are exercised rather than assumed. Coordinates are therefore top-level
  * window coordinates: every frame-relative box is translated by the panel iframe's own origin.
  *
+ * ANDROID'S OWN `contextmenu` IS SYNTHETIC HERE, and only here. Since the second Pixel round the panel suppresses
+ * `contextmenu` panel-wide on mobile - the rows carry inline oncontextmenu handlers (src/core/formats.ts), and the
+ * platform's long press was using them to open the context menu behind this gesture's back. The two cases for that
+ * dispatch a `MouseEvent` rather than gesturing, deliberately: what is under test is the EVENT PATH (is it
+ * cancelled, does the inline handler run, does the opener refuse a caller mid-drag), which a dispatched event
+ * exercises exactly, while the long press that emits it on a device is Android's own and no harness of ours can
+ * make Chromium under Xvfb produce it. The drag halves of those cases are real CDP touch like everything else.
+ *
  * WHAT NO SPEC HERE CAN PROVE, and what the Pixel round is for: Android's own gesture arbitration. Chromium under
  * Xvfb happily lets a non-passive `touchmove` cancel the pan; whether the Android WebView's compositor hands the
  * gesture over at all - rather than starting a fling and delivering non-cancelable moves, or raising the native
@@ -70,6 +78,10 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   const ONTO_DAY = `td-onto-day-${stamp}`;
   const ONTO_CLEAR = `td-onto-clear-${stamp}`;
   const MENU = `td-menu-${stamp}`;
+  // The two cases for Android's own `contextmenu`: one that never gestures at all, and one that fires it in the
+  // middle of a lifted drag.
+  const CTX = `td-ctx-${stamp}`;
+  const CTX_DRAG = `td-ctxdrag-${stamp}`;
   const CANCEL = `td-cancel-${stamp}`;
   const REFUSE = `td-refuse-${stamp}`;
   const SWIPE = `td-swipe-${stamp}`;
@@ -157,6 +169,8 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     ids[ONTO_DAY] = await createTodoViaApi(ONTO_DAY, folderId, todayAt(14, 30));
     ids[ONTO_CLEAR] = await createTodoViaApi(ONTO_CLEAR, folderId, todayAt(16, 45));
     ids[MENU] = await createTodoViaApi(MENU, folderId, yesterdayAt(12));
+    ids[CTX] = await createTodoViaApi(CTX, folderId, yesterdayAt(12, 15));
+    ids[CTX_DRAG] = await createTodoViaApi(CTX_DRAG, folderId, yesterdayAt(12, 30));
     ids[CANCEL] = await createTodoViaApi(CANCEL, folderId, yesterdayAt(13));
     ids[REFUSE] = await createTodoViaApi(REFUSE, folderId, yesterdayAt(13, 30));
     ids[SWIPE] = await createTodoViaApi(SWIPE, folderId, yesterdayAt(13, 45));
@@ -857,6 +871,144 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
       .toContain(PARK);
     await panel.locator('body').press('Escape');
     await expect(panel.locator('#noteContextMenu')).toHaveCount(0);
+  });
+
+  test("a contextmenu on a mobile row opens nothing - Android's long press cannot reach the inline handler", async () => {
+    // THE SECOND PIXEL ROUND'S BUG, at its own event. Android's native long press fires a real `contextmenu` on
+    // whatever is under the finger, and every to-do row carries an inline oncontextmenu="onTodoContextMenu(...)"
+    // (src/core/formats.ts) - so the platform could open the panel's context menu without the long-press adapter
+    // knowing anything about it, at a moment the device's "Touch & hold delay" decides rather than the panel.
+    // On mobile the panel now refuses the event outright, for every target, in the capture phase at the document.
+    // The event is synthetic here on purpose: what is under test is the EVENT PATH (is it cancelled, does the
+    // inline handler run), which a dispatched MouseEvent exercises exactly - the gesture that produces it on the
+    // device is Android's, and no harness of ours can make Chromium under Xvfb emit it.
+    const { win } = joplin;
+    await settle();
+    expect(await forceMobilePanel(win), 'the panel must be in mobile mode').toBe(true);
+    const panel = await agendaPanel(win);
+    await waitForPanelTodo(win, CTX);
+    const seen = await panel.evaluate((m) => {
+      const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
+      const row = rows.find((r) => (r.textContent || '').includes(m));
+      if (!row) return null;
+      const event = new MouseEvent('contextmenu', { button: 2, bubbles: true, cancelable: true });
+      const notCancelled = row.dispatchEvent(event);
+      return {
+        // The hazard, asserted rather than assumed: the row really does carry the handler that would have opened
+        // the menu. The day the markup stops emitting it, this case is testing nothing and should say so.
+        inline: row.getAttribute('oncontextmenu') || '',
+        prevented: !notCancelled || event.defaultPrevented,
+        menus: document.querySelectorAll('#noteContextMenu').length,
+      };
+    }, CTX);
+    console.log('TOUCH CTXMENU', JSON.stringify(seen));
+    expect(seen, `no row on screen for ${CTX}`).not.toBe(null);
+    expect(seen!.inline, 'the row must still carry the inline handler this suppression exists for').toContain(
+      'onTodoContextMenu'
+    );
+    expect(seen!.prevented, 'a contextmenu on a mobile row must be cancelled - the native callout goes with it').toBe(
+      true
+    );
+    expect(seen!.menus, 'and the inline handler must never run: the adapter alone opens the menu').toBe(0);
+    // ...and the same row still opens its menu the way it is supposed to, on a real hold: the suppression removes
+    // the platform's route in without touching the panel's own.
+    const finger = await newFinger(win);
+    try {
+      await finger.down(await rowPoint(win, CTX, 0.5));
+      await win.waitForTimeout(700);
+      await expect(panel.locator('#noteContextMenu'), 'the long-press adapter must still open it').toBeVisible();
+      await finger.up();
+    } finally {
+      await finger.dispose();
+    }
+    await panel.locator('body').press('Escape');
+    await expect(panel.locator('#noteContextMenu')).toHaveCount(0);
+  });
+
+  test('a contextmenu DURING a lifted drag opens nothing, and the release still lands the to-do in the gap', async () => {
+    // The shape the owner actually saw on the Pixel: the hold opened the menu, the vertical move lifted the row,
+    // and then Android's own long press fired its `contextmenu` LATE - after `liftTouchDrag` had closed the menu -
+    // which re-opened it over the lifted row and swallowed the release that should have reached a gap ("the menu
+    // does not close, and the row is not moved"). Both halves are asserted here: the event opens nothing, and the
+    // drop that follows it writes what it was aimed at.
+    const { win } = joplin;
+    await settle();
+    await armMessageLog(win);
+    const panel = await agendaPanel(win);
+    const finger = await newFinger(win);
+    try {
+      const from = await rowPoint(win, CTX_DRAG, 0.5);
+      await finger.down(from);
+      await win.waitForTimeout(700);
+      await expect(panel.locator('#noteContextMenu'), 'the hold opens the menu').toBeVisible();
+      const at = await liftByMovingUpOrDown(finger, from, win);
+      expect((await dragState()).dragging, 'the vertical move must lift the row').toBe(1);
+      await expect(panel.locator('#noteContextMenu'), 'and close the menu').toHaveCount(0);
+      // Now the late native event, on the lifted row, mid-gesture. TWO routes are tried, because the fix has two
+      // layers: the event itself (stopped dead in the capture phase, so no inline handler runs) and the opener
+      // (`showNoteContextMenu` refuses any caller while a touch gesture owns the finger). The second is reached
+      // by calling the row's own handler directly, which is what an inline handler that somehow survived would do.
+      const during = await panel.evaluate((m) => {
+        const w = window as any;
+        const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
+        const row = rows.find((r) => (r.textContent || '').includes(m));
+        if (!row) return null;
+        const event = new MouseEvent('contextmenu', { button: 2, bubbles: true, cancelable: true });
+        const notCancelled = row.dispatchEvent(event);
+        const afterEvent = document.querySelectorAll('#noteContextMenu').length;
+        // The belt to those braces: the handler called outright, with the minimal event shape it reads.
+        w.onTodoContextMenu(
+          {
+            target: row,
+            currentTarget: row,
+            clientX: 10,
+            clientY: 10,
+            preventDefault: () => undefined,
+            stopPropagation: () => undefined,
+          },
+          row.dataset.todoId
+        );
+        return {
+          prevented: !notCancelled || event.defaultPrevented,
+          afterEvent,
+          afterHandler: document.querySelectorAll('#noteContextMenu').length,
+          stillLifted: document.querySelectorAll('.todo.-dragging').length,
+        };
+      }, CTX_DRAG);
+      console.log('TOUCH CTXMENU MID-DRAG', JSON.stringify(during));
+      expect(during, `no row on screen for ${CTX_DRAG}`).not.toBe(null);
+      expect(during!.prevented, 'a contextmenu during the drag must be cancelled like any other').toBe(true);
+      expect(during!.afterEvent, 'and must open no menu over the lifted row').toBe(0);
+      expect(during!.afterHandler, 'nor may the handler itself, called outright while the gesture owns the finger').toBe(0);
+      expect(during!.stillLifted, 'and none of it may end the drag').toBe(1);
+      // ...and the release still does its job: into the BOTTOM half of the 08:00 anchor, the gap under it.
+      const to = await rowPoint(win, LO, 0.8);
+      await finger.glide(at, to);
+      const aiming = await dragState();
+      console.log('TOUCH CTXMENU AIMING', JSON.stringify(aiming));
+      expect(aiming.before + aiming.after, 'exactly one insertion line must still be painted').toBe(1);
+      await finger.up();
+    } finally {
+      await finger.dispose();
+    }
+
+    const posted = await postedMessages(win);
+    console.log('TOUCH CTXMENU POSTED', JSON.stringify(posted));
+    expect(names(posted), 'the drop must still post the between-drop message').toContain('todosDroppedBetween');
+    expect(names(posted), 'and no menu action may have run behind the drag').not.toContain('noteMenuAction');
+    const between = posted.find((m) => m[0] === 'todosDroppedBetween')!;
+    expect(between[1], 'the payload is the dragged to-do').toEqual([ids[CTX_DRAG]]);
+    const guards = posted.filter((m) => m[0] === 'dialogGuard');
+    expect(guards.map((m) => m[1]), 'the refresh guard must be taken once and released once').toEqual([true, false]);
+    // Read back from Joplin's own record: strictly after the 08:00 anchor and before the 12:00 one, which is the
+    // gap it was aimed at whatever else has since been dropped into it.
+    const due = await dueSettles(CTX_DRAG, (d) => d > todayAt(8) && d < todayAt(12));
+    console.log('TOUCH CTXMENU DUE', new Date(due).toString());
+    expect(due, 'strictly after the 08:00 neighbour').toBeGreaterThan(todayAt(8));
+    expect(due, 'strictly before the 12:00 neighbour').toBeLessThan(todayAt(12));
+    await expect
+      .poll(async () => groupOf(CTX_DRAG), { timeout: PANEL_REFRESH_TIMEOUT, intervals: [1500, 2500] })
+      .toBe('Today');
   });
 
   test('a hold then a SIDEWAYS first move lifts nothing, writes nothing and never takes the guard', async () => {
