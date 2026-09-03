@@ -129,11 +129,13 @@ platforms (it draws above the panel on mobile).
 All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click, dblclick,
 `contextmenu` and HTML5 drag are untouched. On mobile `contextmenu` is the one event suppressed
 outright, panel-wide: it is the platform's own long press, and the adapter below is the only thing
-allowed to open a menu from a touch (§7's first hazard). The one exemption is a **real editable field**
-(`input, textarea, select, [contenteditable]` — the search box, the notebook filter, the alarm
+allowed to open a menu from a touch (§7's first hazard). The one exemption is a field **text is typed
+into** (`input` — but never a checkbox or a radio — `textarea, select, [contenteditable]`, and never
+inside an element carrying an inline `oncontextmenu`: the search box, the notebook filter, the alarm
 overlay's date and time): Android's text-selection handles and its Paste / Select-all bar ride on this
 same event, and in a field on a phone that bar is the only way to paste, while nothing of the panel's
-opens from a press there.
+opens from a press there. The two exclusions are the tick circle's doing — it is an `<input>` sitting
+inside the row that carries the handler (§7, the exemption's own hazard bullet).
 
 - **Long-press context menus**: a Pointer Events adapter (500 ms; cancelled by >10 px move, pointer
   up/cancel, or a list scroll) synthesises the three desktop context-menu handlers (to-do row, note
@@ -382,7 +384,8 @@ second Pixel round added:
   gesture trace, because a row's inline handler is on no traced path. So on mobile `contextmenu` is suppressed
   **panel-wide** — any target at all, rows and headings and the list and the body alike — with
   `preventDefault()` **and** `stopImmediatePropagation()` in the document's capture listener, traced once per
-  event as `contextmenu-suppressed:row|heading|other`. `preventDefault()` alone is not enough: it cancels the
+  event as `contextmenu-suppressed:row|note|heading|other` (the adapter's own zones: a to-do row or week card,
+  a note row, a group heading with ids on it, anything else). `preventDefault()` alone is not enough: it cancels the
   native callout, but the inline handlers are listeners like any other and would still run; only stopping the
   event dead in the capture phase makes the long-press adapter the ONLY way a touch opens a context menu. The belt
   to those braces is in `showNoteContextMenu`, which returns at once (`menu-blocked`) while a touch gesture owns
@@ -390,11 +393,20 @@ second Pixel round added:
   blocked call that tidied up on its way out is the other half of the reported symptom). What makes
   `touchDrag.active` a sufficient test there is the fire's order: the menu opens *before* `armTouchDrag()`, so the
   adapter's own call is the one call that finds the flag false. Desktop returns on the listener's first line and
-  is byte-identical. The suppression's **one exemption** is a real editable field (`input, textarea, select,
-  [contenteditable]`): the same event carries Android's selection handles and its Paste / Select-all bar, which in
+  is byte-identical. The suppression's **one exemption** is a field text is typed into (`input`, minus checkboxes
+  and radios, plus `textarea, select, [contenteditable]`, and never inside a `.todo` or an `h2[data-todo-ids]`):
+  the same event carries Android's selection handles and its Paste / Select-all bar, which in
   the search box, the notebook filter or the alarm overlay's date and time is the only way to paste on a phone —
-  and none of those elements carries an inline `oncontextmenu`, is a drag source, or is a zone the adapter
-  recognises, so exempting them takes nothing away from the fix. Past the desktop line that exemption is the
+  and none of those fields carries an inline `oncontextmenu`, is a drag source, or is a zone the adapter
+  recognises, so exempting them takes nothing away from the fix. **Both exclusions in that selector are the tick
+  circle**, and they are the third review round's finding: `input.todo-checkbox` is an `<input>` that takes no
+  text, is the FIRST CHILD of the element carrying `oncontextmenu`, is grown to a 40 px tap target on mobile, and
+  IS a zone the adapter recognises — `onTodoContextMenu`'s first branch is the circle, and on mobile it opens the
+  alarm overlay. An exemption written about the tag rather than about text therefore handed Android's long press
+  a second, unguarded route into `openAlarmOverlay` (no re-entry guard: a second call rebuilds the overlay and
+  discards a date or time already typed) on the one zone of a row the `showNoteContextMenu` belt never covers —
+  the same bug as the round's, narrowed to one circle. The exemption is for fields that stand on their own; a
+  row's own controls are never exempt, whatever control a row grows next. Past the desktop line that exemption is the
   listener's *only* early return, which is what keeps a zone of the panel's from being carved back out of the
   suppression; the harness pins the count, not the spelling. The belt is asymmetric by design: `onHeadingContextMenu`
   never reaches `showNoteContextMenu`, so a heading has the capture listener only — a heading is not a drag source
@@ -489,7 +501,8 @@ says the post was *issued* without throwing, not that the host has written anyth
 the user's own cancel, deliberately not one of the platform's), `drag-cancel:<reason>` (including `drag-cancel:re-arm`, the
 unreachable-today path where a fire lands on a gesture still in flight and `armTouchDrag` ends it through
 the single end rather than overwriting its state, so a taken guard can never be dropped silently), and
-`contextmenu-suppressed:row|heading|other` / `menu-blocked` — the two halves of the panel-wide contextmenu
+`contextmenu-suppressed:row|note|heading|other` (which zone the refused event landed in — a to-do row or week
+card, a note row, a heading with ids on it, or anything else, the tick circle counting as its row) / `menu-blocked` — the two halves of the panel-wide contextmenu
 refusal (the hazard list above), which is the one part of this gesture that used to happen with nothing said. A
 whole successful gesture therefore reads as
 `menu-open > drag-lift > drag-target:after > drag-drop:between a1b2|c3d4 > drag-drop:posted`, or
@@ -871,8 +884,13 @@ success vs failure looks like. The build to install is
     j. **No regressions in the ordinary gestures.** Flick-scroll a long list; tap a title; tap a
        checkbox ring; hold a checkbox ring.
        - Success: the list scrolls freely, a tap opens the note, a tap on the ring ticks it, a hold on
-         the ring opens the date picker. None of these lifts a row.
-       - Failure: any of them behaves differently from before 2.3.0.
+         the ring opens the date picker. None of these lifts a row. The hold on the ring adds a
+         `contextmenu-suppressed:row` line (the ring is an `<input>`, but it is part of its row and is
+         **not** exempted): that line is expected, and the picker must open exactly ONCE.
+       - Failure: any of them behaves differently from before 2.3.0 — in particular the date picker
+         opening twice, or re-opening with a date already typed into it cleared, which is Android's own
+         `contextmenu` reaching the ring's branch through the row's inline handler (§7, the exemption's
+         hazard bullet); the strip would then be missing its `contextmenu-suppressed:row` line.
 
     j-bis. **Text fields keep their own long press.** Type a word into the panel's search box, then press
        and hold **inside the field** (repeat in the notebook filter, and in the alarm overlay's date field).

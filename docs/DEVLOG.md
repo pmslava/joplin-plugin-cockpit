@@ -1312,13 +1312,38 @@ The panel has real ones on mobile — the search box, the notebook filter, the a
 Android raises the text-selection handles and the **Paste / Select-all bar** through this same `contextmenu`
 event, which in a field on a phone is the only way to paste. Cancelling it there would have been a regression on
 exactly the target platform, invisible to the harness and to 18a/18b (the drag would have passed while the search
-box quietly lost its paste). So the listener exempts a *kind of element* rather than a zone of the panel's —
-`input, textarea, select, [contenteditable]` — which costs the fix nothing: none of those carries an inline
-`oncontextmenu`, none is a drag source, and none is a zone the long-press adapter recognises. Past the desktop
-line that exemption is now the listener's ONLY early return, and the pin asserts that count rather than a
-spelling: the version it replaced forbade an `if`-shaped gate, which a ternary early-return would have walked
-straight through while re-introducing exactly the scoping the pin exists to forbid. Step 18 gained a device check
-of its own (18j-bis: hold inside the search box, the Paste bar must appear).
+box quietly lost its paste). So the listener exempts a *kind of element* rather than a zone of the panel's, and
+past the desktop line that exemption is now the listener's ONLY early return, with the pin asserting that count
+rather than a spelling: the version it replaced forbade an `if`-shaped gate, which a ternary early-return would
+have walked straight through while re-introducing exactly the scoping the pin exists to forbid. Step 18 gained a
+device check of its own (18j-bis: hold inside the search box, the Paste bar must appear).
+
+**The third review round found what "a kind of element" had let back in**, on the tick circle of every to-do row.
+The exemption was first written as `input, textarea, select, [contenteditable]`, justified by "none of those
+carries an inline `oncontextmenu`, none is a drag source, and none is a zone the adapter recognises" — and two of
+those three claims are false for the one element that selector unavoidably catches. `input.todo-checkbox` is the
+FIRST CHILD of the `<div class="todo" … oncontextmenu="onTodoContextMenu(…)">` it belongs to (`formats.ts`, list
+rows and week cards alike), the exemption returned *before* `stopImmediatePropagation()`, and the event bubbles
+from the circle to the row's own handler — whose first branch IS the circle: selection rewritten, then
+`requestAlarm` → `openAlarmOverlay`. On mobile that circle is deliberately grown to a 40 px tap target, so it is
+one of the panel's primary long-press zones rather than a sliver, and it is the zone step 18j exercises. Neither
+belt covers it: the checkbox branch never reaches `showNoteContextMenu`, so the `touchDrag.active` guard is not
+on that path, and `canLiftRow` refuses the circle so nothing arms. The failure is this round's own bug narrowed
+to one circle — hold the ring, our adapter opens the picker, and Android's own `contextmenu` opens it a second
+time at a moment the device's "Touch & hold delay" picks; `openAlarmOverlay` has no re-entry guard, so the second
+call rebuilds the overlay and discards a date or time already typed. The exemption now has two teeth, and each is
+load-bearing rather than defensive: the input branch excludes `[type="checkbox"]` and `[type="radio"]` (neither
+takes text, so neither raises the Paste bar the exemption exists for), and no exemption may reach INSIDE an
+element carrying an inline handler (`.todo, h2[data-todo-ids]`) — whatever control a row grows next. Both
+selectors are named once, as `CONTEXTMENU_TEXT_FIELD` and `CONTEXTMENU_HANDLER_ZONE`, and the harness pins what
+they MEAN (it reads `formats.ts` to prove the circle really is an `<input>` nested inside the handler, then
+decomposes each selector) rather than one spelling of them. The e2e case that dispatched a synthetic `contextmenu`
+on a row and on the search box now dispatches a third on the row's circle — a target that is a *child* of the
+handler-carrying element, which is the whole shape of the hole — and asserts both that it is cancelled and that
+no `#cockpitOverlay` opened. The same round tightened the trace's zone words to the adapter's own vocabulary:
+`row` is `.todo[data-todo-id]`, `note` is `.todo[data-note-id]` (a note row opens a different menu and is no drag
+source), `heading` is `h2[data-todo-ids]` — a bare `h2` carries no handler — and everything else is `other`. A
+strip meant to be read literally on a device is worth only as much as the words on it.
 
 The inline-handler inventory was one short as well: `src/core/html.ts` renders group headings with
 `oncontextmenu="onHeadingContextMenu(event)"`, a fourth handler outside `formats.ts`. The capture listener always
@@ -1369,9 +1394,17 @@ any other opener of the context menu"; and swapping the fire's order so the arm 
 fire must open the menu BEFORE it arms the drag" twice over — in the new pin and in the redesign's own. That
 last one is the interesting mutation: with the arm first, `touchDrag.active` would be true on the adapter's own
 call and the guard would block the menu the hold exists to open, so the two changes hold each other up. A fifth
-was run for the review round's fix — deleting the editable-field exemption fails "that one return is the
-editable-field exemption", and re-scoping it as a ternary instead fails the early-return count, which is the
-mutation the pin it replaced would have missed.)
+was run for the review round's fix — deleting the text-field exemption fails "that one return is the
+text-field exemption", and re-scoping it as a ternary instead fails the early-return count, which is the
+mutation the pin it replaced would have missed. Four more for the third round's, three of them
+restoring the hole it closed and each caught by a DIFFERENT pin, which is what says the two teeth are pinned
+independently rather than by one string: widening `CONTEXTMENU_TEXT_FIELD` back to a bare `input` fails "a
+checkbox takes no text, raises no Paste bar and (for the checkbox) IS a row's tick circle"; dropping `.todo` from
+`CONTEXTMENU_HANDLER_ZONE` fails "every to-do row, week card and note row is a .todo and every one of them
+carries an inline oncontextmenu"; dropping the `!el.closest(CONTEXTMENU_HANDLER_ZONE)` conjunct altogether fails
+"that one return is the text-field exemption"; and loosening the trace's zone words back to `.todo` / `h2` fails
+"the zone word must be told apart by .todo[data-todo-id]". The harness count is unchanged at 351 across both
+review rounds: every one of these assertions went inside the round's existing pin rather than into a new check.)
 
 How the 350 it grew from was reached, and what was already proved by mutation, is unchanged below. 350 (347
 before the redesign, plus 3: one driving the new pure
