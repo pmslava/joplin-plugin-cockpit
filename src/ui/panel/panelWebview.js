@@ -745,10 +745,10 @@ function showNoteContextMenu(event, noteID, isTodo){
     // returns, and armTouchDrag ends the old gesture through the single end just after. That is the right way
     // round (a stale gesture's refresh guard is worth more than a menu) and it is not silent: the strip reads
     // `menu-blocked > drag-cancel:re-arm`. It is also, since the third Pixel round, unreachable for the ordinary
-    // case that used to reach it: the drag's second-pointer listener ends a gesture only when the new pointer id
-    // DIFFERS, so a one-finger re-press carrying the same id used to arrive here with a stale `active` and open no
-    // menu for up to the 15s watchdog. The adapter's own pointerdown now ends that gesture before the timer is
-    // even set (drag-cancel:stale-pointer), so what is left here is the belt it always was.
+    // case that used to reach it: a gesture whose pointerup was lost used to sit here `active` until the 15s
+    // watchdog and swallow every menu in between. The adapter's own pointerdown now ends that gesture on the next
+    // press that begins alone (drag-cancel:stale-pointer), before the timer is even set, so what is left here is
+    // the belt it always was.
     if (touchDrag.active){ traceGesture('menu-blocked'); return }
     hideNoteContextMenu()
     // The ids this menu acts on. Any row - to-do or note - that is itself part of a multi-row selection
@@ -984,14 +984,23 @@ document.addEventListener('pointerdown', function(event){
     // click swallower below would eat that unrelated tap. Resetting here guarantees one fired flag is only
     // ever consumed by its own gesture's click.
     longPress.fired = false
-    // ...and any gesture the LAST press left running. The drag's own second-pointer listener ends a gesture only
-    // when the new pointer id DIFFERS from the one it holds (a genuine second finger); a re-press that the platform
-    // hands the SAME id - which is the ordinary case for one finger pressing twice - slips past it, so an old
-    // gesture whose pointerup never arrived would still be `active` here. showNoteContextMenu turns every opener
-    // away while a gesture is active, so that stale flag opens NO MENU AT ALL on the next hold, for up to the 15s
-    // watchdog: the third Pixel round's "the context menu doesn't appear at all", by a route that has nothing to do
-    // with the lift. Ended through the single end, so its refresh guard comes down with it.
-    if (touchDrag.active && event.pointerId === touchDrag.pointerId) endTouchDrag('stale-pointer')
+    // ...and any gesture the LAST press left running. A gesture whose pointerup never arrived is still `active`
+    // here, and showNoteContextMenu turns every opener away while a gesture is active: that stale flag opens NO
+    // MENU AT ALL on the next hold, for up to the 15s watchdog - the third Pixel round's "the context menu doesn't
+    // appear at all", by a route that has nothing to do with the lift.
+    // THE TEST IS isPrimary, NOT THE POINTER ID, and the reason is a platform claim this file must not make
+    // silently: Blink hands every touch point a fresh id and does not reuse the last one, so "the same finger
+    // pressing twice" arrives with a DIFFERENT id and an id comparison here would be dead code on the device.
+    // That claim is checked on the phone (step 18k of MOBILE.md), not assumed. What holds without it is what
+    // isPrimary MEANS: a press that begins with no other finger on the glass. A gesture that still has its finger
+    // down cannot be joined by one, so an active gesture meeting a primary press is a gesture whose end was lost.
+    // It is ended here, through the single end, so its refresh guard comes down with it - and the press itself is
+    // NOT cancelled: it is the user's next hold and must open its own menu.
+    // A NON-primary press is a genuine second finger and is not this line's business: the drag's own second-pointer
+    // listener below ends the gesture AND cancels the press that finger just started. This listener is registered
+    // first, so on a primary press `active` is already false by the time that one runs, which is exactly what keeps
+    // the fresh press alive; on a second finger this line does nothing and that one does all of it.
+    if (touchDrag.active && event.isPrimary) endTouchDrag('stale-pointer')
     if (!event.target.closest) return
     // Events inside an in-panel overlay are the overlay's own; never treat them as a long press on the list.
     if (event.target.closest('#cockpitOverlay')) return
@@ -1924,8 +1933,8 @@ function updateDragTarget(){
 function armTouchDrag(){
     var row = longPress.el
     // Nothing can reach here with a gesture still running today - the adapter's pointerdown ends a stale one on
-    // the same finger, and the second-pointer listener ends one on a different finger, both before a press could
-    // fire - but overwriting the state in place is the ONE way a taken guard could be lost without a release,
+    // the press that begins alone, and the second-pointer listener ends one on a second finger, both before a
+    // press could fire - but overwriting the state in place is the ONE way a taken guard could be lost without a release,
     // which is the leak this block's comment and the 15s watchdog exist to prevent. So the invariant is made
     // structural rather than argued: a live gesture is ended through the single end, first.
     if (touchDrag.active) endTouchDrag('re-arm')
@@ -1941,9 +1950,11 @@ function armTouchDrag(){
     touchDrag.title = ''
     touchDrag.target = null
     touchDrag.autoscroll = 0
-    // THE FIRE POINT, not the press point: where the finger is at the 500ms, which is where the user sees the menu
-    // appear and therefore the only honest origin for "has it moved since". The press point is up to 10px away (the
-    // adapter cancels beyond that), so arming from it would leave the gesture one pixel from its own lift threshold.
+    // THE FIRE POINT, not the press point: where the FINGER is at the 500ms, and therefore the only honest origin
+    // for "has it moved since". The press point is up to 10px away (the adapter cancels beyond that), so arming
+    // from it would leave the gesture one pixel from its own lift threshold. Note the menu itself is drawn at the
+    // PRESS point - onLongPressFire synthesises its event from longPress.x/y - so "the fire point" is where the
+    // finger is when the menu appears, not where the menu appears. It is the finger the threshold is about.
     touchDrag.startX = touchDrag.x = longPress.lastX
     touchDrag.startY = touchDrag.y = longPress.lastY
     // Non-passive, or the preventDefault() that stops the pan is ignored (see the block header). Capture, like every
@@ -1981,11 +1992,13 @@ function liftTouchDrag(){
     touchDrag.lifted = true
     touchDrag.guarded = true
     void webviewApi.postMessage(['dialogGuard', true]);
+    // Three statements, and they are onTodoDragStart's three: clear, add, paint. Not one more - the anchors a
+    // CLICK maintains (lastClickedRowID, lastSelectionInteractionID) are a mouse's Shift-range state and no drag
+    // of either kind writes them, so writing them here would make "verbatim" false in the one place the whole
+    // selection contract is argued from.
     if (!selectedRowIDs.has(touchDrag.id)){
         selectedRowIDs.clear()
         selectedRowIDs.add(touchDrag.id)
-        lastClickedRowID = touchDrag.id
-        lastSelectionInteractionID = touchDrag.id
         paintTodoSelection()
     }
     touchDrag.ids = schedulableSelection()
@@ -2170,9 +2183,11 @@ document.addEventListener('pointercancel', function(event){
     if (touchDrag.active && event.pointerId === touchDrag.pointerId) endTouchDrag('pointercancel')
 }, true)
 
-// A second finger while the gesture is armed or lifted: this is no longer one drag. The press the long-press
+// A SECOND finger while the gesture is armed or lifted: this is no longer one drag. The press the long-press
 // adapter has just armed for that finger goes with it, or its own 500ms would open a menu (and arm a second drag)
-// out of the cancelled gesture.
+// out of the cancelled gesture. A press that begins ALONE never reaches this: the adapter's own pointerdown ran
+// first and ended the stale gesture it found, so `touchDrag.active` is already false and the guard below returns -
+// which is what stops a re-press after a lost pointerup from having its own long press cancelled here.
 document.addEventListener('pointerdown', function(event){
     if (!touchDrag.active || event.pointerId === touchDrag.pointerId) return
     cancelLongPress()
@@ -2186,8 +2201,10 @@ document.addEventListener('pointerdown', function(event){
 // scrolled off. Re-syncing turns that silent wrong write into a correct one.
 document.addEventListener('scroll', function(){
     if (!touchDrag.active) return
-    // The index is kept honest even while the drag is only armed (the list can still pan then - nothing is
-    // prevented yet), but only a LIFTED drag has a target to re-resolve or anything to paint.
+    // The index is kept honest even while the drag is only armed. An armed touchmove does now cancel this
+    // document's own pan, so this should be unreachable before a lift - but "should" is the word Chromium answers
+    // with a non-cancelable move (drag-uncancelable), and that is precisely when the list pans under an armed
+    // gesture. Only a LIFTED drag has a target to re-resolve or anything to paint.
     if (syncRowIndex() && touchDrag.lifted) updateDragTarget()
 }, true)
 

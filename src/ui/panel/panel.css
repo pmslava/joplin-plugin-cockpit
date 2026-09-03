@@ -1340,8 +1340,10 @@ table {
  * at with a fingertip rather than a cursor, and it is the only thing that says where the to-do will land. Same
  * inset box-shadow, so it still adds no height and no row moves under the finger. NOTE what is deliberately NOT
  * here: a touch-action on .todo. The list must keep scrolling by flick, and the drag stops the pan the only way
- * that can be turned on and off per gesture - preventDefault() on a non-passive touchmove, attached for the
- * duration of a lift (see panelWebview.js). A touch-action would apply to every touch on every row, always. */
+ * that can be turned on and off per gesture - preventDefault() on a non-passive touchmove, attached from the
+ * ARM (the menu-first hold's own 500ms) and taken off at the one end, so the list holds still under a held
+ * finger as well as under a lifted row (see panelWebview.js). A touch-action would apply to every touch on
+ * every row, always. */
 .cockpit-mobile .todo.-drop-before {
     box-shadow: inset 0 4px 0 -1px var(--cockpit-url-color, #2D6BDC);
 }
