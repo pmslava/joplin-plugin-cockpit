@@ -2793,20 +2793,47 @@ document.addEventListener('click', function(event){
 // the inline handlers are listeners like any other and would still run. Stopping the event dead in the capture
 // phase, at the document, is what makes the long-press adapter the ONLY way a touch opens a context menu.
 // Desktop returns on the first line, so a right click there - in the list, on a row, anywhere - is untouched.
-// ONE exemption, and it is deliberately not a zone of the panel's but a kind of element: a real editable field -
-// the search box (#searchFilter), the notebook filter, the alarm overlay's date and time. Android raises the
-// text-selection handles and the Paste / Select-all bar through this very event, and in a field on a phone that
-// bar is the only way to paste; cancelling it there would be a regression with nothing to gain, since none of
-// those elements carries an inline oncontextmenu, none is a drag source and none is a zone the long-press adapter
-// recognises. Everything else - rows, headings, the suggestion list, the body - is refused.
+// ONE exemption, and it is deliberately not a zone of the panel's but a kind of element: a field TEXT is typed
+// into - the search box (#searchFilter), the notebook filter, the alarm overlay's date and time. Android raises
+// the text-selection handles and the Paste / Select-all bar through this very event, and in a field on a phone
+// that bar is the only way to paste; cancelling it there would be a regression with nothing to gain, since none
+// of those fields carries an inline oncontextmenu, none is a drag source and none is a zone the long-press
+// adapter recognises. Everything else - rows, headings, the suggestion list, the body - is refused.
+// Two teeth in the exemption's selector, and each one is load-bearing rather than defensive:
+//   - a checkbox and a radio are <input> elements that take NO text, so the Paste bar is not what a long press on
+//     one raises. One of them is the tick circle of every to-do row (input.todo-checkbox, formats.ts) - the FIRST
+//     CHILD of the very element that carries oncontextmenu, grown to a 40px tap target on mobile (panel.css), and
+//     itself a zone the adapter recognises: onTodoContextMenu's first branch is the circle, and it opens the
+//     alarm overlay. Exempting it would have handed Android's long press a second, unguarded route into
+//     openAlarmOverlay (which has no re-entry guard: a second call rebuilds the overlay and discards a date or
+//     time already typed) on the one zone of a row the belt in showNoteContextMenu does not cover, at a moment
+//     the device's "Touch & hold delay" picks. That is this round's bug, narrowed to one circle.
+//   - and no exemption may reach INSIDE an element that carries an inline oncontextmenu, whatever kind of control
+//     a row grows next: the exemption is for fields that stand on their own, never for a row's own controls.
+var CONTEXTMENU_TEXT_FIELD = 'input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable]'
+// Every element with an inline oncontextmenu: a to-do row and a note row (both .todo, formats.ts) and a group
+// heading (h2[data-todo-ids], html.ts). Doubles as the trace's zone vocabulary just below.
+var CONTEXTMENU_HANDLER_ZONE = '.todo, h2[data-todo-ids]'
 document.addEventListener('contextmenu', function(event){
     if (!IS_MOBILE) return
     var el = event.target && event.target.closest ? event.target : null
-    if (el && el.closest('input, textarea, select, [contenteditable]')) return
-    traceGesture('contextmenu-suppressed:' + (!el ? 'other' : el.closest('.todo') ? 'row' : el.closest('h2') ? 'heading' : 'other'))
+    if (el && el.closest(CONTEXTMENU_TEXT_FIELD) && !el.closest(CONTEXTMENU_HANDLER_ZONE)) return
+    traceGesture('contextmenu-suppressed:' + contextmenuZone(el))
     event.preventDefault()
     event.stopImmediatePropagation()
 }, true)
+
+// The zone word for the trace, in the adapter's own vocabulary rather than an approximation of it: 'row' is a
+// to-do row (.todo[data-todo-id], list row or week card), 'note' a note row (.todo[data-note-id], which opens a
+// different menu and is no drag source), 'heading' a group heading with ids on it (h2[data-todo-ids] - a bare h2
+// carries no handler). Anything else - the list, the body, the suggestion list - is 'other'.
+function contextmenuZone(el){
+    if (!el) return 'other'
+    if (el.closest('.todo[data-todo-id]')) return 'row'
+    if (el.closest('.todo[data-note-id]')) return 'note'
+    if (el.closest('h2[data-todo-ids]')) return 'heading'
+    return 'other'
+}
 
 // True for exactly as long as a press inside the open suggestion list is losing the field its focus. A tap on a
 // row is a press on a non-focusable element, which the Android webview answers by dropping focus to <body> with
