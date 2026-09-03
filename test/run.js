@@ -3185,14 +3185,44 @@ async function main() {
         const past = body.slice(body.indexOf('if (!IS_MOBILE) return') + 'if (!IS_MOBILE) return'.length)
         assert.strictEqual((past.match(/\breturn\b/g) || []).length, 1,
             '...and to no zone of the panel\'s: past the desktop line exactly one early return may stand, and nothing else may gate the suppression on where the press landed')
-        assert.ok(past.includes("if (el && el.closest('input, textarea, select, [contenteditable]')) return"),
-            'that one return is the editable-field exemption: Android raises the text-selection handles and the Paste / Select-all bar through this same event, and in a field on a phone that bar is the only way to paste')
+        assert.ok(past.includes('if (el && el.closest(CONTEXTMENU_TEXT_FIELD) && !el.closest(CONTEXTMENU_HANDLER_ZONE)) return'),
+            'that one return is the text-field exemption: Android raises the text-selection handles and the Paste / Select-all bar through this same event, and in a field on a phone that bar is the only way to paste')
         // The fields it exempts are real, and are the ones a finger is held down in on mobile.
         const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
         assert.ok(panelSource.includes('<input id="searchFilter"'), 'the search box is an input, so the exemption reaches it')
         assert.ok(panelSource.includes('class="notebook-filter-input"'), '...and so is the notebook filter')
         assert.ok(webviewSource.includes('<input id="alarmDate"') && webviewSource.includes('<input id="alarmTime"'),
             '...and so are the mobile alarm overlay\'s date and time, which are typed into with the panel in mobile mode')
+        // ...and what it may NOT reach, which is the whole of the exemption's risk: a row's own controls. The tick
+        // circle of every to-do row is an <input> (input.todo-checkbox) sitting INSIDE the element that carries
+        // oncontextmenu, so an exemption written as a bare `input` hands Android's long press a route into
+        // onTodoContextMenu's checkbox branch - selection rewritten, openAlarmOverlay re-entered, a typed date
+        // discarded - on the one zone of a row that never reaches showNoteContextMenu and so has no belt. Two
+        // independent teeth stop it, and each is pinned on what it MEANS rather than on one spelling.
+        assert.ok(formatsSource.includes('class="todo-checkbox'),
+            'the hazard is real: the tick circle is an <input>, which is why the exemption has to be about text and not about the tag')
+        const checkboxRows = formatsSource.split('<div class="todo').slice(1).filter(row => row.includes('class="todo-checkbox'))
+        assert.strictEqual(checkboxRows.length, 2, 'two row templates carry a tick circle: the list row and the week card')
+        for (const row of checkboxRows){
+            assert.ok(row.includes('oncontextmenu=') && row.indexOf('class="todo-checkbox') > row.indexOf('oncontextmenu='),
+                '...and it sits INSIDE the element carrying the handler, so an exempted checkbox lets the event bubble straight to that handler')
+        }
+        const fieldSelector = /var CONTEXTMENU_TEXT_FIELD = '([^']+)'/.exec(webviewSource)
+        assert.ok(fieldSelector, 'the exempted kinds must be named once, as a selector of their own')
+        for (const part of fieldSelector[1].split(',').map(text => text.trim())){
+            if (!/^input\b/.test(part)) continue
+            for (const kind of ['checkbox', 'radio']){
+                assert.ok(part.includes(':not([type="' + kind + '"])'),
+                    `a ${kind} takes no text, raises no Paste bar and (for the checkbox) IS a row's tick circle, nested inside the element that carries the inline handler: the exemption's input branch must exclude it - saw: ${part}`)
+            }
+        }
+        const zoneSelector = /var CONTEXTMENU_HANDLER_ZONE = '([^']+)'/.exec(webviewSource)
+        assert.ok(zoneSelector, 'and the handler-carrying zones must be named once too - the second tooth')
+        const zones = zoneSelector[1].split(',').map(text => text.trim())
+        assert.ok(zones.includes('.todo'),
+            'every to-do row, week card and note row is a .todo and every one of them carries an inline oncontextmenu, so no exemption may reach inside one - whatever control a row grows next')
+        assert.ok(zones.includes('h2[data-todo-ids]'),
+            '...and so does a group heading with ids on it (src/core/html.ts)')
         assert.ok(body.includes('event.preventDefault()'), 'the native callout / selection bar must be cancelled')
         assert.ok(body.includes('event.stopImmediatePropagation()'),
             'and the event must be stopped dead, or preventDefault alone leaves the inline oncontextmenu handlers to run - which IS the bug')
@@ -3207,8 +3237,16 @@ async function main() {
         }
         assert.ok(body.includes("traceGesture('contextmenu-suppressed:"),
             'a suppressed contextmenu must say so in the trace, with the zone it landed in - the device round had no way to see this happening')
-        for (const zone of ["'row'", "'heading'", "'other'"]) assert.ok(body.includes(zone), `the zone word must be able to read ${zone}`)
         assert.strictEqual((body.match(/traceGesture\(/g) || []).length, 1, 'and exactly once per event, or one long press would flood the strip')
+        // The zone word is the adapter's vocabulary, not an approximation of it: a bare h2 carries no handler and
+        // a .todo is a to-do row OR a note row (.todo.-note, formats.ts), which open different menus. A strip read
+        // literally on a device is worth only as much as the words on it.
+        const zoneWord = handlerBody('contextmenuZone')
+        for (const [selector, word] of [['.todo[data-todo-id]', "'row'"], ['.todo[data-note-id]', "'note'"], ['h2[data-todo-ids]', "'heading'"]]){
+            assert.ok(zoneWord.includes(`closest('${selector}')`), `the zone word must be told apart by ${selector}`)
+            assert.ok(zoneWord.includes(`return ${word}`), `...and must be able to read ${word}`)
+        }
+        assert.ok(zoneWord.includes("return 'other'"), 'and everything else - the list, the body, the suggestion list - is other')
 
         // Second: the belt to those braces, inside the menu itself. A gesture that owns the finger - armed behind
         // the menu the fire opened, or lifted - blocks every other route into showNoteContextMenu.
