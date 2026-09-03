@@ -569,6 +569,13 @@ function onRowPressed(event, rowID){
     lastClickedRowID = next.lastClicked
     lastSelectionInteractionID = next.lastInteraction
     paintTodoSelection()
+    // On a phone this handler is reached ONLY through the browser's compatibility mouse events (a row carries
+    // onmousedown and onclick, never a touch handler of its own), and whether those arrive at all after a long
+    // press - and therefore what a hold does to the selection - is a platform behaviour this repo cannot settle
+    // from the source. The third Pixel round reported a selection that grows as the user taps around, and the
+    // strip is the only instrument that can say whether these ever run. Two codes, the count included, so a hold
+    // followed by two taps reads as three lines with the size after each.
+    if (IS_MOBILE) traceGesture('row-press:' + traceId(rowID) + ' n=' + selectedRowIDs.size)
 }
 
 function onTodoRowMouseDown(event, todoID){
@@ -618,6 +625,7 @@ function onRowClicked(event, rowID){
         lastClickedRowID = next.lastClicked
         paintTodoSelection()
     }
+    if (IS_MOBILE) traceGesture('row-click:' + traceId(rowID) + ' n=' + selectedRowIDs.size)
     void onTodoClicked(rowID)
 }
 
@@ -1868,28 +1876,43 @@ function armTouchDrag(){
  *   - the context menu the press opened is closed, with no side effects: on mobile showNoteContextMenu never gives it focus, so hideNoteContextMenu   *
  *     hands nothing back and simply removes the element (which also clears it out of elementFromPoint's way, since it sits under the finger).         *
  *   - the refresh guard is taken, for the drag proper only.                                                                                           *
- *   - the selection collapses onto the pressed row and the payload is taken the way the desktop dragstart takes it - schedulableSelection(), the      *
- *     to-dos within the selection - so it is this one row today and inherits a mobile multi-select for free if one is ever built. The row is itself a *
- *     to-do and is in the selection by the time this reads it, so the payload is never empty.                                                         *
- *   - the row dims and the banner names it.                                                                                                           *
+ *   - the selection is settled EXACTLY as the desktop dragstart settles it, and the payload is read from it.                                          *
+ *   - every lifted row dims, and the banner names what is moving.                                                                                     *
+ *                                                                                                                                                     *
+ * THE SELECTION IS NOT THIS GESTURE'S TO COLLAPSE, and the third Pixel round is why. The previous build cleared selectedRowIDs and put the pressed row *
+ * in it on EVERY lift - and, since the lift fired on very nearly every hold (it was measured from the press point with the press's own slop), a hold   *
+ * left a row painted `-selected` that the user had not selected and nothing took back: "long-hold selects one note, then taps on other notes select    *
+ * them all too". The rule here is onTodoDragStart's, verbatim: a drag that starts on a row OUTSIDE the selection makes that row the selection, and a   *
+ * drag that starts on a row INSIDE it sweeps the WHOLE set and changes nothing. That is what makes a touch drag and a mouse drag the same operation on *
+ * the selection as well as on the host, and it is what lets a multi-selection - however one comes to be built on a phone - move as one. The payload is *
+ * schedulableSelection() either way: the to-dos within the selection, in the selection's own order, notes silently dropped. The pressed row is itself  *
+ * a to-do and is in the selection by the time this reads it, so it is never empty.                                                                     *
  ***************************************************************************************************************************************************/
 function liftTouchDrag(){
     hideNoteContextMenu()
     touchDrag.lifted = true
     touchDrag.guarded = true
     void webviewApi.postMessage(['dialogGuard', true]);
-    selectedRowIDs.clear()
-    selectedRowIDs.add(touchDrag.id)
-    lastClickedRowID = touchDrag.id
-    lastSelectionInteractionID = touchDrag.id
-    paintTodoSelection()
+    if (!selectedRowIDs.has(touchDrag.id)){
+        selectedRowIDs.clear()
+        selectedRowIDs.add(touchDrag.id)
+        lastClickedRowID = touchDrag.id
+        lastSelectionInteractionID = touchDrag.id
+        paintTodoSelection()
+    }
     touchDrag.ids = schedulableSelection()
+    // Every row that is actually moving dims, not only the one under the finger - the same loop the desktop
+    // dragstart runs, so a multi-row touch drag looks like what it is.
+    var dragged = new Set(touchDrag.ids)
+    for (var draggedRow of allTodoRows()){
+        if (dragged.has(draggedRow.dataset.todoId)) draggedRow.classList.add('-dragging')
+    }
     // The row is never null here: canLiftRow required its data-todo-id before the arm, and the arm is the only
-    // thing that puts a gesture in a state to reach this line.
-    touchDrag.title = rowLabel(touchDrag.row)
-    touchDrag.row.classList.add('-dragging')
+    // thing that puts a gesture in a state to reach this line. A multi-row drag names the COUNT instead of a
+    // title - there is no one title to name, and the count is the thing the user needs confirmed.
+    touchDrag.title = touchDrag.ids.length > 1 ? (touchDrag.ids.length + ' to-dos') : rowLabel(touchDrag.row)
     showDragBanner('Moving ' + touchDrag.title + ' — release outside the list to cancel', false)
-    traceGesture('drag-lift')
+    traceGesture('drag-lift n=' + touchDrag.ids.length)
 }
 
 function onTouchDragMove(event){
@@ -2001,8 +2024,10 @@ function endTouchDrag(reason){
     edgeAutoscrollStop()
     clearBetweenIndicator()
     paintDropTargetHighlight(null)
+    // Every lifted row, not only the pressed one: a drag from inside a multi-selection dimmed the whole set, and
+    // the desktop dragend undims exactly the same way (a row left dim would read as still in flight).
+    for (var undim of allTodoRows()) undim.classList.remove('-dragging')
     if (touchDrag.row){
-        touchDrag.row.classList.remove('-dragging')
         try { touchDrag.row.releasePointerCapture(touchDrag.pointerId) } catch (error){}
     }
     hideDragBanner()
