@@ -1754,6 +1754,15 @@ async function main() {
         assert.ok(end > start, 'could not delimit ' + name)
         return webviewSource.slice(start, end)
     }
+    // The body of onLongPressFire's `todo` branch alone: from the brace that opens it to the `else if` that
+    // closes it. Used to assert what is INSIDE that branch rather than what merely follows its first line.
+    const fireTodoBranch = (fire) => {
+        const open = fire.indexOf("if (longPress.kind === 'todo'){")
+        assert.ok(open >= 0, "onLongPressFire must still branch on longPress.kind === 'todo'")
+        const close = fire.indexOf("else if (longPress.kind === 'note')", open)
+        assert.ok(close > open, "could not delimit the fire's to-do branch (the note branch that ends it is gone)")
+        return fire.slice(open, close)
+    }
 
     // (a) The handler shape. The pre-fix code opened ONLY inside `if (event.target.classList.contains('todo-title'))`,
     // so the absence of that exact title-zone gate - while the checkbox / pill / modifier guards remain and the open
@@ -3087,11 +3096,17 @@ async function main() {
         // The branch itself: only kind 'todo', and only when the zone allows it. Asserted as an ORDERING rather
         // than as one regex spanning both lines, so a comment growing between them cannot silently retire the pin.
         const fire = handlerBody('onLongPressFire')
-        assert.ok(fire.includes("if (longPress.kind === 'todo'){"), 'the arm must sit inside the to-do branch of the fire')
+        const todoBranch = fireTodoBranch(fire)
         assert.ok(fire.includes('if (canLiftRow(longPress.target, longPress.el)) armTouchDrag()'),
             'only a to-do row body arms the drag; note rows, headings and the sync button reach their own handlers untouched')
-        assert.ok(fire.indexOf("if (longPress.kind === 'todo'){") < fire.indexOf('armTouchDrag()'),
-            '...and it must be inside that branch, not after it')
+        // CONTAINMENT, not mere ordering: the branch is sliced from `if (longPress.kind === 'todo'){` to the
+        // `else if` that ends it, and the arm must be inside THAT. An arm moved out of the branch - into the
+        // else-if chain, or after the whole chain - would still be "after the branch opened" and would arm the
+        // drag on a note row, a heading or the sync button, so ordering alone is not the property to pin.
+        assert.ok(todoBranch.includes('armTouchDrag()'),
+            'the arm must sit INSIDE the to-do branch of the fire, not merely after it opens')
+        assert.strictEqual((fire.match(/armTouchDrag\(\)/g) || []).length, 1,
+            'and it must be armed from exactly one place in the fire')
     })
 
     await test('webview touch drag: the hold opens the MENU first and only arms the drag behind it', () => {
@@ -3125,6 +3140,14 @@ async function main() {
         assert.ok(arm.includes('touchDrag.id = longPress.id'), 'the arm must snapshot the pressed row\'s id')
         assert.strictEqual(handlerBody('liftTouchDrag').includes('longPress.'), false,
             'and the lift must read that snapshot, never longPress itself')
+        // The one way a taken guard could go missing without a release: arming OVER a gesture still in flight,
+        // which would overwrite `touchDrag.guarded` in place. Unreachable today (the second-pointer listener ends
+        // the old gesture before a new press can fire), so the pin is on the SHAPE - the arm hands a live gesture
+        // to the single end rather than clearing the flag itself - which is what keeps it unreachable-by-accident.
+        assert.ok(/if \(touchDrag\.active\) endTouchDrag\('re-arm'\)/.test(arm),
+            'the arm must end any gesture still in flight through the single end, before it overwrites the state')
+        assert.ok(arm.indexOf('endTouchDrag(') < arm.indexOf('touchDrag.guarded = false'),
+            '...and it must do so BEFORE clearing the guard flag, or the release would be lost exactly as it is today')
     })
 
     await test('webview touch drag: the FIRST move decides - vertical lifts the row, sideways is left to Android', () => {
@@ -3400,6 +3423,17 @@ async function main() {
             const body = ruleBody(selector)
             assert.ok(/box-shadow:\s*inset 0 -?4px/.test(body), `${selector} must draw a 4px line, still as an inset box-shadow (no layout shift)`)
             assert.ok(/var\(--cockpit-/.test(body), `${selector} must colour the line from a --cockpit-* variable`)
+        }
+        // The row index is measured at the ARM, and only then does the lift paint the selection and dim the row.
+        // That order is safe exactly as long as neither class can move a row: `.todo.-selected` and
+        // `.todo.-dragging` must stay purely visual, or the lift would invalidate the index it is about to use
+        // and every gap the drag resolves would be one row out. Nothing else pins this, and it is one CSS
+        // property away from being silently untrue.
+        for (const selector of ['.todo.-selected {', '.todo.-dragging {']) {
+            const body = ruleBody(selector)
+            const boxModel = /(^|[\s;])(width|height|min-width|min-height|max-width|max-height|padding|padding-[a-z]+|margin|margin-[a-z]+|border(?!-radius)[a-z-]*|display|position|top|bottom|left|right|transform|font-size|line-height|box-sizing|flex[a-z-]*)\s*:/
+            assert.ok(!boxModel.test(body),
+                `${selector} must stay purely visual - the drag's row index is built before either class is applied, so anything that changes a row's box would invalidate it`)
         }
         const banner = ruleBody('#cockpitDragBanner {')
         assert.ok(/position: fixed/.test(banner), 'the banner must be fixed over the panel')

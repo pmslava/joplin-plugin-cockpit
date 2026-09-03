@@ -1761,6 +1761,11 @@ function updateDragTarget(){
  ***************************************************************************************************************************************************/
 function armTouchDrag(){
     var row = longPress.el
+    // Nothing can reach here with a gesture still running today - the second-pointer listener ends the old one
+    // before a new press could fire - but overwriting the state in place is the ONE way a taken guard could be
+    // lost without a release, which is the leak this block's comment and the 15s watchdog exist to prevent. So
+    // the invariant is made structural rather than argued: a live gesture is ended through the single end, first.
+    if (touchDrag.active) endTouchDrag('re-arm')
     touchDrag.active = true
     touchDrag.lifted = false
     touchDrag.guarded = false
