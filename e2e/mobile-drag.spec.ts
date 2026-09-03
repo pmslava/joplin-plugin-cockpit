@@ -23,12 +23,17 @@ import {
  * heading, a calendar day, a week column) - the same two messages, and the same host writes, the desktop drag
  * produces.
  *
- * NO NATIVE HTML5 DRAG EXISTS ON A MOBILE ROW, and that is the third Pixel round's root cause rather than a
- * detail. Android's WebView starts its own drag from a long press on a `draggable` element - it fires dragstart,
- * floats a translucent copy of the row under the finger and CANCELS the touch sequence, so the panel's 500 ms
- * timer never fires and none of the gesture above ever begins. Mobile rows therefore carry no draggable attribute
- * and no drag handlers at all (src/core/formats.ts), and the case at the end of this file holds that line: the
- * attribute is absent and a dragstart dispatched at a row is cancelled and lifts nothing.
+ * NO NATIVE HTML5 DRAG MAY START ON MOBILE, and that is the third Pixel round's root cause rather than a detail.
+ * Android's WebView starts its own drag from a long press on a `draggable` element - it fires dragstart, floats a
+ * translucent copy of the row under the finger and CANCELS the touch sequence, so the panel's 500 ms timer never
+ * fires and none of the gesture above ever begins. The fix is that a mobile row carries no draggable attribute
+ * and no drag handlers at all - but that is decided by the HOST, which renders the row markup from its own
+ * `isMobile`, and the host here is a DESKTOP Joplin: `forceMobilePanel` flips the webview's IS_MOBILE and its CSS
+ * class, never the platform the rows were rendered for. The markup half is therefore pinned in the harness (which
+ * runs the plugin against a mobile host outright), and the case near the end of this file takes the half that IS
+ * reachable, on the hardest input there is: a row that really does carry `draggable="true"` and an inline
+ * `ondragstart`, in a webview that believes it is mobile - where a dragstart must still be cancelled, lift
+ * nothing, and never reach the selection rewrite the desktop handler opens with.
  *
  * Because of that order, no case here lifts a row by holding alone: every drag case holds, checks the menu is up
  * and nothing is lifted, then makes ONE deliberate vertical step (`liftByMovingUpOrDown`) and only then aims.
@@ -1599,51 +1604,57 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     }
   });
 
-  test('a mobile row is not draggable, and a dragstart on it is cancelled and lifts nothing', async () => {
-    // THE ROOT CAUSE OF THE THIRD PIXEL ROUND. Android's WebView starts a native HTML5 drag from a long press on
-    // a draggable element - dragstart fires, a translucent copy of the row follows the finger, and the touch
-    // sequence is CANCELLED, so the 500 ms timer never fires: no menu, no arm, no touch drag, and the only drop
-    // that still lands is onto a heading through the native drag's own inline ondrop. The fix is that a mobile
-    // row is not draggable at all. The attribute is checked in the markup, and the belts behind it are exercised
-    // by dispatching the event the platform would have sent.
+  test('a dragstart on a row is cancelled and lifts nothing, and never touches the selection', async () => {
+    // THE ROOT CAUSE OF THE THIRD PIXEL ROUND, and the belts against it. Android's WebView starts a
+    // native HTML5 drag from a long press on a `draggable` element - dragstart fires, a translucent copy
+    // of the row follows the finger, and the touch sequence is CANCELLED, so the 500 ms timer never
+    // fires: no menu, no arm, no touch drag, and the only drop that still lands is onto a heading
+    // through the native drag's own inline ondrop. The real fix is that a mobile row carries no
+    // draggable attribute at all, and that is pinned where it belongs, in the harness: the markup is
+    // decided by the HOST (`isMobile` in the view state, src/ui/panel/panel.ts), and the host under this
+    // spec is a DESKTOP Joplin - `forceMobilePanel` flips the webview's own IS_MOBILE and its CSS class,
+    // never the platform the rows were rendered for.
+    //
+    // Which makes this case the belts' own case, on the hardest input there is: a row that really does
+    // carry `draggable="true"` and an inline `ondragstart`, inside a webview that believes it is mobile.
+    // Nothing may come of a dragstart there - not a lift, and not the selection rewrite `onTodoDragStart`
+    // opens with, which is what left the pressed row selected on the device.
     const { win } = joplin;
     await settle();
     await waitForPanelTodo(win, NATIVE);
     await armMessageLog(win);
     const panel = await agendaPanel(win);
-    const markup = await panel.evaluate((marker: string) => {
-      const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
-      const row = rows.find((r) => (r.textContent || '').includes(marker));
-      if (!row) return null;
-      return {
-        draggable: row.getAttribute('draggable'),
-        ondragstart: row.getAttribute('ondragstart'),
-        ondragend: row.getAttribute('ondragend'),
-        userDrag: (getComputedStyle(row) as any).webkitUserDrag || null,
-        // Nothing anywhere in a mobile panel may be draggable, or the platform has another way in.
-        anyDraggable: document.querySelectorAll('#joplin-plugin-content [draggable]').length,
-      };
-    }, NATIVE);
-    console.log('TOUCH NATIVE MARKUP', JSON.stringify(markup));
-    expect(markup, 'the row must be on screen').not.toBe(null);
-    expect(markup!.draggable, 'a mobile to-do row must carry no draggable attribute').toBe(null);
-    expect(markup!.ondragstart, 'nor a dragstart handler').toBe(null);
-    expect(markup!.ondragend, 'nor a dragend handler').toBe(null);
-    expect(markup!.anyDraggable, 'and nothing in a mobile panel may be draggable').toBe(0);
-    // The belt: even a dragstart aimed straight at the row is cancelled, and starts nothing.
+    expect(await forceMobilePanel(win), 'the webview must believe it is mobile').toBe(true);
+    // A selection of two OTHER rows, so "the guard returns before it writes the selection" is observable:
+    // the desktop handler's first act is to collapse onto the dragged row.
+    const untouched = [ids[MULTI_A], ids[MULTI_C]];
+    await setSelection(untouched);
     const dispatched = await panel.evaluate((marker: string) => {
       const rows = Array.from(document.querySelectorAll('.todo[data-todo-id]')) as HTMLElement[];
       const row = rows.find((r) => (r.textContent || '').includes(marker));
       if (!row) return null;
       const event = new Event('dragstart', { bubbles: true, cancelable: true });
       row.dispatchEvent(event);
-      return { prevented: event.defaultPrevented, dragging: document.querySelectorAll('.todo.-dragging').length };
+      return {
+        // The precondition, read from the row itself rather than assumed: this IS a draggable row with an
+        // inline handler, so the cancel below is the listener's doing and not the markup's.
+        draggable: row.getAttribute('draggable'),
+        inline: row.getAttribute('ondragstart'),
+        prevented: event.defaultPrevented,
+        dragging: document.querySelectorAll('.todo.-dragging').length,
+        selected: Array.from((window as any).selectedRowIDs || []) as string[],
+      };
     }, NATIVE);
     console.log('TOUCH NATIVE DRAGSTART', JSON.stringify(dispatched));
+    expect(dispatched, 'the row must be on screen').not.toBe(null);
+    expect(dispatched!.draggable, 'precondition: the desktop host rendered a draggable row').toBe('true');
+    expect(dispatched!.inline, 'precondition: with its inline dragstart handler').toContain('onTodoDragStart');
     expect(dispatched!.prevented, 'a dragstart on mobile must be cancelled before it can become a drag').toBe(true);
     expect(dispatched!.dragging, 'and it must lift nothing').toBe(0);
+    expect(dispatched!.selected, 'and must not rewrite the selection on its way through').toEqual(untouched);
     expect(names(await postedMessages(win)), 'and take no refresh guard').not.toContain('dialogGuard');
     // ...and the gesture the row is FOR still works, on the very same row: hold, lift, drop into a gap.
+    await setSelection([]);
     await armMessageLog(win);
     await dragRowTo(NATIVE, () => rowPoint(win, MID, 0.85));
     expect(names(await postedMessages(win)), 'the touch drag itself is untouched by any of this').toContain(
