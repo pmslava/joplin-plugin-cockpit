@@ -1866,7 +1866,11 @@ file in the suite that launches Joplin twice, which is why `globalTimeout` went 
 job cap. Its `restarted` latch is safe under `retries: 1`: Playwright discards the worker process on failure and
 starts a fresh one for the retry, so `beforeAll` runs again against a new profile and `restarted` is false again —
 a retried first case can never meet a profile whose settings were already turned on. **None of it has been run
-here** — e2e is the verifier's.
+here** — e2e is the verifier's, and the verifier's first full pass is what caught the one thing a spec written
+from the outside gets wrong: it created its to-do against a profile with no notebook in it. Joplin only draws the
+note list's "New to-do" button once a notebook exists, so `createTodo` waited out the whole 240s `beforeAll`
+timeout against a button that was never coming, and the ON case never ran at all. Every other spec in the suite
+opens with `createNotebook`; this one now does too.
 
 Suite: 388 harness checks (thirteen new), all passing. Thirteen because most of this is registration and refusal:
 one for the two settings themselves (public, Bool, default OFF, Cockpit's section, and the restart, desktop and
@@ -1882,4 +1886,4 @@ was caught by exactly the pin written for it: binding the listener to the button
 discriminator, and removing the stale-listener guard (all three by the content-script source pin), removing the
 `:has(span.toolbar-icon.icon-alarm)` discriminator from the stylesheet (by the CSS pin), removing the mobile gate
 on the registration, removing the `is_todo` gate in the handler, and loading the stylesheet with the setting off. Playwright: 114 tests in 19 files now (107 run, 7 opt-in showcase captures), two
-of them new here and neither run in this pass.
+of them new here — never run on this side, and their result is the verifier's to record.
