@@ -1652,6 +1652,7 @@ var TOUCH_DRAG_BAND = 0.5              // mobile: the whole row is live - the to
 var TOUCH_DRAG_SLOP = 10               // px per axis the long PRESS survives, measured from the press point (the adapter's own cancel gate)
 var TOUCH_DRAG_LIFT_PX = 24            // ...and px per axis from the FIRE point before the armed gesture decides anything at all
 var TOUCH_DRAG_WATCHDOG_MS = 15000     // last resort: no gesture lasts this long, and a stuck one must not hold the guard
+var ROW_INDEX_TOLERANCE_PX = 2         // how far a row's indexed box may disagree with its live one before the index is rebuilt
 
 var touchDrag = {
     active: false,          // the gesture owns this finger right now - armed behind the menu, or lifted
@@ -1664,9 +1665,11 @@ var touchDrag = {
     title: '',              // ...and its title, for the banner (read at the lift, which is the only thing that shows it)
     index: null,            // [{ el, top, bottom, info }] - the rows' boxes, searched by y
     indexTop: 0,            // ...and the list's scrollTop when they were measured, so a scroll can shift them
+    indexRows: 0,           // ...and how many to-do rows the list held then, the one cheap test of "is this still that list"
+
     startX: 0, startY: 0,
     x: 0, y: 0,             // the finger's last position, which the auto-scroll re-resolves against
-    target: null,           // the resolved drop, or null for the cancel state
+    target: null,           // the resolved drop - { kind: 'between'|'drop' } or { kind: 'none', reason } - null before the first resolve
     autoscroll: 0,          // -1 up / +1 down / 0 not scrolling, traced only when it changes
     watchdog: null,
 }
@@ -1730,6 +1733,37 @@ function buildRowIndex(){
     touchDrag.index = rows
     var scroller = touchDragScroller()
     touchDrag.indexTop = scroller ? scroller.scrollTop : 0
+    // Not rows.length: the peek's rows and any zero-height row are skipped above, so what is recorded is the LIVE
+    // count this index was measured against - the one thing a no-candidate lookup can cheaply re-ask (rowEntryAtY).
+    touchDrag.indexRows = document.querySelectorAll('.todo[data-todo-id]').length
+}
+
+/** rowEntryAtY *************************************************************************************************************************************
+ * The indexed row under a y, with the index verified against the screen first. The shift in syncRowIndex is exact for a SCROLL and nothing else, and *
+ * a mobile panel has other ways to move a row: a re-render between two frames of the drag, a group folding, the soft keyboard resizing the viewport. *
+ * A shifted-but-wrong index is the worst failure this gesture has, because it is silent - the insertion line paints somewhere plausible and the drop *
+ * writes the neighbours of a row the finger was never over.                                                                                          *
+ *                                                                                                                                                    *
+ * So the CANDIDATE is checked, and only the candidate: one getBoundingClientRect() on the single row the search returned, against the box the index   *
+ * holds for it. More than ROW_INDEX_TOLERANCE_PX apart (or the row is no longer in the document) and the whole index is rebuilt and the search re-run *
+ * once. That is one rect per move in the ordinary case, against a full rebuild's rect-plus-heading-walk for every row in the list, which is the cost  *
+ * the shift exists to avoid on the device.                                                                                                            *
+ *                                                                                                                                                    *
+ * With NO candidate there is no row to check - a finger in the whitespace below the last row is the ordinary way to have none - so the cheap question *
+ * asked instead is whether the LIST is still the one that was measured, by its row count. That keeps a finger parked off the end of the list from     *
+ * rebuilding the index on every frame, while a re-render that added or removed rows still forces the rebuild it needs.                                *
+ ***************************************************************************************************************************************************/
+function rowEntryAtY(y){
+    var entry = window.TouchDrag.rowAtY(touchDrag.index, y)
+    if (!rowIndexIsStale(entry)) return entry
+    buildRowIndex()
+    return window.TouchDrag.rowAtY(touchDrag.index, y)
+}
+
+function rowIndexIsStale(entry){
+    if (!entry) return document.querySelectorAll('.todo[data-todo-id]').length !== touchDrag.indexRows
+    if (!entry.el || !entry.el.isConnected) return true
+    return Math.abs(entry.el.getBoundingClientRect().top - entry.top) > ROW_INDEX_TOLERANCE_PX
 }
 
 /** syncRowIndex ************************************************************************************************************************************
@@ -1750,29 +1784,50 @@ function syncRowIndex(){
 }
 
 /** resolveDragTarget *******************************************************************************************************************************
- * What the finger is over right now: a whole-row [data-drop] target, an insertion gap, or nothing (the cancel state). Never a silent no-op - the     *
- * caller paints exactly one of the three, so the gesture always says what a release would do.                                                        *
- *                                                                                                                                                    *
- * A gap whose BOTH neighbours are absent in a DATELESS group is deliberately not a target: betweenBounds can form no interval from it (no neighbour  *
- * to bound it, no group date to anchor it) and the host would write nothing, so painting a line there would promise a move that never happens.        *
+ * What the finger is over right now: a whole-row [data-drop] target, an insertion gap, or one of the five NAMED refusals. Never a silent no-op - the *
+ * caller paints exactly one of the three outcomes, so the gesture always says what a release would do, and the trace always says why it would do     *
+ * nothing.                                                                                                                                            *
+ *                                                                                                                                                     *
+ * THE GEOMETRY IS AUTHORITATIVE FOR ROWS, and the third Pixel round is why ("moving one note doesn't land between other notes, only on headings").    *
+ * document.elementFromPoint is asked exactly two questions and no others: is there a [data-drop] under the finger, and is there an h2 under it. What  *
+ * it returns for anything else - the drag banner, the trace strip, a menu, the body, the dragged row itself, a checkbox ring overhanging from the     *
+ * next row - is not consulted at all and can VETO nothing: a gap is resolved from the row index by y, and a floating thing over the list has no say   *
+ * in where the rows are. (The banner and the trace strip are pointer-events:none in panel.css besides, so they never even reach the first question.)  *
+ *                                                                                                                                                     *
+ * The five refusals, each of which used to read as the same bare `drag-target:none`:                                                                  *
+ *   outside          the finger's y is outside the .todos client rect - above the list or below it, where no gap exists.                              *
+ *   refused-heading  an h2 with no data-drop is under the finger. It is a SIBLING of the rows, so the index (which gives everything between one row's *
+ *                    top and the next row's to the row above) would otherwise attribute the heading's whole band - and, while it is stuck to the top  *
+ *                    of a scrolled list, the rows it floats over as well - to a row in the group BEFORE it, and write the drop there. The desktop     *
+ *                    drag is inert on exactly this point (betweenTargetAt starts from a closest('.todo'), which a heading is not).                    *
+ *   no-row           inside the list, but off either end of the index: the whitespace below the last row, or above the first.                          *
+ *   no-info          the row under the finger takes no between-drop: the No-Due group, a week card, a month section, anything outside .todos.          *
+ *   both-null        a gap in a DATELESS group with no non-dragged neighbour on either side. betweenBounds can form no interval from it (no neighbour *
+ *                    to bound it, no group date to anchor it), so the host would write nothing and a line there would promise a move that never came. *
  ***************************************************************************************************************************************************/
+function dragTargetNone(reason){
+    return { kind: 'none', reason: reason }
+}
+
 function resolveDragTarget(){
     var under = document.elementFromPoint(touchDrag.x, touchDrag.y)
     var drop = (under && under.closest) ? under.closest('[data-drop]') : null
     if (drop) return { kind: 'drop', el: drop }
-    // A heading that accepts no drop (Overdue and Future name no date, so getHeadingDropTarget gives them none)
-    // is not a target - and it is not the gap above it either. It is a SIBLING of the rows, so the index, which
-    // by design gives everything between one row's top and the next row's to the row above, would otherwise
-    // attribute the heading's whole band - and, while it is stuck to the top of a scrolled list, the rows it is
-    // floating over as well - to a row in the group BEFORE it, and write the drop there. The desktop drag is
-    // inert on exactly this point (betweenTargetAt starts from a closest('.todo'), which a heading is not).
-    if (under && under.closest && under.closest('h2')) return null
-    var entry = window.TouchDrag.rowAtY(touchDrag.index, touchDrag.y)
-    if (!entry || !entry.info) return null
+    if (under && under.closest && under.closest('h2')) return dragTargetNone('refused-heading')
+    // Off the list entirely - which is the "release outside the list to cancel" the banner offers, and the one
+    // refusal that is a deliberate user action rather than a place the gesture could not read.
+    var scroller = touchDragScroller()
+    if (scroller){
+        var box = scroller.getBoundingClientRect()
+        if (touchDrag.y < box.top || touchDrag.y >= box.bottom) return dragTargetNone('outside')
+    }
+    var entry = rowEntryAtY(touchDrag.y)
+    if (!entry) return dragTargetNone('no-row')
+    if (!entry.info) return dragTargetNone('no-info')
     var before = window.TouchDrag.bandSide(touchDrag.y - entry.top, entry.bottom - entry.top, TOUCH_DRAG_BAND) === 'before'
     if (entry.info.groupDate == null){
         var neighbours = betweenNeighboursAt(entry.el, before, new Set(touchDrag.ids))
-        if (!neighbours.prevId && !neighbours.nextId) return null
+        if (!neighbours.prevId && !neighbours.nextId) return dragTargetNone('both-null')
     }
     return { kind: 'between', row: entry.el, before: before, groupDate: entry.info.groupDate, groupEndDate: entry.info.groupEndDate }
 }
@@ -1781,6 +1836,9 @@ function resolveDragTarget(){
 function sameDragTarget(a, b){
     if (!a || !b) return a === b
     if (a.kind !== b.kind) return false
+    // Two refusals for different reasons are not the same answer: the strip has to see the finger move from
+    // `outside` to `refused-heading` to `no-info`, which is the whole of what the next device round reads.
+    if (a.kind === 'none') return a.reason === b.reason
     return a.kind === 'between' ? (a.row === b.row && a.before === b.before) : a.el === b.el
 }
 
@@ -1788,7 +1846,7 @@ function sameDragTarget(a, b){
 function paintDragTarget(target){
     if (target && target.kind === 'between'){ paintDropTargetHighlight(null); paintBetweenIndicator(target); return }
     clearBetweenIndicator()
-    paintDropTargetHighlight(target ? target.el : null)
+    paintDropTargetHighlight(target && target.kind === 'drop' ? target.el : null)
 }
 
 // The banner over the panel: what is moving, and what a release would do with it. It lives on <body> like the
@@ -1807,7 +1865,7 @@ function hideDragBanner(){
 
 function dragBannerText(target){
     var moving = 'Moving ' + touchDrag.title
-    if (!target) return moving + ' — release to cancel'
+    if (!target || target.kind === 'none') return moving + ' — release to cancel'
     if (target.kind === 'drop') return moving + ' — onto ' + dropTargetLabel(target.el)
     return moving + ' — ' + (target.before ? 'before ' : 'after ') + rowLabel(target.row)
 }
@@ -1819,8 +1877,9 @@ function updateDragTarget(){
     paintDragTarget(target)
     if (sameDragTarget(touchDrag.target, target)){ touchDrag.target = target; return }
     touchDrag.target = target
-    showDragBanner(dragBannerText(target), !target)
-    traceGesture('drag-target:' + (!target ? 'none' : target.kind === 'drop' ? 'drop' : target.before ? 'before' : 'after'))
+    showDragBanner(dragBannerText(target), target.kind === 'none')
+    traceGesture('drag-target:' + (target.kind === 'none' ? 'none:' + target.reason
+        : target.kind === 'drop' ? 'drop' : target.before ? 'before' : 'after'))
 }
 
 /** armTouchDrag ************************************************************************************************************************************
@@ -1981,7 +2040,9 @@ function onTouchDragScrolled(clientX, clientY){
 function dropTouchDrag(){
     var target = touchDrag.target
     var ids = touchDrag.ids
-    if (target && target.kind === 'between'){
+    // A resolved refusal is not a target; it carries its reason to the end, which traces it (see endTouchDrag).
+    var landed = !!(target && target.kind !== 'none')
+    if (landed && target.kind === 'between'){
         var neighbours = betweenNeighboursAt(target.row, target.before, new Set(ids))
         selectedRowIDs.clear()
         // WHAT is about to be written, not merely that something was: a drop that lands in the wrong gap and one
@@ -1991,14 +2052,14 @@ function dropTouchDrag(){
         traceGesture('drag-drop:between ' + traceId(neighbours.prevId) + '|' + traceId(neighbours.nextId))
         void webviewApi.postMessage(['todosDroppedBetween', ids, neighbours.prevId, neighbours.nextId, target.groupDate, target.groupEndDate]);
         traceGesture('drag-drop:posted')
-    } else if (target){
+    } else if (landed){
         selectedRowIDs.clear()
         // The date the [data-drop] carries, verbatim: a YYYY-MM-DD, or 'clear' for the No Due Date heading.
         traceGesture('drag-drop:date ' + (target.el.dataset.drop || '?'))
         void webviewApi.postMessage(['todosDropped', ids, target.el.dataset.drop]);
         traceGesture('drag-drop:posted')
     }
-    endTouchDrag(target ? 'dropped' : 'no-target')
+    endTouchDrag(landed ? 'dropped' : 'no-target')
 }
 
 /** endTouchDrag ************************************************************************************************************************************
@@ -2017,6 +2078,13 @@ function dropTouchDrag(){
  ***************************************************************************************************************************************************/
 function endTouchDrag(reason){
     if (!touchDrag.active) return
+    // Read BEFORE the teardown clears them, and only on the one path that says them: WHICH of resolveDragTarget's
+    // refusals was standing at the release, where the finger was, and how many rows the index held. Without the
+    // reason every refusal reads as the same bare line, which is why the second strip could not say why a gap drop
+    // did nothing on the phone while the same drop passed in the mobile-mode e2e (MOBILE.md, step 18b-bis).
+    var noTargetNote = reason !== 'no-target' ? '' :
+        (':' + ((touchDrag.target && touchDrag.target.kind === 'none') ? touchDrag.target.reason : 'unresolved')
+         + ' y=' + Math.round(touchDrag.y) + ' rows=' + (touchDrag.index ? touchDrag.index.length : 0))
     touchDrag.active = false
     touchDrag.lifted = false
     if (touchDrag.watchdog){ clearTimeout(touchDrag.watchdog); touchDrag.watchdog = null }
@@ -2047,7 +2115,7 @@ function endTouchDrag(reason){
     // among Android's cancels, which is the one reading it must not have - this end is the user's own doing (the
     // banner said "release to cancel" and they did), while every remaining `drag-cancel:` is the platform taking
     // the gesture away. Traced here rather than in dropTouchDrag so that every end still speaks exactly once.
-    else if (reason === 'no-target') traceGesture('drag-release:no-target')
+    else if (reason === 'no-target') traceGesture('drag-release:no-target' + noTargetNote)
     else if (reason !== 'dropped') traceGesture('drag-cancel:' + reason)
     var guarded = touchDrag.guarded
     touchDrag.guarded = false
@@ -2708,9 +2776,10 @@ function wireSuggestList(list, input){
  *                                                                                                                                                      *
  * Off unless the "Gesture trace" setting is on, mobile only, and capped at a handful of entries: a ring buffer of short codes and one textContent write *
  * per traced event, so it costs nothing when off and next to nothing when on. The cap is what decides how much of a gesture is still readable at the    *
- * end of it - a drag arms, changes target a few times, scrolls and drops - so it is a little longer than the press-only trace needed.                   *
+ * end of it - a drag arms, changes target a few times, scrolls and drops, and now names WHY each refusal was one - so 12 rather than the 10 the         *
+ * press-only trace needed.                                                                                                                              *
  ***************************************************************************************************************************************************/
-var GESTURE_TRACE_MAX = 10
+var GESTURE_TRACE_MAX = 12
 var gestureTrace = []
 // The setting, read ONCE per render rather than per traced pointer event: tracing sits on the gesture path,
 // and JSON-parsing the data island on every pointermove would make "costs nothing when off" untrue.
