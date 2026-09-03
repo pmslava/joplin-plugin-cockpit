@@ -727,6 +727,13 @@ function onNoteContextMenu(event, noteID){
  * date…" - is added only for a to-do row and is single-note anyway.                                                                                    *
  ***************************************************************************************************************************************************/
 function showNoteContextMenu(event, noteID, isTodo){
+    // Belt to the braces of the panel-wide contextmenu suppression above: while a touch gesture owns the finger -
+    // armed silently behind the menu the fire opened, or lifted into the drag proper - NOTHING may open a menu.
+    // The adapter's own fire is not caught by this and cannot be: onLongPressFire calls onTodoContextMenu (and so
+    // this) BEFORE armTouchDrag(), so `touchDrag.active` is still false on that one call and true on every other
+    // route in - a native contextmenu that somehow got past the capture listener, a stray inline handler, a second
+    // gesture. That ORDER is therefore load-bearing rather than merely tidy, and the harness pins it.
+    if (touchDrag.active){ traceGesture('menu-blocked'); return }
     hideNoteContextMenu()
     // The ids this menu acts on. Any row - to-do or note - that is itself part of a multi-row selection
     // triggers the batch menu; everything else (a row outside the selection, a selection of one, and mobile,
@@ -1633,6 +1640,12 @@ function rowLabel(row){
     return shortLabel(title ? title.textContent : '')
 }
 
+// Four characters of a note id, for the drop trace: enough to tell one neighbour from another on the strip, and
+// '-' for the end of a group, where there is no neighbour at all.
+function traceId(id){
+    return id ? String(id).slice(0, 4) : '-'
+}
+
 // What to call a whole-row drop target: a heading says itself ("Today", "No Due Date"), and a calendar day or a
 // week column says the date it carries - the one thing every [data-drop] has.
 function dropTargetLabel(el){
@@ -1886,12 +1899,19 @@ function dropTouchDrag(){
     if (target && target.kind === 'between'){
         var neighbours = betweenNeighboursAt(target.row, target.before, new Set(ids))
         selectedRowIDs.clear()
-        traceGesture('drag-drop:between')
+        // WHAT is about to be written, not merely that something was: a drop that lands in the wrong gap and one
+        // that lands in the right gap and is not written both read as "drag-drop" otherwise, and the device round
+        // has nothing but this strip to tell them apart. The neighbour ids are cut to four characters ('-' for an
+        // end of a group) because the whole trace is one line on a phone.
+        traceGesture('drag-drop:between ' + traceId(neighbours.prevId) + '|' + traceId(neighbours.nextId))
         void webviewApi.postMessage(['todosDroppedBetween', ids, neighbours.prevId, neighbours.nextId, target.groupDate, target.groupEndDate]);
+        traceGesture('drag-drop:posted')
     } else if (target){
         selectedRowIDs.clear()
-        traceGesture('drag-drop:date')
+        // The date the [data-drop] carries, verbatim: a YYYY-MM-DD, or 'clear' for the No Due Date heading.
+        traceGesture('drag-drop:date ' + (target.el.dataset.drop || '?'))
         void webviewApi.postMessage(['todosDropped', ids, target.el.dataset.drop]);
+        traceGesture('drag-drop:posted')
     }
     endTouchDrag(target ? 'dropped' : 'no-target')
 }
@@ -1936,6 +1956,11 @@ function endTouchDrag(reason){
     // (the menu stays, and that IS the gesture), and one whose first move was sideways (Android's, not ours).
     if (reason === 'released') traceGesture('drag-released')
     else if (reason === 'sideways') traceGesture('drag-sideways-ignored')
+    // ...and a third: a LIFTED drag released over nothing droppable. It used to read as `drag-cancel:no-target`,
+    // among Android's cancels, which is the one reading it must not have - this end is the user's own doing (the
+    // banner said "release to cancel" and they did), while every remaining `drag-cancel:` is the platform taking
+    // the gesture away. Traced here rather than in dropTouchDrag so that every end still speaks exactly once.
+    else if (reason === 'no-target') traceGesture('drag-release:no-target')
     else if (reason !== 'dropped') traceGesture('drag-cancel:' + reason)
     var guarded = touchDrag.guarded
     touchDrag.guarded = false
@@ -2744,15 +2769,29 @@ document.addEventListener('click', function(event){
     event.stopPropagation()
 }, true)
 
-// Android's native long press would otherwise raise the system callout / selection bar over the list and take
-// the gesture. The CSS suppression (-webkit-touch-callout / user-select, see panel.css) is the main defence;
-// this is the belt to its braces. Mobile only, so a desktop right-click inside the list is untouched.
+// Android's native long press fires a REAL `contextmenu` on whatever is under the finger, and on mobile the panel
+// refuses every one of them - rows, headings, the list, the body alike - because two different things ride on it
+// and both are damage:
+//   - the system callout / selection bar over the list (the CSS suppression, -webkit-touch-callout / user-select
+//     in panel.css, is the first defence; this is the belt to its braces), and
+//   - the panel's OWN context menu, opened behind the long-press adapter's back: every to-do row carries an inline
+//     oncontextmenu="onTodoContextMenu(event, id)" and every note row an onNoteContextMenu (src/core/formats.ts,
+//     the list rows and the week cards), so Android's long press reached showNoteContextMenu without the adapter
+//     ever knowing. That is the second Pixel round's bug. Its TIMING is the device's, not ours - the "Touch & hold
+//     delay" accessibility setting plus Chrome's own ~500ms - so the native event can land BEFORE the adapter's
+//     fire (a second menu over the first) or AFTER the lift has closed the menu (a menu re-opening over a lifted
+//     row, which then swallows the release that should have reached a gap: "the menu doesn't close, and the row is
+//     not moved"). Neither showed in the gesture trace, because a row's inline handler is not on any traced path.
+// stopImmediatePropagation as well as preventDefault, because preventDefault alone cancels only the NATIVE menu:
+// the inline handlers are listeners like any other and would still run. Stopping the event dead in the capture
+// phase, at the document, is what makes the long-press adapter the ONLY way a touch opens a context menu.
+// Desktop returns on the first line, so a right click there - in the list, on a row, anywhere - is untouched.
 document.addEventListener('contextmenu', function(event){
     if (!IS_MOBILE) return
-    if (event.target && event.target.closest && event.target.closest('#searchSuggestions')){
-        traceGesture('contextmenu')
-        event.preventDefault()
-    }
+    var el = event.target && event.target.closest ? event.target : null
+    traceGesture('contextmenu-suppressed:' + (!el ? 'other' : el.closest('.todo') ? 'row' : el.closest('h2') ? 'heading' : 'other'))
+    event.preventDefault()
+    event.stopImmediatePropagation()
 }, true)
 
 // True for exactly as long as a press inside the open suggestion list is losing the field its focus. A tap on a
