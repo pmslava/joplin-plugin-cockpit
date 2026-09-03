@@ -124,6 +124,16 @@ Tools menu; the mobile styler button was removed), where `openPluginDialog` open
 viewer stacking to work around. The editor's **delete confirmation** stays a native message box on both
 platforms (it draws above the panel on mobile).
 
+### 1c. The note title bar features are desktop-gated (v2.5.0)
+
+The two note-title-bar settings — the due date shown on hover (a chrome stylesheet loaded with
+`joplin.window.loadChromeCssFile`) and the alarm bell opening Cockpit's picker (a
+`ContentScriptType.CodeMirrorPlugin` content script) — are registered on **desktop only**, behind the same
+`isMobile()` gate the note-toolbar button uses: `joplin.window` is a desktop API, and the mobile app has neither
+a note title bar with a bell in it nor a CodeMirror-hosted chrome DOM for a content script to reach. Both
+settings are visible on mobile and do nothing there; the harness pins that neither is ever registered on mobile
+even with the setting on.
+
 ### 2. Touch-interaction layer + tap targets + viewport (`panelWebview.js`, `panel.css`)
 
 All gated on the mobile flag (`IS_MOBILE` / `.cockpit-mobile`), so desktop click, dblclick,

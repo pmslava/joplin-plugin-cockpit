@@ -98,6 +98,8 @@ With several to-dos selected the picker offers "Keep each to-do's own schedule" 
 
 Right-click a to-do's circle, or long-press it on touch, to open the picker for that to-do, or for the whole selection if it is part of one. Right-click a group heading — "Today", "No Due Date", a week-planner day — to select everything under it and open the picker for the lot.
 
+On desktop the same picker can be put on the alarm bell in Joplin's own note title bar, so a to-do open in the editor gets it without going through the panel — see [Settings](#settings).
+
 ## The circle on every row
 
 The circle on each row doubles as a ring showing how many of the checkboxes inside that note are ticked, with a "3/7 checkboxes done" tooltip. It is display-only in both directions: filling the ring does not complete the to-do, and completing the to-do does not fill the ring. A note with no checkboxes inside shows a plain disc instead.
@@ -178,6 +180,8 @@ Move, tag and duplicate run Joplin's own dialogs on desktop — the native tag d
 
 [Whereabouts](https://github.com/pmslava/joplin-plugin-whereabouts) puts a small notebook chip under the note title. With Cockpit installed the chip also drives the panel: a **left click** points the panel at that notebook, a **double click** reveals the note in the panel — filtering to its notebook if it is not already listed, and pinning it below the list as a read-only row when the active profile cannot show it at all (a plain note in a to-dos-only profile, say). The revealed row is scrolled into view and flashes briefly. Neither plugin needs the other: without Cockpit the chip is silent, without Whereabouts nothing here changes.
 
+Both plugins reach into Joplin's note title bar, and they do not collide: Whereabouts mounts its chip below the title, while Cockpit's two title-bar settings touch only the alarm bell inside Joplin's own button row (`.note-title-info-group`), which the chip never enters. Run both with everything switched on and each does its own thing.
+
 ## Overview notes
 
 Give a profile the id of a note and Cockpit keeps that note filled with the profile's list as Markdown — a heading per group, each to-do a checkbox linked back to itself — so the plan is readable in any Joplin client, including ones that cannot show the panel.
@@ -231,6 +235,8 @@ Cockpit's settings live in Joplin's own Settings › Plugins › Cockpit.
 - **Excluded notebooks** — see [Search and filtering](#search-and-filtering).
 - **Theme, completed-to-do style, font size, circle size and the six custom colours** — see [Appearance](#appearance).
 - **Show the Cockpit button in the note toolbar** — a gauge button in the note toolbar toggles the panel, and the same command sits in Tools › Cockpit alongside this switch and Set Panel CSS. Joplin cannot add or remove a toolbar button while running, so turning it on or off applies after a restart, and Cockpit says so.
+- **Hide the due date next to the bell in the note title bar and show it on hover** — when a to-do has an alarm, Joplin prints the due date as text beside the bell in the note title bar, and that text eats the space the title has. With this on, the text is hidden and appears as a small bubble under the bell while the pointer is over it. Desktop only. Off by default. Joplin cannot unload a stylesheet it has already loaded, so this applies after a restart.
+- **Open Cockpit's date picker instead of Joplin's when the alarm bell is clicked** — clicking the bell opens Cockpit's picker (calendar, time columns and quick buttons) rather than Joplin's bare datetime prompt. Desktop and the **Markdown editor** only: with the Rich Text editor no plugin code runs in that window, so the bell keeps Joplin's prompt there. The Note menu's *Set alarm* item and its keyboard shortcut always keep Joplin's picker, so the original is never out of reach. Off by default; applies after a restart, since Joplin cannot register an editor content script while running.
 
 ## On Android
 

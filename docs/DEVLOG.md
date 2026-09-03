@@ -1739,3 +1739,113 @@ each was caught: renaming a command (the contract pin, plus every case that exec
 the filter instead of switching it to the note's notebook, dropping the pin on a background refresh, and letting
 `revealNote` act on mobile — the last three each by exactly the one pin written for them. Playwright: 112 tests in
 18 files now (105 run, 7 opt-in showcase captures), three of them new here and none of them run in this pass.
+
+## 2026-09-03 — v2.5.0: the note title bar — due date on hover, the bell opens Cockpit's picker
+
+Two small owner requests about the same three square centimetres of Joplin's UI, the note title bar. Both are
+desktop-only, both ship **off** by default, and both say "takes effect after a Joplin restart" — which is not
+politeness, it is the API: Joplin can neither unload a chrome stylesheet nor unregister a content script.
+
+**A. The due date beside the bell.** When a to-do has an alarm, Joplin renders the datetime as *text inside the
+bell button* — `<button class="toolbar-button -has-title"><span class="toolbar-icon …"/><span>2026-08-23
+12:00</span></button>` — and on a narrow editor column that text takes the space the title wanted. Slava had been
+running his own userchrome block for weeks to hide it and bring it back as a hover bubble; the request was simply
+to make that a setting. The block is ported verbatim into `src/ui/chrome/dueOnHover.css` and loaded, when the
+setting is on, with `joplin.window.loadChromeCssFile(`${installDir}/ui/chrome/dueOnHover.css`)`. No build change
+was needed: the webpack `CopyPlugin` already ships every non-`.ts` file under `src/` into `dist/` verbatim, so the
+path inside the installed plugin mirrors the source tree.
+
+**Why the selector is provably the bell and nothing else.** Every rule is scoped to
+`.note-title-info-group button.toolbar-button.-has-title`. `-has-title` (and the second text `<span>`) appear on a
+`ToolbarButton` only when its command supplies a `mapStateToTitle`, and `editAlarm` is the only title-bar command
+in Joplin that has one — that callback *is* what prints the due date. Plugin buttons never get a title, so
+Cockpit's own gauge is untouched, and the spellcheck, layout and note-properties buttons are icon-only. Whereabouts'
+notebook chip is mounted outside `.note-title-info-group` entirely. So there is no second thing this can catch.
+
+**B. The bell opening Cockpit's picker.** Clicking the bell runs `CommandService.execute('editAlarm')`, which
+opens Joplin's `PromptDialog` — a bare `datetime-local` field. Cockpit already has a much better picker for
+exactly this, so the ask was to put it on the bell.
+
+**Overriding `editAlarm` is not possible, and would break the bell.** The obvious move — register a declaration
+under the same name — *replaces* Joplin's entry in `CommandService`, and the replacement carries no
+`mapStateToTitle`. The bell would immediately stop printing the due date at all, which is the very thing feature A
+is about. There is no "wrap" or "before" hook. So the click has to be taken in the DOM, and reaching Joplin's
+title-bar DOM has exactly one route: a `ContentScriptType.CodeMirrorPlugin` script, which `PluginLoader` injects
+as a plain `<script>` into the renderer window — unsandboxed, same JS realm as Joplin's UI. The CodeMirror editor
+is only the vehicle. This is Cockpit's first editor content script, so `plugin.config.json` had to be created
+(`{"extraScripts": ["contentScripts/titleBar.ts"]}`); `webpack.config.js` has always built extra scripts from that
+file and was simply a no-op while it was absent. The bundled `api/types.ts` predates the CodeMirror editor
+typings, and regenerating the whole API surface for an intercept that touches no editor state was not worth the
+diff, so the script declares the three shapes it uses locally — no `@codemirror` dependency is needed to add a
+click listener.
+
+**The three constraints that make the intercept correct**, each of them a mistake that would pass review:
+
+1. **Bind on `.note-editor-wrapper`, never on the button.** The bell's React key embeds the due-date text, so the
+   button element is *remounted every time the alarm changes*. A listener bound to it would be thrown away by the
+   first alarm the user set through it — the feature would work exactly once, per note, and then silently stop.
+2. **Discriminate by the alarm icon, not by `-has-title`.** A to-do that has no alarm yet has no title text and no
+   `-has-title`, and it is precisely that to-do a user most wants the picker for. The test is
+   `closest('.note-title-info-group button.toolbar-button')` **and** `querySelector('span.toolbar-icon.icon-alarm')`,
+   which also keeps the other title-bar buttons (spellcheck, layout, properties, Cockpit's own gauge) out.
+3. **Capture phase, and stop the event there.** React 18 delegates `onClick` from a *bubble* listener on its root
+   container, so a bubble-phase listener anywhere below it fires too late. A capture-phase listener on a stable
+   ancestor below that root, calling `stopPropagation()` (with `preventDefault()` and `stopImmediatePropagation()`
+   as belt and braces), is what reliably keeps Joplin's `editAlarm` from running.
+
+Two more details that are easy to get wrong. `plugin()` runs once per **editor mount**, not once per note —
+switching notes reuses the same CodeMirror instance — so the open note's id is read from
+`editorControl.joplinExtensions.noteIdFacet` **at click time**, never captured at mount; an id captured at mount
+would be the first note that editor ever showed, forever. And every path that cannot proceed (no id, a disabled
+bell, unexpected DOM) leaves the event **alone**, so the worst failure mode is Joplin's own picker, not a dead
+button.
+
+The plugin half (`src/ui/titlebar/titleBar.ts`) treats the renderer as untrusted: the payload shape and the id are
+re-checked, the note is re-read fresh with `joplin.data.get(['notes', id], { fields: ['id','is_todo','todo_completed'] })`
+in one expression (the sandbox-proxy rule), and a plain note or a completed to-do is **refused** — those are exactly
+the two states in which Joplin disables the bell, so opening a picker for them would be Cockpit inventing an action
+Joplin does not offer. An unknown id makes `data.get` throw `Not Found`, which becomes `{ ok: false }` like any
+other refusal; nothing here ever rejects, because a rejected promise on this side reaches the renderer as an
+unhandled rejection with no visible effect at all. On success it calls the existing `openAlarmDialog([noteId])` —
+the same dialog the panel's own `setAlarmClicked` opens, created once at startup by `setupAlarmDialog`, whose
+OK/Clear paths already write the due and refresh the panel and the overview notes through `afterAlarmWrite`.
+`openAlarmDialog` itself was not touched.
+
+**The harness had to learn two APIs before any of this could be tested.** `test/harness.js` stubbed neither
+`joplin.window` nor `joplin.contentScripts`, so with the new startup wiring in place *every* scenario crashed at
+`onStart`. Added minimally and faithfully: `window.loadChromeCssFile`/`loadNoteCssFile` recording paths into
+`state.chromeCssFiles`/`noteCssFiles` (the real API can only load, never unload, so the ordered path list is the
+whole observable surface), `contentScripts.register` recording `{ type, id, scriptPath }`, and
+`contentScripts.onMessage` storing the handler **wrapped with `withTimerCapture`** — the same treatment
+`views.panels.onMessage` gets, because this handler can reach an alarm write and `afterAlarmWrite` arms the
+reconcile and overview lanes; an uncaptured `setTimeout` would leak across scenarios on a real clock.
+
+**e2e was feasible, and is in.** `e2e/title-bar.spec.ts` launches Joplin against a kept profile, sets an alarm
+through Joplin's own prompt while that is still what the bell opens, and asserts the OFF default: the due-date
+span's computed `display` is not `none`, a real click on
+`.note-title-info-group button.toolbar-button:has(.icon-alarm)` opens `.prompt-dialog` and no Cockpit dialog. Then
+it turns both settings on through the Options screen, **closes Joplin and relaunches against the same profile** —
+the restart is the feature, not a workaround for it — and asserts the ON behaviour: the span computes to `none`
+and to `block` under a real `hover()`, and the same click opens Cockpit's picker (a plugin webview iframe carrying
+`#alarmForm`) while `.prompt-dialog` stays away. Cockpit's settings live in Joplin's database, not in the profile's
+`settings.json`, so they cannot be preset the way `launchJoplin({ settings })` presets Joplin's own File-storage
+settings; the Options screen is the only route a user has and so it is the route the spec takes, through a new
+`setCockpitCheckboxes` helper (Joplin renders a Bool setting as a checkbox with a `<label for>` carrying the
+registered label, so it is reached exactly as the enum controls are). This is the only file in the suite that
+launches Joplin twice, which is why `globalTimeout` went 30 → 34 minutes, still well under the workflow's 40-minute
+job cap. **None of it has been run here** — e2e is the verifier's.
+
+Suite: 388 harness checks (thirteen new), all passing. Thirteen because most of this is registration and refusal:
+one for the two settings themselves (public, Bool, default OFF, Cockpit's section, and the restart, desktop and
+Markdown-editor caveats present in the descriptions), three for the stylesheet (loaded exactly once from the
+installation directory when on; never when off; never on mobile), three for the content script (registered as
+`codeMirrorPlugin`/`cockpit-title-bar`/`./contentScripts/titleBar.js` with its handler, and with that file proven
+present in `dist/`; never when off; never on mobile), four for the handler (an uncompleted to-do opens the dialog
+and OK writes one numeric `todo_due`; a plain note and a completed to-do are each refused with nothing written; an
+unknown id and five malformed payloads all come back `{ ok: false }` rather than throwing), and two source pins for
+what a Node harness cannot execute — the three intercept constraints in the content script, and the four scoped
+rules in the stylesheet. Five mutations were run and each was caught by exactly the pin written for it: binding the
+listener to the button and dropping the `icon-alarm` discriminator (both by the content-script source pin),
+removing the mobile gate on the registration, removing the `is_todo` gate in the handler, and loading the
+stylesheet with the setting off. Playwright: 114 tests in 19 files now (107 run, 7 opt-in showcase captures), two
+of them new here and neither run in this pass.
