@@ -18,6 +18,13 @@ export const showToolbarButtonSettingKey = "showToolbarButton"
 export const hideDueDateOnBellSettingKey = "hideDueDateOnBell"
 export const bellOpensCockpitPickerSettingKey = "bellOpensCockpitPicker"
 export const gestureTraceSettingKey = "gestureTrace"
+/** The gesture trace's ONE switch. A shipping build must never show the diagnostic strip, whatever a profile happens
+ * to have stored, so every reader of gestureTraceSettingKey is gated on this constant and startup resets a stored
+ * true back to false (resetUnavailableGestureTrace below). FOR A DEVICE ROUND, IN A DEV BUILD: flip this to true -
+ * and, if the toggle should also be reachable from the Settings screen, set public: true on the registration below -
+ * then `npm run dist` and sideload. Never commit either flip; with the constant true the harness pins that hold the
+ * trace unavailable fail by design. See docs/MOBILE.md §7. */
+export const gestureTraceAvailable: boolean = false
 export const updateFrequencySettingKey = "updateFrequency"
 export const dayStartTimeSettingKey = "dayStartTime"
 
@@ -91,12 +98,15 @@ export async function setupSettings(){
 		[gestureTraceSettingKey]: {
 			// HIDDEN, not removed. The mobile drag rounds are done (2.3.0) and the trace has no place on a user's
 			// Settings screen, so it is registered with public: false: Joplin keeps the value, the default stays
-			// OFF, joplin.settings.value() still reads it and it still rides the search-data island - it simply
-			// never appears in Settings › Plugins › Cockpit. Every piece of the machinery behind it (panel.ts's
-			// island field, panelWebview.js's traceGesture/refreshGestureTraceFlag and the codes MOBILE.md §7
-			// lists) is untouched and inert. A future device round re-enables it in a DEV BUILD by turning the
-			// public flag below back on, rebuilding and sideloading - see docs/MOBILE.md §7. (Written that way
-			// on purpose: the harness pin reads this whole block and refuses the enabled spelling inside it.)
+			// OFF, and it never appears in Settings › Plugins › Cockpit. Every piece of the machinery behind it
+			// (panel.ts's island field, panelWebview.js's traceGesture/refreshGestureTraceFlag and the codes
+			// MOBILE.md §7 lists) is untouched and inert. Hiding the toggle was NOT enough on its own (2.5.1):
+			// a profile that turned the trace on while it was public kept its stored true, and the strip stayed
+			// up on the owner's Pixel with no switch left to turn it off. So the value is no longer what decides
+			// anything - gestureTraceAvailable above is, every reader is gated on it, and startup writes a stored
+			// true back to false. A device round flips that constant in a dev build (and this public flag too, if
+			// the toggle is wanted in Settings); neither flip is ever committed - see docs/MOBILE.md §7. (Written
+			// that way on purpose: the harness pin reads this whole block and refuses the enabled spelling in it.)
 			label: "Show a touch-gesture trace in the search suggestions (diagnostic)",
 			description: "Mobile only, and only while the search suggestion list is open: replaces the list's hint line with the last few touch events (press, hold, cancel, context menu, why the list closed). Leave this off - it exists so a touch problem on a real device can be reported precisely instead of guessed at.",
 			value: false,
@@ -272,6 +282,9 @@ export async function setupSettings(){
 			section: 'section',
 		},
 	})
+	// The stored value is reconciled with the build BEFORE the change handler is registered, so the one write this
+	// can make does not re-enter the handler below (which has nothing to say about this key anyway).
+	await resetUnavailableGestureTrace()
 	await joplin.settings.onChange(async (event) => {
 		var keys = event && event.keys ? event.keys : []
 		if (keys.includes(updateFrequencySettingKey)) await setupTimer()
@@ -283,6 +296,20 @@ export async function setupSettings(){
 		// exclusion takes effect at once.
 		if (keys.includes(EXCLUDED_NOTEBOOKS_KEY)) await resolveExcludedNotebooks()
 	})
+}
+
+/** resetUnavailableGestureTrace *******************************************************************************************************************
+ * Switches the hidden gesture trace back off in any profile that still has it stored ON. From 1.9.10 to 2.2.1 the setting was public, so a device	*
+ * round could leave a real profile with a stored true; 2.3.0 then hid the toggle, which took away the only way to turn it back off and left the		*
+ * owner's Pixel showing the diagnostic strip for good. A build where the trace is unavailable therefore heals the value at startup instead of		*
+ * merely ignoring it. The readers are gated on gestureTraceAvailable as well, so a stale true cannot reach the webview even before this write		*
+ * lands. In a dev build (gestureTraceAvailable true) this does nothing and the stored value is honoured as it always was.							*
+ ***************************************************************************************************************************************************/
+export async function resetUnavailableGestureTrace(){
+	if (gestureTraceAvailable) return
+	if (!(await joplin.settings.value(gestureTraceSettingKey))) return
+	await joplin.settings.setValue(gestureTraceSettingKey, false)
+	console.info("Cockpit: the hidden gesture trace was still stored ON in this profile - switched off, as this build does not offer it.")
 }
 
 /** resolveExcludedNotebooks ************************************************************************************************************************

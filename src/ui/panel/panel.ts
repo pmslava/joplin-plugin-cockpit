@@ -16,7 +16,7 @@ import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
 import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
-import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceSettingKey } from "../../core/settings";
+import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
 import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
@@ -1321,8 +1321,11 @@ async function getControlsHTML(currentProfileID){
     // webview know whether "All notebooks" is active when deciding if a New note needs the notebook
     // overlay. The autocomplete only reads title/path, so the extra fields are inert there and on desktop.
     // The mobile gesture-trace diagnostic (off by default) rides in the island the webview already reads, so
-    // it costs no extra round-trip and no new plumbing.
-    var gestureTrace = !!(await joplin.settings.value(gestureTraceSettingKey))
+    // it costs no extra round-trip and no new plumbing. The build's own switch comes FIRST and short-circuits the
+    // read: a shipping build never even asks for the stored value, so a profile that still has a stale true from
+    // the days the toggle was public (see resetUnavailableGestureTrace) cannot put the strip on the panel - not
+    // even on the first render, before that startup reset has landed.
+    var gestureTrace = gestureTraceAvailable && !!(await joplin.settings.value(gestureTraceSettingKey))
     var searchData = JSON.stringify({
         gestureTrace: gestureTrace,
         tags: tags.map(tag => tag.title),
