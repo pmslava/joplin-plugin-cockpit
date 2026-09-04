@@ -5798,6 +5798,100 @@ async function main() {
         for (const reason of ['menus-closed', 'field-left', 'commit', 'no-token', 'escape', 'applied']){
             assert.ok(webviewSource.includes("reason: '" + reason + "'"), `the ${reason} teardown must be named`)
         }
+        // 2.5.1: HIDING THE TOGGLE WAS NOT THE SAME AS TURNING IT OFF. Joplin keeps a setting's stored value when
+        // the registration goes public: false, so the owner's Pixel - where the trace was switched on for the 2.3.0
+        // rounds while the toggle was still public (1.9.10 through 2.2.1) - kept reading back true and kept the
+        // sticky strip at the bottom of the panel, with no switch left anywhere to turn it off. What decides now is
+        // the BUILD, not the value: one exported constant, false in everything that ships.
+        assert.ok(/export const gestureTraceAvailable(?:: boolean)? = false/.test(settingsSource),
+            'the shipped source must declare the trace unavailable')
+        assert.ok(!/export const gestureTraceAvailable(?:: boolean)? = true/.test(settingsSource),
+            'and no dev-build flip of that constant may ever be committed')
+        // EVERY reader is gated on it, counted across the whole of src/ so a third one cannot appear later that
+        // quietly trusts the stored value: the startup self-heal (which returns before reading in a dev build) and
+        // the island writer (which short-circuits the read entirely) are the only two.
+        const srcFiles = []
+        const walkSrc = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })){
+                const full = path.join(dir, entry.name)
+                if (entry.isDirectory()) walkSrc(full)
+                else srcFiles.push(full)
+            }
+        }
+        walkSrc(path.join(__dirname, '..', 'src'))
+        let traceReads = 0
+        for (const file of srcFiles){
+            traceReads += (fs.readFileSync(file, 'utf8').match(/settings\.value\(gestureTraceSettingKey\)/g) || []).length
+        }
+        assert.strictEqual(traceReads, 2,
+            'exactly two reads of the setting may exist in src/ - the self-heal and the island writer - and both are gated below')
+        assert.ok(/var gestureTrace = gestureTraceAvailable && !!\(await joplin\.settings\.value\(gestureTraceSettingKey\)\)/.test(panelSource),
+            'the island writer must consult the build constant FIRST, short-circuiting the read, so a stale true cannot reach the webview even on the render that precedes the startup reset')
+        const resetBody = /export async function resetUnavailableGestureTrace\(\)\{([\s\S]*?)\n\}/.exec(settingsSource)
+        assert.ok(resetBody, 'the startup self-heal must exist')
+        assert.ok(/^\s*if \(gestureTraceAvailable\) return/.test(resetBody[1]),
+            'and stand down in a dev build before it reads anything')
+        assert.ok(/await joplin\.settings\.setValue\(gestureTraceSettingKey, false\)/.test(resetBody[1]),
+            'writing the stored value back to false is the whole point of it')
+        assert.ok(/console\.info\(/.test(resetBody[1]), 'and saying so once in the log')
+        assert.ok(/await resetUnavailableGestureTrace\(\)/.test(settingsSource), 'it must actually be called at startup')
+        assert.ok(settingsSource.indexOf('registerSettings(') < settingsSource.indexOf('await resetUnavailableGestureTrace()'),
+            'after the settings are registered, since it reads and writes one of them')
+    })
+
+    // ------------------------------------------------ the stale gesture trace heals itself (2.5.1)
+    // The owner's report: the mobile panel still shows the diagnostic strip and the setting that switched it off is
+    // gone. Both runs below model that profile exactly - a stored `gestureTrace: true` left over from a build where
+    // the toggle was public - and prove the two halves of the fix on both platforms: the value is written back to
+    // false at startup, and the island the webview reads carries the flag OFF regardless.
+    const staleTraceMobile = await run({
+        dataDir: path.join(tmp, 'stale-trace-mobile-data'),
+        installationDir: path.join(tmp, 'mobile-install'),
+        require: mobileRequire,
+        versionInfo: { version: '3.7.0', platform: 'mobile' },
+        todos,
+        initialSettings: { gestureTrace: true },
+    })
+    const staleTraceDesktop = await run({
+        dataDir: path.join(tmp, 'stale-trace-desktop-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos,
+        initialSettings: { gestureTrace: true },
+    })
+
+    for (const [platform, state] of [['mobile', staleTraceMobile], ['desktop', staleTraceDesktop]]){
+        await test(`${platform}: a profile with the hidden gesture trace still stored ON has it switched off at startup (2.5.1)`, () => {
+            const writes = state.settingWrites.filter(write => write.key === 'gestureTrace')
+            assert.deepStrictEqual(writes, [{ key: 'gestureTrace', value: false }],
+                'startup must write the stale true back to false, exactly once')
+            assert.strictEqual(state.settings.gestureTrace, false, 'and the stored value must end the run OFF')
+        })
+        await test(`${platform}: the stale trace never reaches the webview - the island carries it OFF (2.5.1)`, () => {
+            const html = state.panelHtml['panel-panel']
+            assert.ok(html.includes('<script id="cockpitSearchData"'), 'the search-data island must be rendered')
+            assert.ok(html.includes('"gestureTrace":false'), 'and it must carry the flag OFF')
+            assert.ok(!html.includes('"gestureTrace":true'),
+                'with no trace marker anywhere in the panel html - the strip is drawn only when this flag is true')
+        })
+    }
+
+    await test('the gesture trace is one constant away from coming back, and that constant is the dev build (2.5.1)', () => {
+        // THE DEV-BUILD BEHAVIOUR, pinned as such. Flip gestureTraceAvailable to true in src/core/settings.ts and
+        // the 2.3.0 behaviour returns whole: resetUnavailableGestureTrace returns on its first line, so a stored
+        // true is left alone, and the island writer's `gestureTraceAvailable && ...` stops short-circuiting and
+        // hands the stored value to the webview - the strip is back, without a line of plumbing changing. That is
+        // deliberately the ONLY switch (plus the registration's public flag, if the toggle is also wanted on the
+        // Settings screen), and it is what MOBILE.md's device-round recipe names. With the flip in place the pins
+        // above go red by design; the flip is never committed.
+        const settingsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settings.ts'), 'utf8')
+        const constant = /export const gestureTraceAvailable(?:: boolean)? = (true|false)/.exec(settingsSource)
+        assert.ok(constant, 'the constant must be a single exported literal, so flipping it is a one-word edit')
+        assert.strictEqual(constant[1], 'false', 'and it ships false')
+        const mobileDoc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'MOBILE.md'), 'utf8')
+        assert.ok(mobileDoc.includes('gestureTraceAvailable'),
+            'the dev-build recipe in docs/MOBILE.md must name the constant, or the next device round flips the wrong word')
     })
 
     await test('mobile long press: the press-inside flag covers the whole HOLD, not just a tap (1.9.9 device fix)', () => {
