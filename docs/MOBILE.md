@@ -663,22 +663,33 @@ not a menu that never opened — read the TAIL for the outcome. The one shape th
 job is a strip that reads `contextmenu-suppressed:row` and then nothing at all: that is a touch sequence that was
 cancelled before the 500 ms, which is what Android's native drag used to do (first hazard below).
 
-**Where the trace is now (2.3.0, the owner's call).** With the mobile drag shipped, the `gestureTrace`
-setting is registered `public: false` in `src/core/settings.ts`: it no longer appears in Settings ›
-Plugins › Cockpit, and a user's build has no way to turn a diagnostic strip on. Nothing else changed —
-the setting is still registered and still default-off, `panel.ts` still reads it into the search-data
-island, and every trace point listed above is still compiled in and simply inert. **To run another
-device round, flip that one word back in a DEV BUILD**: set `public: true` on `gestureTraceSettingKey`
-in `src/core/settings.ts`, `npm run dist`, sideload the `.jpl`, and the option is back in Settings ›
-Plugins › Cockpit exactly as it was for the 2.3.0 rounds. Do not ship that build; the flip is not meant
-to be committed — and while it is in place `npm test` goes red **by design**, on the harness pin that
-holds the setting off the Settings screen (`test/run.js`, "mobile diagnostic: the gesture trace is a
-mobile-only, default-off, HIDDEN setting"). That is why the dev-build recipe says `npm run dist` and not
-`npm test`: revert the word and the pin passes again. One case the hiding does not reach: a user who had
-already turned the trace ON in a shipped build (it was public from 1.9.10 through 2.2.1) keeps their
-stored `true`, and now has no switch to turn it off. Deliberately left alone — a forced write on upgrade
-would also stamp out the dev flip above, and the population is mobile users who deliberately enabled a
-diagnostic on a sideloaded build.
+**Where the trace is now (2.3.0, hidden; 2.5.1, off for good).** With the mobile drag shipped, the
+`gestureTrace` setting is registered `public: false` in `src/core/settings.ts`: it no longer appears in
+Settings › Plugins › Cockpit, and a user's build has no way to turn a diagnostic strip on. Every trace
+point listed above is still compiled in and simply inert.
+
+**Hiding the toggle was not the same as turning it off, which is what 2.5.1 fixes.** Joplin keeps a
+setting's stored value when its registration goes `public: false`, so the owner's Pixel — where the
+trace was switched on for the 2.3.0 rounds, while the toggle was still public (it was, from 1.9.10
+through 2.2.1) — kept reading back `true` and kept the sticky strip at the bottom of the panel, with no
+switch left anywhere to turn it off. 2.3.0 saw that case and left it alone; the device it left it on was
+the owner's. What decides now is the **build**, not the value: `export const gestureTraceAvailable =
+false` in `src/core/settings.ts`. Every reader of the setting is gated on that constant (there are
+exactly two, and the harness counts them: `panel.ts`'s island writer, which short-circuits before it
+reads, and the self-heal itself), and at startup `resetUnavailableGestureTrace()` writes a stored `true`
+back to `false` — so a stuck profile heals on the first launch of 2.5.1, and even the render that
+precedes that write carries the flag OFF.
+
+**To run another device round, flip that ONE constant in a DEV BUILD**: set `gestureTraceAvailable =
+true` in `src/core/settings.ts` — and, if you also want the toggle back on the Settings screen rather
+than just the strip, `public: true` on `gestureTraceSettingKey` in the registration below it — then
+`npm run dist` and sideload the `.jpl`. With the constant true the self-heal returns on its first line
+and the island hands the stored value to the webview, so the trace behaves exactly as it did for the
+2.3.0 rounds. Do not ship that build; neither flip is meant to be committed — and while one is in place
+`npm test` goes red **by design**, on the harness pins that hold the trace unavailable and off the
+Settings screen (`test/run.js`, "mobile diagnostic: the gesture trace is a mobile-only, default-off,
+HIDDEN setting"). That is why the dev-build recipe says `npm run dist` and not `npm test`: revert the
+flip and the pins pass again.
 
 **Rejected, and why** — gaps-only targets (the headings are the coarse, forgiving target a finger wants
 and they already exist); a per-row drag handle (a permanent column of chrome on every row for a gesture
@@ -861,10 +872,10 @@ success vs failure looks like. The build to install is
       each toggles its mark (no note opens, nothing commits). Tapping a marked row again unmarks it.
     - Failure: the hold picks the row and closes the list (the old pointerdown behaviour), the hold
       does nothing, a plain tap commits while marks exist, or the list closes on the first tap.
-    - **If it fails again, turn on the trace.** The trace is hidden from Settings in a shipping build
-      (§7), so this needs a **dev build**: set `public: true` on `gestureTraceSettingKey` in
-      `src/core/settings.ts`, `npm run dist` (not `npm test` — the flip fails a pin by design, §7),
-      sideload, then Settings → Cockpit → "Show a touch-gesture
+    - **If it fails again, turn on the trace.** A shipping build cannot show it at all (§7), so this
+      needs a **dev build**: set `gestureTraceAvailable = true` (and, for the toggle itself, `public:
+      true` on `gestureTraceSettingKey`) in `src/core/settings.ts`, `npm run dist` (not `npm test` — the
+      flip fails a pin by design, §7), sideload, then Settings → Cockpit → "Show a touch-gesture
       trace in the search suggestions". With it on, the list's hint line is replaced by the last few
       touch events as they happen — e.g. `down > hold-fired > up > click-swallowed`, or
       `down > press-cancelled > field-left > list-closed:field-left`. Read that line back to us: it says
@@ -919,11 +930,12 @@ success vs failure looks like. The build to install is
       mode; the other three styles (Normal / Grayed out / Strikethrough) still behave as before.
     - Failure: only one of dim/strike applies, or the option is missing.
 
-18. **TOUCH DRAG TO RESCHEDULE (the 2.3.0 round).** Get the **Gesture trace** ON first. It is hidden
-    from a shipping build's Settings screen (§7), so this round runs on a **dev build**: set
-    `public: true` on `gestureTraceSettingKey` in `src/core/settings.ts`, `npm run dist`, sideload that
+18. **TOUCH DRAG TO RESCHEDULE (the 2.3.0 round).** Get the **Gesture trace** ON first. A shipping build
+    has no trace at all (§7 — it is gated on a build constant and switches a stored `true` back off), so
+    this round runs on a **dev build**: set `gestureTraceAvailable = true` and `public: true` on
+    `gestureTraceSettingKey` in `src/core/settings.ts`, `npm run dist`, sideload that
     `.jpl`, then turn the setting on in Settings → Cockpit. (`npm run dist`, not `npm test`: with the flip
-    in place the harness pin that holds the setting off the Settings screen fails by design — see §7.)
+    in place the harness pins that hold the trace unavailable fail by design — see §7.)
     Every step below can then be read back from
     the strip at the bottom of the panel; on a shipping build the steps still work, with nothing to read.
     Work through them in order — 18b is the one that decides whether the feature ships as designed, and
@@ -1162,5 +1174,6 @@ success vs failure looks like. The build to install is
          the strip when the press was inside the field.
 
     k. **Trace off.** Turn the Gesture trace setting back off in the dev build — or install the shipping
-       `.jpl`, where the option is hidden and the trace is off by default — and repeat 18a.
+       `.jpl`, where the option is hidden and the build switches any stored `true` back off on its first
+       launch (§7) — and repeat 18a.
        - Success: **no strip appears at all** at the bottom of the panel, and the drag still works.
