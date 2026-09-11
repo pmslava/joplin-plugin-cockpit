@@ -484,6 +484,35 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
   }
 
   /**
+   * Scrolls the list so a group heading is inside its visible box, for a case whose target sits below the fold on
+   * some days (see the "No Due Date" case). Only ever called BEFORE a finger goes down: assertOnScreen and
+   * dragRowTo both refuse to move the list under a gesture, and this keeps that rule. The heading is parked
+   * HEADING_CLEARANCE above the bottom edge - inside the box, and clear of the bottom auto-scroll band a lifted row
+   * drives when it nears an edge (72px deep on this list; verticalLiftStep has the arithmetic) - and the scroll is
+   * clamped to the end of the content. A heading already in view is left where it is.
+   */
+  const HEADING_CLEARANCE = 120;
+  async function scrollHeadingIntoView(win: Page, text: string): Promise<void> {
+    const panel = await agendaPanel(win);
+    const moved = await panel.evaluate(([t, clearance]) => {
+      const list = document.querySelector('.todos') as HTMLElement | null;
+      const heads = Array.from(document.querySelectorAll('.todos h2')) as HTMLElement[];
+      const head = heads.find((h) => (h.textContent || '').trim() === t);
+      if (!list || !head) return null;
+      const listRect = list.getBoundingClientRect();
+      const rect = head.getBoundingClientRect();
+      const wanted = rect.bottom - (listRect.bottom - clearance);
+      if (wanted <= 0) return 0;
+      const before = list.scrollTop;
+      list.scrollTop = Math.min(list.scrollHeight - list.clientHeight, before + wanted);
+      return list.scrollTop - before;
+    }, [text, HEADING_CLEARANCE] as [string, number]);
+    if (moved === null) throw new Error(`no group heading "${text}" to scroll into view`);
+    await win.waitForTimeout(150);
+    console.log('TOUCH DRAG PRESCROLL', text, moved);
+  }
+
+  /**
    * The move that turns the open menu into a lifted row. The gesture is decided by the FIRST travel past
    * TOUCH_DRAG_LIFT_PX and by nothing else: |dy| >= |dx| lifts, |dx| > |dy| is refused as Joplin's side-menu
    * swipe. So the lift is one deliberate `LIFT_STEP` at a CONSTANT x - unambiguously vertical, comfortably past
@@ -873,6 +902,13 @@ test.describe('Touch drag to reschedule (mobile-mode panel)', () => {
     const { win } = joplin;
     await settle();
     expect(await todoDue(ONTO_CLEAR), 'precondition: it has a due date').toBeGreaterThan(0);
+    // "No Due Date" is the LAST group, and where it sits depends on the day the suite runs, not only on the rows
+    // seeded above it: an overdue row reads "September 10, 2026 - td-band-up-<stamp>", one character longer than
+    // it did on the 9th, and on 2026-09-11 enough of them wrapped onto a second line to put the heading 20px
+    // below the fold, after a green pass on the 4th. So this case scrolls the heading into view BEFORE the
+    // finger goes down - never mid-gesture, which assertOnScreen refuses by design - and rowPoint then measures
+    // the source row where the scroll left it. settle() puts the next case back at the top.
+    await scrollHeadingIntoView(win, 'No Due Date');
     await dragRowTo(ONTO_CLEAR, () => headingPoint(win, 'No Due Date'));
     const after = await dueSettles(ONTO_CLEAR, (d) => d === 0);
     expect(after, 'the "clear" target must clear the due date outright').toBe(0);
