@@ -200,7 +200,7 @@ function makeJoplin(options) {
                 create: async (id, command, location) => { state.toolbarButtons.push({ id, command, location }) },
             },
             menus: {
-                create: async (id, label, items, location) => { state.menus.push({ id, label, location }) },
+                create: async (id, label, items, location) => { state.menus.push({ id, label, items, location }) },
             },
         },
         workspace: {

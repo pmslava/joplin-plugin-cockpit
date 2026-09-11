@@ -234,7 +234,7 @@ Cockpit's settings live in Joplin's own Settings › Plugins › Cockpit.
 - **Day start time** — the time a to-do gets when it is dragged onto a day it has no time of its own for. 09:00 by default.
 - **Excluded notebooks** — see [Search and filtering](#search-and-filtering).
 - **Theme, completed-to-do style, font size, circle size and the six custom colours** — see [Appearance](#appearance).
-- **Show the Cockpit button in the note toolbar** — a gauge button in the note toolbar toggles the panel, and the same command sits in Tools › Cockpit alongside this switch and Set Panel CSS. Joplin cannot add or remove a toolbar button while running, so turning it on or off applies after a restart, and Cockpit says so.
+- **Show the Cockpit button in the note toolbar** — a gauge button in the note toolbar toggles the panel, and the same command sits in Tools › Cockpit alongside this switch and Set Panel CSS, with **Ctrl+Shift+H** as its keyboard shortcut on every desktop platform (change it under Options › Keyboard Shortcuts). Joplin cannot add or remove a toolbar button while running, so turning it on or off applies after a restart, and Cockpit says so.
 - **Hide the due date next to the bell in the note title bar and show it on hover** — when a to-do has an alarm, Joplin prints the due date as text beside the bell in the note title bar, and that text eats the space the title has. With this on, the text is hidden and appears as a small bubble under the bell while the pointer is over it. Desktop only. Off by default. Joplin cannot unload a stylesheet it has already loaded, so this applies after a restart.
 - **Open Cockpit's date picker instead of Joplin's when the alarm bell is clicked** — clicking the bell opens Cockpit's picker (calendar, time columns and quick buttons) rather than Joplin's bare datetime prompt. Desktop and the **Markdown editor** only: with the Rich Text editor no plugin code runs in that window, so the bell keeps Joplin's prompt there. The Note menu's *Set alarm* item and its keyboard shortcut always keep Joplin's picker, so the original is never out of reach. Off by default; applies after a restart, since Joplin cannot register an editor content script while running.
 
@@ -248,7 +248,7 @@ That same half-second hold also **arms a drag** behind the menu it opens: keep t
 
 Android can restart the panel's webview under load, so Cockpit keeps the scroll position, an open picker and an in-progress search — the typed query, the open dropdown and its marks — on the plugin side and rebuilds them.
 
-Desktop-only: Ctrl/Shift multi-select and the batch actions that follow from it, double-click to open in a new window, custom panel CSS, and the note-toolbar button.
+Desktop-only: Ctrl/Shift multi-select and the batch actions that follow from it, double-click to open in a new window, custom panel CSS, the note-toolbar button, and the Ctrl+Shift+H shortcut that toggles the panel.
 
 ## Commands for other plugins
 

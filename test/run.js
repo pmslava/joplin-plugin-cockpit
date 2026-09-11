@@ -131,6 +131,17 @@ async function main() {
         assert.strictEqual(desktop.toolbarButtons[0].location, 'noteToolbar')
         assert.strictEqual(desktop.menus.length, 1)
     })
+    await test('desktop: the panel toggle carries Ctrl+Shift+H, and it is the only menu item with a shortcut', () => {
+        // The accelerator on a views.menus.create item is what registers the command with Joplin's keymap, so
+        // this pin is what keeps "Toggle Cockpit Panel" on the Keyboard Shortcuts screen (issue 4). One literal
+        // chord on every platform - not CmdOrCtrl - by decision.
+        const items = desktop.menus[0].items
+        const toggle = items.find(item => item.commandName === 'togglePanelVisibility')
+        assert.ok(toggle, 'the toggle command is in the Tools > Cockpit menu')
+        assert.strictEqual(toggle.accelerator, 'Ctrl+Shift+H')
+        const withShortcut = items.filter(item => item.accelerator).map(item => item.commandName)
+        assert.deepStrictEqual(withShortcut, ['togglePanelVisibility'], 'no other item claims a chord')
+    })
     await test('desktop: no mobile-only heading buttons', () => {
         const html = desktop.panelHtml['panel-panel']
         assert.ok(!html.includes('onStylerClicked()'), 'styler button should be desktop-menu only')
