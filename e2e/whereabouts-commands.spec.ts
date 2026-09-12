@@ -7,8 +7,10 @@ import {
   createProfile,
   createTodo,
   executePluginCommand,
+  panelToastVisible,
   panelTodoTitles,
   selectProfile,
+  setCockpitTextSetting,
   waitForPanelTodo,
   PANEL_REFRESH_TIMEOUT,
 } from './helpers';
@@ -160,5 +162,46 @@ test.describe('Commands for other plugins (the Whereabouts contract)', () => {
     expect(
       await panel.evaluate(() => (document.querySelector('.outside-results-heading')?.textContent || '').trim())
     ).toContain('Revealed - outside current filters');
+  });
+
+  /**
+   * The owner's report, end to end. A chip click naming a notebook the user has EXCLUDED in Cockpit's settings
+   * used to point the filter at it: the dropdown could not mark a row it does not list, so its label fell back to
+   * "All notebooks" while the search really was narrowed to a notebook the exclusion then emptied - and New to-do
+   * saw a non-empty filter and created straight into the excluded notebook without asking.
+   *
+   * Declared LAST in the file on purpose: it excludes one of the fixtures' own notebooks, which the cases above
+   * still need.
+   */
+  test('cockpit.filterByNotebook refuses an excluded notebook, and New to-do still asks where to create', async () => {
+    const { win } = joplin;
+    const panel = await agendaPanel(win);
+    // The id has to be read while the notebook is still listed - excluding it takes its row out of the dropdown.
+    const betaId = await notebookIdByName(panel, betaNotebook);
+    expect(betaId).not.toBe('');
+
+    await setCockpitTextSetting(win, 'Excluded notebooks', betaNotebook);
+    await expect
+      .poll(async () => panelTodoTitles(win).then((titles) => titles.includes(betaTodo)), {
+        timeout: PANEL_REFRESH_TIMEOUT,
+      })
+      .toBe(false);
+
+    await executePluginCommand(win, 'cockpit.filterByNotebook', betaId);
+
+    // The filter is left exactly where it was, and the user is told why rather than left with an empty panel.
+    await expect.poll(async () => panelToastVisible(win), { timeout: 20_000 }).toBe(true);
+    expect(await currentNotebookLabel(panel)).toBe('All notebooks');
+    // ...and because the filter really is empty, the create asks: the picker dialog opens instead of a note
+    // appearing silently inside the excluded notebook.
+    await panel.locator('#profileControls button[title="New to-do"]').click();
+    const pickerShowing = async () => {
+      for (const frame of win.frames()) {
+        if (await frame.locator('.picker-filter').count().catch(() => 0)) return true;
+      }
+      return false;
+    };
+    await expect.poll(pickerShowing, { timeout: 30_000 }).toBe(true);
+    await win.locator('button:has-text("Cancel")').last().click();
   });
 });

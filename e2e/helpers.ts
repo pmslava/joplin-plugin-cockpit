@@ -678,6 +678,24 @@ async function withCockpitOptions(win: Page, work: () => Promise<void>): Promise
 }
 
 /**
+ * Type a value into one of Cockpit's own TEXT settings through Joplin's Options screen.
+ *
+ * Same route and same reason as `setCockpitSetting` and `setCockpitCheckboxes` - Cockpit's settings live in
+ * Joplin's database, so a spec cannot preset them the way `launchJoplin({ settings })` presets Joplin's own
+ * File-storage settings. A String setting is rendered as a text input with a `<label for>` carrying the
+ * registered label, so it is reached exactly as the enum and Bool controls are. `fill` then blur, because
+ * Joplin commits a text setting on change rather than per keystroke.
+ */
+export async function setCockpitTextSetting(win: Page, label: string, value: string): Promise<void> {
+  await withCockpitOptions(win, async () => {
+    const control = win.getByLabel(label, { exact: true }).first();
+    await control.waitFor({ state: 'visible', timeout: 30_000 });
+    await control.fill(value);
+    await control.blur();
+  });
+}
+
+/**
  * Turn one or more of Cockpit's own Bool settings on or off through Joplin's Options screen.
  *
  * Same route and same reason as `setCockpitSetting` above - Cockpit's settings live in Joplin's database, so a

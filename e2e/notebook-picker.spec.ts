@@ -99,6 +99,19 @@ test.describe('Notebook picker dialog (desktop)', () => {
     return false;
   }
 
+  /**
+   * The plugin dialog's own box in the MAIN window - the element Joplin centres, not the full-screen modal layer
+   * it sits in. Several spellings are tried because only the inner box is worth measuring: a match on the layer
+   * would be the whole window and would make both assertions below vacuous, which the size check guards against.
+   */
+  async function dialogBox(win: Page): Promise<{ x: number; y: number; width: number; height: number }> {
+    for (const selector of ['dialog.user-webview-dialog .content', '.user-webview-dialog .content', 'dialog.user-webview-dialog iframe']) {
+      const box = await win.locator(selector).first().boundingBox().catch(() => null);
+      if (box && box.height > 0) return box;
+    }
+    throw new Error('the plugin dialog box was not found in the main window');
+  }
+
   /** Click the panel's "New to-do" button and wait for the picker dialog it opens. */
   async function openPickerFromNewTodo(win: Page): Promise<Frame> {
     const panel = await agendaPanel(win);
@@ -137,9 +150,17 @@ test.describe('Notebook picker dialog (desktop)', () => {
     await win.locator('button:has-text("Cancel")').last().click();
   });
 
-  test('typing in the filter narrows the list to the matching notebook', async () => {
+  test('typing in the filter narrows the list to the matching notebook, and the dialog neither shrinks nor sits low', async () => {
     const { win } = joplin;
     const picker = await openPickerFromNewTodo(win);
+
+    // The owner's other two complaints, measured from the main window rather than from inside the iframe.
+    // Joplin centres this box and re-centres it whenever its content resizes, so before the fixed height the
+    // dialog sat low AND jumped upward as rows were filtered away.
+    const windowHeight = await win.evaluate(() => window.innerHeight);
+    const before = await dialogBox(win);
+    expect(before.height).toBeLessThan(windowHeight);         // the inner box, not the full-screen modal layer
+    expect(before.y).toBeLessThan(windowHeight * 0.3);        // its top edge sits in the upper third of the window
 
     await picker.locator('.picker-filter').fill('beta');
 
@@ -149,6 +170,11 @@ test.describe('Notebook picker dialog (desktop)', () => {
     await expect(visible.first()).toHaveText(beta);
     // The narrowed-away row is still in the document, just hidden - the filter shows and hides, it never rebuilds.
     await expect(picker.locator('.picker-row')).toHaveCount(2);
+
+    // ...and hiding a row changed nothing about the frame: same height, same place.
+    const after = await dialogBox(win);
+    expect(after.height).toBe(before.height);
+    expect(after.y).toBe(before.y);
 
     await win.locator('button:has-text("Cancel")').last().click();
   });
