@@ -4815,6 +4815,13 @@ async function main() {
         assert.strictEqual(underRows[0].id, '__root', 'and carries the __root sentinel pickNotebook maps back to ""')
         assert.deepStrictEqual(underRows.slice(1).map(row => row.path), ['Alpha', 'Alpha / Zeta', 'Beta'],
             'with the same excluded-filtered, path-sorted notebooks under it')
+        // And it is the row that starts SELECTED, as the old dropdown's first option was. Not the notebook the
+        // app is showing (Beta here): in this flow that is very often the notebook being moved, so pre-selecting
+        // it would offer to make it the parent of itself.
+        assert.strictEqual(underRows.filter(row => row.selected).length, 1, 'exactly one row starts selected')
+        assert.ok(underRows[0].selected, 'the root row is the pre-selection for "Move notebook under..."')
+        assert.ok(pickUnderHtml.includes('<input type="hidden" name="folderId" value="__root">'),
+            'and the hidden input starts on __root, which pickNotebook maps back to ""')
     })
 
     await test('picker css: the scrollbar is themed here (the point of the rework), the list is capped in pixels, and there is no @media', () => {
@@ -4855,10 +4862,15 @@ async function main() {
 
     await test('picker glue: the rows are read from the markup, never built, and every decision goes through the pure model', () => {
         const glue = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'notebookPickerWebview.js'), 'utf8')
-        // Joplin sizes the dialog from the markup the host wrote, so a list built from script would be laid out
-        // inside a dialog measured for an empty one. The glue may only read rows.
+        // The dialog's FIRST measurement is taken from the markup the host wrote, before this script runs, so a
+        // list built from script would open at the height of an empty dialog and then jump. The glue reads rows.
         assert.ok(glue.includes("querySelectorAll('.picker-row')"), 'the glue must read the rows the host emitted')
-        assert.ok(!/createElement\(/.test(glue), 'the glue must never build rows (the dialog is sized before it runs)')
+        assert.ok(!/createElement\(/.test(glue), 'the glue must never build rows (the dialog is first sized before it runs)')
+        // The rows are plain divs, so a click on one drops focus to <body> - after which Enter reaches nothing
+        // and Escape cancels the dialog instead of clearing the filter. The caret goes back to the box.
+        assert.ok(glue.includes('function focusPickerFilter('), 'the glue must be able to hand the caret back to the filter box')
+        const clickBody = glue.slice(glue.indexOf('function onPickerListClick('), glue.indexOf('function onPickerListDoubleClick('))
+        assert.ok(clickBody.includes('focusPickerFilter()'), 'a row click must refocus the filter box, so the keyboard keeps working')
         // No forked logic: the four questions are all asked of the shared module.
         for (const call of ['visibleIndexes(', 'moveHighlight(', 'enterTarget(', 'escapeAction(']){
             assert.ok(glue.includes('window.NotebookPickerModel.' + call), `the glue must ask the model ${call}`)
@@ -4913,6 +4925,77 @@ async function main() {
         assert.strictEqual(NotebookPickerModel.enterTarget(pickerModelRows, 'zzz', 1), -1, 'and a filter matching nothing commits nothing')
     })
 
+    await test('picker glue: the selection follows the filter - re-pointed when it is hidden, emptied when nothing matches', () => {
+        const glue = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'notebookPickerWebview.js'), 'utf8')
+        // The selection IS the answer - it is what the hidden input carries and what an OK click commits. Leaving
+        // it on a row the filter has just hidden means "type beta, see one row, click OK" files the note in the
+        // notebook that WAS highlighted, one the user can no longer see; a filter matching nothing commits the
+        // stale id the same way. So every filter pass re-points the selection, by the rule Enter uses.
+        const filterBody = glue.slice(glue.indexOf('function applyPickerFilter('), glue.indexOf('function clearPickerSelection('))
+        assert.ok(filterBody.includes('window.NotebookPickerModel.enterTarget('),
+            'applyPickerFilter must re-point the selection through the model, not merely show and hide rows')
+        assert.ok(/if \(target >= 0\) selectPickerRow\(/.test(filterBody), 'a surviving target is selected (highlight + hidden input)')
+        assert.ok(filterBody.includes('clearPickerSelection()'), 'and no target at all clears the selection')
+        // Cleared means EMPTY, not "left as it was": an empty folderId makes pickNotebook return null, and all
+        // three callers abort on null. Only the "(top level)" row answers with a deliberate "", via __root.
+        const clearBody = glue.slice(glue.indexOf('function clearPickerSelection('), glue.indexOf('/** submitPicker'))
+        assert.ok(/pickerSelectedIndex\s*=\s*-1/.test(clearBody), 'clearing must drop the selected index')
+        assert.ok(clearBody.includes("classList.remove('-selected')"), 'and unmark every row')
+        assert.ok(/hidden\.value\s*=\s*''/.test(clearBody), 'and empty the hidden folderId input')
+        // The host half of that contract, unchanged: "" comes back as null, and only __root survives as "".
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        assert.ok(/if \(picked === "__root"\) return ""/.test(panelSource), 'the root sentinel must still map to the empty string')
+        assert.ok(/return picked \|\| null/.test(panelSource), 'and any other empty answer must come back as null (cancelled)')
+        // The rule itself, exercised: a hidden highlight gives way to the first visible row, and nothing visible
+        // commits nothing. (enterTarget is what applyPickerFilter asks, so these are the two cases it handles.)
+        assert.strictEqual(NotebookPickerModel.enterTarget(pickerModelRows, 'beta', 0), 1,
+            'a selection the filter hid moves to the first visible row')
+        assert.strictEqual(NotebookPickerModel.enterTarget(pickerModelRows, 'zzz', 0), -1,
+            'and with nothing visible there is no target at all, so the answer is emptied')
+    })
+
+    await test('picker model: the shared matcher is looked up per CALL, never bound at load', () => {
+        const modelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'notebookPickerModel.js'), 'utf8')
+        // joplin.views.dialogs.addScript appends ordinary classic scripts without async=false, so the dialog's
+        // three files run in whatever order they finish fetching. A binding taken at load would be null for the
+        // life of the dialog whenever this file wins the race against searchTokens.js - and the host's own Enter
+        // handler would go on submitting the pre-selection while the filter, the arrows and Enter all threw.
+        assert.ok(modelSource.includes('var api = factory()'), 'the factory must not be handed a pre-resolved matcher')
+        const tokensAt = modelSource.indexOf('function tokens(){')
+        assert.ok(tokensAt >= 0, 'the model must resolve the matcher through a tokens() getter')
+        const tokensEnd = modelSource.indexOf('\n    }', tokensAt)
+        assert.ok(tokensEnd > tokensAt, 'could not delimit tokens()')
+        const reads = []
+        for (let at = modelSource.indexOf('window.SearchTokens'); at !== -1; at = modelSource.indexOf('window.SearchTokens', at + 1)) reads.push(at)
+        assert.ok(reads.length > 0, 'the model must read the shared matcher off the global somewhere')
+        for (const at of reads){
+            assert.ok(at > tokensAt && at < tokensEnd,
+                'every window.SearchTokens read must sit INSIDE tokens() - a load-time binding cannot survive the script race')
+        }
+        assert.ok(modelSource.slice(tokensAt, tokensEnd).includes("require('./searchTokens.js')"),
+            'with the Node fallback in the same getter, so the harness reaches the one implementation too')
+    })
+
+    await test('picker model: a dialog whose scripts load out of order still filters once the matcher arrives', () => {
+        // The race, run for real rather than asserted: evaluate the model in a context that HAS a window but no
+        // SearchTokens on it yet and no require to fall back on - exactly a dialog where this file beat
+        // searchTokens.js - then let the matcher arrive afterwards, as the slower script would.
+        const vm = require('vm')
+        const modelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'notebookPickerModel.js'), 'utf8')
+        const dialogWindow = { window: {} }
+        vm.createContext(dialogWindow)
+        vm.runInContext(modelSource, dialogWindow)
+        const racedModel = dialogWindow.window.NotebookPickerModel
+        assert.ok(racedModel, 'the model must still install itself on the window when it loads first')
+        dialogWindow.window.SearchTokens = SearchTokens          // searchTokens.js finishes loading a moment later
+        // Array.from, because an array made inside the vm carries THAT realm's Array.prototype and would fail a
+        // deepStrictEqual on its prototype rather than on its contents.
+        assert.deepStrictEqual(Array.from(racedModel.visibleIndexes(pickerModelRows, 'beta')), [1, 3],
+            'the filter must work from the first keystroke after the matcher arrives, not throw for the life of the dialog')
+        assert.strictEqual(racedModel.enterTarget(pickerModelRows, 'beta', 0), 1, 'and so must Enter')
+        assert.strictEqual(racedModel.moveHighlight(pickerModelRows, 'beta', 1, 1), 3, 'and the arrows')
+    })
+
     await test('picker model: Escape is the dropdown\'s two-step - clear the text first, then leave the press to Joplin', () => {
         assert.strictEqual(NotebookPickerModel.escapeAction('fam'), 'clear', 'the first Escape clears the filter')
         assert.strictEqual(NotebookPickerModel.escapeAction(' '), 'clear', 'even a lone space is text the user typed')
@@ -4938,6 +5021,11 @@ async function main() {
         assert.ok(narrowBody.includes('window.SearchTokens.matchesFilter('), 'the overlay filter must use the shared match rule')
         assert.ok(narrowBody.includes("setAttribute('hidden'") && narrowBody.includes("removeAttribute('hidden')"),
             'and show/hide rows by the hidden attribute')
+        // A selection the filter has hidden must not survive: OK commits overlayNotebookSelection, so committing
+        // a row the user can no longer see is the desktop dialog's own bug in overlay form.
+        assert.ok(/overlayNotebookSelection\s*=\s*null/.test(narrowBody),
+            'a selection the overlay filter hides must be cleared, so OK cannot commit an invisible notebook')
+        assert.ok(narrowBody.includes("classList.remove('-selected')"), 'and its highlight must go with it')
         // Enter picks the first still-visible row - the same action as tapping it.
         const overlayKeyBody = handlerBody('onNotebookOverlayFilterKeyDown')
         assert.ok(overlayKeyBody.includes("'Enter'") && overlayKeyBody.includes(':not([hidden])') && overlayKeyBody.includes('.click()'),
