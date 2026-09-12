@@ -123,18 +123,21 @@ test.describe('Multi-select context menu (desktop)', () => {
     }, marker);
   }
 
-  /** The iframe hosting Cockpit's notebook picker dialog, identified by its folderId select. */
+  /**
+   * The iframe hosting Cockpit's notebook picker dialog. The dialog is no longer a native `<select>` - it is a
+   * list Cockpit draws and themes itself, with a filter box pinned above it - so it is identified by that box
+   * plus the hidden input that carries the answer back as `formData.picker.folderId`.
+   */
   async function notebookPickerFrame(win: Page): Promise<Frame> {
+    const isPicker = async (frame: Frame) =>
+      (await frame.locator('.picker-filter').count().catch(() => 0)) > 0 &&
+      (await frame.locator('input[name="folderId"]').count().catch(() => 0)) > 0;
     const has = async () => {
-      for (const frame of win.frames()) {
-        if (await frame.locator('select[name="folderId"]').count().catch(() => 0)) return true;
-      }
+      for (const frame of win.frames()) if (await isPicker(frame)) return true;
       return false;
     };
     await expect.poll(has, { timeout: 30_000 }).toBe(true);
-    for (const frame of win.frames()) {
-      if (await frame.locator('select[name="folderId"]').count().catch(() => 0)) return frame;
-    }
+    for (const frame of win.frames()) if (await isPicker(frame)) return frame;
     throw new Error('notebook picker dialog not found');
   }
 
@@ -254,9 +257,15 @@ test.describe('Multi-select context menu (desktop)', () => {
 
     await clickMenuAction('moveToFolder');
 
-    // The move opens Cockpit's notebook picker (a plugin dialog webview): pick the destination and confirm.
+    // The move opens Cockpit's notebook picker (a plugin dialog webview): narrow the drawn list with its filter
+    // box, click the destination's row, then confirm. Typing is what a user with a hundred notebooks does, and it
+    // is also what makes the click reliable - the row is on screen without scrolling the list.
     const picker = await notebookPickerFrame(win);
-    await picker.locator('select[name="folderId"]').selectOption({ label: dest });
+    await picker.locator('.picker-filter').fill(dest);
+    const visibleRows = picker.locator('.picker-row:not([hidden])');
+    await expect(visibleRows).toHaveCount(1, { timeout: 10_000 });
+    await expect(visibleRows.first()).toHaveText(dest);
+    await visibleRows.first().click();
     await win.locator('button:has-text("OK")').last().click();
 
     // Both selected to-dos now live in the destination notebook (their row's notebook pill reads `dest`).

@@ -31,6 +31,9 @@ export default defineConfig({
   // (the suite still gets its full 30 minutes once its turn comes); on CI each repo has its own VM,
   // the lock is never contended, and the cap stays exactly where the job's own limit needs it.
   //
+  // Left at 34 for the twentieth file (the notebook picker dialog): one more Joplin launch and three short
+  // cases against a cap a healthy run does not come near - the same call the eighteenth file got.
+  //
   // Raised 30 -> 34 for 2.5.0's nineteenth file (the note title bar). That file is the only one in the suite that
   // launches Joplin TWICE - both its settings take effect only after a restart, so the restart is the case - which
   // makes it worth roughly two ordinary files rather than one. Still comfortably under the workflow's 40-minute cap.
