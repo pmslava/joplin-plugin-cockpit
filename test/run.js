@@ -4920,6 +4920,49 @@ async function main() {
         assert.strictEqual(NotebookPickerModel.escapeAction(null), 'dismiss', 'and so is an absent one')
     })
 
+    // The mobile half of the same rework: the in-panel notebook overlay (the picker Android gets, since a plugin
+    // dialog there is always drawn behind the panel) grows the same filter box. Source-shape pins, as every other
+    // webview check is - the harness renders markup but never runs panelWebview.js.
+    await test('notebook overlay: a filter box above the list, narrowing through the shared matcher, and never focused', () => {
+        const overlayBody = handlerBody('openNotebookOverlay')
+        assert.ok(overlayBody.includes("'cockpit-overlay-input -filter'"), 'the overlay must carry a filter box, reusing the overlay input skin')
+        assert.ok(overlayBody.includes("placeholder = 'Filter notebooks...'"), 'and say what it narrows, in the dropdown\'s wording')
+        // Pinned ABOVE the list: appended to the body first.
+        const boxAt = overlayBody.indexOf('body.appendChild(filterBox)')
+        const listAt = overlayBody.indexOf('body.appendChild(list)')
+        assert.ok(boxAt >= 0 && listAt > boxAt, 'the filter box must be appended above the row list')
+        // Never focused on open: a focus pops the Android soft keyboard over the list the user came to read.
+        assert.ok(!overlayBody.includes('.focus()'), 'the overlay filter box must NOT be focused (it would pop the soft keyboard)')
+        // The narrowing is the shared, tested rule - not a second substring test written here.
+        const narrowBody = handlerBody('filterNotebookOverlay')
+        assert.ok(narrowBody.includes('window.SearchTokens.matchesFilter('), 'the overlay filter must use the shared match rule')
+        assert.ok(narrowBody.includes("setAttribute('hidden'") && narrowBody.includes("removeAttribute('hidden')"),
+            'and show/hide rows by the hidden attribute')
+        // Enter picks the first still-visible row - the same action as tapping it.
+        const overlayKeyBody = handlerBody('onNotebookOverlayFilterKeyDown')
+        assert.ok(overlayKeyBody.includes("'Enter'") && overlayKeyBody.includes(':not([hidden])') && overlayKeyBody.includes('.click()'),
+            'Enter must select the first still-visible row, by clicking it')
+        // A narrowed-away row must actually vanish: .cockpit-overlay-item sets display:flex, which beats [hidden].
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        assert.ok(/\.cockpit-overlay-item\[hidden\]\s*{[^}]*display:\s*none/.test(css), 'a narrowed-away overlay row must be hidden')
+        assert.ok(/\.cockpit-overlay-input\.-filter\s*{[^}]*min-height:\s*40px/.test(css), 'the box must keep the 40px touch height')
+    })
+
+    await test('notebook overlay: the typed filter rides in the reload-survival descriptor, and a reconstruct re-narrows the list', () => {
+        const descriptorBody = handlerBody('currentOverlayDescriptor')
+        const notebookBranch = descriptorBody.slice(descriptorBody.indexOf("kind === 'notebook'"), descriptorBody.indexOf("kind === 'tag'"))
+        assert.ok(notebookBranch.includes('filter:'), 'the notebook descriptor must carry the filter text')
+        assert.ok(notebookBranch.includes('notebookOverlayFilterInput()'), 'read live from the box, like the tag overlay reads its input')
+        const overlayBody = handlerBody('openNotebookOverlay')
+        assert.ok(/filter:\s*\(restore && restore\.filter\)/.test(overlayBody), 'a reconstruct must start from the saved filter text')
+        assert.ok(overlayBody.includes('filterBox.value = overlayContext.filter'), 'which is put back into the box')
+        assert.ok(/if \(overlayContext\.filter\) filterNotebookOverlay\(\)/.test(overlayBody),
+            'and applied to the freshly built rows, so the reconstructed list is narrowed as the user left it')
+        // The typing itself is throttled onto the descriptor channel, like every other overlay input.
+        assert.ok(handlerBody('onNotebookOverlayFilterInput').includes('queueOverlayState()'),
+            'typing must post the descriptor (throttled), so a reload has the latest text')
+    })
+
     // ============================================================ 1.9.5: outside dismissal, editor-note highlight, create buttons
     // Three changes ship together here. (1) The custom context menu (Cockpit draws its own, because Joplin's native note
     // menu cannot be opened from a plugin webview) stayed open when the user clicked the main editor: the panel is an

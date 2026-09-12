@@ -1612,6 +1612,11 @@ table {
     cursor: pointer;
 }
 
+/* A row the notebook overlay's filter box has narrowed away. The rule above sets display:flex, which would
+ * otherwise beat the user agent's [hidden] rule and leave the row on screen - the same trap .dropdown-item
+ * has in the notebook menu. */
+.cockpit-overlay-item[hidden] { display: none; }
+
 .cockpit-overlay-item:hover {
     background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
 }
@@ -1632,6 +1637,13 @@ table {
 
 .cockpit-overlay-input:focus {
     border-color: var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
+}
+
+/* The notebook overlay's filter box: the same input, given the 40px touch height every other overlay control
+ * has and a gap so it reads as pinned above the list rather than as its first row. */
+.cockpit-overlay-input.-filter {
+    min-height: 40px;
+    margin-bottom: 8px;
 }
 
 /* The alarm overlay body: the "Move to date" picker ported from the alarm dialog into the panel, in the

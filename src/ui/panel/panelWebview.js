@@ -3761,7 +3761,11 @@ var overlayStateTimer = null
 function currentOverlayDescriptor(){
     if (!overlayContext) return null
     if (overlayContext.kind === 'notebook'){
-        return { kind: 'notebook', purpose: overlayContext.purpose, opts: overlayContext.opts, selection: overlayNotebookSelection }
+        // The filter text rides along so a reload rebuilds the list narrowed exactly as the user left it (and the
+        // restored selection still makes sense against what is on screen). Read live from the box, like the tag one.
+        var notebookFilterBox = notebookOverlayFilterInput()
+        return { kind: 'notebook', purpose: overlayContext.purpose, opts: overlayContext.opts, selection: overlayNotebookSelection,
+            filter: notebookFilterBox ? notebookFilterBox.value : (overlayContext.filter || '') }
     }
     if (overlayContext.kind === 'tag'){
         var tagInput = document.querySelector('#cockpitOverlay .cockpit-overlay-input')
@@ -3915,8 +3919,45 @@ function buildOverlay(titleText, footerButtons){
  * The in-panel notebook picker. purpose says which flow opened it (moveNotes, moveNotebookUnder, createNote, createTodo) and is echoed back in the    *
  * notebookPicked result so the host runs the matching data-API logic. opts carries the flow's extra payload: noteIDs (moveNotes), sourceFolderId       *
  * (moveNotebookUnder) and includeRoot (offer a "(top level)" row, sent as an empty id). A row is selected on tap; OK commits the selection.           *
+ *                                                                                                                                                     *
+ * A FILTER BOX sits above the list, the same one the notebook dropdown and the desktop picker dialog have: typing narrows the rows by a case-          *
+ * insensitive substring of the full path through the shared window.SearchTokens.matchesFilter, and Enter selects the first row still visible. It is    *
+ * deliberately NOT focused on open - a focus pops the Android soft keyboard over the list the user came here to read, which is exactly why the         *
+ * dropdown's own box is left unfocused on mobile. The typed text rides in the overlay descriptor, so a renderer restart rebuilds the narrowed list.    *
  ***************************************************************************************************************************************************/
 var overlayNotebookSelection = null
+
+function notebookOverlayFilterInput(){
+    return document.querySelector('#cockpitOverlay .cockpit-overlay-input.-filter')
+}
+
+/** filterNotebookOverlay ***************************************************************************************************************************
+ * Shows or hides each overlay row by whether its label survives the filter box, by the shared, tested rule. A hidden row needs the explicit attribute *
+ * because .cockpit-overlay-item sets display:flex, which would otherwise beat the user agent's [hidden] rule (see panel.css).                          *
+ ***************************************************************************************************************************************************/
+function filterNotebookOverlay(){
+    var input = notebookOverlayFilterInput()
+    var text = input ? input.value : ''
+    var rows = document.querySelectorAll('#cockpitOverlay .cockpit-overlay-item')
+    for (var index = 0; index < rows.length; index++){
+        if (window.SearchTokens.matchesFilter(rows[index].textContent, text)) rows[index].removeAttribute('hidden')
+        else rows[index].setAttribute('hidden', '')
+    }
+}
+
+function onNotebookOverlayFilterInput(){
+    filterNotebookOverlay()
+    queueOverlayState()
+}
+
+function onNotebookOverlayFilterKeyDown(event){
+    // Enter selects the first still-visible row - the same action as tapping it, not a commit; OK still has to be
+    // pressed. Escape is left alone: the overlay's own capturing handler closes the overlay, as it does everywhere else.
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    var first = document.querySelector('#cockpitOverlay .cockpit-overlay-item:not([hidden])')
+    if (first) first.click()
+}
 
 function openNotebookOverlay(purpose, opts, restore){
     opts = opts || {}
@@ -3926,9 +3967,9 @@ function openNotebookOverlay(purpose, opts, restore){
         createNote: 'Create note in notebook',
         createTodo: 'Create to-do in notebook',
     }
-    // On a reload-survival reconstruct, start from the previously-picked row.
+    // On a reload-survival reconstruct, start from the previously-picked row and the text that was narrowing it.
     overlayNotebookSelection = (restore && restore.selection != null) ? restore.selection : null
-    overlayContext = { kind: 'notebook', purpose: purpose, opts: opts }
+    overlayContext = { kind: 'notebook', purpose: purpose, opts: opts, filter: (restore && restore.filter) || '' }
     var body = buildOverlay(titles[purpose] || 'Select notebook', [
         { label: 'Cancel', onClick: function(){ closeOverlay() } },
         { label: 'OK', kind: 'primary', onClick: function(){
@@ -3940,6 +3981,21 @@ function openNotebookOverlay(purpose, opts, restore){
             closeOverlay()
         } },
     ])
+
+    // The filter box, pinned above the list. NOT focused - see the header: a focus here pops the soft keyboard.
+    var filterBox = document.createElement('input')
+    filterBox.className = 'cockpit-overlay-input -filter'
+    filterBox.type = 'text'
+    filterBox.placeholder = 'Filter notebooks...'
+    filterBox.setAttribute('inputmode', 'text')
+    filterBox.setAttribute('autocomplete', 'off')
+    filterBox.setAttribute('autocorrect', 'off')
+    filterBox.setAttribute('autocapitalize', 'off')
+    filterBox.setAttribute('spellcheck', 'false')
+    filterBox.value = overlayContext.filter
+    filterBox.addEventListener('input', onNotebookOverlayFilterInput)
+    filterBox.addEventListener('keydown', onNotebookOverlayFilterKeyDown)
+    body.appendChild(filterBox)
 
     var list = document.createElement('div')
     list.className = 'cockpit-overlay-list'
@@ -3964,6 +4020,8 @@ function openNotebookOverlay(purpose, opts, restore){
         makeRow(String(notebook.id), String(notebook.path))
     }
     body.appendChild(list)
+    // A reconstruct comes back with text already in the box, so narrow the freshly built rows to match it.
+    if (overlayContext.filter) filterNotebookOverlay()
     pushOverlayState()
 }
 

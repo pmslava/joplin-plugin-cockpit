@@ -55,7 +55,11 @@ second Modal and are structurally immune to the bug; the panel is never torn dow
 the profile editor joins the pickers — the dismiss-first native-dialog flow is gone (see §1b).
 
 - **Notebook picker** (move-to-notebook, create-in-notebook, move-notebook-under): a scrollable list
-  reusing the notebook rows the panel already embeds. On tap it posts a result; the host runs the same
+  reusing the notebook rows the panel already embeds, with a **filter box** pinned above it
+  (`.cockpit-overlay-input.-filter`) — typing narrows the rows by the shared
+  `SearchTokens.matchesFilter` (a case-insensitive substring of the full path) and Enter selects the
+  first still-visible row. The box is deliberately **not focused** on open, like the dropdown's own:
+  a focus pops the soft keyboard over the list. On tap it posts a result; the host runs the same
   `parent_id` PUT / create path as before.
 - **Tag picker**: a single comma-separated text input prefilled with the note's current tags; on OK
   the host keeps the exact attach/detach diff (`setTagsFallback`).
@@ -90,8 +94,8 @@ overlay, and the plugin's guard cannot help (the reload is host-initiated, not a
 Fix, mirroring the scroll-persistence pattern: the **host owns** an `openOverlayState` descriptor.
 
 - The webview posts `['overlayState', descriptor]` on open and (throttled, `queueOverlayState`) as the
-  user edits. The descriptor is small and fully rebuildable — notebook: purpose/opts/selection; tag:
-  noteID + text; alarm: ids + date + time; editor: profileID + serialized field values.
+  user edits. The descriptor is small and fully rebuildable — notebook: purpose/opts/selection/filter
+  text; tag: noteID + text; alarm: ids + date + time; editor: profileID + serialized field values.
 - On the fresh webview's `['dialogGuardReset', hasIsland]`: if an overlay should be open and the loaded
   document does **not** already carry the descriptor island, the host re-renders **once** with the
   descriptor embedded as a `<script id="cockpitOverlayState">` JSON island next to `cockpitSearchData`
