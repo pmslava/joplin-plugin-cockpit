@@ -19,6 +19,7 @@ import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
+import { isSettingsNoteConnected } from "../../core/settingsSync";
 import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
 import { iconButton, icons } from "../icons";
@@ -134,6 +135,14 @@ export function trackEditorNoteSelection(noteIDs){
     } catch (error) {
         console.warn("Cockpit: could not tell the panel which note is open", error)
     }
+}
+
+/** getEditorNoteID *********************************************************************************************************************************
+ * The id of the note the main editor is showing, for the one caller outside this file that needs it: the settings note's write gate. A plugin PUT   *
+ * evicts the mobile editor mid-edit, so the settings note is never written while it is the note open there (src/core/settingsSync.ts).              *
+ ***************************************************************************************************************************************************/
+export function getEditorNoteID(){
+    return editorNoteID
 }
 
 /** calendarViewState *******************************************************************************************************************************
@@ -337,6 +346,15 @@ async function reconcileExcludedNotebookText(){
     // Drop ids whose notebook no longer exists (deleted). Writing the hidden id list does not re-enter the
     // resolver (it keys off the visible field only), so this is safe to do first.
     var liveIds = ids.filter(id => map.has(id))
+    // ...UNLESS A SETTINGS NOTE IS CONNECTED AND SOMETHING WOULD BE DROPPED. Then "the notebook is not in the map"
+    // does not mean "the user deleted it": it equally means this device has not synced that notebook yet, and the
+    // exclusion pair it came with is about to be published back to every other device with the entry missing - a
+    // deletion nobody asked for. The names field cannot be rebuilt for a notebook that cannot be seen either (its
+    // label would simply vanish from the text, which is the same loss by another route), so this poll leaves the
+    // whole pair exactly as it is and tries again when the notebook arrives. Renames of the notebooks it CAN see
+    // are picked up on that later pass. With no settings note configured nothing changes: a deleted notebook's id
+    // is still tidied away, which is all this ever did.
+    if (liveIds.length !== ids.length && isSettingsNoteConnected()) return
     var liveCsv = liveIds.join(",")
     if (liveCsv !== idsCsv) await joplin.settings.setValue(EXCLUDED_NOTEBOOK_IDS_KEY, liveCsv)
     // Refresh the visible names from the live ids (new titles after a rename/move). Only write when it
@@ -356,6 +374,33 @@ function applyProfileHeaderState(profile){
     searchFilter = String(profile.panelSearch || "")
     sortField = sortFieldCycle.includes(profile.sortField) ? profile.sortField : "title"
     sortDirection = profile.sortDirection === "desc" ? "desc" : "asc"
+}
+
+/** onProfilesReplaced ******************************************************************************************************************************
+ * The panel-side half of a settings-note apply: the profile store has just been replaced wholesale with another device's (src/core/settingsSync.ts), *
+ * so everything this file holds ABOUT the current profile is stale. It is exactly the state a profile switch resets, for the same reason - the view  *
+ * the user is looking at is now a different profile's view - minus the painting: the caller runs refreshInterfaces() itself, once, after this.      *
+ ***************************************************************************************************************************************************/
+export async function onProfilesReplaced(){
+    // The incoming profiles may show a different calendar, so start it at today rather than wherever the previous one was scrolled to.
+    resetCalendarViewState()
+    lastScrollTop = 0
+    // A note pinned by a reveal belongs to the view that is being replaced (nor does its pending flash carry over).
+    clearReveal()
+    // The current profile carries its own header state: notebook filter, search and sorting. getCurrentProfileID falls back
+    // to the first profile when the id this device held no longer exists in the incoming store.
+    applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+    // The rendered markup is compared with the last one to decide whether a paint is needed; the incoming profiles can
+    // produce the very same html for a different reason, so the guard is dropped rather than trusted.
+    lastRenderedHtml = null
+}
+
+/** showPanelToast **********************************************************************************************************************************
+ * The panel's own toast, for code outside this file that has something short to tell the user (the settings-note command and its resolver). It is    *
+ * notifyPanel under another name - see there, and copyToClipboard, for why a notice is never a plugin dialog on either platform.                     *
+ ***************************************************************************************************************************************************/
+export function showPanelToast(text){
+    notifyPanel(text)
 }
 
 /** eventHandler ************************************************************************************************************************************

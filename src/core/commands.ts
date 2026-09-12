@@ -7,6 +7,7 @@ import joplin from "api";
 import { openStyler } from "../ui/styler/styler";
 import { filterByNotebook, revealNote, togglePanelVisibility } from "../ui/panel/panel";
 import { showToolbarButtonSettingKey } from "./settings";
+import { connectSettingsNote } from "./settingsSync";
 
 /** setupCommands ***********************************************************************************************************************************
  * Sets up the commands used by the plugin                                                                                                          *
@@ -27,6 +28,13 @@ export async function setupCommands(){
         name: 'showStylerDialog',
         label: 'Set Panel CSS',
         execute: openStyler
+    })
+    // The settings note (v2.6.0): create it, or find and adopt one that already exists, and point the setting at it. Registered on
+    // both platforms so it is reachable from the command palette; the Tools menu item is desktop only, like every other menu item.
+    await joplin.commands.register({
+        name: 'cockpit.connectSettingsNote',
+        label: 'Cockpit: Connect settings note',
+        execute: connectSettingsNote
     })
     // ------------------------------------------------------------------ the cross-plugin contract
     // These two exist for OTHER PLUGINS to call, and their names are the contract: the Whereabouts plugin's
