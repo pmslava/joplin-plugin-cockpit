@@ -1578,8 +1578,10 @@ async function runNotebookAction(action, folderID){
  * keyboard and filter decisions live in the pure notebookPickerModel.js; notebookPickerWebview.js is the glue. The answer still travels back as       *
  * formData.picker.folderId - now from a hidden input the script rewrites - so every caller and the harness see the unchanged shape.                  *
  *                                                                                                                                                    *
- * EVERY ROW IS EMITTED HERE. Joplin measures a fit-to-content dialog once, from this markup, before its scripts run; a list built from script would   *
- * be laid out inside a dialog sized for an empty one. Same reason there is no @media rule in the CSS below and the list is capped in pixels.          *
+ * EVERY ROW IS EMITTED HERE. Joplin sizes a fit-to-content dialog from the content it can see, and the FIRST measurement is taken from this markup,   *
+ * before any dialog script has run - 3.6.14 keeps a ResizeObserver on it afterwards, so a later change does resize the frame, but it resizes one that  *
+ * is already on screen. A list built from script would therefore open at the height of an empty dialog and then jump. The pixel cap on the list and    *
+ * the absence of any @media rule follow from the same shape: a webview sized from its own content cannot sensibly answer a viewport query.             *
  ***************************************************************************************************************************************************/
 async function pickNotebook(promptTitle, includeRoot = false){
     var excludedSet = await getExcludedNotebookIdSet()
@@ -1591,13 +1593,20 @@ async function pickNotebook(promptTitle, includeRoot = false){
     // The notebook the app is currently showing is by far the likeliest target, so its row starts selected (and
     // is what OK commits without any further input). Wrapped because selectedFolder() rejects when nothing is
     // selected, and absent from older hosts; either way the first row takes over below.
+    //
+    // NOT for "Move notebook under...", the one flow with includeRoot: there the notebook the app is showing is
+    // very often the very notebook being moved, so pre-selecting it would offer to make it its own parent. That
+    // flow starts on "(top level)" - its first row, and what the old dropdown defaulted to. The host is not even
+    // asked which notebook is open.
     var currentFolderID = ""
-    try {
-        currentFolderID = String(((await joplin.workspace.selectedFolder()) || {}).id || "")
-    } catch (error) {
-        currentFolderID = ""
+    if (!includeRoot){
+        try {
+            currentFolderID = String(((await joplin.workspace.selectedFolder()) || {}).id || "")
+        } catch (error) {
+            currentFolderID = ""
+        }
     }
-    var selectedIndex = choices.findIndex(choice => choice.id === currentFolderID)
+    var selectedIndex = includeRoot ? 0 : choices.findIndex(choice => choice.id === currentFolderID)
     if (selectedIndex < 0 && choices.length) selectedIndex = 0
     var rows = choices.map((choice, index) =>
         `<div class="picker-row${index === selectedIndex ? " -selected" : ""}" data-id="${escapeHtml(choice.id)}">${escapeHtml(choice.path)}</div>`).join("")
@@ -1613,8 +1622,8 @@ async function pickNotebook(promptTitle, includeRoot = false){
                 border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;
             }
             .picker-filter:focus { outline: none; border-color: var(--joplin-url-color, #2D6BDC); }
-            /* Twelve 28px rows, then it scrolls - a pixel cap, because the one measurement Joplin takes of this
-             * dialog happens before any script runs and is never revised. */
+            /* Twelve 28px rows, then it scrolls - a pixel cap rather than a vh one, because this webview's own
+             * size is derived from its content, so a viewport query here would be circular. */
             .picker-list {
                 max-height: 336px; overflow-y: auto;
                 border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;
