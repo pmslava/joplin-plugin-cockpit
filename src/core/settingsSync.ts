@@ -640,6 +640,9 @@ export async function onSettingsNoteReferenceChanged(announce?){
         } else {
             lastContentKey = null
             initialized = false
+            // The rival watch belongs to the note this device CREATED (createSettingsNote arms it); pointing at any other note
+            // ends it, so an adopted note is never searched for rivals on the strength of an earlier creation.
+            duplicateChecksLeft = 0
             // A REPOINT IS A FIRST CONNECTION, whatever the user typed to cause it - a title, a bare id, a Markdown link, a joplin:// URL.
             // The read it starts therefore folds this device's own profiles into the note instead of replacing them (mergeOnFirstConnection).
             // Repointing at a DIFFERENT note later is a first connection to that note, and merges again.
