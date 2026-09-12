@@ -2224,7 +2224,7 @@ The command stays REGISTERED, palette-only, exactly like the two commands Wherea
 
 **Release.** v2.6.0 ships with 467 harness checks, all passing, and 123 Playwright tests in 21 files (116 run, 7 opt-in showcase captures). The full suite was run locally as the release gate on the release commit: 116 passed, no retries, in 21 minutes 34 seconds. The targeted runs earlier in the day found two spec-only faults in the newly written files (a race against Cockpit's 3 s notebook poll in the picker spec, and a stale panel frame plus an unmet "All notebooks" precondition in the excluded-notebook case) and no plugin fault.
 
-## 2026-09-13 — vNEXT: both reference fields show the name AND the id
+## 2026-09-13 — v2.6.1: both reference fields show the name AND the id
 
 The owner's refinement, in his own words: *"whatever user type - name or ID - we will show ... So the user will see both name and ID"*, and *"I want Parent/Sub (ID) for notebooks as well."* Cockpit has two settings that hold a REFERENCE to something rather than a value — **Excluded notebooks** and **Settings note** — and both showed only the name. A name is not an identity: two notebooks called "Archive", two notes someone titled the same, and a field that is pointed at exactly one of them looks identical either way. They now read `Lab / Joplin (fdfd6c06), Archive (a1b2c3d4)` and `Joplin Cockpit Plugin Settings (310b413d)`.
 
