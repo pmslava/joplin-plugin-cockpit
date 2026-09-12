@@ -205,15 +205,15 @@ Joplin syncs notes, never plugin settings, so profiles normally have to be built
 Setting it up is one field, and it is the same field on every platform. Open **Settings › Plugins › Cockpit** and type `Joplin Cockpit Plugin Settings` into **Settings note**.
 
 - On the **first device**, no such note exists yet, so Cockpit makes one: a note of that name in the notebook you are looking at, filled with this device's profiles and settings, with the field rewritten to the note's id.
-- On the **next device**, sync first so the note arrives, then type the same title there. Cockpit finds it and that device takes on what the note carries. Pasting the note's id or a link to it works just as well if you would rather copy it across.
+- On the **next device**, sync first so the note arrives, then type the same title there. Cockpit connects to it, and any profile that device has which the note does not (by name) is added to the note rather than lost. Pasting the note's id or a link to it does exactly the same.
 
-There is also a `Cockpit: Connect settings note` command in the command palette. It does the same, and when it connects to a note that already exists it additionally folds in any profile that device has and the note does not — so reach for it on a second device that has profiles of its own worth keeping.
+There is also a `Cockpit: Connect settings note` command in the command palette. It is the same three steps and the same rules; the field is the one to reach for.
 
 What travels: your profiles, the custom panel CSS, the theme and its colours, the completed-to-do style, the day start time and the excluded notebooks. What stays per device: the font and circle sizes (a phone and a 27-inch monitor want different ones), the refresh interval, the toolbar button, the two title-bar options, and which profile is currently selected.
 
 - A change on either side reaches the other on your next sync, a few seconds after you make it.
 - The note carries the whole picture, not a list of edits, so the last device to write wins — including deletions. Two devices changing profiles at the same moment produce an ordinary Joplin conflict copy, which you resolve like any other.
-- Connecting with the palette command to a note that already exists adds any profile that device has and the note does not (by name) rather than losing it. That merge happens once, at that connection, and never again; connecting by typing the title takes the note as it stands.
+- The **first time a device connects** to a note that already has something in it, any profile that device has and the note does not (by name) is added to the note. That happens once, at that connection, whichever way you connected — by typing the title, by pasting an id or link, or with the command. Afterwards the note simply wins, so a profile deleted on one device disappears on the others. Pointing a device at a *different* settings note is a new first connection, and merges again.
 - Cockpit never writes the note while you have it open in the editor, and never writes a note it has not managed to read yet, so a device that has just been set up cannot overwrite everyone else's settings.
 - The note holds machine-readable JSON. Do not edit it by hand; if you do, Cockpit says so and keeps working from this device's own settings until it rewrites the note. A note written by a newer version of Cockpit is left strictly alone.
 - To stop syncing, empty the setting. Nothing is read or written after that, and the note stays where it is.
