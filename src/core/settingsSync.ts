@@ -731,13 +731,20 @@ async function resolveSettingsNoteReference(announce){
         return reference.id
     }
     // A TITLE - or a display form whose short id is NOT the note this device is holding, which means the user edited the box or pasted someone
-    // else's text. Both are resolved from scratch by the name, through the one search path, and both are repoints like any other.
-    var matches = await findNotesTitled(reference.title)
+    // else's text. Both are resolved from scratch by the name, and both are repoints like any other.
+    //
     // A DISPLAY FORM IS SPLIT ON FAITH, and this is where that is paid for. The notebook field can ask its map whether the bracketed group is
     // really an id; there is no such map for notes - which is the whole reason the full id is stored beside the field - so a note a user
-    // genuinely called "Cockpit Settings (20240101)" has just had a real part of its name eaten (digits are hex). When the name half finds
-    // nothing, the WHOLE text is tried once as the title it may well be, before anything is given up on.
-    if (!matches.length && reference.kind === "display") matches = await findNotesTitled(raw.trim())
+    // genuinely called "Cockpit Settings (20240101)" has had a real part of its name eaten (digits are hex).
+    //
+    // SO THE LITERAL TEXT IS SEARCHED FIRST, and the guess that the brackets were an id Cockpit wrote only if that finds nothing. The order is
+    // the whole of the rule: with BOTH "Cockpit Settings" and "Cockpit Settings (20240101)" in the vault, asking the name half first matches the
+    // PLAIN note - so a user who typed the MORE specific title would be connected to the LESS specific note, have their typed text rewritten to
+    // it, and have this device's profiles merged into a mailbox they never named. What the user actually typed wins; the guess is the fallback.
+    // A display-form repoint therefore costs two lookups instead of one, and the steady state - the field already naming the stored note - still
+    // costs none at all, because it returns long before here.
+    var matches = reference.kind === "display" ? await findNotesTitled(raw.trim()) : []
+    if (!matches.length) matches = await findNotesTitled(reference.title)
     if (matches.length === 1){
         unresolvedTitle = ""
         await writeSettingsNoteReference(String(matches[0].id), String(matches[0].title || ""))

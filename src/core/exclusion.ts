@@ -112,12 +112,19 @@ export function canonicalLabel(map, id){
  * WHAT THE USER READS IN THE FIELD: the name (or the Parent / Sub path) followed by the short id in brackets - "Lab / Joplin (fdfd6c06)". The name is *
  * the part a person recognises and the id is what Cockpit is actually holding on to, so a field pointed at the wrong one of two same-named notebooks   *
  * says so at a glance instead of looking right. Falls back to the bare name for an id that cannot be shown in a form the parser would take back.       *
+ *                                                                                                                                                     *
+ * NOTHING THAT CANNOT BE READ BACK IS EVER WRITTEN, which is what the blank-title case is about. A notebook with no title at all would give the label  *
+ * " (e1e1e1e1)", and the parser refuses that - it wants a non-blank name in front of the brackets - so the id would be dropped by the very next        *
+ * resolve pass and the exclusion silently lost. Writing the bare empty label loses it just as surely (the entry disappears from the comma list). With  *
+ * no name to show, the entry is therefore THE FULL ID: the one string that names such a notebook and survives being read back.                         *
  ***************************************************************************************************************************************************/
 export function displayLabel(map, id){
     var label = canonicalLabel(map, id)
     if (label == null) return null
     var short = shortID(id, map.keys())
-    return short ? label + " (" + short + ")" : label
+    if (!short) return label
+    if (!String(label).trim()) return FULL_ID_PATTERN.test(String(id).toLowerCase()) ? String(id) : label
+    return label + " (" + short + ")"
 }
 
 /** resolveTypedEntry ******************************************************************************************************************************

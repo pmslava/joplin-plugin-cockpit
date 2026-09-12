@@ -1218,6 +1218,29 @@ async function main() {
         assert.ok(/a name, a Parent\/Sub path or a full id/.test(readme), 'and the README says the same three spellings')
     })
 
+    await test('excluded notebooks display: a notebook with a BLANK title keeps its exclusion through a resolve pass', async () => {
+        // NOTHING THAT CANNOT BE READ BACK IS EVER WRITTEN. A notebook with no title at all would give the label
+        // " (e1e1e1e1)", and the parser refuses that - it wants a non-blank name in front of the brackets - so the id was
+        // dropped on the very next resolve pass and the exclusion silently lost. (Main lost it too, by writing an empty
+        // label.) With no name to show, the entry IS the full id, which is the one string that names the notebook and
+        // survives being read back.
+        const idBlank = 'e1e1e1e1' + '0'.repeat(24)
+        dispOptions.folders = dispFolders.concat([{ id: idBlank, title: '', parent_id: '', updated_time: 16 }])
+        const poll = disp.intervals.find(interval => interval.ms === 3000)
+        await poll.fn()
+        await poll.fn()
+        await disp.setSetting('excludedNotebooks', idBlank)
+        assert.strictEqual(disp.settings.excludedNotebookIds, idBlank, 'the nameless notebook is excluded')
+        assert.strictEqual(disp.settings.excludedNotebooks, idBlank, 'and the field holds the one string that names it')
+        // THE RESOLVE PASS THAT USED TO LOSE IT: feed the field's own text back in.
+        await disp.setSetting('excludedNotebooks', disp.settings.excludedNotebooks)
+        assert.strictEqual(disp.settings.excludedNotebookIds, idBlank, 'reading Cockpit\'s own text back keeps the exclusion')
+        assert.strictEqual(disp.settings.excludedNotebooks, idBlank, 'and settles on the same text')
+        await disp.setSetting('excludedNotebooks', '')
+        dispOptions.folders = dispFolders
+        await poll.fn()
+    })
+
     // ---- the short id itself: the pure module both settings share ------------------------------------------------
     const ShortID = require('../src/core/shortId.js')
 
@@ -8925,6 +8948,63 @@ async function main() {
             'and the field shows it by its whole name, with its own short id added')
         assert.deepStrictEqual(state.dataPosts, [], 'nothing is created - the note was there all along')
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop', 'Only on this device'], 'and it is connected to, merge and all')
+    })
+
+    await test('settings note display: the text the user TYPED wins over the guess that the brackets were an id', async () => {
+        // THE ORDER OF THE TWO LOOKUPS IS THE WHOLE RULE. With both "Cockpit Settings" and "Cockpit Settings (20240101)" in
+        // the vault, asking the name half first matches the PLAIN note - so a user who typed the MORE specific title was
+        // connected to the LESS specific one, had their own text rewritten to it, and had this device's profiles merged into
+        // a mailbox they never named. The literal text is searched first; the guess that Cockpit wrote those brackets is only
+        // the fallback.
+        const oddTitle = 'Cockpit Settings (20240101)'
+        const state = await runSync('display-order', {
+            notes: {
+                [SYNC_NOTE_ID]: { id: SYNC_NOTE_ID, title: 'Cockpit Settings', updated_time: 10,
+                    body: syncBody(syncStore(3, [syncProfile(2, 'The plain note')]), syncSettings()) },
+                [SYNC_OTHER_ID]: { id: SYNC_OTHER_ID, title: oddTitle, updated_time: 11,
+                    body: syncBody(syncStore(3, [syncProfile(2, 'The bracketed note')]), syncSettings()) },
+            },
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', oddTitle))
+        assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_OTHER_ID, 'the note the user actually named is the one connected to')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_OTHER_ID, oddTitle), 'and the field still shows that name, not the plain one')
+        assert.deepStrictEqual(syncProfileNames(state), ['The bracketed note', 'Only on this device'], 'the merge went into that note')
+        assert.deepStrictEqual(state.notePuts.map(put => put.id), [SYNC_OTHER_ID], 'and nothing at all was written to the note the user did not name')
+        // The literal text answered, so the name half was never asked: one lookup, not two.
+        const titleQueries = state.gets.filter(g => g.path[0] === 'search' && /^title:/.test(String((g.query && g.query.query) || '')))
+            .map(g => String(g.query.query))
+        assert.deepStrictEqual(titleQueries, [`title:"cockpit settings (20240101)"`], 'the text as typed is what was searched for')
+    })
+
+    await test('settings note display: the name half is still the fallback when the literal text names nothing', async () => {
+        // The other side of the order: the bracketed group really was an id Cockpit wrote, and no note carries the whole
+        // string. The name half then answers, exactly as it did before the order was fixed - two lookups, in that order.
+        const state = await runSync('display-order-fallback', {
+            notes: {
+                [SYNC_NOTE_ID]: { id: SYNC_NOTE_ID, title: 'Cockpit Settings', updated_time: 10,
+                    body: syncBody(syncStore(3, [syncProfile(2, 'The plain note')]), syncSettings()) },
+            },
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', 'Cockpit Settings (20240101)'))
+        assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID, 'the name half found the note the brackets were hiding')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID, 'Cockpit Settings'), 'and the field shows that note')
+        const titleQueries = state.gets.filter(g => g.path[0] === 'search' && /^title:/.test(String((g.query && g.query.query) || '')))
+            .map(g => String(g.query.query))
+        assert.deepStrictEqual(titleQueries, [`title:"cockpit settings (20240101)"`, `title:"cockpit settings"`],
+            'the literal text first, the name half only because it found nothing')
+        assert.deepStrictEqual(state.dataPosts, [], 'and a display form still never creates')
     })
 
     await test('settings note reference: an ambiguous title is left exactly as typed, and nothing is read or written', async () => {
