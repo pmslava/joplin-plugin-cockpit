@@ -392,9 +392,14 @@ export async function onProfilesReplaced(){
 /** showPanelToast **********************************************************************************************************************************
  * The panel's own toast, for code outside this file that has something short to tell the user (the settings-note command and its resolver). It is    *
  * notifyPanel under another name - see there, and copyToClipboard, for why a notice is never a plugin dialog on either platform.                     *
+ *                                                                                                                                                    *
+ * It answers whether there was a panel to tell. Startup raises notices BEFORE the panel is created (the sync module is wired up next to the profile  *
+ * store it syncs, well before setupPanel), and a notice pushed into nothing is simply lost - so the caller needs to know to keep it and say it later. *
  ***************************************************************************************************************************************************/
 export function showPanelToast(text){
+    if (!panel) return false
     notifyPanel(text)
+    return true
 }
 
 /** eventHandler ************************************************************************************************************************************
