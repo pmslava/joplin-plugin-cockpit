@@ -19,7 +19,8 @@
  *                                                                                                                                                  *
  * CONCURRENT EDITS ARE NOT MERGED. Whole-note last-writer-wins. Two devices changing settings at the same moment produce a Joplin conflict copy,     *
  * which the plugin ignores entirely: it always uses the note at the configured id, and the user resolves the conflict themselves. The ONE exception  *
- * is adoption - the first time a device connects to a note that already exists, its own profiles are folded in by name (see adoptSettingsNote).      *
+ * is adoption - the first time this device connects to a note that already carries a payload, its own profiles are folded in by name, whichever      *
+ * route the connection came in by (see mergeOnFirstConnection).                                                                                       *
  *                                                                                                                                                  *
  * A MANGLED NOTE NEVER STOPS ANYTHING. An unreadable body is logged once, the remembered key is cleared, and the plugin keeps running on local        *
  * state; the next local change rewrites the note wholesale. A note that cannot be read at all (a bad id, a note that has not synced to this device    *
@@ -70,6 +71,13 @@ var unresolvedTitle = ""
 var warnedWrongNote = false
 /** A notice raised before there was a panel to show it in, kept until there is. See announceNotice. */
 var pendingNotice = ""
+/** How many more completed syncs should look for a RIVAL settings note. Armed only when this device created its own note (see
+ * createSettingsNote), counted down one per sync, and dropped to zero the moment a rival is found and reported. */
+var duplicateChecksLeft = 0
+/** THE FIRST CONNECTION. Set when this device is pointed at a settings note it has not been reading, and consumed by the next successful read of
+ * that note, which merges instead of replacing (see mergeOnFirstConnection). One flag for every route in - the command, a typed title, a pasted id
+ * or link - so the paths cannot drift apart on what "connecting" means. */
+var pendingAdoption = false
 
 /** ONE SETTINGS-NOTE OPERATION AT A TIME.
  *
@@ -171,12 +179,38 @@ export function pollSettingsNote(reason){
 /** syncSettingsNote ********************************************************************************************************************************
  * The unconditional drain: flush what we owe, then read. Used where something is known to have happened (a completed sync, a change to the note).    *
  ***************************************************************************************************************************************************/
-export function syncSettingsNote(reason){
+export async function syncSettingsNote(reason){
     // A TITLE THAT NAMED NOTHING IS TRIED AGAIN HERE. "Wait for the note to sync to this device" is what the toast tells the user, and a
     // completed sync is precisely when that can have happened - so the promise the message makes is kept rather than left to the user to
     // re-save the setting. Silent: the notice has already been given once, and repeating it every sync would be nagging.
-    if (!noteId) return unresolvedTitle ? onSettingsNoteReferenceChanged(false) : Promise.resolve()
-    return drainSettingsNote(reason, false)
+    if (!noteId){
+        if (unresolvedTitle) await onSettingsNoteReferenceChanged(false)
+        return
+    }
+    await drainSettingsNote(reason, false)
+    await checkForRivalSettingsNote()
+}
+
+/** checkForRivalSettingsNote ***********************************************************************************************************************
+ * CHEAP INSURANCE FOR THE ONE CASE THE UNION CANNOT COVER.                                                                                          *
+ *                                                                                                                                                    *
+ * findNotesTitled looks in the index AND in the most-recently-updated page, so a note that is already on this device is found however stale the       *
+ * index is. What neither half can see is a note that has not ARRIVED yet: a user who installs Cockpit on the second device and types the title        *
+ * before the first sync has brought the note down gets a second, perfectly legitimate-looking settings note, and from then on the two devices are     *
+ * each talking to their own mailbox in silence.                                                                                                       *
+ *                                                                                                                                                    *
+ * So a device that CREATED its note looks once on each of the next three completed syncs - by then the first sync has certainly finished - and, if it *
+ * ever sees two notes of that name, says so once and stops. Bounded to three searches, armed only by a creation (an adopt connects to the note that   *
+ * already exists, so there is nothing to collide with), and it never acts on its own: which mailbox to keep is the user's decision, not the plugin's. *
+ ***************************************************************************************************************************************************/
+async function checkForRivalSettingsNote(){
+    if (duplicateChecksLeft <= 0) return
+    duplicateChecksLeft--
+    var matches = await findNotesTitled(SETTINGS_NOTE_TITLE)
+    if (matches.length < 2) return
+    duplicateChecksLeft = 0
+    announceNotice("Cockpit: another Cockpit settings note arrived from a different device - paste its id into the Settings note field " +
+        "to use that one instead")
 }
 
 /** drainDeferredSettingsNoteWrite ******************************************************************************************************************
@@ -220,7 +254,16 @@ async function settingsNoteMoved(){
     }
 }
 
-/** announceNotice / flushPendingNotice *************************************************************************************************************
+/** markFirstConnection *****************************************************************************************************************************
+ * Arm the one-time merge for the note this device is pointed at, ON THE CHAIN so it cannot be set while a read is already deciding. Used by the      *
+ * command for the case the repoint cannot cover: the field already names the note, so writing the same value changes nothing, but this device has    *
+ * never managed to read it - which is a first connection like any other.                                                                             *
+ ***************************************************************************************************************************************************/
+function markFirstConnection(){
+    return withSettingsNote(async () => { pendingAdoption = true })
+}
+
+/** rememberNotice / announceNotice / flushPendingNotice ********************************************************************************************
  * Tell the user something short, wherever in the startup order we happen to be.                                                                      *
  *                                                                                                                                                    *
  * setupSettingsSync runs beside the profile store it syncs, which is well before setupPanel - so a notice raised while resolving the setting at       *
@@ -228,11 +271,18 @@ async function settingsNoteMoved(){
  * will never read. The automatic retries are deliberately silent, so that was the ONLY chance to say it. The notice is therefore kept until there is  *
  * a panel, and the startup read - which runs after setupPanel - flushes it. Exactly one notice is ever pending: a second overwrites the first, which  *
  * is right, because the later one describes the state the device is actually in.                                                                     *
+ *                                                                                                                                                    *
+ * rememberNotice is the delivery half on its own, for the things that are not complaints: setting the note up from the Settings field can happen at   *
+ * startup too, and "Cockpit: settings note created" deserves to survive that just as much as a warning does.                                          *
  ***************************************************************************************************************************************************/
-function announceNotice(toast, logLine?){
-    console.warn(logLine || toast)
+function rememberNotice(toast){
     pendingNotice = toast
     flushPendingNotice()
+}
+
+function announceNotice(toast, logLine?){
+    console.warn(logLine || toast)
+    rememberNotice(toast)
 }
 
 function flushPendingNotice(){
@@ -428,6 +478,15 @@ async function refreshFromSettingsNoteLocked(reason){
         console.warn(`Cockpit: the settings note (${reason}) carries profiles this build cannot read`, error)
         return
     }
+
+    // THE FIRST CONNECTION MERGES; every read after it replaces. This is the one place it happens, so the command, a typed title and a pasted
+    // id all behave identically - see mergeOnFirstConnection.
+    if (pendingAdoption){
+        pendingAdoption = false
+        applied = await mergeOnFirstConnection(applied, reason)
+        if (!applied) return
+    }
+
     var key = settingsContentKey(applied)
     if (key === lastContentKey) return      // our own write, or something already applied
     lastContentKey = key
@@ -441,6 +500,61 @@ async function refreshFromSettingsNoteLocked(reason){
         initialized = false
         console.warn(`Cockpit: the settings note (${reason}) could not be applied`, error)
     }
+}
+
+/** mergeOnFirstConnection **************************************************************************************************************************
+ * THE ONE-TIME MERGE, for every way a device can connect to a settings note that already exists.                                                    *
+ *                                                                                                                                                    *
+ * Ongoing sync is wholesale by design - a profile deleted on another device has to be able to disappear here - but the FIRST connection is the one    *
+ * moment where both sides hold profiles that were built independently and neither side's absence is a deletion. A local profile whose NAME the note   *
+ * does not carry is appended with a fresh id (names are compared trimmed and case-sensitively: two profiles called "Work" are the same intent, "work" *
+ * and "Work" are two deliberate names), and a synced setting the payload leaves out keeps this device's value.                                        *
+ *                                                                                                                                                    *
+ * It lives HERE, in the read, rather than in the command that used to own it, because there are four ways to connect - the command, typing the note's *
+ * title, pasting its id, pasting a link - and they were drifting: only the command merged, so a user who set the second device up the way the         *
+ * Settings field tells them to silently lost that device's own profiles. One rule, one place.                                                         *
+ *                                                                                                                                                    *
+ * The merged store is WRITTEN BACK before it is applied, and only when something was actually appended: this device must not start treating the note  *
+ * as the truth while holding profiles the note has never heard of. A write-back that fails aborts the whole connection - nothing is applied, the       *
+ * write gate is shut again and the merge is re-armed - because the alternatives are both destructive: applying the merge would leave the other        *
+ * devices permanently behind, and applying the note alone would throw this device's profiles away.                                                    *
+ *                                                                                                                                                    *
+ * Returns the content to apply, or null when the caller must stop.                                                                                    *
+ ***************************************************************************************************************************************************/
+async function mergeOnFirstConnection(applied, reason){
+    var local = null
+    try {
+        local = await collectSettingsContent()
+    } catch (error) {
+        // This device cannot state its own side, so it cannot know what the merge would add. Stop rather than guess in either direction.
+        pendingAdoption = true
+        initialized = false
+        console.warn(`Cockpit: the settings note (${reason}) could not read this device's own state to connect with`, error)
+        return null
+    }
+    var merged = {
+        profiles: normalizeProfileStore(mergeProfileStores(applied.profiles, local.profiles)),
+        settings: Object.assign({}, local.settings, applied.settings),
+    }
+    // Nothing of this device's was missing from the note: the connection is a plain read, and the note is not given a revision for nothing.
+    if (settingsContentKey(merged) === settingsContentKey(applied)) return applied
+    try {
+        await joplin.data.put(['notes', noteId], null, { body: buildSettingsNoteBody(merged, new Date().toISOString()) })
+    } catch (error) {
+        pendingAdoption = true
+        initialized = false
+        console.warn(`Cockpit: the settings note (${reason}) could not be given this device's own profiles`, error)
+        return null
+    }
+    try {
+        var after: any = await joplin.data.get(['notes', noteId], { fields: ['updated_time'] })
+        lastUpdatedTime = (after && after.updated_time) || lastUpdatedTime
+    } catch (error) {
+        // Best effort: an unknown stamp only costs the next tick a body read.
+    }
+    console.info(`Cockpit: connected to the settings note ${noteId} and folded this device's own profiles in - ` +
+        `${merged.profiles.profiles.length} profile(s) in all`)
+    return merged
 }
 
 /** applySettingsPayload ****************************************************************************************************************************
@@ -518,12 +632,18 @@ export async function onSettingsNoteReferenceChanged(announce?){
         if (seededNote && seededNote.id === resolved){
             // The note this device has just CREATED and seeded. Its content is this device's own handwriting, so the read below must
             // recognise it rather than apply it back as though a second device had sent it - an apply is wholesale, and anything the
-            // user changed between the POST and this read would be taken as absent from the incoming state and thrown away.
+            // user changed between the POST and this read would be taken as absent from the incoming state and thrown away. Nothing to
+            // merge either: the note holds exactly this device's state already.
             lastContentKey = seededNote.key
             initialized = true
+            pendingAdoption = false
         } else {
             lastContentKey = null
             initialized = false
+            // A REPOINT IS A FIRST CONNECTION, whatever the user typed to cause it - a title, a bare id, a Markdown link, a joplin:// URL.
+            // The read it starts therefore folds this device's own profiles into the note instead of replacing them (mergeOnFirstConnection).
+            // Repointing at a DIFFERENT note later is a first connection to that note, and merges again.
+            pendingAdoption = !!resolved
         }
         seededNote = null
     })
@@ -534,12 +654,18 @@ export async function onSettingsNoteReferenceChanged(announce?){
 }
 
 /** resolveSettingsNoteReference ********************************************************************************************************************
- * What the setting names, as a note id, or "" for "nothing usable".                                                                                 *
+ * What the setting names, as a note id, or "" for "nothing usable". THIS IS THE WHOLE SETUP UI.                                                     *
  *                                                                                                                                                    *
- * An ID in any of its four spellings is canonicalised to the bare id, so the field ends up holding the thing the rest of the plugin uses. A TITLE is  *
- * searched for - this is how a phone connects, where there is no comfortable way to carry an id across - and, when exactly one non-trashed note       *
- * carries that title exactly, the field is rewritten to its id. Zero or several matches leave the field exactly as typed (a user who mistyped can see  *
- * what they typed) and turn the feature off until it resolves.                                                                                        *
+ * 2.6.0 shipped a Tools menu item to create the note and a Settings field to point at one; the owner's first live round removed the menu item, and    *
+ * rightly - creating the note is a one-time action, and a user who is configuring a plugin is already in Settings. So the field does all of it:       *
+ *                                                                                                                                                    *
+ *   AN ID, in any of its four spellings, is canonicalised to the bare id - what the rest of the plugin uses.                                          *
+ *   THE CANONICAL TITLE with no note behind it yet is a request to SET THE FEATURE UP: the note is created here, exactly as the command creates it     *
+ *     (same placement, same seed, same token), and the field is rewritten to its id. That makes the first device's whole setup "type the title".      *
+ *   ANY TITLE with exactly one note behind it is that note - which is the second device, where the note has already synced in.                        *
+ *   ANY OTHER TITLE that matches nothing is left exactly as typed (a user who mistyped can see what they typed), with a notice and a silent retry at   *
+ *     the next completed sync. Creating for an arbitrary title would make a typo into a second mailbox, which is the one outcome worth refusing.      *
+ *   SEVERAL matches are refused too: guessing which mailbox a user meant is not a thing a plugin should do.                                            *
  *                                                                                                                                                    *
  * Both writes are guarded by a value comparison, the same loop pattern resolveExcludedNotebooks uses: the setValue re-enters this handler, and on that *
  * pass the field already holds the id, so nothing is written and the recursion stops.                                                                 *
@@ -562,6 +688,18 @@ async function resolveSettingsNoteReference(announce){
         await joplin.settings.setValue(settingsNoteIdSettingKey, String(matches[0].id))
         return String(matches[0].id)
     }
+    if (!matches.length && isCanonicalSettingsNoteTitle(reference.title)){
+        // THE SETUP GESTURE. The user typed the name of the thing they want and there is no such note, so make it - the same
+        // createSettingsNote the command runs, which also writes the field, so the id is what this returns. A creation that fails
+        // has already said so; the title is remembered and the next completed sync tries again.
+        var createdId = await createSettingsNote()
+        if (createdId){
+            unresolvedTitle = ""
+            return createdId
+        }
+        unresolvedTitle = reference.title
+        return ""
+    }
     // Remembered so that a completed sync tries again (see syncSettingsNote). Several matches are remembered too: the user is told to paste
     // an id, but the ambiguity can equally be resolved by them deleting the spare note, and a retry then costs one search.
     unresolvedTitle = reference.title
@@ -574,17 +712,43 @@ async function resolveSettingsNoteReference(announce){
     return ""
 }
 
+/** isCanonicalSettingsNoteTitle ********************************************************************************************************************
+ * Whether what the user typed is the settings note's own name. Trimmed and case-insensitive, because this is a name a person types from memory on a  *
+ * phone keyboard, not an identifier - and it is the one string that turns "no such note" into "make one".                                            *
+ ***************************************************************************************************************************************************/
+function isCanonicalSettingsNoteTitle(title){
+    return String(title || "").trim().toLowerCase() === String(SETTINGS_NOTE_TITLE).toLowerCase()
+}
+
 /** findNotesTitled *********************************************************************************************************************************
- * The non-trashed notes whose title is EXACTLY this, case-insensitively.                                                                            *
+ * The non-trashed notes whose title is EXACTLY this, case-insensitively. TWO SOURCES, UNIONED, because neither is sufficient on its own.             *
  *                                                                                                                                                    *
- * Joplin's `title:` search token is a token match, not an equality test: it answers "Joplin Cockpit Plugin Settings Backup" to a search for the plain *
- * title. So the query is only the cheap way to narrow the vault, and the exactness is decided here, on the titles that come back. `deleted_time` is    *
- * checked where the API returns it (builds with a trash); where it does not, the field is simply absent and every result counts.                       *
+ * THE SEARCH is index-backed, and Joplin's FTS index is NOT live: SearchEngine.syncTables() rebuilds it on a fixed 10s timer after notes change and   *
+ * once at app start. So for up to ten seconds after another device's settings note arrives with a sync - and at startup for notes changed late in the *
+ * previous session - a search for its title answers NOTHING. That window is exactly when this code is asked the question, and the answer it used to    *
+ * get was fatal: "no note of that name" sends the canonical-title branch off to CREATE a second one, the field points at the duplicate, and the two    *
+ * devices never converge again. It is also a token match rather than an equality test (it answers "... Settings Backup" to a search for the plain      *
+ * title), so exactness is decided here either way.                                                                                                    *
+ *                                                                                                                                                    *
+ * THE SCAN is the index-independent half: one page of the plain ['notes'] listing, most-recently-updated first. A note that has just synced in is by   *
+ * definition among the most recently updated, so one page of 100 finds it while the index is still catching up. It cannot replace the search (a note   *
+ * that has sat untouched for a year is nowhere near the first page), which is why this is a union and not a choice.                                    *
+ *                                                                                                                                                    *
+ * `deleted_time` is checked on both halves, where the API returns it (builds with a trash); where it does not, the field is simply absent and every    *
+ * result counts. Results are deduped by id, so a note both halves see is one note.                                                                     *
  ***************************************************************************************************************************************************/
 async function findNotesTitled(title){
     var wanted = String(title || "").trim().toLowerCase()
     if (!wanted) return []
     var found = []
+    var seen = new Set()
+    var keep = function(item){
+        if (!item || !item.id || seen.has(item.id)) return
+        if (item.deleted_time) return
+        if (String(item.title || "").trim().toLowerCase() !== wanted) return
+        seen.add(item.id)
+        found.push(item)
+    }
     try {
         // PAGED, not capped. The token match means the result set is "every note whose title contains these words", which in a big vault
         // can be far more than one page - and the note we want could be on any of them. A fixed limit would silently answer "no such note"
@@ -596,21 +760,29 @@ async function findNotesTitled(title){
                 fields: ['id', 'title', 'deleted_time'],
                 page: page,
             })
-            for (var item of (result && result.items) || []){
-                if (item.deleted_time) continue
-                if (String(item.title || "").trim().toLowerCase() !== wanted) continue
-                found.push(item)
-            }
+            for (var item of (result && result.items) || []) keep(item)
             if (!result || !result.has_more) break
         }
     } catch (error) {
         console.warn("Cockpit: could not search for the settings note", error)
     }
+    try {
+        var recent: any = await joplin.data.get(['notes'], {
+            fields: ['id', 'title', 'deleted_time'],
+            order_by: 'updated_time',
+            order_dir: 'DESC',
+            limit: 100,
+        })
+        for (var candidate of (recent && recent.items) || []) keep(candidate)
+    } catch (error) {
+        console.warn("Cockpit: could not list recent notes while looking for the settings note", error)
+    }
     return found
 }
 
 /** connectSettingsNote *****************************************************************************************************************************
- * The Tools > Cockpit > "Connect settings note" command, and the whole of the desktop setup flow.                                                   *
+ * The "Cockpit: Connect settings note" command. The SETTINGS FIELD is the setup UI (see resolveSettingsNoteReference); this stays registered for the *
+ * command palette, and for another plugin or a script that wants the same three steps in one call, but it has no menu item any more.                 *
  *                                                                                                                                                    *
  *   (a) ALREADY CONNECTED, and the note reads: nothing to decide. Read it, apply whatever it says, and say so.                                        *
  *   (b) A NOTE ALREADY EXISTS with the exact title - the ordinary second-device case, where the first device made one and it has synced here. Exactly  *
@@ -639,9 +811,7 @@ async function connectSettingsNoteLocked(){
             // A stale id: the note was deleted, or this device has never received it. Fall through and look for one by title.
         }
         if (readable){
-            await refreshFromSettingsNote("connect")
-            console.info(`Cockpit: the settings note is note ${noteId}`)
-            showPanelToast("Cockpit: settings note connected")
+            await connectToNote(noteId)
             return
         }
     }
@@ -651,48 +821,27 @@ async function connectSettingsNoteLocked(){
         return
     }
     if (matches.length === 1){
-        await adoptSettingsNote(String(matches[0].id))
+        await connectToNote(String(matches[0].id))
         return
     }
     await createSettingsNote()
 }
 
-/** adoptSettingsNote *******************************************************************************************************************************
- * Connect to a settings note that already exists, folding this device's own profiles into it.                                                       *
+/** connectToNote ***********************************************************************************************************************************
+ * Point this device at an existing settings note, by the ordinary route: write the id into the setting and let the repoint read it - which is where  *
+ * the one-time merge lives (mergeOnFirstConnection), so the command gets exactly what typing the title into the Settings field gets.                 *
  *                                                                                                                                                    *
- * THE MERGE HAPPENS EXACTLY ONCE, HERE, AND NOWHERE ELSE. Ongoing sync is wholesale by design - a profile deleted on the other device has to be able  *
- * to disappear here - but the very first connection is the one moment where both sides hold profiles that were built independently and neither is a   *
- * deletion. A local profile whose NAME is not already in the note is appended with a fresh id (names are compared trimmed and case-sensitively: two    *
- * profiles called "Work" are the same intent, "work" and "Work" are two deliberate names). The merged store is written back to the note before the     *
- * setting is pointed at it, so the read that the repoint starts is what installs the merge on this device - one path, not two.                         *
+ * When the field ALREADY names that note, writing the same value changes nothing and no repoint follows, so the merge is armed by hand here. That     *
+ * case is real: a device whose note had not synced yet read nothing at startup, and running the command is how the user asks it to try again.         *
  ***************************************************************************************************************************************************/
-async function adoptSettingsNote(adoptedId){
-    var body = ""
-    try {
-        var note: any = await joplin.data.get(['notes', adoptedId], { fields: ['body'] })
-        body = (note && note.body) || ""
-    } catch (error) {
-        console.warn(`Cockpit: the settings note ${adoptedId} could not be read`, error)
-        showPanelToast("Cockpit: the settings note could not be read.")
-        return
+async function connectToNote(targetId){
+    if (targetId === noteId){
+        if (!initialized) await markFirstConnection()
+        await refreshFromSettingsNote("connect")
+    } else {
+        await joplin.settings.setValue(settingsNoteIdSettingKey, targetId)
     }
-    var payload = parseSettingsNoteBody(body)
-    var local = await collectSettingsContent()
-    // A note that exists but holds no readable payload (the user made it by hand) is adopted as empty: the merge below is then simply
-    // this device's own state, which is the seed that note was always going to need.
-    var merged = {
-        profiles: payload ? mergeProfileStores(payload.profiles, local.profiles) : local.profiles,
-        settings: payload ? Object.assign({}, local.settings, payload.settings) : local.settings,
-    }
-    // NOTHING TO ADD, NOTHING TO WRITE. When this device holds no profile the note is missing and no setting it leaves out, the merge is
-    // the note's own content and the PUT would be a no-op revision on a note the user may be looking at. Compared through the same
-    // normalisation the read side uses, so "the same" means the same thing on both sides of the connection.
-    var adoptedKey = payload ? settingsContentKey({ profiles: normalizeProfileStore(payload.profiles), settings: payload.settings }) : null
-    if (adoptedKey === null || settingsContentKey(merged) !== adoptedKey){
-        await joplin.data.put(['notes', adoptedId], null, { body: buildSettingsNoteBody(merged, new Date().toISOString()) })
-    }
-    await joplin.settings.setValue(settingsNoteIdSettingKey, adoptedId)
-    console.info(`Cockpit: adopted the settings note ${adoptedId} with ${merged.profiles.profiles.length} profile(s)`)
+    console.info(`Cockpit: the settings note is note ${targetId}`)
     showPanelToast("Cockpit: settings note connected")
 }
 
@@ -716,7 +865,8 @@ function mergeProfileStores(rawAdopted, local){
 }
 
 /** createSettingsNote ******************************************************************************************************************************
- * Create the note, seeded from this device's current state, and point the setting at it.                                                            *
+ * Create the note, seeded from this device's current state, and point the setting at it. Returns the new note's id, or "" when the app would not     *
+ * make one - the ONE piece of creation code there is, shared by the Settings field's setup gesture and by the command.                               *
  *                                                                                                                                                    *
  * THE SEED'S CONTENT KEY IS REMEMBERED BEFORE the setting is written and CONSUMED ON THE CHAIN by the repoint that write causes (see                  *
  * onSettingsNoteReferenceChanged). Without it this device reads its OWN freshly written seed as though a second device had sent it - and an apply is  *
@@ -734,9 +884,9 @@ async function createSettingsNote(){
     })
     var createdId = String((created && created.id) || "")
     if (!createdId){
-        console.warn("Cockpit: the settings note was created but the app returned no id for it")
-        showPanelToast("Cockpit: the settings note could not be created.")
-        return
+        announceNotice("Cockpit: the settings note could not be created.",
+            "Cockpit: the settings note was created but the app returned no id for it")
+        return ""
     }
     seededNote = { id: createdId, key: settingsContentKey(content) }
     await joplin.settings.setValue(settingsNoteIdSettingKey, createdId)
@@ -748,8 +898,13 @@ async function createSettingsNote(){
         initialized = true
         warnedUnparseable = false
     })
+    // Arm the rival watch: this device made its own note, which is the only way two of them can come to exist.
+    duplicateChecksLeft = 3
     console.info(`Cockpit: created the settings note ${createdId}`)
-    showPanelToast("Cockpit: settings note created")
+    // Through the pending-notice path, not straight at the panel: the Settings field can trigger this at startup (a field still holding
+    // the title because a previous attempt failed), and that is before there is a panel to toast into.
+    rememberNotice("Cockpit: settings note created")
+    return createdId
 }
 
 /** pickFolderForSettingsNote ***********************************************************************************************************************

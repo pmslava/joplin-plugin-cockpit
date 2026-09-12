@@ -684,7 +684,9 @@ async function withCockpitOptions(win: Page, work: () => Promise<void>): Promise
  * Joplin's database, so a spec cannot preset them the way `launchJoplin({ settings })` presets Joplin's own
  * File-storage settings. A String setting is rendered as a text input with a `<label for>` carrying the
  * registered label, so it is reached exactly as the enum and Bool controls are. `fill` then blur, because
- * Joplin commits a text setting on change rather than per keystroke.
+ * Joplin commits a text setting on change rather than per keystroke, and the value is polled back before the
+ * screen is left. This is the only route to the "Settings note" field, which is the whole of that feature's
+ * setup UI, and to the "Excluded notebooks" field.
  */
 export async function setCockpitTextSetting(win: Page, label: string, value: string): Promise<void> {
   await withCockpitOptions(win, async () => {
@@ -692,6 +694,7 @@ export async function setCockpitTextSetting(win: Page, label: string, value: str
     await control.waitFor({ state: 'visible', timeout: 30_000 });
     await control.fill(value);
     await control.blur();
+    await expect.poll(async () => control.inputValue(), { timeout: 10_000 }).toBe(value);
   });
 }
 

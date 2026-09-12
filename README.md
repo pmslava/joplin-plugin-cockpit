@@ -206,13 +206,20 @@ A profile switch draws the list first and fills the progress rings in behind it,
 
 Joplin syncs notes, never plugin settings, so profiles normally have to be built again on every device. Cockpit can carry them in a note instead. It is **off until you turn it on**: leave the setting empty and everything stays exactly as it is, on this device only.
 
-On desktop, run **Tools › Cockpit › Connect settings note**. Cockpit creates a note called `Joplin Cockpit Plugin Settings` in the notebook you are looking at, fills it with this device's profiles and settings, and points the **Settings note** setting at it. Sync, and on your other device either run the same command — it finds the note that already exists and adopts it — or open Settings › Plugins › Cockpit and type the note's title, paste its id, or paste a link to it. Cockpit resolves what you typed to the note and takes it from there.
+Setting it up is one field, and it is the same field on every platform. Open **Settings › Plugins › Cockpit** and type `Joplin Cockpit Plugin Settings` into **Settings note**.
+
+- On the **first device**, no such note exists yet, so Cockpit makes one: a note of that name in the notebook you are looking at, filled with this device's profiles and settings, with the field rewritten to the note's id.
+- On the **next device**, sync first so the note arrives, then type the same title there. Cockpit connects to it, and any profile that device has which the note does not (by name) is added to the note rather than lost. Pasting the note's id or a link to it does exactly the same.
+
+Type the title before the note has synced down and the second device makes a note of its own, because there is nothing yet to find. Cockpit watches for that on the next few syncs and tells you when a second note of that name turns up, so you can paste the id of the one you want to keep into the field. Syncing first avoids it entirely.
+
+There is also a `Cockpit: Connect settings note` command in the command palette. It is the same three steps and the same rules; the field is the one to reach for.
 
 What travels: your profiles, the custom panel CSS, the theme and its colours, the completed-to-do style, the day start time and the excluded notebooks. What stays per device: the font and circle sizes (a phone and a 27-inch monitor want different ones), the refresh interval, the toolbar button, the two title-bar options, and which profile is currently selected.
 
 - A change on either side reaches the other on your next sync, a few seconds after you make it.
 - The note carries the whole picture, not a list of edits, so the last device to write wins — including deletions. Two devices changing profiles at the same moment produce an ordinary Joplin conflict copy, which you resolve like any other.
-- The very first time a device connects to a note that already exists, any profile it has that the note does not (by name) is added to the note rather than lost. That merge happens once, at that connection, and never again.
+- The **first time a device connects** to a note that already has something in it, any profile that device has and the note does not (by name) is added to the note. That happens once, at that connection, whichever way you connected — by typing the title, by pasting an id or link, or with the command. Afterwards the note simply wins, so a profile deleted on one device disappears on the others. Pointing a device at a *different* settings note is a new first connection, and merges again.
 - Cockpit never writes the note while you have it open in the editor, and never writes a note it has not managed to read yet, so a device that has just been set up cannot overwrite everyone else's settings.
 - The note holds machine-readable JSON. Do not edit it by hand; if you do, Cockpit says so and keeps working from this device's own settings until it rewrites the note. A note written by a newer version of Cockpit is left strictly alone.
 - To stop syncing, empty the setting. Nothing is read or written after that, and the note stays where it is.
@@ -254,9 +261,9 @@ Cockpit's settings live in Joplin's own Settings › Plugins › Cockpit.
 - **Panel refresh interval** — how long Cockpit waits between background refreshes of the panel and the overview notes. 60 seconds by default on desktop, raised on mobile unless you set it yourself.
 - **Day start time** — the time a to-do gets when it is dragged onto a day it has no time of its own for. 09:00 by default.
 - **Excluded notebooks** — see [Search and filtering](#search-and-filtering).
-- **Settings note** — the note that carries your profiles and view settings to your other devices through your normal Joplin sync. Empty by default, which keeps everything on this device. See [Sync your settings between devices](#sync-your-settings-between-devices).
+- **Settings note** — type `Joplin Cockpit Plugin Settings` here and Cockpit creates that note, or connects to the one that has already synced in from another device. A note id or a link to it works too. Empty by default, which keeps everything on this device. See [Sync your settings between devices](#sync-your-settings-between-devices).
 - **Theme, completed-to-do style, font size, circle size and the six custom colours** — see [Appearance](#appearance).
-- **Show the Cockpit button in the note toolbar** — a gauge button in the note toolbar toggles the panel, and the same command sits in Tools › Cockpit alongside this switch, Set Panel CSS and Connect settings note, with **Ctrl+Shift+H** as its keyboard shortcut on every desktop platform (change it under Options › Keyboard Shortcuts). Joplin cannot add or remove a toolbar button while running, so turning it on or off applies after a restart, and Cockpit says so.
+- **Show the Cockpit button in the note toolbar** — a gauge button in the note toolbar toggles the panel, and the same command sits in Tools › Cockpit alongside this switch and Set Panel CSS, with **Ctrl+Shift+H** as its keyboard shortcut on every desktop platform (change it under Options › Keyboard Shortcuts). Joplin cannot add or remove a toolbar button while running, so turning it on or off applies after a restart, and Cockpit says so.
 - **Hide the due date next to the bell in the note title bar and show it on hover** — when a to-do has an alarm, Joplin prints the due date as text beside the bell in the note title bar, and that text eats the space the title has. With this on, the text is hidden and appears as a small bubble under the bell while the pointer is over it. Desktop only. Off by default. Joplin cannot unload a stylesheet it has already loaded, so this applies after a restart.
 - **Open Cockpit's date picker instead of Joplin's when the alarm bell is clicked** — clicking the bell opens Cockpit's picker (calendar, time columns and quick buttons) rather than Joplin's bare datetime prompt. Desktop and the **Markdown editor** only: with the Rich Text editor no plugin code runs in that window, so the bell keeps Joplin's prompt there. The Note menu's *Set alarm* item and its keyboard shortcut always keep Joplin's picker, so the original is never out of reach. Off by default; applies after a restart, since Joplin cannot register an editor content script while running.
 
@@ -270,7 +277,7 @@ That same half-second hold also **arms a drag** behind the menu it opens: keep t
 
 Android can restart the panel's webview under load, so Cockpit keeps the scroll position, an open picker and an in-progress search — the typed query, the open dropdown and its marks — on the plugin side and rebuilds them.
 
-Settings sync works on Android too, but the menu item that creates the note is desktop only: make the note on a desktop device, then on the phone open Settings › Plugins › Cockpit and type `Joplin Cockpit Plugin Settings` into **Settings note** — Cockpit finds the note by that title and fills the setting in with its id.
+Settings sync is set up on Android exactly as it is on desktop, in the same one field: open Settings › Plugins › Cockpit and type `Joplin Cockpit Plugin Settings` into **Settings note**. If a desktop device made the note already, sync first so it is here to be found; if not, the phone makes it.
 
 Desktop-only: Ctrl/Shift multi-select and the batch actions that follow from it, double-click to open in a new window, custom panel CSS, the note-toolbar button, and the Ctrl+Shift+H shortcut that toggles the panel.
 

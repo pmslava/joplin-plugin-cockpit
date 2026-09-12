@@ -262,6 +262,10 @@ function makeJoplin(options) {
                     // the thing that has to narrow it to an exact title itself.
                     const wantsDeleted = query && Array.isArray(query.fields) && query.fields.includes('deleted_time')
                     const titlePhrase = wantsDeleted ? /^title:"([^"]*)"$/.exec(q.trim()) : null
+                    // `titleSearchBlind` models Joplin's FTS index BEFORE SearchEngine.syncTables() has caught up: the note exists and
+                    // the plain ['notes'] listing serves it, but the search answers nothing. That window - up to ten seconds after a
+                    // sync brings a note in, and again at app start - is exactly when this plugin asks the question.
+                    if (titlePhrase && options.titleSearchBlind) return { items: [], has_more: false }
                     if (titlePhrase) {
                         const wanted = titlePhrase[1].trim().toLowerCase()
                         const matched = Object.keys(notes)
@@ -324,8 +328,22 @@ function makeJoplin(options) {
                     return { items: options.tags || [], has_more: false }
                 }
                 if (pathParts[0] === 'notes') {
-                    // Bare ['notes'] is the search field's "recent notes" suggestion fetch.
-                    if (pathParts.length === 1) return { items: options.recentNotes || [], has_more: false }
+                    // Bare ['notes'] is a LISTING ordered by updated_time, and two callers use it: the search field's "recent notes"
+                    // suggestion fetch and the settings note's index-independent title scan (findNotesTitled, which cannot rely on the
+                    // FTS index being current). `options.recentNotes` still answers it wholesale for the suggestion checks that pin an
+                    // exact list; otherwise the note fixtures are served most-recently-updated first, honouring `limit`, which is what
+                    // lets a test model a note that has synced in but is not yet in the index.
+                    if (pathParts.length === 1) {
+                        if (options.recentNotes) return { items: options.recentNotes, has_more: false }
+                        const listed = Object.keys(notes)
+                            .map(id => Object.assign({ id }, notes[id]))
+                            .sort((first, second) => (Number(second.updated_time) || 0) - (Number(first.updated_time) || 0))
+                        const limit = Number(query && query.limit) || listed.length
+                        return {
+                            items: listed.slice(0, limit).map(note => projectFields(note, query && query.fields)),
+                            has_more: listed.length > limit,
+                        }
+                    }
                     const note = notes[pathParts[1]]
                     if (!note) throw new Error('Not Found')
                     // ['notes', id, 'tags'] lists the tags currently on a note (tag picker).
