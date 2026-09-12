@@ -17,6 +17,8 @@ const legacyDatabaseFileName = "profiles.sqlite3"
 const legacyPluginID = "com.gitlab.BeatLink.joplin-plugin-agenda"
 var profileStore = null
 var migrationWarning = null
+// Called after every profile store save, when the settings-note runtime has registered itself (setProfileStoreListener below).
+var profileStoreListener = null
 
 /** profileDefaults *********************************************************************************************************************************
  * The values a profile is created with, and the values used for any field missing from a stored profile                                            *
@@ -162,17 +164,56 @@ async function loadProfileStore(){
 }
 
 /** saveProfileStore ********************************************************************************************************************************
- * Writes the profiles back to settings                                                                                                             *
+ * Writes the profiles back to settings, and tells whoever is listening that the profile store has changed.                                         *
+ *                                                                                                                                                  *
+ * The listener is how the settings note (src/core/settingsSync.ts) learns about a profile create/edit/delete without this file having to know that  *
+ * the feature exists: an import the other way would be circular (settingsSync replaces the store through replaceProfileStore below), and the        *
+ * settings onChange handler cannot stand in for it either - the profile store lives in a PRIVATE setting whose key is deliberately not one of the   *
+ * synced ones. The notification is best effort: a listener that throws must never make a profile save fail.                                         *
  ***************************************************************************************************************************************************/
 async function saveProfileStore(){
     await joplin.settings.setValue(profileDataSettingKey, JSON.stringify(profileStore))
+    if (!profileStoreListener) return
+    try {
+        profileStoreListener()
+    } catch (error) {
+        console.warn("Cockpit: the profile store listener failed", error)
+    }
+}
+
+/** setProfileStoreListener *************************************************************************************************************************
+ * Registers the one function called after every profile store save. Set at startup by the settings-note runtime; unset (null) the rest of the time, *
+ * which is what keeps a build - or a startup - without that feature free of any extra work at all.                                                  *
+ ***************************************************************************************************************************************************/
+export function setProfileStoreListener(listener){
+    profileStoreListener = listener || null
+}
+
+/** getProfileStoreSnapshot *************************************************************************************************************************
+ * The whole profile store, normalized and DEEP COPIED, for the settings note to serialize. normalizeProfileStore rebuilds every profile object, so  *
+ * the caller cannot reach back into the live store through what it is handed.                                                                      *
+ ***************************************************************************************************************************************************/
+export function getProfileStoreSnapshot(){
+    return normalizeProfileStore(profileStore)
+}
+
+/** replaceProfileStore *****************************************************************************************************************************
+ * Replaces the whole profile store with one that arrived from another device, and saves it. WHOLESALE: there is no per-profile merging during       *
+ * ongoing sync - the note is a mailbox whose last writer wins - so a profile deleted on the other device is deleted here too. The incoming data      *
+ * goes through the same normalizeProfileStore every other reader does, so a payload written by an older or newer build still yields profiles with    *
+ * every field this build expects.                                                                                                                   *
+ ***************************************************************************************************************************************************/
+export async function replaceProfileStore(parsedData){
+    profileStore = normalizeProfileStore(parsedData)
+    if (profileStore.profiles.length < 1) await createProfile()
+    else await saveProfileStore()
 }
 
 /** normalizeProfileStore ***************************************************************************************************************************
  * Makes sure a parsed profile store has the expected shape, that every profile has every field, and that the next ID does not collide with an       *
  * existing profile                                                                                                                                 *
  ***************************************************************************************************************************************************/
-function normalizeProfileStore(parsedData){
+export function normalizeProfileStore(parsedData){
     if (!parsedData || !Array.isArray(parsedData.profiles)) throw new Error("Profile data is not in the expected format")
     var nextID = Number(parsedData.nextID)
     if (!Number.isFinite(nextID) || nextID < 1) nextID = 1
