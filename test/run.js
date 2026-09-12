@@ -142,6 +142,17 @@ async function main() {
         const withShortcut = items.filter(item => item.accelerator).map(item => item.commandName)
         assert.deepStrictEqual(withShortcut, ['togglePanelVisibility'], 'no other item claims a chord')
     })
+    await test('desktop: the settings note is set up from Settings, so the Tools menu does not carry its command', () => {
+        // 2.6.0 gave "Cockpit: Connect settings note" a menu item; the owner's first live round took it out again, because
+        // setting the note up is a one-time action and belongs where the plugin is configured. Typing the note's title into
+        // the Settings field now does the whole job. The COMMAND stays registered - the palette reaches it, exactly like the
+        // two commands Whereabouts calls - so this pins the pair: listed nowhere, registered all the same.
+        const items = desktop.menus[0].items.map(item => item.commandName)
+        assert.deepStrictEqual(items, ['togglePanelVisibility', 'toggleCockpitToolbarButton', 'showStylerDialog'],
+            'exactly the three items the Tools > Cockpit menu had before the settings note existed')
+        assert.ok(desktop.commands.some(command => command.name === 'cockpit.connectSettingsNote'),
+            'and the command is still registered for the command palette')
+    })
     await test('desktop: no mobile-only heading buttons', () => {
         const html = desktop.panelHtml['panel-panel']
         assert.ok(!html.includes('onStylerClicked()'), 'styler button should be desktop-menu only')
@@ -7924,6 +7935,9 @@ async function main() {
 
     const SYNC_NOTE_ID = '1'.repeat(32)
     const SYNC_OTHER_ID = '2'.repeat(32)
+    // A title a user might type that is NOT the note's canonical name. Typing the canonical name is a request to create the
+    // note; typing anything else can only ever mean "find this one", so it waits instead - a typo must not become a mailbox.
+    const OWN_TITLE = 'Team Cockpit Settings'
     // A COMPLETE profile, as a real device writes one: baseProfile plus the six fields it leaves out.
     //
     // This used to say the completeness mattered because a device "rightly" writes the completed form back when a payload leaves
@@ -8256,6 +8270,9 @@ async function main() {
                 g.query && Array.isArray(g.query.fields) && g.query.fields.includes('body'))
             assert.strictEqual(reads.length, 1, 'the repointed note is read exactly once, not once per rewrite of the field')
             assert.deepStrictEqual(syncProfileNames(state), ['From the note'], 'and what it says takes effect at once')
+            // A note that is already there is connected to, never duplicated - which is the whole of the second-device story
+            // now that the canonical title creates one when there is none.
+            assert.deepStrictEqual(state.dataPosts, [], 'and nothing is created when the note already exists')
         })
     }
 
@@ -8267,8 +8284,66 @@ async function main() {
         assert.strictEqual(state.settings.settingsNoteId, SETTINGS_NOTE_TITLE, 'the user is left looking at what they typed')
         assert.deepStrictEqual(syncProfileNames(state), ['Only on this device'], 'neither candidate was applied')
         assert.strictEqual(state.notePuts.length, 0, 'and neither was written')
-        assert.ok(state.panelMessages.some(m => m[0] === 'panelToast' && /several notes/i.test(String(m[1]))),
-            'the user is told in the panel toast - never a blocking message box')
+        // Nor is a third one made. The canonical title creates a note only when there is NO note of that name; two candidates
+        // is the one case where guessing is worse than doing nothing.
+        assert.deepStrictEqual(state.dataPosts, [], 'and no note is created to break the tie')
+        assert.strictEqual(state.settingWrites.filter(w => w.key === 'settingsNoteId').length, 1,
+            'the only write of the field is the user\'s own - the plugin does not rewrite it')
+        const notices = state.panelMessages.filter(m => m[0] === 'panelToast' && /several notes/i.test(String(m[1])))
+        assert.strictEqual(notices.length, 1, 'the user is told once, in the panel toast - never a blocking message box')
+    })
+
+    // ---- the Settings field IS the setup UI (2.6.0, owner's first live round) -----------------------------------------
+    await test('settings note: typing the canonical title with no such note creates it, from the Settings field alone', async () => {
+        const state = await runSync('field-create', {
+            notes: {},
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        const storeBefore = state.settings.profileData
+        await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
+        const posted = state.dataPosts.filter(p => p.path[0] === 'notes')
+        assert.strictEqual(posted.length, 1, 'exactly one note was created - no menu item, no command, just the field')
+        assert.strictEqual(posted[0].body.title, SETTINGS_NOTE_TITLE, 'titled exactly as the next device will search for it')
+        assert.strictEqual(posted[0].body.parent_id, 'folder-1', 'in the notebook the user is looking at')
+        const payload = parseSettingsNoteBody(posted[0].body.body)
+        assert.ok(payload, 'the created note parses as Cockpit settings')
+        assert.deepStrictEqual(payload.profiles.profiles.map(p => p.name), ['Only on this device'], 'seeded from this device, never empty')
+        assert.strictEqual(state.settings.settingsNoteId, '0'.repeat(31) + '1', 'and the field is rewritten from the title to the new id')
+        // The same no-self-apply guarantee the command has: the seed's content key is remembered before the field is written, so
+        // the read the repoint starts recognises this device's own handwriting instead of applying it back wholesale.
+        assert.strictEqual(state.settings.profileData, storeBefore, 'the store is untouched by reading back what we just wrote')
+        assert.strictEqual(state.notePuts.length, 0, 'and the seed is not written a second time')
+        assert.ok(state.panelMessages.some(m => m[0] === 'panelToast' && /settings note created/i.test(String(m[1]))), 'the user is told')
+    })
+
+    await test('settings note: a title that is NOT the canonical one never creates a note, whatever else it does', async () => {
+        // The guard that keeps a typo from becoming a second mailbox. "Team Cockpit Settings" matches nothing here, and the answer
+        // is the same as it has always been: leave the field as typed, say so once, and try again when a sync completes.
+        const state = await runSync('field-other-title', {
+            notes: {},
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', OWN_TITLE))
+        assert.deepStrictEqual(state.dataPosts, [], 'nothing is created for a title that is not the note\'s own name')
+        assert.strictEqual(state.settings.settingsNoteId, OWN_TITLE, 'the field is left exactly as typed')
+        assert.ok(state.panelMessages.some(m => m[0] === 'panelToast' && /no note titled/i.test(String(m[1]))), 'and the user is told')
+        // The silent retry is unchanged: the note arrives with a sync, and THAT is what connects it.
+        state.notes[SYNC_NOTE_ID] = Object.assign(syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]),
+            syncSettings())), { title: OWN_TITLE })
+        await state.syncCompleteHandler({})
+        assert.deepStrictEqual(state.dataPosts, [], 'still nothing created')
+        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the retry found the note and filled the field in')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'], 'and applied what it says')
     })
 
     // ---- the command -----------------------------------------------------------------------------------------------
@@ -8279,8 +8354,6 @@ async function main() {
             selectedFolder: { id: 'folder-1' },
             initialSettings: { profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])), currentProfileID: 1 },
         })
-        assert.ok(state.menus[0].items.some(item => item.commandName === 'cockpit.connectSettingsNote'),
-            'the command sits in the Tools > Cockpit menu on desktop')
         const storeBefore = state.settings.profileData
         await state.withTimers(() => executeCommand(state, 'cockpit.connectSettingsNote'))
         const posted = state.dataPosts.filter(p => p.path[0] === 'notes')
@@ -8644,19 +8717,20 @@ async function main() {
 
     await test('settings note: a title that named nothing at startup is tried again when a sync completes', async () => {
         // The notice says "wait for the note to sync to this device", so the retry has to be real: a completed sync is exactly
-        // when the missing note can have arrived.
+        // when the missing note can have arrived. A title of the user's OWN, not the canonical one - that one is a request to
+        // create the note rather than to wait for it (see the setup checks below).
         const state = await runSync('title-later', {
             notes: {},
             initialSettings: {
-                settingsNoteId: SETTINGS_NOTE_TITLE,
+                settingsNoteId: OWN_TITLE,
                 profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
                 currentProfileID: 1,
             },
         })
-        assert.strictEqual(state.settings.settingsNoteId, SETTINGS_NOTE_TITLE, 'the field still holds what the user typed')
+        assert.strictEqual(state.settings.settingsNoteId, OWN_TITLE, 'the field still holds what the user typed')
         assert.deepStrictEqual(syncProfileNames(state), ['Only on this device'], 'and nothing has been applied')
-        state.notes[SYNC_NOTE_ID] = syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]),
-            syncSettings({ themeMode: 'nord' })))
+        state.notes[SYNC_NOTE_ID] = Object.assign(syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]),
+            syncSettings({ themeMode: 'nord' }))), { title: OWN_TITLE })
         await state.syncCompleteHandler({})
         assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the retry found it and filled the field in')
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'], 'and applied what it says')
@@ -8669,7 +8743,7 @@ async function main() {
         const state = await runSync('startup-notice', {
             notes: {},
             initialSettings: {
-                settingsNoteId: SETTINGS_NOTE_TITLE,
+                settingsNoteId: OWN_TITLE,
                 profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
                 currentProfileID: 1,
             },
