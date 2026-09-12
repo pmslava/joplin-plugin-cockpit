@@ -34,12 +34,45 @@ test.describe('Notebook picker dialog (desktop)', () => {
     // Beta below is then a genuine change, not the default answered by accident.
     await createNotebook(win, beta);
     await createNotebook(win, alpha);
+    // ...and then the wait that makes every case below deterministic (see waitForCockpitNotebooks).
+    await waitForCockpitNotebooks(win, [alpha, beta]);
     // The panel is left on "All notebooks" (Cockpit's default): that is precisely what makes the create ask.
   });
 
   test.afterAll(async () => {
     if (joplin) await closeJoplin(joplin);
   });
+
+  /**
+   * Wait until COCKPIT knows about `names` - not merely Joplin.
+   *
+   * Joplin publishes no folder-change workspace event, so the notebook map behind both the panel's notebook
+   * filter and this dialog is a 20 s TTL cache, refreshed early only by Cockpit's own 3 s folder poll - whose
+   * FIRST tick just records a baseline. A notebook made through Joplin's own sidebar (which is what
+   * `createNotebook` drives, and which the panel never hears about directly) therefore reaches Cockpit several
+   * seconds later, and a picker opened inside that window draws a list that is genuinely short: the first run
+   * of this file opened the dialog on an EMPTY list with both notebooks plainly in Joplin's sidebar. That lag
+   * is the notebook map's, not the rework's - the old native <select> was fed from the very same cache.
+   *
+   * The panel's notebook dropdown is built from that same `getNotebookMap()`, so it is the readiness signal:
+   * once it lists a notebook, the dialog will list it too. Its menu is rendered hidden, hence textContent
+   * (`allTextContents`) rather than innerText, exactly as the profile helpers read theirs.
+   */
+  async function waitForCockpitNotebooks(win: Page, names: string[]): Promise<void> {
+    await expect
+      .poll(
+        async () => {
+          const panel = await agendaPanel(win);
+          const labels = await panel
+            .locator('#notebookMenu .dropdown-item[data-notebook-row] .dropdown-label')
+            .allTextContents();
+          const seen = labels.map((label) => label.trim());
+          return names.every((name) => seen.includes(name));
+        },
+        { timeout: 60_000 }
+      )
+      .toBe(true);
+  }
 
   /**
    * The iframe hosting the picker dialog, identified by its filter box plus the hidden input that carries the
