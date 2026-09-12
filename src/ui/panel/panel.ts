@@ -238,6 +238,12 @@ export async function setupPanel(){
     await joplin.views.panels.addScript(panel, '/ui/panel/panel.css')
     await joplin.views.panels.onMessage(panel, eventHandler)
     notebookPickerDialog = await joplin.views.dialogs.create('notebookPicker')
+    // The notebook picker draws its own themed, filterable list instead of a native <select>. The shared match
+    // rule (window.SearchTokens) is loaded first, then the pure keyboard/filter state (window.NotebookPickerModel)
+    // the Node unit tests drive directly, then the thin DOM glue that wires them to the markup pickNotebook emits.
+    await joplin.views.dialogs.addScript(notebookPickerDialog, '/ui/panel/searchTokens.js')
+    await joplin.views.dialogs.addScript(notebookPickerDialog, '/ui/panel/notebookPickerModel.js')
+    await joplin.views.dialogs.addScript(notebookPickerDialog, '/ui/panel/notebookPickerWebview.js')
     tagPickerDialog = await joplin.views.dialogs.create('tagPicker')
     applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
     setupFolderPoll()
@@ -1564,31 +1570,84 @@ async function runNotebookAction(action, folderID){
 /** pickNotebook ************************************************************************************************************************************
  * Asks the user to choose a notebook and returns its ID, or null when cancelled. With includeRoot, "(top level)" is offered and returned as an      *
  * empty string.                                                                                                                                    *
+ *                                                                                                                                                   *
+ * A LIST THIS FILE DRAWS, NOT A <select>. The dialog used to hold a native dropdown, which cost it two things on a vault with a hundred notebooks:  *
+ * the open popup is a PLATFORM window, so its scrollbar stayed white over a dark theme and no stylesheet could reach it, and there was no way to     *
+ * narrow the list. Ordinary divs fix both - the scrollbar is themed here like the mobile overlay's, and a filter box sits above the rows, with the   *
+ * SAME behaviour the panel's notebook dropdown has (case-insensitive substring of the full path, Enter picks, Escape clears then cancels). The       *
+ * keyboard and filter decisions live in the pure notebookPickerModel.js; notebookPickerWebview.js is the glue. The answer still travels back as       *
+ * formData.picker.folderId - now from a hidden input the script rewrites - so every caller and the harness see the unchanged shape.                  *
+ *                                                                                                                                                    *
+ * EVERY ROW IS EMITTED HERE. Joplin measures a fit-to-content dialog once, from this markup, before its scripts run; a list built from script would   *
+ * be laid out inside a dialog sized for an empty one. Same reason there is no @media rule in the CSS below and the list is capped in pixels.          *
  ***************************************************************************************************************************************************/
 async function pickNotebook(promptTitle, includeRoot = false){
     var excludedSet = await getExcludedNotebookIdSet()
     var notebooks = [...(await getNotebookMap()).values()]
         .filter(notebook => !excludedSet.has(notebook.id))
         .sort((first, second) => String(first.path).localeCompare(String(second.path)))
-    var options = notebooks.map(notebook => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.path)}</option>`).join("")
-    if (includeRoot) options = `<option value="__root">(top level)</option>` + options
+    var choices = notebooks.map(notebook => ({ id: String(notebook.id), path: String(notebook.path) }))
+    if (includeRoot) choices.unshift({ id: "__root", path: "(top level)" })
+    // The notebook the app is currently showing is by far the likeliest target, so its row starts selected (and
+    // is what OK commits without any further input). Wrapped because selectedFolder() rejects when nothing is
+    // selected, and absent from older hosts; either way the first row takes over below.
+    var currentFolderID = ""
+    try {
+        currentFolderID = String(((await joplin.workspace.selectedFolder()) || {}).id || "")
+    } catch (error) {
+        currentFolderID = ""
+    }
+    var selectedIndex = choices.findIndex(choice => choice.id === currentFolderID)
+    if (selectedIndex < 0 && choices.length) selectedIndex = 0
+    var rows = choices.map((choice, index) =>
+        `<div class="picker-row${index === selectedIndex ? " -selected" : ""}" data-id="${escapeHtml(choice.id)}">${escapeHtml(choice.path)}</div>`).join("")
+    var selectedValue = selectedIndex >= 0 ? choices[selectedIndex].id : ""
     await joplin.views.dialogs.setHtml(notebookPickerDialog, `
         <style>
-            #joplin-plugin-content { width: 300px; }
-        </style>
-        <style>
-            /* Explicit option colours, because the dropdown list otherwise mixes the theme's light
-             * text with the platform's white popup background and becomes unreadable */
-            option {
-                background-color: var(--joplin-background-color, #ffffff);
-                color: var(--joplin-color, #000000);
+            /* The paths are long ("Parent / Child / Grandchild"), so the dialog is wider than the old two-line one. */
+            #joplin-plugin-content { width: 380px; }
+            .picker-form { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
+            .picker-filter {
+                padding: 4px 6px;
+                font-family: inherit; font-size: inherit; color: inherit; background: inherit;
+                border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;
             }
+            .picker-filter:focus { outline: none; border-color: var(--joplin-url-color, #2D6BDC); }
+            /* Twelve 28px rows, then it scrolls - a pixel cap, because the one measurement Joplin takes of this
+             * dialog happens before any script runs and is never revised. */
+            .picker-list {
+                max-height: 336px; overflow-y: auto;
+                border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;
+                background-color: var(--joplin-background-color, #ffffff);
+            }
+            /* The whole point of dropping the native dropdown: its open popup was a platform window whose
+             * scrollbar stayed white on a dark theme and could not be styled. An ordinary element can be, so
+             * the thumb follows the theme here exactly as .cockpit-overlay-body's does in the panel. */
+            .picker-list::-webkit-scrollbar { width: 6px; }
+            .picker-list::-webkit-scrollbar-track { background: transparent; }
+            .picker-list::-webkit-scrollbar-thumb {
+                border-radius: 3px;
+                background: var(--joplin-color-faded, rgba(127, 127, 127, 0.5));
+            }
+            .picker-row {
+                display: block; box-sizing: border-box;
+                height: 28px; line-height: 20px; padding: 4px 8px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                color: var(--joplin-color, #000000);
+                cursor: pointer;
+            }
+            .picker-row:hover { background-color: rgba(127, 127, 127, 0.2); }
+            .picker-row.-selected { background-color: var(--joplin-selected-color, rgba(127, 127, 127, 0.35)); }
+            /* A filtered-out row must actually vanish: the rule above sets display, which would otherwise beat
+             * the user agent's [hidden] rule. */
+            .picker-row[hidden] { display: none; }
         </style>
-        <form name="picker" style="display: flex; flex-direction: column; gap: 10px; padding: 14px;">
+        <form name="picker" class="picker-form">
             <strong>${escapeHtml(promptTitle)}</strong>
-            <select name="folderId" style="padding: 4px 6px; font-family: inherit; font-size: inherit; color: inherit; background: inherit; border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;">
-                ${options}
-            </select>
+            <input type="text" class="picker-filter" placeholder="Filter notebooks..." autofocus
+                inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+            <div class="picker-list">${rows}</div>
+            <input type="hidden" name="folderId" value="${escapeHtml(selectedValue)}">
         </form>
     `)
     var result = await openPluginDialog(notebookPickerDialog)
