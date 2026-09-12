@@ -14,6 +14,11 @@
  * this takes. It lives in memory only: a fresh session reads the note and applies it, which is correct (that is how a change made while this device  *
  * was closed arrives) and idempotent.                                                                                                               *
  *                                                                                                                                                  *
+ * THE REFERENCE IS A PAIR, exactly as the excluded notebooks are: the visible "Settings note" field is what the user types and what they read back    *
+ * ("Joplin Cockpit Plugin Settings (310b413d)"), and the hidden settingsNoteResolvedId holds the full 32-character id every operation here uses. The   *
+ * field shows a SHORT id because a Joplin String setting is one narrow single-line input that cannot wrap; a short id cannot be looked up, which is    *
+ * exactly why the full one is kept beside it. See resolveSettingsNoteReference.                                                                        *
+ *                                                                                                                                                    *
  * OFF BY DEFAULT, AND FREE WHEN OFF. With the "Settings note" setting empty there is no note id, so every entry point here returns before it reaches *
  * a single data call: startup, every refresh and every note change cost exactly what they cost before this feature existed.                          *
  *                                                                                                                                                  *
@@ -32,13 +37,13 @@ import joplin from "api"
 import { getProfileStoreSnapshot, normalizeProfileStore, replaceProfileStore, setProfileStoreListener } from "./database"
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY } from "./exclusion"
 import { invalidateNotebookMap, invalidateResultCaches } from "./joplin"
-import { getCurrentProfileID, settingsNoteIdSettingKey } from "./settings"
+import { getCurrentProfileID, settingsNoteIdSettingKey, settingsNoteResolvedIdSettingKey } from "./settings"
 import { refreshInterfaces } from "./timer"
 import { getEditorNoteID, onProfilesReplaced, showPanelToast, trackEditorNoteSelection } from "../ui/panel/panel"
 // The pure note module: the body, the payload and the content key. The same UMD file the Node harness require()s, so the
 // rules the tests pin are the rules that run here. Webpack bundles it in.
 const { SETTINGS_NOTE_TITLE, SYNCED_SETTING_KEYS, buildSettingsNoteBody, isFutureSettingsNote, parseSettingsNoteBody, parseSettingsNoteReference,
-    settingsContentKey } = require("./settingsNote")
+    settingsContentKey, settingsNoteDisplay } = require("./settingsNote")
 
 /** Variable Setup *********************************************************************************************************************************/
 /** A few seconds: long enough to coalesce a burst of profile edits or colour changes, short enough that the other device sees it on its next sync. */
@@ -416,6 +421,11 @@ async function refreshFromSettingsNoteLocked(reason){
     initialized = true
 
     var payload = parseSettingsNoteBody(body)
+    // THE DISPLAYED NAME FOLLOWS THE NOTE. This read is the one place that knows the note's TITLE (it is fetched with the body, for the wrong-note
+    // guard below), so it is where the visible field becomes "<title> (<short id>)" - which is the rename refresh and, on an install made before
+    // the field showed an id at all, the migration from the bare id it still holds. Guarded by a value comparison, so the ordinary pass writes
+    // nothing; and NOT for a note that is not a settings note at all, where the user should go on seeing exactly what they pasted.
+    if (payload || title.trim() === SETTINGS_NOTE_TITLE) await refreshSettingsNoteDisplay(title)
     if (!payload){
         lastContentKey = null
         if (isFutureSettingsNote(body)){
@@ -499,6 +509,22 @@ async function refreshFromSettingsNoteLocked(reason){
         lastContentKey = null
         initialized = false
         console.warn(`Cockpit: the settings note (${reason}) could not be applied`, error)
+    }
+}
+
+/** refreshSettingsNoteDisplay *********************************************************************************************************************
+ * Bring the visible field into step with the note it names: same id, whatever the note is called NOW. Best effort - a settings write that fails is   *
+ * cosmetic and must not abort the read it rode in on - and a no-op unless the note has actually been renamed, because writeSettingsNoteReference     *
+ * compares before it writes. The id is re-read from `noteId` rather than trusted from the top of the read, so a repoint that landed mid-read cannot  *
+ * have this write the old note's name over the new one's field.                                                                                      *
+ ***************************************************************************************************************************************************/
+async function refreshSettingsNoteDisplay(title){
+    var targetId = noteId
+    if (!targetId) return
+    try {
+        await writeSettingsNoteReference(targetId, title)
+    } catch (error) {
+        console.warn("Cockpit: could not refresh the settings note field", error)
     }
 }
 
@@ -662,7 +688,10 @@ export async function onSettingsNoteReferenceChanged(announce?){
  * 2.6.0 shipped a Tools menu item to create the note and a Settings field to point at one; the owner's first live round removed the menu item, and    *
  * rightly - creating the note is a one-time action, and a user who is configuring a plugin is already in Settings. So the field does all of it:       *
  *                                                                                                                                                    *
- *   AN ID, in any of its four spellings, is canonicalised to the bare id - what the rest of the plugin uses.                                          *
+ *   AN ID, in any of its four spellings, is canonicalised to the bare id - and stored, in full, in the hidden settingsNoteResolvedId, which is what   *
+ *     every read and write of the note actually uses. The visible field becomes "<title> (<short id>)" as soon as the read knows the title.           *
+ *   THE DISPLAY FORM this device wrote, whose short id is still the start of the stored id, means UNCHANGED: no search, no repoint, no re-merge. That *
+ *     is the path every startup of a connected device takes. One whose short id does NOT match is resolved from scratch by its title, like any title.  *
  *   THE CANONICAL TITLE with no note behind it yet is a request to SET THE FEATURE UP: the note is created here, exactly as the command creates it     *
  *     (same placement, same seed, same token), and the field is rewritten to its id. That makes the first device's whole setup "type the title".      *
  *   ANY TITLE with exactly one note behind it is that note - which is the second device, where the note has already synced in.                        *
@@ -670,25 +699,42 @@ export async function onSettingsNoteReferenceChanged(announce?){
  *     the next completed sync. Creating for an arbitrary title would make a typo into a second mailbox, which is the one outcome worth refusing.      *
  *   SEVERAL matches are refused too: guessing which mailbox a user meant is not a thing a plugin should do.                                            *
  *                                                                                                                                                    *
- * Both writes are guarded by a value comparison, the same loop pattern resolveExcludedNotebooks uses: the setValue re-enters this handler, and on that *
- * pass the field already holds the id, so nothing is written and the recursion stops.                                                                 *
+ * Every write here is guarded by a value comparison, the same loop pattern resolveExcludedNotebooks uses: the setValue re-enters this handler, and on  *
+ * that pass the field already holds what it would be given (and the hidden id already names the note it names), so nothing is written and the          *
+ * recursion stops. The hidden id is always written BEFORE the visible text, so the re-entering pass can recognise that text as the note it has.        *
  ***************************************************************************************************************************************************/
 async function resolveSettingsNoteReference(announce){
     var raw = String(await joplin.settings.value(settingsNoteIdSettingKey) || "")
+    var stored = String(await joplin.settings.value(settingsNoteResolvedIdSettingKey) || "")
     var reference = parseSettingsNoteReference(raw)
     if (reference.kind === "empty"){
         unresolvedTitle = ""
+        // The user emptied the field: the feature is off, and the id behind it is not kept warm for a note nobody is pointing at.
+        if (stored) await joplin.settings.setValue(settingsNoteResolvedIdSettingKey, "")
         return ""
+    }
+    // UNCHANGED, AND THEREFORE FREE. The field holds the display text this device wrote and its short id is still the start of the full id stored
+    // beside it, so it names the very note this device has been reading: no search, no repoint, no re-merge. This is the path EVERY startup of a
+    // connected device takes, and re-arming the one-time merge here would fold this device's profiles into the note on every launch.
+    if (reference.kind === "display" && stored && stored.indexOf(reference.id) === 0){
+        unresolvedTitle = ""
+        return stored
     }
     if (reference.kind === "id"){
         unresolvedTitle = ""
+        await rememberSettingsNoteId(reference.id)
+        // The visible field is canonicalised to the bare id exactly as it always was; the READ that follows is what turns it into the display form,
+        // because the read is the one place that knows the note's title (see refreshFromSettingsNoteLocked). That is also the whole of the migration
+        // for an install made before this existed, whose field holds precisely a bare id: it resolves, fills the hidden id, and the field catches up.
         if (raw !== reference.id) await joplin.settings.setValue(settingsNoteIdSettingKey, reference.id)
         return reference.id
     }
+    // A TITLE - or a display form whose short id is NOT the note this device is holding, which means the user edited the box or pasted someone
+    // else's text. Both are resolved from scratch by the name, through the one search path, and both are repoints like any other.
     var matches = await findNotesTitled(reference.title)
     if (matches.length === 1){
         unresolvedTitle = ""
-        await joplin.settings.setValue(settingsNoteIdSettingKey, String(matches[0].id))
+        await writeSettingsNoteReference(String(matches[0].id), String(matches[0].title || ""))
         return String(matches[0].id)
     }
     if (!matches.length && isCanonicalSettingsNoteTitle(reference.title)){
@@ -721,6 +767,29 @@ async function resolveSettingsNoteReference(announce){
  ***************************************************************************************************************************************************/
 function isCanonicalSettingsNoteTitle(title){
     return String(title || "").trim().toLowerCase() === String(SETTINGS_NOTE_TITLE).toLowerCase()
+}
+
+/** rememberSettingsNoteId / writeSettingsNoteReference *********************************************************************************************
+ * THE TWO HALVES OF THE REFERENCE, WRITTEN IN THE ONE ORDER THAT WORKS.                                                                             *
+ *                                                                                                                                                    *
+ * The hidden `settingsNoteResolvedId` holds the full 32-character id and is what every read and write of the note uses; the visible field holds what  *
+ * the user typed and, once the note is known, "<title> (<short id>)". The pair is exactly the pair excludedNotebookIds/excludedNotebooks already is.  *
+ *                                                                                                                                                    *
+ * THE HIDDEN ID GOES FIRST, always. Writing the visible field re-enters the settings onChange handler, and the resolve that runs on that pass has to  *
+ * read the new text as "the note we already have" - which it can only do by comparing its short id against the stored one. Both writes are guarded by *
+ * a value comparison, the same loop pattern resolveExcludedNotebooks uses, so the re-entry settles instead of looping.                                *
+ ***************************************************************************************************************************************************/
+async function rememberSettingsNoteId(id){
+    var stored = String(await joplin.settings.value(settingsNoteResolvedIdSettingKey) || "")
+    if (stored === String(id || "")) return
+    await joplin.settings.setValue(settingsNoteResolvedIdSettingKey, String(id || ""))
+}
+
+async function writeSettingsNoteReference(id, title){
+    await rememberSettingsNoteId(id)
+    var display = settingsNoteDisplay(title, id)
+    var raw = String(await joplin.settings.value(settingsNoteIdSettingKey) || "")
+    if (raw !== display) await joplin.settings.setValue(settingsNoteIdSettingKey, display)
 }
 
 /** findNotesTitled *********************************************************************************************************************************
@@ -824,7 +893,7 @@ async function connectSettingsNoteLocked(){
         return
     }
     if (matches.length === 1){
-        await connectToNote(String(matches[0].id))
+        await connectToNote(String(matches[0].id), String(matches[0].title || ""))
         return
     }
     await createSettingsNote()
@@ -837,12 +906,12 @@ async function connectSettingsNoteLocked(){
  * When the field ALREADY names that note, writing the same value changes nothing and no repoint follows, so the merge is armed by hand here. That     *
  * case is real: a device whose note had not synced yet read nothing at startup, and running the command is how the user asks it to try again.         *
  ***************************************************************************************************************************************************/
-async function connectToNote(targetId){
+async function connectToNote(targetId, title?){
     if (targetId === noteId){
         if (!initialized) await markFirstConnection()
         await refreshFromSettingsNote("connect")
     } else {
-        await joplin.settings.setValue(settingsNoteIdSettingKey, targetId)
+        await writeSettingsNoteReference(targetId, title || SETTINGS_NOTE_TITLE)
     }
     console.info(`Cockpit: the settings note is note ${targetId}`)
     showPanelToast("Cockpit: settings note connected")
@@ -892,7 +961,7 @@ async function createSettingsNote(){
         return ""
     }
     seededNote = { id: createdId, key: settingsContentKey(content) }
-    await joplin.settings.setValue(settingsNoteIdSettingKey, createdId)
+    await writeSettingsNoteReference(createdId, SETTINGS_NOTE_TITLE)
     // THE LAST WORD, ON THE CHAIN: queueing behind the read the repoint started makes this command's return mean "this device's mailbox
     // is settled". When the host has not delivered the settings change yet, the token above is still waiting for it and nothing is done
     // here - the repoint will do it.

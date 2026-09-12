@@ -8337,6 +8337,10 @@ async function main() {
         (g.path[0] === 'notes' && g.path.length === 2 && g.query && Array.isArray(g.query.fields) && g.query.fields.includes('updated_time')) ||
         (g.path[0] === 'search' && g.query && Array.isArray(g.query.fields) && g.query.fields.includes('deleted_time')))
     const syncProfileNames = (state) => JSON.parse(state.settings.profileData).profiles.map(p => p.name)
+    // THE FIELD'S DISPLAY FORM (2.6.1): what the visible "Settings note" setting holds once the note behind it is known - the note's
+    // title and the first eight characters of its id. Built with the pure module's own function, so a check states the rule rather
+    // than a literal; the reference check below pins the literal text once, which is what a user actually reads.
+    const syncDisplayed = (id, title) => SettingsNote.settingsNoteDisplay(title === undefined ? SETTINGS_NOTE_TITLE : title, id)
     // The captured 3 s write the given action armed, insisting there is exactly one. Indexed from a mark rather than taken from
     // pendingTimeouts(3000), because the reconcile lane also uses a 3 s offset and a drain point may have armed one.
     const armedSyncWrite = (state, mark) => {
@@ -8447,6 +8451,42 @@ async function main() {
         assert.strictEqual(parseSettingsNoteReference(SYNC_NOTE_ID.slice(1)).kind, 'title', 'a 31-character id is not an id')
     })
 
+    await test('settings note: the display form is read as a display reference, and its two implementations agree', () => {
+        // The sixth spelling, and the one the field holds most of the time: what Cockpit itself wrote there.
+        const shown = SettingsNote.settingsNoteDisplay(SETTINGS_NOTE_TITLE, SYNC_NOTE_ID)
+        assert.strictEqual(shown, 'Joplin Cockpit Plugin Settings (11111111)', 'name, a space, and the first eight characters of the id')
+        assert.deepStrictEqual(parseSettingsNoteReference(shown),
+            { kind: 'display', id: '11111111', title: SETTINGS_NOTE_TITLE }, 'and it reads back as both halves')
+        assert.deepStrictEqual(parseSettingsNoteReference(`  ${shown}  `), parseSettingsNoteReference(shown), 'whitespace is trimmed off it too')
+        // The five older spellings are untouched by it: a Markdown link ends in a bracket as well, and must still be an id.
+        assert.strictEqual(parseSettingsNoteReference(`[x](:/${SYNC_NOTE_ID})`).kind, 'id', 'a Markdown link is still an id, not a display form')
+        assert.strictEqual(parseSettingsNoteReference('Meeting notes (draft)').kind, 'title', 'brackets that are not hex are part of the title')
+        assert.strictEqual(parseSettingsNoteReference('Meeting notes (abcd)').kind, 'title', 'and so are brackets too short to be an id')
+        // A note whose TITLE ends in a hex word is the one ambiguity there is, and it resolves the same way the notebook
+        // field resolves it: the bracketed group is taken as the id, and the title in front of it is what a repoint
+        // searches for. There is no map of note ids to check it against, so the stored full id is the check instead.
+        assert.deepStrictEqual(parseSettingsNoteReference('Budget (deadbeef)'), { kind: 'display', id: 'deadbeef', title: 'Budget' })
+        // THE TWO COPIES. settingsNote.js is loaded in webviews and by the harness on its own, so it cannot require
+        // shortId.js and carries its own copy of both functions. Neither may drift from the other.
+        for (const [id, others] of [
+            [SYNC_NOTE_ID, []],
+            ['abcdef0123456789abcdef0123456789', ['abcdef0199999999999999999999999']],
+            ['abcdef0123456789abcdef0123456789', ['abcdef0123999999999999999999999']],
+            ['ABCDEF0123456789ABCDEF0123456789', []],
+            ['abcdef', []],
+            ['f1', []],
+            ['not-hex', []],
+            ['', []],
+        ]) {
+            assert.strictEqual(SettingsNote.shortID(id, others), ShortID.shortID(id, others), `shortID("${id}") must mean the same in both copies`)
+        }
+        for (const text of ['Lab / Joplin (fdfd6c06)', 'Archive (A1B2C3D4)', 'Budget (deadbeef) (c0ffee11)', 'Archive', 'Archive (v2)',
+            'Archive (abcd)', '(deadbeef)', '', 'Archive(deadbeef)']) {
+            assert.deepStrictEqual(SettingsNote.splitDisplayID(text), ShortID.splitDisplayID(text),
+                `splitDisplayID("${text}") must mean the same in both copies`)
+        }
+    })
+
     // ---- OFF: the whole feature is opt-in, and an install that never opts in must pay nothing for it ----------------
     const syncOffState = await runSync('off', {
         initialSettings: { profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])), currentProfileID: 1 },
@@ -8492,7 +8532,9 @@ async function main() {
         // a PER-DEVICE choice, written here and never carried in the note.
         assert.strictEqual(syncOnState.settings.currentProfileID, 2, 'a vanished current profile falls back to the first one')
         assert.strictEqual(syncOnState.settings.showToolbarButton, true, 'a per-device setting is left exactly as it was')
-        const allowed = new Set([...SYNCED_SETTING_KEYS, 'profileData', 'currentProfileID'])
+        // The two reference keys are written here because this fixture is an install made BEFORE the field showed an id: its field holds a
+        // bare id, which resolves, fills the hidden full id and rewrites the field to the display form. That migration has its own check.
+        const allowed = new Set([...SYNCED_SETTING_KEYS, 'profileData', 'currentProfileID', 'settingsNoteId', 'settingsNoteResolvedId'])
         const strays = syncOnState.settingWrites.map(w => w.key).filter(key => !allowed.has(key))
         assert.deepStrictEqual(strays, [], 'nothing outside the synced list (plus the store and the local current profile) was written')
         assert.ok(syncOnState.panelHtml['panel-panel'].includes('From the laptop'), 'and the very first paint already shows it')
@@ -8634,10 +8676,13 @@ async function main() {
         ['a Markdown link', 'ref-markdown', `[Cockpit settings](:/${SYNC_NOTE_ID})`],
         ['the note\'s exact title', 'ref-title', SETTINGS_NOTE_TITLE],
     ]) {
-        await test(`settings note reference: ${label} is rewritten to the bare id, and that note is read once`, async () => {
+        await test(`settings note reference: ${label} is rewritten to the note's name and id, and that note is read once`, async () => {
             const state = await runSyncRef(name, syncRefNotes())
             await state.withTimers(() => state.setSetting('settingsNoteId', typed))
-            assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the field ends up holding the bare id')
+            assert.strictEqual(state.settings.settingsNoteId, 'Joplin Cockpit Plugin Settings (11111111)',
+                'the field ends up holding the note\'s name and the first eight characters of its id - the literal a user reads')
+            assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID,
+                'and the full id is kept beside it, out of sight, which is what every read and write of the note uses')
             const reads = state.gets.filter(g => g.path[0] === 'notes' && g.path[1] === SYNC_NOTE_ID &&
                 g.query && Array.isArray(g.query.fields) && g.query.fields.includes('body'))
             assert.strictEqual(reads.length, 1, 'the repointed note is read exactly once, not once per rewrite of the field')
@@ -8656,6 +8701,100 @@ async function main() {
             assert.strictEqual(state.notePuts.length, 1, 'the next tick writes nothing - the merge settled the pair')
         })
     }
+
+    // ---- the field shows the note's NAME and its id (2.6.1) --------------------------------------------------------
+    // The same refinement as the excluded-notebook field: a setting that holds a reference must say what it points at.
+    // The visible field is the user's input AND the display; the full id lives in a hidden setting beside it, because a
+    // short id cannot be turned back into a note without scanning every note there is.
+
+    await test('settings note display: an install holding a bare id migrates to name-and-id, and it is not a repoint', async () => {
+        // EVERY EXISTING INSTALL IS THIS. The field holds a bare 32-hex id, which still parses as an id, so the first run
+        // resolves it, fills the hidden setting and - once the read knows the note's title - rewrites the field. What it
+        // must NOT do is look like a fresh connection: a repoint arms the one-time merge, and re-merging on every launch
+        // would fold this device's profiles back into the note for ever.
+        const state = await runSync('display-migrate', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings())) },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(state.settings.settingsNoteId, 'Joplin Cockpit Plugin Settings (11111111)', 'the field now shows the note by name and id')
+        assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID, 'and the full id it was pointing at is kept, out of sight')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'],
+            'the note wins WHOLESALE, as it has since this device first connected - a migration is not a first connection')
+        assert.strictEqual(state.notePuts.length, 0, 'so nothing is written back to the note')
+        assert.deepStrictEqual(state.dataPosts, [], 'and nothing is created')
+        assert.strictEqual(state.settingWrites.filter(w => w.key === 'settingsNoteId').length, 1, 'the field is rewritten exactly once')
+    })
+
+    await test('settings note display: a field already holding the display form costs one read and re-arms nothing', async () => {
+        // THE COMMON CASE - every startup of a connected device, after the migration above. The short id in the field is
+        // the start of the stored full id, so the reference is UNCHANGED: no title search, no repoint, no merge, and not
+        // one settings write either.
+        const state = await runSync('display-steady', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings())) },
+            initialSettings: {
+                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteResolvedId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(state.settings.settingsNoteId, 'Joplin Cockpit Plugin Settings (11111111)', 'the field is left exactly as it stood')
+        assert.deepStrictEqual(state.settingWrites.filter(w => w.key === 'settingsNoteId' || w.key === 'settingsNoteResolvedId'), [],
+            'and neither half of the reference is written')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'], 'the note wins wholesale - the merge was NOT re-armed')
+        assert.strictEqual(state.notePuts.length, 0, 'nothing is published back')
+        assert.deepStrictEqual(state.gets.filter(g => g.path[0] === 'search' && String(g.query && g.query.query || '').includes('title:')), [],
+            'and the note is never searched for by name: the stored id already names it')
+    })
+
+    await test('settings note display: the shown name follows the note when the note is renamed', async () => {
+        const state = await runSync('display-rename', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings())) },
+            initialSettings: {
+                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteResolvedId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(3, [syncProfile(2, 'From the laptop')])),
+                currentProfileID: 2,
+            },
+        })
+        // The read already fetches the title (it is the guard that refuses to write over a note that is not ours), so the
+        // rename costs nothing extra to notice.
+        state.notes[SYNC_NOTE_ID].title = 'Our shared Cockpit settings'
+        state.notes[SYNC_NOTE_ID].updated_time = 99
+        await state.withTimers(() => state.syncCompleteHandler({}))
+        assert.strictEqual(state.settings.settingsNoteId, 'Our shared Cockpit settings (11111111)', 'the shown name catches up with the note')
+        assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID, 'the id behind it is untouched - the note did not move')
+        assert.strictEqual(state.notePuts.length, 0, 'a rename is not news to publish')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'], 'nor is it a first connection')
+    })
+
+    await test('settings note display: an EDITED display form is resolved from scratch and repoints properly', async () => {
+        // The other half of the rule: a short id that is not the start of the stored one means the user typed something
+        // else, or pasted another device's text. Then the title in front of it is all there is to go on, and it takes the
+        // ordinary title path - search, repoint, one-time merge.
+        const state = await runSync('display-repoint', {
+            notes: {
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]), syncSettings())),
+                [SYNC_OTHER_ID]: { id: SYNC_OTHER_ID, title: OWN_TITLE, updated_time: 4,
+                    body: syncBody(syncStore(3, [syncProfile(2, 'On the other note')]), syncSettings()) },
+            },
+            initialSettings: {
+                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteResolvedId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', `${OWN_TITLE} (22222222)`))
+        assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_OTHER_ID, 'the reference now names the other note')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_OTHER_ID, OWN_TITLE), 'and the field shows that note by name and id')
+        assert.deepStrictEqual(syncProfileNames(state), ['On the other note', 'Shared'],
+            'pointing at a different note is a first connection to it, so this device\'s own profile is folded in')
+    })
 
     await test('settings note reference: an ambiguous title is left exactly as typed, and nothing is read or written', async () => {
         const notes = syncRefNotes()
@@ -8683,7 +8822,7 @@ async function main() {
             initialSettings: { profileData: JSON.stringify(store), currentProfileID: 1 },
         })
         await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the field holds the note id')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'the field holds the note\'s name and id')
         assert.deepStrictEqual(syncProfileNames(state), ['Shared'], 'the store is the note\'s, unchanged')
         assert.strictEqual(state.notePuts.length, 0, 'and the note is not written at all')
         assert.deepStrictEqual(state.dataPosts, [], 'nor is a second one created')
@@ -8725,7 +8864,7 @@ async function main() {
         const payload = parseSettingsNoteBody(posted[0].body.body)
         assert.ok(payload, 'the created note parses as Cockpit settings')
         assert.deepStrictEqual(payload.profiles.profiles.map(p => p.name), ['Only on this device'], 'seeded from this device, never empty')
-        assert.strictEqual(state.settings.settingsNoteId, '0'.repeat(31) + '1', 'and the field is rewritten from the title to the new id')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed('0'.repeat(31) + '1'), 'and the field is rewritten from the title to the new note')
         // The same no-self-apply guarantee the command has: the seed's content key is remembered before the field is written, so
         // the read the repoint starts recognises this device's own handwriting instead of applying it back wholesale.
         assert.strictEqual(state.settings.profileData, storeBefore, 'the store is untouched by reading back what we just wrote')
@@ -8754,7 +8893,7 @@ async function main() {
             syncSettings())), { title: OWN_TITLE })
         await state.syncCompleteHandler({})
         assert.deepStrictEqual(state.dataPosts, [], 'still nothing created')
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the retry found the note and filled the field in')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID, OWN_TITLE), 'the retry found the note and filled the field in')
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop', 'Only on this device'],
             'and connected to it - which, being this device\'s first connection to that note, folds its own profile in')
     })
@@ -8783,7 +8922,7 @@ async function main() {
         // THE DEFECT THIS PINS: the search said "no such note", so the canonical branch created a SECOND one, the field
         // pointed at the duplicate, and the two devices never converged again.
         assert.deepStrictEqual(state.dataPosts, [], 'no second settings note is created while the index is merely stale')
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the field points at the note that already exists')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'the field points at the note that already exists')
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop', 'Only on this device'], 'and the one-time merge ran')
         const merged = state.notePuts.filter(put => put.id === SYNC_NOTE_ID)
         assert.strictEqual(merged.length, 1, 'exactly once')
@@ -8802,7 +8941,7 @@ async function main() {
             },
         })
         await state.withTimers(() => state.setSetting('settingsNoteId', OWN_TITLE))
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'connected at once, not left waiting for the retry')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID, OWN_TITLE), 'connected at once, not left waiting for the retry')
         assert.deepStrictEqual(state.dataPosts, [], 'and nothing created - a non-canonical title never creates anyway')
         assert.ok(!state.panelMessages.some(m => m[0] === 'panelToast' && /no note titled/i.test(String(m[1]))),
             'and the user is not told the note is missing, because it is not')
@@ -8827,7 +8966,7 @@ async function main() {
         // them itself, exactly as the search half does.
         const posted = state.dataPosts.filter(p => p.path[0] === 'notes')
         assert.strictEqual(posted.length, 1, 'a note in the trash is no note at all, so a fresh one is created')
-        assert.strictEqual(state.settings.settingsNoteId, '0'.repeat(31) + '1', 'and the field points at the new one, not the binned one')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed('0'.repeat(31) + '1'), 'and the field points at the new one, not the binned one')
         assert.deepStrictEqual(syncProfileNames(state), ['Only on this device'], 'the binned note\'s profiles are not adopted')
     })
 
@@ -8850,7 +8989,7 @@ async function main() {
         for (let round = 0; round < 5; round++) await state.syncCompleteHandler({})
         assert.strictEqual(rivalNotices().length, 1, 'said exactly once across five syncs - a notice, not a nag')
         assert.ok(state.notePuts.every(put => put.id !== SYNC_NOTE_ID), 'and nothing is written to the other device\'s note')
-        assert.strictEqual(state.settings.settingsNoteId, '0'.repeat(31) + '1', 'nor is the field repointed - which mailbox to keep is the user\'s call')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed('0'.repeat(31) + '1'), 'nor is the field repointed - which mailbox to keep is the user\'s call')
     })
 
     await test('settings note: a device that ADOPTED a note never looks for a rival', async () => {
@@ -8862,7 +9001,7 @@ async function main() {
             },
         })
         await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'precondition: connected to the note that already existed')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'precondition: connected to the note that already existed')
         const before = titleLookups(state).length
         for (let round = 0; round < 5; round++) await state.syncCompleteHandler({})
         assert.strictEqual(titleLookups(state).length, before,
@@ -8886,7 +9025,7 @@ async function main() {
         const payload = parseSettingsNoteBody(posted[0].body.body)
         assert.ok(payload, 'the created note parses as Cockpit settings')
         assert.deepStrictEqual(payload.profiles.profiles.map(p => p.name), ['Only on this device'], 'seeded from this device, never empty')
-        assert.strictEqual(state.settings.settingsNoteId, '0'.repeat(31) + '1', 'and the setting points at the note that was made')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed('0'.repeat(31) + '1'), 'and the setting points at the note that was made')
         // NO SELF-APPLY. The device remembers the seed's own content key, so the read its repoint starts recognises its own
         // handwriting instead of applying it back wholesale - which would throw away anything changed since the POST.
         assert.strictEqual(state.settings.profileData, storeBefore, 'the store is untouched by reading back what we just wrote')
@@ -8909,7 +9048,7 @@ async function main() {
         // THE ONE-TIME MERGE, and the only merge there is: ongoing sync is wholesale, so a profile deleted elsewhere can vanish.
         assert.deepStrictEqual(payload.profiles.profiles.map(p => p.name), ['Shared', 'Only on this device'],
             'a local-only profile is appended by name; a name the note already carries is not duplicated')
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the setting now points at the adopted note')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'the setting now points at the adopted note')
         assert.deepStrictEqual(syncProfileNames(state), ['Shared', 'Only on this device'], 'and the merge lands on this device too')
     })
 
@@ -9108,6 +9247,37 @@ async function main() {
         assert.strictEqual(state.settings.excludedNotebookIds, 'f1', 'and so does the settings resolver')
     })
 
+    await test('settings note: an excluded notebook this device cannot see yet survives the NAME-AND-ID display too', async () => {
+        // The 2.6.0 data-loss rule, restated against the text 2.6.1 writes. An entry whose notebook is in the map is
+        // rebuilt as "Name (id)"; an entry whose notebook is NOT - because this device has not synced it yet - has no
+        // label to rebuild and no id to show, so it must come through EXACTLY as it stands rather than be regenerated
+        // or dropped. Both halves of the pair therefore arrive byte-identical and there is nothing to write at all.
+        const seenId = 'a1b2c3d4' + '0'.repeat(24)
+        const unseenId = 'b9b9b9b9' + '0'.repeat(24)
+        const state = await runSync('exclusion-display-on', {
+            folders: [{ id: seenId, title: 'Family' }],
+            notes: {
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]),
+                    syncSettings({ excludedNotebookIds: `${seenId},${unseenId}`, excludedNotebooks: 'Family (a1b2c3d4), Work' }))),
+            },
+            initialSettings: {
+                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteResolvedId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(state.settings.excludedNotebooks, 'Family (a1b2c3d4), Work',
+            'the entry that resolves keeps its id, and the one this device cannot see is kept verbatim, with none invented for it')
+        assert.strictEqual(state.settings.excludedNotebookIds, `${seenId},${unseenId}`, 'and the unseen id is still in the hidden list')
+        // ONE write of each, which is the apply putting the payload in place - and not a second from the resolver that
+        // the apply's own write runs. A resolve pass over Cockpit's own text has nothing to say.
+        assert.strictEqual(state.settingWrites.filter(w => w.key === 'excludedNotebooks').length, 1, 'the resolver adds no write of its own')
+        assert.strictEqual(state.settingWrites.filter(w => w.key === 'excludedNotebookIds').length, 1, 'nor to the id list')
+        await fireArmedSyncWrite(state)
+        assert.strictEqual(state.notePuts.length, 0, 'so the pair is byte-identical to the payload and there is nothing to say back')
+    })
+
     await test('settings note: a note that is not a Cockpit settings note is never written over', async () => {
         // Pointing the setting at the wrong note (a mistyped title that matched something, a pasted id from the wrong note)
         // used to destroy that note one profile edit later: an unreadable body still opened the write gate.
@@ -9195,7 +9365,7 @@ async function main() {
             initialSettings: { profileData: JSON.stringify(store), currentProfileID: 1 },
         })
         await state.withTimers(() => executeCommand(state, 'cockpit.connectSettingsNote'))
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the note is adopted')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'the note is adopted')
         assert.strictEqual(state.notePuts.length, 0, 'and a note that already says exactly this is not given a revision for nothing')
     })
 
@@ -9234,7 +9404,7 @@ async function main() {
             },
         })
         await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the exact match was on the second page and was still found')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'the exact match was on the second page and was still found')
         assert.deepStrictEqual(syncProfileNames(state), ['From the note', 'Only on this device'], 'and connected to')
     })
 
@@ -9255,7 +9425,7 @@ async function main() {
         state.notes[SYNC_NOTE_ID] = Object.assign(syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]),
             syncSettings({ themeMode: 'nord' }))), { title: OWN_TITLE })
         await state.syncCompleteHandler({})
-        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the retry found it and filled the field in')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID, OWN_TITLE), 'the retry found it and filled the field in')
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop', 'Only on this device'], 'and connected to it')
     })
 

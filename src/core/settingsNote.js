@@ -31,7 +31,10 @@
  *   buildSettingsNoteBody(c, when) - the exact bytes of a note body for that content, stamped with an ISO timestamp.                                   *
  *   parseSettingsNoteBody(body)    - the payload in a body, or null when there is not one this build can soundly interpret.                            *
  *   isFutureSettingsNote(body)    - whether an unreadable body is unreadable because a NEWER Cockpit wrote it, which is never written over.            *
- *   parseSettingsNoteReference(v)  - what the user typed in the setting: a bare id, ":/id", a Markdown link, a joplin:// URL, or a title.              *
+ *   parseSettingsNoteReference(v)  - what the user typed in the setting: a bare id, ":/id", a Markdown link, a joplin:// URL, the "Title (id)"     *
+ *                                    form Cockpit writes back, or a title.                                                                           *
+ *   settingsNoteDisplay(title,id) - that display form: what the field is rewritten to once the note behind it is known.                              *
+ *   shortID / splitDisplayID       - the display form's two halves, a dependency-free copy of src/core/shortId.js (see the note beside them).        *
  ***************************************************************************************************************************************************/
 ;(function(root, factory){
     var api = factory()
@@ -79,6 +82,52 @@
 
     /** A Joplin item id: 32 lower-case hex characters. Written by the app itself, so the spelling is exact rather than tolerant. */
     var ID_PATTERN = /^[0-9a-f]{32}$/i
+
+    /** THE DISPLAY FORM, DUPLICATED FROM src/core/shortId.js ON PURPOSE.
+     *
+     * The "Settings note" field shows the note as "Joplin Cockpit Plugin Settings (310b413d)" - its name and the id Cockpit is holding - for the same
+     * reason the excluded-notebook field does, and by exactly the same rule: the first 8 characters of the id, and 6 to 32 hex characters read back.
+     * shortId.js owns that rule and the notebook side requires it; this file is loaded in webviews and by the Node harness on its own and must stay
+     * dependency-free (no require, no `joplin`, no `api`), so it carries its own copy instead. The harness pins the two copies against each other,
+     * case for case, so they cannot drift. There is only ever ONE settings note, so nothing is here to collide with and the id never lengthens. */
+    var SHORT_ID_PATTERN = /^[0-9a-f]{6,32}$/
+    var DISPLAY_SUFFIX = /^(.*\S)\s+\(([0-9a-fA-F]{6,32})\)$/
+
+    function shortID(id, otherIds){
+        var text = String(id === undefined || id === null ? '' : id).trim().toLowerCase()
+        if (!SHORT_ID_PATTERN.test(text)) return ''
+        var others = []
+        for (var other of (otherIds || [])){
+            var candidate = String(other === undefined || other === null ? '' : other).trim().toLowerCase()
+            if (candidate && candidate !== text) others.push(candidate)
+        }
+        for (var length = 8; length < text.length; length += 2){
+            var prefix = text.slice(0, length)
+            var shared = false
+            for (var rival of others){
+                if (rival.indexOf(prefix) === 0){ shared = true; break }
+            }
+            if (!shared) return prefix
+        }
+        return text
+    }
+
+    function splitDisplayID(value){
+        var match = DISPLAY_SUFFIX.exec(String(value === undefined || value === null ? '' : value).trim())
+        if (!match) return null
+        return { name: match[1], id: match[2].toLowerCase() }
+    }
+
+    /** settingsNoteDisplay *************************************************************************************************************************
+     * What the "Settings note" field is rewritten to once Cockpit knows which note it means: "<title> (<short id>)". Falls back to the bare id when   *
+     * there is no title to show or the id is not one this form could carry back - which is exactly what the field held before this existed.          *
+     ***************************************************************************************************************************************************/
+    function settingsNoteDisplay(title, id){
+        var name = String(title === undefined || title === null ? '' : title).trim()
+        var short = shortID(id, [])
+        if (!name || !short) return String(id === undefined || id === null ? '' : id).trim()
+        return name + ' (' + short + ')'
+    }
 
     /** sortedObject ********************************************************************************************************************************
      * A copy of an object with its keys in sorted order, so JSON.stringify produces the same characters whatever order the source happened to hold.  *
@@ -251,6 +300,12 @@
         if (internal) return { kind: 'id', id: internal[1].toLowerCase(), title: '' }
         // The bare id.
         if (ID_PATTERN.test(text)) return { kind: 'id', id: text.toLowerCase(), title: '' }
+        // "<title> (<short id>)" - what Cockpit itself writes into the field, and what the user is therefore looking at every time they open
+        // Settings. It carries BOTH halves: a short id is not enough to find a note with (nothing short of scanning every note could turn a prefix
+        // back into an id), so it is checked against the full id Cockpit stored alongside, and the title is what a repoint resolves from when it is
+        // not the note that id names. See resolveSettingsNoteReference in settingsSync.ts.
+        var display = splitDisplayID(text)
+        if (display) return { kind: 'display', id: display.id, title: display.name }
         return { kind: 'title', id: '', title: text }
     }
 
@@ -265,5 +320,8 @@
         parseSettingsNoteBody: parseSettingsNoteBody,
         isFutureSettingsNote: isFutureSettingsNote,
         parseSettingsNoteReference: parseSettingsNoteReference,
+        settingsNoteDisplay: settingsNoteDisplay,
+        shortID: shortID,
+        splitDisplayID: splitDisplayID,
     }
 })
