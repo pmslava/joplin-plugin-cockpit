@@ -207,6 +207,8 @@ Setting it up is one field, and it is the same field on every platform. Open **S
 - On the **first device**, no such note exists yet, so Cockpit makes one: a note of that name in the notebook you are looking at, filled with this device's profiles and settings, with the field rewritten to the note's id.
 - On the **next device**, sync first so the note arrives, then type the same title there. Cockpit connects to it, and any profile that device has which the note does not (by name) is added to the note rather than lost. Pasting the note's id or a link to it does exactly the same.
 
+Type the title before the note has synced down and the second device makes a note of its own, because there is nothing yet to find. Cockpit watches for that on the next few syncs and tells you when a second note of that name turns up, so you can paste the id of the one you want to keep into the field. Syncing first avoids it entirely.
+
 There is also a `Cockpit: Connect settings note` command in the command palette. It is the same three steps and the same rules; the field is the one to reach for.
 
 What travels: your profiles, the custom panel CSS, the theme and its colours, the completed-to-do style, the day start time and the excluded notebooks. What stays per device: the font and circle sizes (a phone and a 27-inch monitor want different ones), the refresh interval, the toolbar button, the two title-bar options, and which profile is currently selected.
