@@ -2076,6 +2076,82 @@ and assert both that the to-do landed in the typed notebook and that the dialog 
 case that covers the re-pointed selection and the single accept together. Not run on this side; the e2e
 pass is the verifier's.
 
+### From the owner's first live round
+
+Two items came back from the first run of this against a real vault, and the more serious one is not about
+the picker at all.
+
+**The dialog still sat low, and it now jumped while filtering.** Both are the same mechanism, and it is the
+one written up above: Joplin keeps a `ResizeObserver` on `#joplin-plugin-content` and re-centres the frame on
+every change. The list shrank as rows hid, so the whole dialog crept upward under the cursor, keystroke by
+keystroke. The earlier conclusion — that a plugin cannot position the frame and can only make it taller —
+still stands; this is the deliberate use of that one lever. The panel now posts its own `window.innerHeight`
+on load and on a throttled resize (300 ms, the `queueScrollPost` pattern), the host caches it in a branch
+that renders nothing, and `pickNotebook` writes ONE fixed pixel height onto the content box: 0.62 of that
+viewport, clamped to 360–880, falling back to 420 when no panel has ever reported. The form and the list fill
+it (`flex: 1 1 auto` with `min-height: 0`, or a flex item refuses to shrink below its content and the rows
+get their height back) instead of sizing themselves from their rows. Filtering therefore changes nothing the
+observer can see, and a tall dialog's top edge lands in the upper quarter of the window. The mobile overlay
+had the identical shrink-jump — centred, capped at 90vh — and gets the smallest fix that works: its panel is
+locked to its rendered height once the rows are in the DOM, inside the cap that produced that height.
+
+**The real bug: the notebook filter could point at an EXCLUDED notebook.** Reported with a screenshot — a
+note open in an excluded "Archive", the dropdown reading "All notebooks", the list empty, and New to-do
+creating straight into Archive without asking. Three wrong answers, one cause. `notebookFilter` was holding
+Archive's id; the dropdown builds its rows from the excluded-filtered list, so it could not mark a row it
+does not list and fell back to its "All notebooks" label; the search really was narrowed to Archive, which
+the exclusion then emptied; and `createItem` saw a non-empty filter and used it. The last of those is the
+one that does damage, because it puts a note somewhere the user cannot see and did not choose.
+
+Three writers could put it there and none of them looked: `filterByNotebook` (the Whereabouts contract)
+checked only that the notebook map held the id, and that map includes excluded notebooks; `revealNote` wrote
+`note.parent_id` for a note living in one; and `applyProfileHeaderState` restored a `profile.notebook` saved
+before the notebook was excluded. The rule is now stated once — **the notebook filter must never point at a
+notebook the panel cannot show** — and one helper, `creatableNotebookID`, answers it (in the map, not in
+`getExcludedNotebookIdSet`, which already carries descendants). Every writer goes through it.
+`filterByNotebook` refuses an excluded id as a no-op *with a notice*, unlike the unknown-id no-op it keeps
+silent: an unknown id is the caller's mistake, an excluded one is a setting the user made and has probably
+forgotten, and silence is how this confusion started. `revealNote` skips its filter-switch step entirely and
+goes straight to the pinned peek row — nothing is lost, since the row could not have been listed either way.
+`applyProfileHeaderState` starts the session at "all notebooks" and does **not** rewrite the profile, so
+un-excluding the notebook brings its stored filter straight back. `setNotebookFilter`, the single state
+write both routes share, sanitises what it is handed as a last gate.
+
+`createItem` then re-checks on the way out whatever wrote the filter. That check is unreachable while the
+writers hold, which is exactly the point and exactly why it is pinned on the source rather than by scenario:
+of the three symptoms it is the only one that cannot be undone by the user, so it does not get to depend on
+every writer staying correct.
+
+Two things can make a filter the user is already working in unshowable **without writing to it**, and
+neither could be caught by a writer: the notebook is added to the Excluded notebooks setting, and the
+notebook is deleted elsewhere in Joplin. The exclusion resolver and the folder poll each call
+`dropUnshowableNotebookFilter` just before their own repaint. The deletion half was not in the report — it
+turned up while mutation-testing the read-side defence, which nothing caught until there was a route that
+could actually reach it.
+
+The other create paths were checked and are clean: the mobile notebook overlay builds its rows from the same
+excluded-filtered island the dropdown uses, so `notebookPicked` → `createItemInFolder` can never be handed an
+excluded notebook; `pickNotebook` filters the exclusion out of its own list; and the desktop
+`newNoteClicked` / `newTodoClicked` handlers reach the data API only through `createItem`.
+
+**Pins.** Nine new checks, harness at 456. Two for the dialog height (a panel reporting 1000px gives 620px,
+the clamps hold at 360 and 880, a zero report is ignored, a run where nothing ever reported falls back to
+420px, and the report itself costs neither a paint nor a request; the overlay lock pinned on source,
+including that it is measured after the rows are in the DOM) and seven for the filter: the report itself,
+a reveal into an excluded notebook, a profile whose stored notebook was excluded afterwards, excluding the
+filtered notebook, deleting it, the source shape of the four writers plus the read-side defence, and the
+invariant that ties them together — the dropdown can never say "All notebooks" while a notebook filter is
+set, asserted across every route that writes one. Eight mutations, each caught by the pin written for it:
+`height` back to `max-height`, and one per guard.
+
+Playwright: 118 tests in 20 files, two of them extended rather than added. The picker's filter case now
+measures the dialog's own box from the main window — top edge in the upper third, and the same height and
+position before and after a filter hides a row, with the measurement asserted to be smaller than the window
+so a match on the full-screen modal layer fails loudly instead of passing vacuously — and the Whereabouts
+spec gains the report end to end, declared last in its file because it excludes a notebook the cases above
+still need. `setCockpitTextSetting` is the String sibling of the enum and Bool Options-screen helpers. Not
+run on this side.
+
 ## 2026-09-12 — v2.6.0: the settings note — profiles and view settings between devices
 
 Issue 5: Joplin syncs notes and never plugin settings, so every device needs its profiles built again by hand. The owner's decision settled the shape before any code: ONE note, titled exactly `Joplin Cockpit Plugin Settings`, carrying a JSON payload; its id in a new public setting; empty setting means the plugin behaves exactly as it did yesterday. The design is Harper's sync note (same author, same conventions), ported rather than reinvented — a mailbox read whole and written whole, with the loop-prevention token that makes such a scheme terminate.
