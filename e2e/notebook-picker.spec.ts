@@ -24,6 +24,7 @@ test.describe('Notebook picker dialog (desktop)', () => {
   const alpha = 'Picker Alpha';
   const beta = 'Picker Beta';
   const created = `pick-todo-${stamp}`;
+  const enterCreated = `pick-enter-${stamp}`;
 
   test.beforeAll(async () => {
     joplin = await launchJoplin();
@@ -55,6 +56,14 @@ test.describe('Notebook picker dialog (desktop)', () => {
     await expect.poll(has, { timeout: 30_000 }).toBe(true);
     for (const frame of win.frames()) if (await isPicker(frame)) return frame;
     throw new Error('notebook picker dialog not found');
+  }
+
+  /** Whether any frame is still showing the picker dialog. A closed Joplin dialog unmounts its webview. */
+  async function pickerIsOpen(win: Page): Promise<boolean> {
+    for (const frame of win.frames()) {
+      if (await frame.locator('.picker-filter').count().catch(() => 0)) return true;
+    }
+    return false;
   }
 
   /** Click the panel's "New to-do" button and wait for the picker dialog it opens. */
@@ -131,5 +140,43 @@ test.describe('Notebook picker dialog (desktop)', () => {
     await expect
       .poll(async () => notebookOf(win, created), { timeout: PANEL_REFRESH_TIMEOUT, intervals: [1500, 2500, 4000] })
       .toBe(beta);
+  });
+
+  /**
+   * The keyboard route, which is the one a vault with a hundred notebooks actually uses: type a few letters and
+   * press Enter, without touching the list or the OK button.
+   *
+   * It also covers the two things that make that route correct. The picker pre-selects the notebook the app is
+   * showing - Picker Beta by now, since the case above created a to-do there - so typing "alp" HIDES the
+   * pre-selection, and the selection has to follow the filter or Enter would commit a notebook that is no longer
+   * on screen. And Enter must accept the dialog exactly once: Joplin answers a submit inside the dialog document
+   * with the OK button, so a second submit (the browser's own implicit one) would close it twice over.
+   */
+  test('typing and pressing Enter picks the typed notebook and accepts the dialog', async () => {
+    const { win } = joplin;
+    const picker = await openPickerFromNewTodo(win);
+
+    // Precondition: the row that starts selected is NOT the one about to be typed.
+    await expect(picker.locator('.picker-row.-selected')).toHaveText(beta);
+
+    await picker.locator('.picker-filter').fill('alp');
+    const visible = picker.locator('.picker-row:not([hidden])');
+    await expect(visible).toHaveCount(1, { timeout: 10_000 });
+    // The selection followed the filter: it is on the one row still showing, not on the hidden pre-selection.
+    await expect(picker.locator('.picker-row.-selected')).toHaveText(alpha);
+
+    await picker.locator('.picker-filter').press('Enter');
+
+    // Accepted, and gone - no click on a row, no click on OK.
+    await expect.poll(async () => pickerIsOpen(win), { timeout: 20_000 }).toBe(false);
+
+    await win.waitForTimeout(1500);
+    await win.keyboard.type(enterCreated);
+    await win.waitForTimeout(1500);
+
+    await waitForPanelTodo(win, enterCreated);
+    await expect
+      .poll(async () => notebookOf(win, enterCreated), { timeout: PANEL_REFRESH_TIMEOUT, intervals: [1500, 2500, 4000] })
+      .toBe(alpha);
   });
 });
