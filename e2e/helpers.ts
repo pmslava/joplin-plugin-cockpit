@@ -678,6 +678,22 @@ async function withCockpitOptions(win: Page, work: () => Promise<void>): Promise
 }
 
 /**
+ * Type into one of Cockpit's own String settings through Joplin's Options screen.
+ *
+ * Same route and same reason as `setCockpitSetting` above; a String setting is rendered by Joplin as a text input
+ * tied to a `<label for>` carrying the setting's registered label, so it is reached the same way and filled rather
+ * than selected. This is the only route to the "Settings note" field, which is the whole of that feature's setup UI.
+ */
+export async function setCockpitTextSetting(win: Page, label: string, value: string): Promise<void> {
+  await withCockpitOptions(win, async () => {
+    const control = win.getByLabel(label, { exact: true }).first();
+    await control.waitFor({ state: 'visible', timeout: 30_000 });
+    await control.fill(value);
+    await expect.poll(async () => control.inputValue(), { timeout: 10_000 }).toBe(value);
+  });
+}
+
+/**
  * Turn one or more of Cockpit's own Bool settings on or off through Joplin's Options screen.
  *
  * Same route and same reason as `setCockpitSetting` above - Cockpit's settings live in Joplin's database, so a
