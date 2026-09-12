@@ -2088,7 +2088,7 @@ keystroke. The earlier conclusion — that a plugin cannot position the frame an
 still stands; this is the deliberate use of that one lever. The panel now posts its own `window.innerHeight`
 on load and on a throttled resize (300 ms, the `queueScrollPost` pattern), the host caches it in a branch
 that renders nothing, and `pickNotebook` writes ONE fixed pixel height onto the content box: 0.62 of that
-viewport, clamped to 360–880, falling back to 420 when no panel has ever reported. The form and the list fill
+viewport, clamped to 360–880 (the floor itself yielding to a window too short to hold it, so a title and filter box are never centred off the screen), falling back to 420 when no panel has ever reported. The form and the list fill
 it (`flex: 1 1 auto` with `min-height: 0`, or a flex item refuses to shrink below its content and the rows
 get their height back) instead of sizing themselves from their rows. Filtering therefore changes nothing the
 observer can see, and a tall dialog's top edge lands in the upper quarter of the window. The mobile overlay
@@ -2135,9 +2135,9 @@ excluded notebook; `pickNotebook` filters the exclusion out of its own list; and
 `newNoteClicked` / `newTodoClicked` handlers reach the data API only through `createItem`.
 
 **Pins.** Nine new checks, harness at 456. Two for the dialog height (a panel reporting 1000px gives 620px,
-the clamps hold at 360 and 880, a zero report is ignored, a run where nothing ever reported falls back to
+the clamps hold at 360 and 880 while a 400px viewport gets 260 because the floor yields to the window, a zero report is ignored, a run where nothing ever reported falls back to
 420px, and the report itself costs neither a paint nor a request; the overlay lock pinned on source,
-including that it is measured after the rows are in the DOM) and seven for the filter: the report itself,
+including that it is measured after the rows are in the DOM and before a restored filter narrows them) and seven for the filter: the report itself,
 a reveal into an excluded notebook, a profile whose stored notebook was excluded afterwards, excluding the
 filtered notebook, deleting it, the source shape of the four writers plus the read-side defence, and the
 invariant that ties them together — the dropdown can never say "All notebooks" while a notebook filter is

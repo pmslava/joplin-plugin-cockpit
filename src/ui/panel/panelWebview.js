@@ -4066,17 +4066,18 @@ function openNotebookOverlay(purpose, opts, restore){
         makeRow(String(notebook.id), String(notebook.path))
     }
     body.appendChild(list)
-    // A reconstruct comes back with text already in the box, so narrow the freshly built rows to match it.
-    if (overlayContext.filter) filterNotebookOverlay()
     // Mobile: the overlay panel is centred and capped at 90vh, so it SHRINKS and re-centres as the filter hides
     // rows - the same jump the desktop dialog had, for the same reason. Locking the panel to the height it was
     // just rendered at stops it: the lock is taken after the rows are in the DOM, so it is a real measurement,
     // and it can never exceed the 90vh cap because that cap produced the height being read. The list inside
-    // keeps its own scrolling, so a long list is no less usable than before.
+    // keeps its own scrolling, so a long list is no less usable than before. Taken BEFORE a restored filter
+    // narrows the rows, so a reconstruct locks the full-list height a normal open gets, not the narrowed one.
     if (IS_MOBILE){
         var overlayPanelEl = body.parentElement
         if (overlayPanelEl && overlayPanelEl.offsetHeight) overlayPanelEl.style.height = overlayPanelEl.offsetHeight + 'px'
     }
+    // A reconstruct comes back with text already in the box, so narrow the freshly built rows to match it.
+    if (overlayContext.filter) filterNotebookOverlay()
     pushOverlayState()
 }
 

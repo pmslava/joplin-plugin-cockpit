@@ -173,7 +173,8 @@ var lastViewportHeight = 0
 
 /** pickerDialogHeight ******************************************************************************************************************************
  * The fixed height, in pixels, of the notebook picker dialog's content. Roughly five-eighths of the panel's viewport, clamped so a tiny window does  *
- * not produce a dialog with three visible rows and a tall one does not produce a strip taller than the screen. The FIXED part is the point: Joplin   *
+ * not produce a dialog with three visible rows (a floor that itself yields to a window too short to hold it) and a tall one does not produce a strip *
+ * taller than the screen. The FIXED part is the point: Joplin   *
  * watches the content box with a ResizeObserver and re-centres the frame on every change, so a list that shrinks while the user filters made the      *
  * dialog jump. A height that never changes removes the jump, and because the frame is centred, a tall dialog is also the only way to put its top edge  *
  * near the top of the window.                                                                                                                        *
@@ -183,9 +184,15 @@ const pickerHeightMin = 360
 const pickerHeightMax = 880
 const pickerHeightFallback = 420
 
+// How much of the panel's viewport the dialog's OWN chrome takes beyond the content box: Joplin's button bar and the
+// modal layer's margins, plus the toolbar rows the panel does not see. The floor below yields to this, so a short
+// window never gets a dialog whose top edge (title and filter box) is clipped off the screen by the centring.
+const pickerWindowReserve = 140
+
 function pickerDialogHeight(){
     if (!lastViewportHeight) return pickerHeightFallback
-    return Math.min(pickerHeightMax, Math.max(pickerHeightMin, Math.round(lastViewportHeight * pickerViewportFraction)))
+    var floor = Math.min(pickerHeightMin, lastViewportHeight - pickerWindowReserve)
+    return Math.min(pickerHeightMax, Math.max(floor, Math.round(lastViewportHeight * pickerViewportFraction)))
 }
 
 /** searchFilter ************************************************************************************************************************************

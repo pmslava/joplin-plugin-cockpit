@@ -4876,9 +4876,14 @@ async function main() {
         assert.ok(dialogCss().includes('height: 620px'), 'a 1000px panel gives a 620px dialog (0.62 of the viewport)')
         // (d) Clamped at both ends: a tiny window must not produce a three-row dialog, a huge one must not
         // produce a strip taller than the screen.
+        await pick.panelMessageHandler(['viewportHeight', 500])
+        await openPicker()
+        assert.ok(dialogCss().includes('height: 360px'), 'a small panel is clamped up to the 360px floor while the window can hold it')
+        // The floor yields to a window too short for it: 400 - 140 = 260 beats both the floor and 0.62 * 400 = 248, so the
+        // dialog's top edge (title and filter box) is never centred off the screen.
         await pick.panelMessageHandler(['viewportHeight', 400])
         await openPicker()
-        assert.ok(dialogCss().includes('height: 360px'), 'a small panel is clamped up to the 360px floor')
+        assert.ok(dialogCss().includes('height: 260px'), 'a window too short for the floor gets viewport - 140 instead')
         await pick.panelMessageHandler(['viewportHeight', 2000])
         await openPicker()
         assert.ok(dialogCss().includes('height: 880px'), 'a large panel is clamped down to the 880px ceiling')

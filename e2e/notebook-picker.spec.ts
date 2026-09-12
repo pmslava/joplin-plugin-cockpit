@@ -160,7 +160,9 @@ test.describe('Notebook picker dialog (desktop)', () => {
     const windowHeight = await win.evaluate(() => window.innerHeight);
     const before = await dialogBox(win);
     expect(before.height).toBeLessThan(windowHeight);         // the inner box, not the full-screen modal layer
-    expect(before.y).toBeLessThan(windowHeight * 0.3);        // its top edge sits in the upper third of the window
+    // Its top edge sits in the upper third of the window. Holds while the dialog's 880px ceiling is above 0.4 x the window
+    // height, i.e. for windows under about 2360px tall - true of the suite's 1920x1080 display, not of every monitor.
+    expect(before.y).toBeLessThan(windowHeight * 0.3);
 
     await picker.locator('.picker-filter').fill('beta');
 
