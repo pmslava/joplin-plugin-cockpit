@@ -7604,10 +7604,14 @@ async function main() {
 
     const SYNC_NOTE_ID = '1'.repeat(32)
     const SYNC_OTHER_ID = '2'.repeat(32)
-    // A COMPLETE profile, as a real device writes one: baseProfile plus the six fields it leaves out. The completeness matters -
-    // a payload missing fields is filled in by normalizeProfileStore on arrival, so the receiving device's canonical form would
-    // differ from the note's and it would rightly write the completed form back, which is a second write the loop-prevention
-    // checks below must not be reading as a loop.
+    // A COMPLETE profile, as a real device writes one: baseProfile plus the six fields it leaves out.
+    //
+    // This used to say the completeness mattered because a device "rightly" writes the completed form back when a payload leaves
+    // fields out. That was the seed of the cross-version ping-pong the review found: the read side took its content key from the
+    // RAW payload while the write side took it from the normalized store, so the two never agreed and the devices rewrote the note
+    // at each other forever. The read side now keys on the store as this device will hold it, so an incomplete payload is applied
+    // and answered with silence - which the two cross-version checks below pin directly. Complete fixtures are kept here because
+    // they are what a real device writes, not because anything depends on it.
     const syncProfile = (id, name) => ({
         ...baseProfile, id, name,
         showCompleted: false, notesPosition: 'after', notebook: '', panelSearch: '', sortField: 'title', sortDirection: 'asc',
@@ -7790,10 +7794,14 @@ async function main() {
     })
 
     await test('settings note: the flush that follows an apply writes NOTHING - the loop-prevention proof', async () => {
-        // The device set the applied content key before applying, so the settings writes the apply caused schedule a write that
-        // already sees itself as redundant. Drained here through the editor-selection drain point, which performs no read of its own.
+        // A WRITE REALLY IS PENDING FIRST, so this cannot pass by there being nothing to flush: the apply replaced the profile
+        // store, which notifies the sync module, which arms the 3 s debounce like any other local change.
+        assert.strictEqual(syncOnState.pendingTimeouts(3000).length, 1, 'the apply armed a write, as every store change does')
+        // The device set the applied content key before applying, so that write already sees itself as redundant. Drained here
+        // through the editor-selection drain point, which performs no read of its own.
         await syncOnState.noteSelectionHandler({ value: ['9'.repeat(32)] })
         assert.strictEqual(syncOnState.notePuts.length, 0, 'this device recognised its own applied state and said nothing back')
+        assert.deepStrictEqual(syncOnState.pendingTimeouts(3000), [], 'and the drained write took its timer with it')
     })
 
     await test('settings note: a local profile edit reaches the note after the 3 s debounce, in exactly one write', async () => {
@@ -8031,6 +8039,307 @@ async function main() {
         await state.fireTimeout(armedSyncWrite(state, mark))
         assert.strictEqual(state.notePuts.length, 0, 'a newer build\'s settings are never deleted by an older one')
         assert.strictEqual(state.notes[SYNC_NOTE_ID].body, futureBody, 'the note is byte-for-byte as it was')
+    })
+
+    // ---- what the review found ---------------------------------------------------------------------------------------
+    // Every check below reproduces a scenario the reviewer drove against the bundle. They are grouped here rather than
+    // scattered so the next reader can see, in one place, which promises this feature has already been caught breaking.
+
+    /** Fire the one write a fresh run has armed, insisting there is exactly one. Only valid straight after a run(). */
+    const fireArmedSyncWrite = async (state) => {
+        const armed = state.pendingTimeouts(3000)
+        assert.strictEqual(armed.length, 1, 'the apply must have armed exactly one write')
+        await state.fireTimeout(armed[0])
+    }
+
+    await test('settings note: a profile field this build does not know is applied, and answered with silence', async () => {
+        // CROSS-VERSION PING-PONG, half one. The read side used to key on the RAW payload while the write side keys on the
+        // store as normalizeProfileStore leaves it - which drops a field this build has no place for. The two never agreed,
+        // so this device answered every payload from a newer Cockpit by writing the field back out, and the newer one put it
+        // back, forever. The key is now taken from the store as this device will hold it.
+        const state = await runSync('cross-newer', {
+            notes: {
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(
+                    syncStore(3, [{ ...syncProfile(2, 'From a newer Cockpit'), futureField: 7 }]),
+                    syncSettings({ themeMode: 'nord' }))),
+            },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.deepStrictEqual(syncProfileNames(state), ['From a newer Cockpit'], 'the payload is still applied')
+        assert.ok(!('futureField' in JSON.parse(state.settings.profileData).profiles[0]),
+            'and the field this build has no place for is dropped, as every profile read here is')
+        await fireArmedSyncWrite(state)
+        assert.strictEqual(state.notePuts.length, 0, 'but the device does not answer by stripping that field out of the note')
+        await state.syncCompleteHandler({})
+        assert.strictEqual(state.notePuts.length, 0, 'nor on the next sync, which is where the cycle used to restart')
+    })
+
+    await test('settings note: a profile field a payload leaves out takes this build\'s default, and is answered with silence', async () => {
+        // CROSS-VERSION PING-PONG, half two: the same disagreement from the other side. The payload has no maxDotsPerDay,
+        // normalizeProfileStore fills in 4, and the device used to publish that completed form straight back.
+        const partial = syncProfile(2, 'From an older Cockpit')
+        delete partial.maxDotsPerDay
+        const state = await runSync('cross-older', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [partial]), syncSettings({ themeMode: 'nord' }))) },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [{ ...syncProfile(1, 'Only on this device'), maxDotsPerDay: 9 }])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(JSON.parse(state.settings.profileData).profiles[0].maxDotsPerDay, 4,
+            'the missing field takes this build\'s default, which is what normalizeProfileStore is for')
+        await fireArmedSyncWrite(state)
+        assert.strictEqual(state.notePuts.length, 0, 'and the completed form is not published back')
+        await state.syncCompleteHandler({})
+        assert.strictEqual(state.notePuts.length, 0, 'nor on the next sync - the pair has stopped cycling')
+    })
+
+    await test('settings note command: adoption gives an appended profile an id the adopted store does not already use', async () => {
+        // A payload with NO nextID - an older or hand-made note. The merge used to start the counter at 1 and hand the
+        // appended profile an id the note already carried, so the store came out as ids 1, 2, 1.
+        const noCounter = 'Cockpit\n\n```json\n' + JSON.stringify({
+            version: 1,
+            updatedAt: '2026-09-12T08:00:00.000Z',
+            profiles: { profiles: [syncProfile(1, 'Shared'), syncProfile(2, 'Also theirs')] },
+            settings: syncSettings(),
+        }, null, 2) + '\n```\n'
+        const state = await runSync('merge-ids', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(noCounter) },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => executeCommand(state, 'cockpit.connectSettingsNote'))
+        const stored = JSON.parse(state.settings.profileData).profiles
+        assert.deepStrictEqual(stored.map(p => p.name), ['Shared', 'Also theirs', 'Only on this device'], 'the local-only profile is appended')
+        const ids = stored.map(p => p.id)
+        assert.strictEqual(new Set(ids).size, ids.length, `every profile id must be distinct, got ${JSON.stringify(ids)}`)
+    })
+
+    await test('settings note: an excluded notebook this device cannot see yet is kept, not published away', async () => {
+        // The exclusion pair travels as ids AND names, and notebook ids are the same on every device. A device that has not
+        // synced the notebook yet resolves the name to nothing - and publishing THAT back deletes the exclusion everywhere,
+        // for good. While a settings note is connected, an id whose notebook is not in the map is now kept.
+        const state = await runSync('exclusion-on', {
+            folders: [{ id: 'f1', title: 'Family' }],
+            notes: {
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]),
+                    syncSettings({ excludedNotebookIds: 'f1,f2', excludedNotebooks: 'Family, Work' }))),
+            },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(state.settings.excludedNotebookIds, 'f1,f2', 'the id of the notebook that has not arrived is kept')
+        assert.strictEqual(state.settings.excludedNotebooks, 'Family, Work', 'and so is the name it came with')
+        await fireArmedSyncWrite(state)
+        assert.strictEqual(state.notePuts.length, 0, 'so the pair is byte-identical to the payload and there is nothing to say back')
+    })
+
+    await test('settings note: the folder poll does not tidy away an excluded notebook that has not arrived yet', async () => {
+        // The second route to the same deletion: panel.ts reconciles the visible names from the stored ids whenever a
+        // notebook changes anywhere, and used to drop every id it could not see while doing it.
+        const folders = [{ id: 'f1', title: 'Family' }]
+        const state = await runSync('exclusion-poll-on', {
+            folders,
+            notes: {
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]),
+                    syncSettings({ excludedNotebookIds: 'f1,f2', excludedNotebooks: 'Family, Work' }))),
+            },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            },
+        })
+        const poll = state.intervals.find(interval => interval.ms === 3000)
+        assert.ok(poll, 'the folder poll is the 3 s interval')
+        await state.withTimers(() => poll.fn())          // the first poll only records the baseline
+        folders.push({ id: 'f3', title: 'Something else' })
+        await state.withTimers(() => poll.fn())          // ...and now a real notebook change
+        assert.strictEqual(state.settings.excludedNotebookIds, 'f1,f2', 'the unseen id survives a notebook change')
+        assert.strictEqual(state.settings.excludedNotebooks, 'Family, Work', 'and the names field is left alone with it')
+        assert.strictEqual(state.notePuts.length, 0, 'nothing is published back')
+    })
+
+    await test('settings note off: a deleted excluded notebook is still tidied out of the pair, exactly as before', async () => {
+        const folders = [{ id: 'f1', title: 'Family' }]
+        const state = await runSync('exclusion-off', {
+            folders,
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+                excludedNotebookIds: 'f1,f2',
+                excludedNotebooks: 'Family, Work',
+            },
+        })
+        const poll = state.intervals.find(interval => interval.ms === 3000)
+        await state.withTimers(() => poll.fn())
+        folders.push({ id: 'f3', title: 'Something else' })
+        await state.withTimers(() => poll.fn())
+        // With no note carrying the pair between devices, an id that resolves to nothing means what it always meant: the
+        // notebook is gone. Keeping it would be hoarding.
+        assert.strictEqual(state.settings.excludedNotebookIds, 'f1', 'the folder poll drops it as it always did')
+        await state.withTimers(() => state.setSetting('excludedNotebooks', 'Family, Work'))
+        assert.strictEqual(state.settings.excludedNotebookIds, 'f1', 'and so does the settings resolver')
+    })
+
+    await test('settings note: a note that is not a Cockpit settings note is never written over', async () => {
+        // Pointing the setting at the wrong note (a mistyped title that matched something, a pasted id from the wrong note)
+        // used to destroy that note one profile edit later: an unreadable body still opened the write gate.
+        const diary = 'Dear diary,\n\nToday I finally wrote the thing down.\n'
+        const state = await runSync('wrong-note', {
+            notes: { [SYNC_NOTE_ID]: { id: SYNC_NOTE_ID, title: 'My diary', body: diary, updated_time: 10 } },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(state.notePuts.length, 0, 'nothing at startup')
+        assert.ok(state.panelMessages.some(m => m[0] === 'panelToast' && /not a Cockpit settings note/i.test(String(m[1]))),
+            'and the user is told which way to put it right')
+        const mark = state.timeouts.length
+        await state.panelMessageHandler(['profileSaved', 1, { ...baseProfile, name: 'Renamed here' }])
+        await state.fireTimeout(armedSyncWrite(state, mark))
+        assert.strictEqual(state.notePuts.length, 0, 'and a local change does not overwrite the user\'s note a moment later')
+        assert.strictEqual(state.notes[SYNC_NOTE_ID].body, diary, 'the note is byte-for-byte as it was')
+    })
+
+    await test('settings note: a damaged body under the right title is still repaired by the next local change', async () => {
+        // The other side of that judgement: a note carrying OUR title whose payload is mangled (a hand edit, a truncated
+        // sync) is still this device's mailbox, and rewriting it wholesale is the repair.
+        const state = await runSync('mangled', {
+            notes: {
+                [SYNC_NOTE_ID]: {
+                    id: SYNC_NOTE_ID,
+                    title: SETTINGS_NOTE_TITLE,
+                    body: 'Cockpit\n\n```json\n{ half a payl\n```\n',
+                    updated_time: 10,
+                },
+            },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(state.notePuts.length, 0, 'a damaged body is not rewritten on sight')
+        const mark = state.timeouts.length
+        await state.panelMessageHandler(['profileSaved', 1, { ...baseProfile, name: 'Renamed here' }])
+        await state.fireTimeout(armedSyncWrite(state, mark))
+        assert.strictEqual(state.notePuts.length, 1, 'the next local change rewrites the mailbox')
+        assert.ok(parseSettingsNoteBody(state.notePuts[0].body), 'and what it wrote parses')
+    })
+
+    await test('settings note: a payload that failed half way through applying is never published back', async () => {
+        const state = await runSync('partial-apply', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]), syncSettings())) },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            },
+        })
+        // A change from another device whose theme write the host refuses, once, after the profile store has already been
+        // replaced - so a write is owed for a state this device only half holds.
+        state.notes[SYNC_NOTE_ID].body = syncBody(syncStore(3, [syncProfile(2, 'From the phone')]),
+            syncSettings({ themeMode: 'nord' }), '2026-09-12T10:00:00.000Z')
+        state.notes[SYNC_NOTE_ID].updated_time = 99
+        let refused = false
+        state.onSettingWrite = (key) => {
+            if (key !== 'themeMode' || refused) return
+            refused = true
+            throw new Error('the host refused this write')
+        }
+        await state.syncCompleteHandler({})
+        state.onSettingWrite = null
+        assert.ok(refused, 'the apply really did reach the refused write')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the phone'], 'and the store had already been replaced by then')
+        for (const armed of state.pendingTimeouts(3000)) await state.fireTimeout(armed)
+        assert.strictEqual(state.notePuts.length, 0, 'a device holding a half-applied payload may not write it over the note')
+        const mark = state.timeouts.length
+        await state.panelMessageHandler(['profileSaved', 2, { ...baseProfile, name: 'Renamed here' }])
+        await state.fireTimeout(armedSyncWrite(state, mark))
+        assert.strictEqual(state.notePuts.length, 0, 'and it stays shut until a read succeeds again')
+    })
+
+    await test('settings note command: adopting a note this device has nothing to add to writes nothing', async () => {
+        const store = syncStore(2, [syncProfile(1, 'Shared')])
+        const state = await runSync('adopt-quiet', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(store, syncSettings())) },
+            initialSettings: { profileData: JSON.stringify(store), currentProfileID: 1 },
+        })
+        await state.withTimers(() => executeCommand(state, 'cockpit.connectSettingsNote'))
+        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the note is adopted')
+        assert.strictEqual(state.notePuts.length, 0, 'and a note that already says exactly this is not given a revision for nothing')
+    })
+
+    await test('settings note gate 2: a device that starts up ON the settings note defers the write until the editor moves off', async () => {
+        // onNoteSelectionChange does not fire for the note Joplin restored at launch, so the gate had no starting value and a
+        // device reopened on the settings note wrote straight into the editor the user was looking at.
+        const state = await runSync('open-at-startup', {
+            selectedNoteIds: [SYNC_NOTE_ID],
+            notes: { [SYNC_NOTE_ID]: { id: SYNC_NOTE_ID, title: SETTINGS_NOTE_TITLE, body: '', updated_time: 2 } },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        // An empty note is SEEDED, so a write is owed from the very first read - and the note is the one that is open.
+        await fireArmedSyncWrite(state)
+        assert.strictEqual(state.notePuts.length, 0, 'nothing is written into the editor the user is looking at')
+        await state.noteSelectionHandler({ value: ['9'.repeat(32)] })
+        assert.strictEqual(state.notePuts.length, 1, 'and the seed lands the moment they move off it')
+        assert.ok(parseSettingsNoteBody(state.notePuts[0].body), 'carrying a payload that parses')
+    })
+
+    await test('settings note: a title search walks past the first page to the note it wants', async () => {
+        // `title:` is a token match, so a vault with a "... Settings Backup" note answers both - and the one we want can be on
+        // any page. A fixed limit silently answered "no note of that name" to anyone whose note sorted late.
+        const state = await runSync('title-paged', {
+            titleSearchPageSize: 1,
+            notes: {
+                [SYNC_OTHER_ID]: { id: SYNC_OTHER_ID, title: `${SETTINGS_NOTE_TITLE} Backup`, body: '', updated_time: 1 },
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the note')]), syncSettings())),
+            },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
+        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the exact match was on the second page and was still found')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the note'], 'and applied')
+    })
+
+    await test('settings note: a title that named nothing at startup is tried again when a sync completes', async () => {
+        // The notice says "wait for the note to sync to this device", so the retry has to be real: a completed sync is exactly
+        // when the missing note can have arrived.
+        const state = await runSync('title-later', {
+            notes: {},
+            initialSettings: {
+                settingsNoteId: SETTINGS_NOTE_TITLE,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(state.settings.settingsNoteId, SETTINGS_NOTE_TITLE, 'the field still holds what the user typed')
+        assert.deepStrictEqual(syncProfileNames(state), ['Only on this device'], 'and nothing has been applied')
+        state.notes[SYNC_NOTE_ID] = syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]),
+            syncSettings({ themeMode: 'nord' })))
+        await state.syncCompleteHandler({})
+        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the retry found it and filled the field in')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'], 'and applied what it says')
     })
 
     await test('settings note: the applied content key is recorded BEFORE the apply, and cleared again if the apply throws', () => {

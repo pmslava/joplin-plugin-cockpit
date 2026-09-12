@@ -172,6 +172,9 @@ function makeJoplin(options) {
                 return settings[key]
             },
             setValue: async (key, value) => {
+                // The write-side twin of state.onSettingRead: a one-shot hook a test can set to make ONE setting write fail,
+                // which is the only way to model a partly-applied settings-note payload (the host refusing a write mid-apply).
+                if (state.onSettingWrite) await state.onSettingWrite(key, value)
                 state.settingWrites.push({ key, value })
                 settings[key] = value
                 for (const handler of state.settingHandlers) await handler({ keys: [key] })
@@ -218,6 +221,9 @@ function makeJoplin(options) {
             onSyncComplete: async (h) => { state.workspaceEvents.push('onSyncComplete'); state.syncCompleteHandler = withTimerCapture(h) },
             onNoteAlarmTrigger: async (h) => { state.workspaceEvents.push('onNoteAlarmTrigger'); state.noteAlarmHandler = withTimerCapture(h) },
             onNoteSelectionChange: async (h) => { state.workspaceEvents.push('onNoteSelectionChange'); state.noteSelectionHandler = withTimerCapture(h) },
+            // What Joplin restored as the open note at launch. A test that gives none gets an empty list, which is the
+            // "nothing open" the plugin assumed before it started asking.
+            selectedNoteIds: async () => options.selectedNoteIds || [],
             // The notebook a newly created plugin note is put in. A test that gives no `selectedFolder` gets the THROW an older
             // desktop build and every mobile build answer with, so the caller's fallback chain is the path actually exercised.
             selectedFolder: async () => {
@@ -255,8 +261,14 @@ function makeJoplin(options) {
                         const matched = Object.keys(notes)
                             .map(id => Object.assign({ id }, notes[id]))
                             .filter(note => String(note.title || '').toLowerCase().includes(wanted))
-                            .map(note => projectFields(note, query && query.fields))
-                        return { items: matched, has_more: false }
+                        // PAGED like the real endpoint. `titleSearchPageSize` lets a test push the note it wants onto a later
+                        // page, which is what proves the plugin walks has_more instead of reading the first page and giving up.
+                        const size = options.titleSearchPageSize || matched.length || 1
+                        const page = Math.max(1, Number((query && query.page) || 1))
+                        return {
+                            items: matched.slice((page - 1) * size, page * size).map(note => projectFields(note, query && query.fields)),
+                            has_more: page * size < matched.length,
+                        }
                     }
                     // One-shot gate: the first search to arrive is held on the gate's promise and answered
                     // from the gate's own snapshot, so a test can freeze an older refresh here (with a
