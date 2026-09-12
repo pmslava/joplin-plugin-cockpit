@@ -4,25 +4,38 @@
  * every case is covered by behavioural tests rather than by reading the source. The DOM glue in the webview is deliberately thin: it reads the rows  *
  * out of the markup the host emitted, asks the four questions below, and writes classes and the hidden input back.                                  *
  *                                                                                                                                                    *
- * THE MATCH RULE IS NOT FORKED. Which rows survive the filter box is decided by window.SearchTokens.matchesFilter - the very rule behind the panel's  *
- * notebook dropdown and the search suggestion list - so "fam" narrows a dialog exactly as it narrows the menu. searchTokens.js is added to the dialog *
- * before this file, and required here in Node, so both worlds reach the one implementation.                                                          *
+ * THE MATCH RULE IS NOT FORKED. Which rows survive the filter box is decided by the shared SearchTokens.matchesFilter - the very rule behind the      *
+ * panel's notebook dropdown and the search suggestion list - so "fam" narrows a dialog exactly as it narrows the menu. It is looked up when it is     *
+ * CALLED, not when this file loads: see tokens() below, which explains why the load order of a dialog's scripts is not something to rely on.          *
  *                                                                                                                                                    *
  * ROW INDEXES, NOT IDS. Everything below speaks in indexes into the row array, because the dialog's rows are a fixed list emitted once by the host    *
- * (Joplin measures a fit-to-content dialog before any script runs, so rows may never be built from script) and only ever shown or hidden afterwards.  *
- * A hidden row keeps its index; the highlight simply steps over it, which is what makes the wrap below "wrap over the VISIBLE rows".                  *
+ * (the dialog's first measurement is taken from that markup, before any script runs, so rows are never built from script) and only ever shown or      *
+ * hidden afterwards. A hidden row keeps its index; the highlight simply steps over it, which is what makes the wrap below "wrap over the VISIBLE       *
+ * rows".                                                                                                                                              *
  ***************************************************************************************************************************************************/
 ;(function(root, factory){
-    // The shared match rule, reached the same way in both worlds: the global the dialog's earlier addScript
-    // installed, or a require() in the Node harness. Resolved once, at load.
-    var tokens = (typeof window !== 'undefined' && window.SearchTokens) || (root && root.SearchTokens) || null
-    if (!tokens && typeof module !== 'undefined' && module.exports) tokens = require('./searchTokens.js')
-    var api = factory(tokens)
+    var api = factory()
     if (typeof module !== 'undefined' && module.exports) module.exports = api        // Node test harness (require)
     if (typeof window !== 'undefined') window.NotebookPickerModel = api               // notebook picker dialog webview
     else if (root) root.NotebookPickerModel = api
-})(typeof globalThis !== 'undefined' ? globalThis : this, function(SearchTokens){
+})(typeof globalThis !== 'undefined' ? globalThis : this, function(){
     'use strict'
+
+    /** tokens **************************************************************************************************************************************
+     * The shared match rule, resolved when it is CALLED and never at load. joplin.views.dialogs.addScript appends ordinary classic <script> elements *
+     * without async=false, so the three scripts of this dialog run in whatever order they finish fetching - this file can perfectly well win the race *
+     * against searchTokens.js. A binding taken at load would then be null for the whole life of the dialog and every function below would throw,      *
+     * killing the filter, the arrows and Enter while the host's own Enter handler went on submitting the pre-selection. A per-call lookup costs one   *
+     * property read and is how alarmWebview.js and panelWebview.js reach their own pure modules. The Node fallback is memoised; the browser one need   *
+     * not be, since it is a plain global read.                                                                                                        *
+     ***********************************************************************************************************************************************/
+    var requiredTokens = null
+    function tokens(){
+        if (typeof window !== 'undefined' && window.SearchTokens) return window.SearchTokens
+        if (typeof globalThis !== 'undefined' && globalThis.SearchTokens) return globalThis.SearchTokens
+        if (!requiredTokens && typeof module !== 'undefined' && module.exports) requiredTokens = require('./searchTokens.js')
+        return requiredTokens
+    }
 
     // A row is { id, path } (the webview adds its element; nothing here looks at it). A bare string is accepted
     // too, so a test can write a list of paths.
@@ -39,7 +52,7 @@
         var list = Array.isArray(rows) ? rows : []
         var out = []
         for (var index = 0; index < list.length; index++){
-            if (SearchTokens.matchesFilter(pathOf(list[index]), filter)) out.push(index)
+            if (tokens().matchesFilter(pathOf(list[index]), filter)) out.push(index)
         }
         return out
     }
