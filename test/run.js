@@ -6941,6 +6941,16 @@ async function main() {
         if (row.includes('data-notebook-all')) return ''
         return (row.match(/'notebookFilterChanged', '([^']*)'/) || [])[1] || null
     }
+    // What the notebook dropdown's own BUTTON says. It is the label the user reads, and the whole of the reported
+    // confusion was that it said "All notebooks" while the panel was in fact filtered to an excluded one.
+    const notebookLabelOf = (html) => {
+        const menuAt = html.indexOf('id="notebookMenu"')
+        if (menuAt < 0) return null
+        const head = html.slice(0, menuAt)
+        const labelAt = head.lastIndexOf('<span class="dropdown-toggle-label">')
+        if (labelAt < 0) return null
+        return head.slice(labelAt + '<span class="dropdown-toggle-label">'.length, head.indexOf('</span>', labelAt))
+    }
     const revealIDOf = (html) => (html.match(/data-reveal-id="([^"]*)"/) || [])[1] || ''
     const listsRow = (html, id) => html.includes(`data-todo-id="${id}"`) || html.includes(`data-note-id="${id}"`)
     const executeCommand = async (state, name, ...args) => {
@@ -7004,6 +7014,174 @@ async function main() {
         await executeCommand(state, 'cockpit.filterByNotebook', 'deadbeef'.repeat(4))
         assert.strictEqual(state.setHtmlCalls, paintsBefore, 'an unknown id must not repaint the panel')
         assert.strictEqual(currentNotebookID(panelOf(state)), nbAlpha, 'an unknown id must leave the filter alone')
+    })
+
+    // ============================================================ the notebook filter may never point at an excluded notebook
+    // Reported from a real vault, with a screenshot: a note open in an excluded "Archive", the panel's dropdown reading
+    // "All notebooks", the list EMPTY, and New to-do / New note creating straight into Archive without asking. Three
+    // wrong answers with one cause - notebookFilter was holding an excluded notebook's id. The dropdown builds its rows
+    // from the excluded-filtered list, so it could not find that id among them and fell back to its "All notebooks"
+    // label; the search really was narrowed to Archive, which the exclusion then emptied; and createItem saw a
+    // non-empty filter and used it. Three writers could put it there (the Whereabouts command, a reveal, a profile
+    // saved before the notebook was excluded), so all three go through creatableNotebookID now, createItem re-checks on
+    // the way out, and the resolver drops the filter when the setting makes it excluded.
+    await test('excluded filter (the report): a chip click on an excluded notebook is a no-op with a notice, and New to-do still asks', async () => {
+        const state = await runReveal({})
+        await state.setSetting('excludedNotebooks', 'Secret')
+        assert.ok(!listsRow(panelOf(state), todoSecret), 'precondition: the excluded notebook is out of the list')
+        const paintsBefore = state.setHtmlCalls
+        const toastsBefore = state.panelMessages.filter(message => message[0] === 'panelToast').length
+        // Whereabouts' left click on the chip of a note that lives in Archive. Fire-and-forget over there.
+        await executeCommand(state, 'cockpit.filterByNotebook', nbSecret)
+        assert.strictEqual(state.setHtmlCalls, paintsBefore, 'an excluded notebook must not repaint the panel')
+        assert.strictEqual(currentNotebookID(panelOf(state)), '', 'and must leave the filter on all notebooks')
+        // Unlike the unknown-id no-op above, this one SAYS something: it is a setting the user made and has
+        // probably forgotten, and silence is how the reported confusion started.
+        const toasts = state.panelMessages.filter(message => message[0] === 'panelToast')
+        assert.strictEqual(toasts.length - toastsBefore, 1, 'exactly one notice is raised')
+        assert.ok(/excluded/i.test(String(toasts[toasts.length - 1][1])), 'which says the notebook is excluded in the settings')
+        // The other half of the report: the create must ASK, not file the note into Archive behind the user's back.
+        const postsBefore = state.dataPosts.length
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.ok(state.dialogHtml['dialog-notebookPicker'], 'New to-do must open the notebook picker')
+        assert.strictEqual(state.dataPosts.length, postsBefore, 'and must create nothing until the picker answers')
+    })
+
+    await test('excluded filter (reveal): a note in an excluded notebook is pinned, and the filter is never pointed at it', async () => {
+        const state = await runReveal({})
+        await state.setSetting('excludedNotebooks', 'Secret')
+        assert.strictEqual(currentNotebookID(panelOf(state)), '', 'precondition: all notebooks')
+        await executeCommand(state, 'cockpit.revealNote', todoSecret)
+        const html = panelOf(state)
+        // Step (b) of the reveal cascade - point the filter at the note's own notebook - is skipped for a notebook
+        // the panel may not show. Nothing is lost: the row could not be listed either way, and step (c) answers.
+        assert.strictEqual(currentNotebookID(html), '', 'the filter must NOT move to the excluded notebook')
+        assert.strictEqual(notebookLabelOf(html), 'All notebooks', 'and the label agrees with it')
+        assert.ok(html.includes('Revealed - outside current filters (1)'), 'the reveal still answers, by pinning the note')
+        assert.ok(html.includes(`data-todo-id="${todoSecret}"`), 'with the revealed note itself on screen')
+        assert.ok(revealIDOf(html), 'and the render carries the reveal marker')
+    })
+
+    await test('excluded filter (profile): a stored notebook that is now excluded starts at all notebooks, and the profile is left alone', async () => {
+        // A profile saved while "Secret" was an ordinary notebook, opened after it was excluded.
+        const storedProfile = JSON.parse(revealProfileData)
+        storedProfile.profiles[0].notebook = nbSecret
+        const state = await runReveal({ initialSettings: {
+            profileData: JSON.stringify(storedProfile),
+            currentProfileID: 1,
+            excludedNotebooks: 'Secret',
+            excludedNotebookIds: nbSecret,
+        } })
+        const html = panelOf(state)
+        assert.strictEqual(currentNotebookID(html), '', 'the session starts at all notebooks, not at the excluded notebook')
+        assert.strictEqual(notebookLabelOf(html), 'All notebooks', 'and the label says so')
+        assert.ok(listsRow(html, todoAlpha) && listsRow(html, todoBeta), 'so the panel lists everything it can show')
+        assert.ok(!listsRow(html, todoSecret), 'minus the excluded notebook itself')
+        // The profile is not rewritten: un-excluding the notebook must bring its stored filter straight back.
+        assert.strictEqual(JSON.parse(state.settings.profileData).profiles[0].notebook, nbSecret,
+            "the stored profile's own notebook must be left exactly as the user saved it")
+    })
+
+    await test('excluded filter (setting change): excluding the notebook the panel is filtered to drops the filter and repaints', async () => {
+        const state = await runReveal({})
+        await executeCommand(state, 'cockpit.filterByNotebook', nbSecret)
+        assert.strictEqual(currentNotebookID(panelOf(state)), nbSecret, 'precondition: the panel is filtered to it')
+        // The user now adds it to the Excluded notebooks setting, with the panel still pointed at it.
+        await state.setSetting('excludedNotebooks', 'Secret')
+        const html = panelOf(state)
+        assert.strictEqual(currentNotebookID(html), '', 'the filter is dropped back to all notebooks')
+        assert.strictEqual(notebookLabelOf(html), 'All notebooks', 'the label agrees')
+        assert.ok(listsRow(html, todoAlpha) && listsRow(html, todoBeta), 'and the repaint lists everything again')
+        assert.ok(!listsRow(html, todoSecret), 'except what was just excluded')
+    })
+
+    await test('excluded filter (deleted notebook): the filter drops when the notebook it points at is deleted elsewhere', async () => {
+        // The other way a filter the user is already working in stops being showable, and it is not a write to the
+        // filter either: the notebook is deleted in Joplin, not in Cockpit. The folder poll is what notices.
+        const vanishOptions = {
+            dataDir: path.join(tmp, 'reveal-vanish'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos: revealTodos,
+            folders: revealFolders.map(folder => ({ ...folder })),
+            notes: revealNotes,
+            initialSettings: { profileData: revealProfileData, currentProfileID: 1 },
+        }
+        const state = await run(vanishOptions)
+        const poll = state.intervals.find(interval => interval.ms === 3000)
+        assert.ok(poll, 'the folder poll is armed')
+        await executeCommand(state, 'cockpit.filterByNotebook', nbBeta)
+        assert.strictEqual(currentNotebookID(panelOf(state)), nbBeta, 'precondition: the panel is filtered to Beta')
+        await poll.fn()                                                   // baseline signature, with Beta present
+        vanishOptions.folders = vanishOptions.folders.filter(folder => folder.id !== nbBeta)
+        await poll.fn()                                                   // the poll notices Beta is gone
+        const html = panelOf(state)
+        assert.strictEqual(currentNotebookID(html), '', 'the filter must not be left on a notebook that no longer exists')
+        assert.strictEqual(notebookLabelOf(html), 'All notebooks', 'and the label must agree with it')
+        assert.ok(listsRow(html, todoAlpha), 'the panel lists what is left')
+        // The create must ask again, rather than POSTing into the id of a deleted notebook.
+        const postsBefore = state.dataPosts.length
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.ok(state.dialogHtml['dialog-notebookPicker'], 'New to-do opens the picker again')
+        assert.strictEqual(state.dataPosts.length, postsBefore, 'and creates nothing into the notebook that went')
+    })
+
+    await test('excluded filter (defence in depth): every writer goes through the one helper, and createItem re-checks on the way out', () => {
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const between = (from, to) => panelSource.slice(panelSource.indexOf(from), panelSource.indexOf(to))
+        // The helper itself: in the map AND not excluded. getExcludedNotebookIdSet already carries descendants.
+        const helper = between('function creatableNotebookID(', 'async function resolveCreatableNotebookID(')
+        assert.ok(/notebooks\.has\(wanted\)/.test(helper), 'the helper must require the notebook to be in the map')
+        assert.ok(/excludedSet\.has\(wanted\)/.test(helper), 'and to not be excluded')
+        // Every writer of notebookFilter routes through it.
+        assert.ok(between('export async function setNotebookFilter(', '/** filterByNotebook').includes('resolveCreatableNotebookID('),
+            'the single state write must sanitise what it is given')
+        assert.ok(between('export async function filterByNotebook(', 'function renderedRowIsListed').includes('creatableNotebookID('),
+            'the command must refuse an excluded notebook')
+        assert.ok(between('async function applyProfileHeaderState(', '/** onProfilesReplaced').includes('resolveCreatableNotebookID('),
+            "a profile's stored notebook must be validated before it becomes the session's filter")
+        assert.ok(between('export async function revealNote(', '/** refreshPanelData').includes('resolveCreatableNotebookID('),
+            'a reveal must not point the filter at a notebook the panel cannot show')
+        // And the read side checks AGAIN - this one is deliberately unreachable while the writers above hold, which
+        // is exactly why it is pinned on the source: creating a note somewhere the user cannot see and did not
+        // choose is the worst of the three symptoms, so it does not depend on every writer staying correct.
+        const create = between('async function createItem(', 'async function createItemInFolder(')
+        assert.ok(create.includes('await resolveCreatableNotebookID(notebookFilter)'),
+            'createItem must re-check the filter rather than trust it')
+        assert.ok(!/var folderID = notebookFilter\b/.test(create), 'it must not read the filter state raw')
+    })
+
+    await test('excluded filter (the invariant): the dropdown can never say "All notebooks" while a notebook filter is set', async () => {
+        // The broken state has a signature: NO row in the notebook menu is marked -current (the All row is not,
+        // because the filter is non-empty; no notebook row is, because the excluded one is not among them), while
+        // the button reads "All notebooks". currentNotebookID answers null for exactly that, so the invariant is
+        // "never null, and the label agrees with it" - asserted across every route that writes the filter.
+        const check = (html, where) => {
+            const id = currentNotebookID(html)
+            assert.notStrictEqual(id, null, `${where}: exactly one notebook row must be -current`)
+            const label = notebookLabelOf(html)
+            if (label === 'All notebooks') assert.strictEqual(id, '', `${where}: the label says all notebooks, so nothing may be filtered`)
+            else assert.notStrictEqual(id, '', `${where}: the label names a notebook, so one must be filtered`)
+            return id
+        }
+        const state = await runReveal({})
+        check(panelOf(state), 'startup')
+        await state.setSetting('excludedNotebooks', 'Secret')
+        check(panelOf(state), 'after excluding a notebook')
+        await executeCommand(state, 'cockpit.filterByNotebook', nbSecret)
+        check(panelOf(state), 'after a command naming the excluded notebook')
+        await executeCommand(state, 'cockpit.revealNote', todoSecret)
+        check(panelOf(state), 'after revealing a note inside it')
+        // The dropdown's own route, with a stale id a reloaded webview could still be carrying.
+        await state.panelMessageHandler(['notebookFilterChanged', nbSecret])
+        check(panelOf(state), 'after the dropdown posts a stale excluded id')
+        await executeCommand(state, 'cockpit.filterByNotebook', nbAlpha)
+        assert.strictEqual(check(panelOf(state), 'after filtering to a kept notebook'), nbAlpha,
+            'and a notebook the panel CAN show still filters normally')
+        // The last route: the filtered notebook is EXCLUDED under the panel's feet, rather than named by a caller.
+        await state.setSetting('excludedNotebooks', 'Secret, Alpha')
+        check(panelOf(state), 'after the filtered notebook itself is excluded')
     })
 
     await test('cockpit.filterByNotebook: the panel dropdown and the command share ONE state write, and neither touches the profile', async () => {
