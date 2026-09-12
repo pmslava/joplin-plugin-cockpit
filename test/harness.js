@@ -110,7 +110,12 @@ function makeJoplin(options) {
             global.clearTimeout = (handle) => {
                 if (handle && typeof handle === 'object' && typeof handle.id === 'number' && state.timeouts[handle.id]) {
                     state.timeouts[handle.id].cleared = true
+                    return
                 }
+                // A handle the capture did not issue belongs to a REAL timer the plugin armed outside a captured window.
+                // Clearing it for real is what the plugin asked for: leaving it ticking would fire plugin code on the
+                // wall clock, in the middle of a later scenario, against whatever `global.joplin` is by then.
+                realClearTimeout(handle)
             }
             try {
                 return await fn.apply(null, args)
@@ -129,6 +134,10 @@ function makeJoplin(options) {
     }
     // Convenience: the captured lane timeouts of a given delay that are still live (neither cleared nor fired).
     state.pendingTimeouts = (ms) => state.timeouts.filter(t => t.ms === ms && !t.cleared && !t.fired)
+    // Runs a piece of a test with capture active, so a timeout armed by something the suite drives DIRECTLY - a command
+    // execution, a setting write - is captured like one armed inside a wrapped handler instead of being left on the real
+    // clock, where it would fire plugin code into a later scenario.
+    state.withTimers = (fn) => withTimerCapture(fn)()
 
     const joplin = {
         plugins: {
@@ -209,6 +218,12 @@ function makeJoplin(options) {
             onSyncComplete: async (h) => { state.workspaceEvents.push('onSyncComplete'); state.syncCompleteHandler = withTimerCapture(h) },
             onNoteAlarmTrigger: async (h) => { state.workspaceEvents.push('onNoteAlarmTrigger'); state.noteAlarmHandler = withTimerCapture(h) },
             onNoteSelectionChange: async (h) => { state.workspaceEvents.push('onNoteSelectionChange'); state.noteSelectionHandler = withTimerCapture(h) },
+            // The notebook a newly created plugin note is put in. A test that gives no `selectedFolder` gets the THROW an older
+            // desktop build and every mobile build answer with, so the caller's fallback chain is the path actually exercised.
+            selectedFolder: async () => {
+                if (!options.selectedFolder) throw new Error('workspace.selectedFolder is not available')
+                return options.selectedFolder
+            },
         },
         data: {
             get: async (pathParts, query) => {
@@ -226,6 +241,23 @@ function makeJoplin(options) {
                     const hasTodo = q.includes('type:todo')
                     const hasNote = q.includes('type:note')
                     const isNoteQuery = hasNote && !hasTodo
+                    // The settings note's own lookup (findNotesTitled in core/settingsSync.ts): a `title:"..."` PHRASE search
+                    // asking for `deleted_time`, which is the one search in the plugin that wants that field - the deep peek
+                    // tier searches a user's quoted phrase with the same shape but never asks for it, and the search field's
+                    // title autocomplete queries `title:word*` unquoted. Answered from the note fixtures, and deliberately as
+                    // a CONTAINS match: Joplin's `title:` is a token match rather than an equality test, so a note titled
+                    // "... Settings Backup" comes back for a search for "... Settings" in the real app too, and the plugin is
+                    // the thing that has to narrow it to an exact title itself.
+                    const wantsDeleted = query && Array.isArray(query.fields) && query.fields.includes('deleted_time')
+                    const titlePhrase = wantsDeleted ? /^title:"([^"]*)"$/.exec(q.trim()) : null
+                    if (titlePhrase) {
+                        const wanted = titlePhrase[1].trim().toLowerCase()
+                        const matched = Object.keys(notes)
+                            .map(id => Object.assign({ id }, notes[id]))
+                            .filter(note => String(note.title || '').toLowerCase().includes(wanted))
+                            .map(note => projectFields(note, query && query.fields))
+                        return { items: matched, has_more: false }
+                    }
                     // One-shot gate: the first search to arrive is held on the gate's promise and answered
                     // from the gate's own snapshot, so a test can freeze an older refresh here (with a
                     // deliberately smaller result) while a newer refresh runs to completion past it.
@@ -291,10 +323,27 @@ function makeJoplin(options) {
                 // `fields` keeps the whole PUT body so a test can assert the exact shape (e.g. that a tick
                 // writes a numeric todo_completed); `body` stays the note-body string the older checks read.
                 state.notePuts.push({ id: pathParts[1], body: body.body, fields: body })
-                if (notes[pathParts[1]]) Object.assign(notes[pathParts[1]], body)
+                if (notes[pathParts[1]]) {
+                    Object.assign(notes[pathParts[1]], body)
+                    // A real write moves the note's updated_time, which is the one field the settings note's cheap change
+                    // check reads. Only a fixture that CARRIES the field gets it moved, so no existing check sees a note
+                    // grow a field it did not declare; the step is 1 rather than a clock so it is deterministic.
+                    if (notes[pathParts[1]].updated_time !== undefined) {
+                        notes[pathParts[1]].updated_time = (Number(notes[pathParts[1]].updated_time) || 0) + 1
+                    }
+                }
             },
             post: async (pathParts, _q, body) => {
                 state.dataPosts.push({ path: pathParts, body })
+                // `livePostedNotes` models the app more closely for the tests that need it: a created note gets a real
+                // 32-character hex id (the only shape Joplin ever hands back, and the one the settings-note reference
+                // parser recognises as an id rather than a title) and joins the note fixtures, so it can be read back.
+                // Off by default: the existing checks assert on the `created-N` ids this has always returned.
+                if (options.livePostedNotes && pathParts[0] === 'notes') {
+                    const id = String(state.dataPosts.length).padStart(32, '0')
+                    notes[id] = Object.assign({ id, updated_time: 1 }, body)
+                    return Object.assign({}, notes[id])
+                }
                 return Object.assign({ id: `created-${state.dataPosts.length}` }, body)
             },
             delete: async (pathParts) => { state.dataDeletes.push(pathParts) },
@@ -324,7 +373,10 @@ async function run(options) {
     global.setInterval = (fn, ms) => { const id = state.intervals.length; state.intervals.push({ fn, ms, cleared: false }); return id }
     global.clearInterval = (id) => { if (typeof id === 'number' && state.intervals[id]) state.intervals[id].cleared = true }
     try {
-        await state.onStart({})
+        // Timeouts armed DURING startup are captured too (the settings note's debounced write is the only one there is),
+        // for the same reason the intervals are: a real 3 s timer left over from one run fires plugin code into whichever
+        // run happens to be in flight three seconds later.
+        await state.withTimers(() => state.onStart({}))
     } finally {
         global.setInterval = realSetInterval
         global.clearInterval = realClearInterval
