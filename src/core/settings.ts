@@ -9,9 +9,9 @@ import joplin from "api"
 import { SettingItemType } from "api/types"
 import { getAllProfiles, getProfile, profileDataSettingKey } from "./database"
 import { refreshInterfaces, setupTimer } from "./timer"
-import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, resolveNamesToIds } from "./exclusion"
+import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, parseExcludedIds, resolveNamesToIds } from "./exclusion"
 import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches } from "./joplin"
-import { onSettingsNoteReferenceChanged, scheduleSettingsNoteWrite } from "./settingsSync"
+import { isSettingsNoteConnected, onSettingsNoteReferenceChanged, scheduleSettingsNoteWrite } from "./settingsSync"
 // The synced key list lives with the note format it belongs to (src/core/settingsNote.js, pure and harness-tested), so
 // the handler below and the payload builder can never drift apart on which settings actually travel.
 const { SYNCED_SETTING_KEYS } = require("./settingsNote")
@@ -336,15 +336,35 @@ export async function resetUnavailableGestureTrace(){
  * titles; a bare title matching several notebooks resolves to all of them). Unresolvable entries are kept verbatim so a typo stays visible. Both        *
  * writes are guarded by a value comparison so the setValue that re-enters this handler settles immediately instead of looping, and the caches are       *
  * cleared and the interfaces re-rendered only when something actually changed.                                                                         *
+ *                                                                                                                                                      *
+ * While a settings note is connected, a stored id whose notebook is not in the map is KEPT rather than resolved away - see the block below, which is    *
+ * what stops an exclusion being deleted on every device by whichever device has not synced that notebook yet.                                           *
  ***************************************************************************************************************************************************/
 async function resolveExcludedNotebooks(){
 	var raw = String(await joplin.settings.value(EXCLUDED_NOTEBOOKS_KEY) || "")
 	var map = await getNotebookMap()
 	var resolved = resolveNamesToIds(map, raw)
-	var idsCsv = resolved.ids.join(",")
+	var storedIdsCsv = String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")
+	var ids = resolved.ids
+	// AN ID THIS DEVICE CANNOT SEE YET IS KEPT, NOT DROPPED - but only while a settings note is carrying the exclusion between devices.
+	//
+	// The pair (ids + names) arrives from another device as one payload, and notebook ids are the same on every device of one account. A
+	// receiving device that has not yet synced the notebook itself - or that is inside the notebook map's own 20s TTL - resolves the name
+	// to nothing, and publishing THAT back deletes the exclusion on every device, permanently. The names field already keeps an entry it
+	// cannot resolve verbatim, so keeping the matching id leaves the pair byte-identical to what arrived and nothing is written at all.
+	//
+	// With no settings note configured this does not apply and the old behaviour stands: the id list is purely local, a notebook that is
+	// gone is gone, and tidying the pair is right.
+	if (isSettingsNoteConnected()){
+		for (var storedId of parseExcludedIds(storedIdsCsv)){
+			if (map.has(storedId) || ids.includes(storedId)) continue
+			ids = ids.concat([storedId])
+		}
+	}
+	var idsCsv = ids.join(",")
 	var changed = false
 	// The hidden id list keys off the visible field only, so writing it does not re-enter this handler.
-	if (idsCsv !== String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")){
+	if (idsCsv !== storedIdsCsv){
 		await joplin.settings.setValue(EXCLUDED_NOTEBOOK_IDS_KEY, idsCsv)
 		changed = true
 	}

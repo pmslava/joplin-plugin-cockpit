@@ -19,6 +19,7 @@ import { toISODate } from "../../core/calendar";
 import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { isMobile } from "../../core/platform";
+import { isSettingsNoteConnected } from "../../core/settingsSync";
 import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
 import { iconButton, icons } from "../icons";
@@ -339,6 +340,15 @@ async function reconcileExcludedNotebookText(){
     // Drop ids whose notebook no longer exists (deleted). Writing the hidden id list does not re-enter the
     // resolver (it keys off the visible field only), so this is safe to do first.
     var liveIds = ids.filter(id => map.has(id))
+    // ...UNLESS A SETTINGS NOTE IS CONNECTED AND SOMETHING WOULD BE DROPPED. Then "the notebook is not in the map"
+    // does not mean "the user deleted it": it equally means this device has not synced that notebook yet, and the
+    // exclusion pair it came with is about to be published back to every other device with the entry missing - a
+    // deletion nobody asked for. The names field cannot be rebuilt for a notebook that cannot be seen either (its
+    // label would simply vanish from the text, which is the same loss by another route), so this poll leaves the
+    // whole pair exactly as it is and tries again when the notebook arrives. Renames of the notebooks it CAN see
+    // are picked up on that later pass. With no settings note configured nothing changes: a deleted notebook's id
+    // is still tidied away, which is all this ever did.
+    if (liveIds.length !== ids.length && isSettingsNoteConnected()) return
     var liveCsv = liveIds.join(",")
     if (liveCsv !== idsCsv) await joplin.settings.setValue(EXCLUDED_NOTEBOOK_IDS_KEY, liveCsv)
     // Refresh the visible names from the live ids (new titles after a rename/move). Only write when it
