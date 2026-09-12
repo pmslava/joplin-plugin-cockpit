@@ -68,6 +68,8 @@ var seededNote = null
 var unresolvedTitle = ""
 /** Whether the "that note is not a Cockpit settings note" notice has been given for the note currently pointed at. */
 var warnedWrongNote = false
+/** A notice raised before there was a panel to show it in, kept until there is. See announceNotice. */
+var pendingNotice = ""
 
 /** ONE SETTINGS-NOTE OPERATION AT A TIME.
  *
@@ -203,6 +205,11 @@ function drainSettingsNote(reason, cheapCheck){
  * caller falls through to the ordinary read and its own error handling rather than deciding anything from a failure here.                            *
  ***************************************************************************************************************************************************/
 async function settingsNoteMoved(){
+    // AN UNINITIALIZED DEVICE HAS NO BUSINESS TRUSTING A STAMP. `lastUpdatedTime` is recorded by the read, but the apply that followed it can have
+    // been refused half way through - and that clears `initialized` while leaving the stamp behind. The tick would then answer "nothing moved" to
+    // the end of time, so the device sits out of step, its own edit unpublished, until a sync happens to complete; and the wholesale apply that
+    // finally arrives throws that edit away. While the gate is shut the body is fetched again, whatever the stamp says.
+    if (!initialized) return true
     if (lastUpdatedTime === null) return true
     try {
         var head: any = await joplin.data.get(['notes', noteId], { fields: ['updated_time'] })
@@ -211,6 +218,27 @@ async function settingsNoteMoved(){
     } catch (error) {
         return true
     }
+}
+
+/** announceNotice / flushPendingNotice *************************************************************************************************************
+ * Tell the user something short, wherever in the startup order we happen to be.                                                                      *
+ *                                                                                                                                                    *
+ * setupSettingsSync runs beside the profile store it syncs, which is well before setupPanel - so a notice raised while resolving the setting at       *
+ * startup (a title that names no note yet, the commonest way a phone connects) had nowhere to go and was lost, leaving only a console line the user   *
+ * will never read. The automatic retries are deliberately silent, so that was the ONLY chance to say it. The notice is therefore kept until there is  *
+ * a panel, and the startup read - which runs after setupPanel - flushes it. Exactly one notice is ever pending: a second overwrites the first, which  *
+ * is right, because the later one describes the state the device is actually in.                                                                     *
+ ***************************************************************************************************************************************************/
+function announceNotice(toast, logLine?){
+    console.warn(logLine || toast)
+    pendingNotice = toast
+    flushPendingNotice()
+}
+
+function flushPendingNotice(){
+    if (!pendingNotice) return
+    if (!showPanelToast(pendingNotice)) return
+    pendingNotice = ""
 }
 
 /** flushSettingsNote *******************************************************************************************************************************
@@ -313,6 +341,9 @@ export function refreshFromSettingsNote(reason){
 }
 
 async function refreshFromSettingsNoteLocked(reason){
+    // The first thing that runs after the panel exists (index.ts calls this before the first paint), so it is where a notice raised during setup
+    // finally reaches the user.
+    flushPendingNotice()
     if (!noteId){
         // Nothing to read; writes are irrelevant while the feature is off, and the gate above must not hold a write that can never happen.
         initialized = true
@@ -365,10 +396,9 @@ async function refreshFromSettingsNoteLocked(reason){
             initialized = false
             if (!warnedWrongNote){
                 warnedWrongNote = true
-                var complaint = "Cockpit: that note is not a Cockpit settings note"
-                console.warn(`${complaint} (${noteId}) - point the Settings note setting at the right note, or run ` +
+                announceNotice("Cockpit: that note is not a Cockpit settings note",
+                    `Cockpit: note ${noteId} is not a Cockpit settings note - point the Settings note setting at the right note, or run ` +
                     "Tools > Cockpit > Connect settings note to make one.")
-                showPanelToast(complaint)
             }
             return
         }
@@ -539,11 +569,8 @@ async function resolveSettingsNoteReference(announce){
         ? `Cockpit: several notes are titled "${reference.title}" - paste the right note's id into the Settings note setting.`
         : `Cockpit: no note titled "${reference.title}" was found - check the title, or wait for the note to sync to this device.`
     // Announced when the user has just asked for this (a setting they edited, a startup); silent on the automatic retries, which would
-    // otherwise repeat the same toast after every sync.
-    if (announce){
-        console.warn(complaint)
-        showPanelToast(complaint)
-    }
+    // otherwise repeat the same toast after every sync. A notice raised at startup is kept until there is a panel to show it in.
+    if (announce) announceNotice(complaint)
     return ""
 }
 
@@ -620,9 +647,7 @@ async function connectSettingsNoteLocked(){
     }
     var matches = await findNotesTitled(SETTINGS_NOTE_TITLE)
     if (matches.length > 1){
-        var complaint = `Cockpit: several notes are titled "${SETTINGS_NOTE_TITLE}" - paste the right note's id into the Settings note setting.`
-        console.warn(complaint)
-        showPanelToast(complaint)
+        announceNotice(`Cockpit: several notes are titled "${SETTINGS_NOTE_TITLE}" - paste the right note's id into the Settings note setting.`)
         return
     }
     if (matches.length === 1){
