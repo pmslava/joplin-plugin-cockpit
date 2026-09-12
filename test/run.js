@@ -8388,6 +8388,116 @@ async function main() {
             'and connected to it - which, being this device\'s first connection to that note, folds its own profile in')
     })
 
+    // ---- the search index is not live, and the note must be found anyway ----------------------------------------------
+    // Joplin's FTS index is rebuilt by SearchEngine.syncTables() on a fixed 10s timer after notes change, and once at app
+    // start. For up to ten seconds after another device's settings note syncs in - and at startup for notes changed late in
+    // the previous session - a title: search answers NOTHING. `titleSearchBlind` models exactly that: the note is in the
+    // fixtures, the plain ['notes'] listing serves it, and only the search is blind.
+    const titleLookups = (state) => state.gets.filter(g =>
+        (g.path[0] === 'search' && g.query && Array.isArray(g.query.fields) && g.query.fields.includes('deleted_time')) ||
+        (g.path[0] === 'notes' && g.path.length === 1 && g.query && Array.isArray(g.query.fields) && g.query.fields.includes('deleted_time')))
+
+    await test('settings note: a note the search index has not caught up with is connected to, not duplicated', async () => {
+        const state = await runSync('blind-canonical', {
+            titleSearchBlind: true,
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings())) },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
+        // THE DEFECT THIS PINS: the search said "no such note", so the canonical branch created a SECOND one, the field
+        // pointed at the duplicate, and the two devices never converged again.
+        assert.deepStrictEqual(state.dataPosts, [], 'no second settings note is created while the index is merely stale')
+        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'the field points at the note that already exists')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop', 'Only on this device'], 'and the one-time merge ran')
+        const merged = state.notePuts.filter(put => put.id === SYNC_NOTE_ID)
+        assert.strictEqual(merged.length, 1, 'exactly once')
+    })
+
+    await test('settings note: a non-canonical exact title is found through the stale index too, with no notice', async () => {
+        const state = await runSync('blind-own-title', {
+            titleSearchBlind: true,
+            notes: {
+                [SYNC_NOTE_ID]: Object.assign(syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]),
+                    syncSettings())), { title: OWN_TITLE }),
+            },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', OWN_TITLE))
+        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'connected at once, not left waiting for the retry')
+        assert.deepStrictEqual(state.dataPosts, [], 'and nothing created - a non-canonical title never creates anyway')
+        assert.ok(!state.panelMessages.some(m => m[0] === 'panelToast' && /no note titled/i.test(String(m[1]))),
+            'and the user is not told the note is missing, because it is not')
+    })
+
+    await test('settings note: a trashed note carrying the title is not mistaken for the settings note', async () => {
+        const state = await runSync('blind-trashed', {
+            titleSearchBlind: true,
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            notes: {
+                [SYNC_NOTE_ID]: Object.assign(syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Binned')]), syncSettings())),
+                    { deleted_time: 1757000000000 }),
+            },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
+        // The listing serves trashed notes (trashing even bumps updated_time, so they sort to the top); the scan has to drop
+        // them itself, exactly as the search half does.
+        const posted = state.dataPosts.filter(p => p.path[0] === 'notes')
+        assert.strictEqual(posted.length, 1, 'a note in the trash is no note at all, so a fresh one is created')
+        assert.strictEqual(state.settings.settingsNoteId, '0'.repeat(31) + '1', 'and the field points at the new one, not the binned one')
+        assert.deepStrictEqual(syncProfileNames(state), ['Only on this device'], 'the binned note\'s profiles are not adopted')
+    })
+
+    await test('settings note: a device that created its own note says so once when a rival arrives, and then stops looking', async () => {
+        const state = await runSync('rival', {
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            notes: {},
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
+        assert.strictEqual(state.dataPosts.filter(p => p.path[0] === 'notes').length, 1, 'precondition: this device made its own note')
+        // The other device's note finally arrives - the user typed the title before the first sync had brought it down, which is
+        // the one case no search can protect against, because there was nothing here to find.
+        state.notes[SYNC_NOTE_ID] = syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings()))
+        const rivalNotices = () => state.panelMessages.filter(m => m[0] === 'panelToast' && /another Cockpit settings note/i.test(String(m[1])))
+        for (let round = 0; round < 5; round++) await state.syncCompleteHandler({})
+        assert.strictEqual(rivalNotices().length, 1, 'said exactly once across five syncs - a notice, not a nag')
+        assert.ok(state.notePuts.every(put => put.id !== SYNC_NOTE_ID), 'and nothing is written to the other device\'s note')
+        assert.strictEqual(state.settings.settingsNoteId, '0'.repeat(31) + '1', 'nor is the field repointed - which mailbox to keep is the user\'s call')
+    })
+
+    await test('settings note: a device that ADOPTED a note never looks for a rival', async () => {
+        const state = await runSync('rival-none', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings())) },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
+        assert.strictEqual(state.settings.settingsNoteId, SYNC_NOTE_ID, 'precondition: connected to the note that already existed')
+        const before = titleLookups(state).length
+        for (let round = 0; round < 5; round++) await state.syncCompleteHandler({})
+        assert.strictEqual(titleLookups(state).length, before,
+            'a device that connected to an existing note has nothing to collide with, so it searches for nothing')
+    })
+
     // ---- the command -----------------------------------------------------------------------------------------------
     await test('settings note command: with no note anywhere it creates one, seeded from this device, and connects to it', async () => {
         const state = await runSync('create', {
