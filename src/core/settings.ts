@@ -176,7 +176,7 @@ export async function setupSettings(){
 		},
 		[EXCLUDED_NOTEBOOKS_KEY]: {
 			label: "Excluded notebooks",
-			description: "Comma-separated notebook names to hide from Cockpit everywhere: search results, panel rows, checkbox counts, the overview notes and the notebook filter/picker. Sub-notebooks of an excluded notebook are hidden too. To pick one of several notebooks that share a name, give a Parent/Sub path. Entries are resolved to the notebooks themselves and tracked internally by id, so renaming a notebook later keeps the exclusion working. Leave empty to turn the feature off.",
+			description: "Comma-separated notebooks to hide from Cockpit everywhere: search results, panel rows, checkbox counts, the overview notes and the notebook filter/picker. Sub-notebooks of an excluded notebook are hidden too. Type a name, a Parent/Sub path, or a notebook id. Cockpit rewrites each entry as Name (id): the id in brackets is how it tells two notebooks of the same name apart, and it keeps tracking the notebook by that id, so renaming it later keeps the exclusion working. Leave empty to turn the feature off.",
 			value: "",
 			type: SettingItemType.String,
 			public: true,

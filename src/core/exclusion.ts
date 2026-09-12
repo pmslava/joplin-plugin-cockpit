@@ -4,6 +4,10 @@
  * ID, so renaming a notebook never breaks it. The visible comma-separated names field is only an entry/display surface; the hidden id list is the      *
  * single source of truth for every exclusion decision.                                                                                               *
  *                                                                                                                                                    *
+ * THE FIELD SHOWS BOTH: "Lab / Joplin (fdfd6c06), Archive (a1b2c3d4)". The name is what a person recognises, the short id is what Cockpit is holding   *
+ * on to - so a field pointed at the wrong one of two same-named notebooks says so at a glance. It still PARSES BACK: the user goes on typing plain     *
+ * names, paths or ids, and a " (id)" Cockpit wrote is read as the id it names (see resolveTypedEntry, and shortID for why the id is shortened).        *
+ *                                                                                                                                                    *
  * Every function here takes the notebook map (Map<id,{id,title,path,parentID}>, path = "Parent / Child") as a parameter rather than fetching it, so    *
  * this module stays a leaf with no dependency on joplin.ts (which would be circular).                                                                 *
  ***************************************************************************************************************************************************/
@@ -31,6 +35,26 @@ function normalizePathKey(value){
  ***************************************************************************************************************************************************/
 export function parseExcludedIds(raw){
     return String(raw || "").split(",").map(part => part.trim()).filter(Boolean)
+}
+
+/** The short id, shared with the settings note *****************************************************************************************************
+ * src/core/shortId.js: one pure, dependency-free leaf (the same UMD shape as horizons.js) holding the whole display form - how an id is shortened for *
+ * a single-line setting box, and how a " (id)" is read back out of one. Required rather than reimplemented so the notebook field and the settings     *
+ * note cannot drift apart on what the brackets mean.                                                                                                 *
+ ***************************************************************************************************************************************************/
+const { shortID, splitDisplayID } = require("./shortId")
+
+/** idsWithPrefix **********************************************************************************************************************************
+ * The notebook ids in the map that begin with this (already lower-cased) prefix. The parse side's whole question: a bracketed group is only an id     *
+ * when it actually names something here.                                                                                                             *
+ ***************************************************************************************************************************************************/
+function idsWithPrefix(map, prefix){
+    var out = []
+    if (!prefix) return out
+    for (var id of map.keys()){
+        if (String(id).toLowerCase().indexOf(prefix) === 0) out.push(id)
+    }
+    return out
 }
 
 /** resolveEntry ***********************************************************************************************************************************
@@ -72,13 +96,45 @@ function titleIsAmbiguous(map, title){
 }
 
 /** canonicalLabel *********************************************************************************************************************************
- * The label the visible field should show for a resolved id: its bare title when that title is unique, otherwise its full "Parent / Child" path so    *
- * the user can tell duplicate-titled notebooks apart.                                                                                                 *
+ * The NAME half of the label: the notebook's bare title when that title is unique, otherwise its full "Parent / Child" path so the user can tell      *
+ * duplicate-titled notebooks apart. What the field actually shows is displayLabel below, which is this plus the id.                                    *
  ***************************************************************************************************************************************************/
 export function canonicalLabel(map, id){
     var notebook = map.get(id)
     if (!notebook) return null
     return titleIsAmbiguous(map, notebook.title) ? notebook.path : notebook.title
+}
+
+/** displayLabel ***********************************************************************************************************************************
+ * WHAT THE USER READS IN THE FIELD: the name (or the Parent / Sub path) followed by the short id in brackets - "Lab / Joplin (fdfd6c06)". The name is *
+ * the part a person recognises and the id is what Cockpit is actually holding on to, so a field pointed at the wrong one of two same-named notebooks   *
+ * says so at a glance instead of looking right. Falls back to the bare name for an id that cannot be shown in a form the parser would take back.       *
+ ***************************************************************************************************************************************************/
+export function displayLabel(map, id){
+    var label = canonicalLabel(map, id)
+    if (label == null) return null
+    var short = shortID(id, map.keys())
+    return short ? label + " (" + short + ")" : label
+}
+
+/** resolveTypedEntry ******************************************************************************************************************************
+ * ONE entry of the visible field, read back to notebook ids - the display form included, so re-reading what Cockpit wrote does not lose the reference. *
+ *                                                                                                                                                     *
+ * A trailing " (<6-32 hex>)" is stripped ONLY when what is in the brackets is a prefix of an id THIS MAP ACTUALLY HOLDS; otherwise the whole entry is  *
+ * the name, so a notebook genuinely titled "Budget (deadbeef)" keeps working. When the stripped prefix names exactly one notebook, THAT ID WINS over   *
+ * the name in front of it: the user may not have re-typed the field since the notebook was renamed, and the id is the thing that was true. A prefix    *
+ * several notebooks share settles nothing, so the name part is resolved exactly as it always was.                                                      *
+ ***************************************************************************************************************************************************/
+function resolveTypedEntry(map, entry){
+    var text = String(entry || "").trim()
+    if (!text) return []
+    var split = splitDisplayID(text)
+    if (split){
+        var hits = idsWithPrefix(map, split.id)
+        if (hits.length === 1) return hits
+        if (hits.length > 1) return resolveEntry(map, split.name)
+    }
+    return resolveEntry(map, text)
 }
 
 /** dedupeLabels ***********************************************************************************************************************************
@@ -97,9 +153,10 @@ function dedupeLabels(parts){
 }
 
 /** resolveNamesToIds ******************************************************************************************************************************
- * Resolves the visible names field to { ids, canonicalText }. Each entry is resolved case-insensitively (title, or Parent/Sub path); a bare title      *
- * matching several notebooks contributes all of them. The canonical text is rebuilt from the resolved ids (path form where a bare title is ambiguous), *
- * with any entry that resolved to nothing kept verbatim so the user can still see and fix their typo.                                                  *
+ * Resolves the visible names field to { ids, canonicalText }. Each entry is resolved case-insensitively (title, Parent/Sub path, or the "Name (id)"   *
+ * display form Cockpit itself writes - see resolveTypedEntry); a bare title matching several notebooks contributes all of them. The canonical text is  *
+ * rebuilt from the resolved ids (path form where a bare title is ambiguous, each with its short id), with any entry that resolved to nothing kept      *
+ * verbatim - and unadorned, there being no id to show - so the user can still see and fix their typo.                                                  *
  ***************************************************************************************************************************************************/
 export function resolveNamesToIds(map, raw){
     var entries = String(raw || "").split(",").map(part => part.trim()).filter(Boolean)
@@ -107,16 +164,16 @@ export function resolveNamesToIds(map, raw){
     var seenIds = new Set()
     var labelParts = []
     for (var entry of entries){
-        var matches = resolveEntry(map, entry)
+        var matches = resolveTypedEntry(map, entry)
         if (!matches.length){
-            labelParts.push(entry)                 // unresolvable: kept verbatim so the typo is visible
+            labelParts.push(entry)                 // unresolvable: kept verbatim so the typo is visible, and with no id to show
             continue
         }
         for (var id of matches){
             if (seenIds.has(id)) continue
             seenIds.add(id)
             ids.push(id)
-            labelParts.push(canonicalLabel(map, id))
+            labelParts.push(displayLabel(map, id))
         }
     }
     return { ids: ids, canonicalText: dedupeLabels(labelParts) }
@@ -129,7 +186,7 @@ export function resolveNamesToIds(map, raw){
 export function canonicalTextFromIds(map, ids){
     var parts = []
     for (var id of ids){
-        var label = canonicalLabel(map, id)
+        var label = displayLabel(map, id)
         if (label != null) parts.push(label)
     }
     return dedupeLabels(parts)

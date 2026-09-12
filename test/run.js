@@ -1002,7 +1002,9 @@ async function main() {
     })
 
     // (e) Excluded notebooks: hidden everywhere, id-tracked (rename-safe), and a same-titled namesake is spared.
-    const K = 'c'.repeat(32), P = 'p'.repeat(32), AC = 'a'.repeat(32), AP = 'b'.repeat(32), T = 't'.repeat(32), S = 's'.repeat(32)
+    // Every folder id is HEX, as a real Joplin id is: the visible field now shows each excluded notebook's short id beside its name,
+    // and an id that is not 6-32 hex characters could not be read back out of that text, so it is deliberately not written into it.
+    const K = 'c'.repeat(32), P = 'd'.repeat(32), AC = 'a'.repeat(32), AP = 'b'.repeat(32), T = 'e'.repeat(32), S = 'f'.repeat(32)
     const exFolders = [
         { id: K, title: 'Client', parent_id: '', updated_time: 10 },
         { id: P, title: 'Personal', parent_id: '', updated_time: 11 },
@@ -1047,7 +1049,8 @@ async function main() {
     })
     await test('budget e / exclude: resolution stores ids and canonicalises the visible text', () => {
         assert.strictEqual(ex.settings.excludedNotebookIds, `${AC},${T}`, 'the resolved ids are stored (source of truth)')
-        assert.strictEqual(ex.settings.excludedNotebooks, 'Client / Archive, Trash', 'the visible text is rewritten to canonical labels (path form where the title is ambiguous)')
+        assert.strictEqual(ex.settings.excludedNotebooks, 'Client / Archive (aaaaaaaa), Trash (eeeeeeee)',
+            'the visible text is rewritten to name AND id (path form where the title is ambiguous, short id in brackets)')
     })
     await test('budget e / exclude: no checkbox body is fetched for an excluded to-do (even when every body is stale)', async () => {
         // Make every to-do's body stale so a fresh render must refetch the KEPT ones - proving the excluded
@@ -1089,7 +1092,8 @@ async function main() {
         exOptions.folders = exFolders.map(f => f.id === AC ? { ...f, title: 'ArchivedFolder', updated_time: 999 } : f)
         await pollEntry.fn()                                   // detects the change -> reconciles the excluded text
         assert.strictEqual(ex.settings.excludedNotebookIds, `${AC},${T}`, 'the id list is unchanged - exclusion survives the rename')
-        assert.strictEqual(ex.settings.excludedNotebooks, 'ArchivedFolder, Trash', 'the visible text is refreshed to the new (now unique) title')
+        assert.strictEqual(ex.settings.excludedNotebooks, 'ArchivedFolder (aaaaaaaa), Trash (eeeeeeee)',
+            'the visible text is refreshed to the new (now unique) title, and the id beside it is unchanged')
         // No onChange loop: another poll with the same folders changes nothing further.
         const textBefore = ex.settings.excludedNotebooks
         await pollEntry.fn()
@@ -1097,6 +1101,127 @@ async function main() {
         // Still excluded from the rows after the rename.
         await ex.panelMessageHandler(['sortDirectionClicked'])
         assert.ok(!ex.panelHtml['panel-panel'].includes('ArchivedC'), 'the renamed notebook\'s to-do stays excluded')
+    })
+
+    // ------------------------------------------------------- the field shows the NAME and the ID (2.6.1)
+    // The owner's refinement: both of Cockpit's reference-holding settings must show what they point at, not just
+    // what it is called. "Excluded notebooks" therefore reads "Lab / Joplin (fdfd6c06), Archive (a1b2c3d4)" - the
+    // canonical label it always built, plus the short id - and still PARSES BACK, so the field stays a field the
+    // user types into. The pure half (how long the id is, and what counts as one) is src/core/shortId.js, which the
+    // harness requires directly, three checks below.
+    const idLab = 'fdfd6c06' + '0'.repeat(24)
+    const idJoplin = 'a1b2c3d4' + '0'.repeat(24)
+    const idArchive = 'b0b0b0b0' + '0'.repeat(24)
+    // Two ids sharing their first EIGHT characters and differing at the ninth: the shown id has to lengthen to ten.
+    const idTwinA = 'abcdef01' + '22' + '0'.repeat(22)
+    const idTwinB = 'abcdef01' + '33' + '0'.repeat(22)
+    // A notebook a user REALLY named with a bracketed hex word. Nothing may read that as an id - and nothing does,
+    // because 'deadbeef' is not the start of any id in this map.
+    const idBudget = 'c0ffee11' + '0'.repeat(24)
+    const dispFolders = [
+        { id: idLab, title: 'Lab', parent_id: '', updated_time: 10 },
+        { id: idJoplin, title: 'Joplin', parent_id: idLab, updated_time: 11 },
+        { id: idArchive, title: 'Archive', parent_id: '', updated_time: 12 },
+        { id: idTwinA, title: 'TwinOne', parent_id: '', updated_time: 13 },
+        { id: idTwinB, title: 'TwinTwo', parent_id: '', updated_time: 14 },
+        { id: idBudget, title: 'Budget (deadbeef)', parent_id: '', updated_time: 15 },
+    ]
+    const dispOptions = {
+        dataDir: path.join(tmp, 'display-id-data'),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [],
+        folders: dispFolders,
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'All', searchCriteria: '', noteID: '', showNotes: false }] }),
+            currentProfileID: 1,
+        },
+    }
+    const disp = await run(dispOptions)
+
+    await test('excluded notebooks display: a typed name comes back as "Name (id)", and reading that back writes nothing', async () => {
+        await disp.setSetting('excludedNotebooks', 'Archive')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (b0b0b0b0)`, 'the user typed a name and gets the name AND the id')
+        assert.strictEqual(disp.settings.excludedNotebookIds, idArchive, 'the hidden id list is the full id, as it always was')
+        // THE ROUND TRIP, which is the whole reason the id is written in a form that parses: saving the field again
+        // resolves to the same id and rebuilds the same text, so the second pass has nothing to write at all.
+        const mark = disp.settingWrites.length
+        await disp.setSetting('excludedNotebooks', disp.settings.excludedNotebooks)
+        assert.deepStrictEqual(disp.settingWrites.slice(mark).filter(w => w.key !== 'excludedNotebooks').map(w => w.key), [],
+            'a second resolve pass over Cockpit\'s own text writes nothing back')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (b0b0b0b0)`, 'and leaves the text byte-identical')
+    })
+
+    await test('excluded notebooks display: a path entry keeps its path, and the id lengthens only where eight would be ambiguous', async () => {
+        await disp.setSetting('excludedNotebooks', 'Lab/Joplin, TwinOne')
+        assert.strictEqual(disp.settings.excludedNotebooks, 'Joplin (a1b2c3d4), TwinOne (abcdef0122)',
+            'a unique title stays a bare title, and the twin ids lengthen to ten characters because eight name both')
+        assert.strictEqual(disp.settings.excludedNotebookIds, `${idJoplin},${idTwinA}`)
+    })
+
+    await test('excluded notebooks display: THE ID WINS over a name the user has not re-typed since the rename', async () => {
+        await disp.setSetting('excludedNotebooks', 'Archive')
+        // The notebook is renamed in Joplin; the field still says what the user last typed. The id in the brackets
+        // is the thing that was true, so it resolves and the NAME half is refreshed from it.
+        const poll = disp.intervals.find(interval => interval.ms === 3000)
+        await poll.fn()                                     // the first pass only records the folder baseline
+        dispOptions.folders = dispFolders.map(f => f.id === idArchive ? { ...f, title: 'Archived', updated_time: 999 } : f)
+        await poll.fn()                                     // ...and now the rename is seen
+        await disp.setSetting('excludedNotebooks', 'Archive (b0b0b0b0)')
+        assert.strictEqual(disp.settings.excludedNotebookIds, idArchive, 'the exclusion survives a rename the user never re-typed')
+        assert.strictEqual(disp.settings.excludedNotebooks, 'Archived (b0b0b0b0)', 'and the shown name catches up with the notebook')
+        dispOptions.folders = dispFolders
+        await poll.fn()                                     // put the fixture back for the checks below
+        assert.strictEqual(disp.settings.excludedNotebooks, 'Archive (b0b0b0b0)', 'and follows it back again')
+    })
+
+    await test('excluded notebooks display: a notebook genuinely NAMED "Budget (deadbeef)" is not read as an id', async () => {
+        // The bracketed word is hex and the right length, so only "is it the start of an id in this map?" tells the
+        // two apart. It is not, so the WHOLE entry is the name - and the notebook gets its own real id beside it.
+        await disp.setSetting('excludedNotebooks', 'Budget (deadbeef)')
+        assert.strictEqual(disp.settings.excludedNotebookIds, idBudget, 'the notebook of that name is what was excluded')
+        assert.strictEqual(disp.settings.excludedNotebooks, 'Budget (deadbeef) (c0ffee11)', 'its own id is added; the name keeps its brackets')
+    })
+
+    await test('excluded notebooks display: an entry that names nothing is kept verbatim, with no id invented for it', async () => {
+        await disp.setSetting('excludedNotebooks', 'Archive, Nosuchnotebook')
+        assert.strictEqual(disp.settings.excludedNotebooks, 'Archive (b0b0b0b0), Nosuchnotebook',
+            'the typo stays exactly as typed, so the user can see and fix it, and carries no bracket')
+        assert.strictEqual(disp.settings.excludedNotebookIds, idArchive)
+        await disp.setSetting('excludedNotebooks', '')
+    })
+
+    // ---- the short id itself: the pure module both settings share ------------------------------------------------
+    const ShortID = require('../src/core/shortId.js')
+
+    await test('short id: eight characters, lengthened two at a time only for as long as something else shares them', () => {
+        const full = 'abcdef0123456789abcdef0123456789'
+        assert.strictEqual(ShortID.shortID(full, []), 'abcdef01', 'eight characters is the default, and what a narrow box can show')
+        assert.strictEqual(ShortID.shortID(full, [full]), 'abcdef01', 'the id itself is not a rival to itself')
+        assert.strictEqual(ShortID.shortID(full, ['abcdef01' + '9'.repeat(24)]), 'abcdef0123',
+            'a rival sharing eight lengthens it to ten')
+        assert.strictEqual(ShortID.shortID(full, ['abcdef0123' + '9'.repeat(22)]), 'abcdef012345',
+            'a rival sharing ten lengthens it to twelve - two at a time, never one')
+        assert.strictEqual(ShortID.shortID(full, [full.slice(0, 31) + 'a']), full,
+            'a rival that differs only in the last character is the one case the whole id is shown')
+        assert.strictEqual(ShortID.shortID('ABCDEF0123456789ABCDEF0123456789', []), 'abcdef01', 'ids are shown lower-case')
+        // The one refusal: what cannot be read back is not written. A Joplin id is always 32 hex characters, so this
+        // is only ever reached by a fixture or something foreign - and it gets a bare name rather than a broken id.
+        for (const notAnID of ['', 'f1', 'abcde', 'not-hex-at-all', 'zzzzzzzz', 'a'.repeat(33)]){
+            assert.strictEqual(ShortID.shortID(notAnID, []), '', `"${notAnID}" is not an id this display form can carry`)
+        }
+        assert.strictEqual(ShortID.shortID('abcdef', []), 'abcdef', 'six characters is the shortest there is, and is shown whole')
+    })
+
+    await test('short id: a display form is split back only when the brackets hold 6-32 hex characters', () => {
+        assert.deepStrictEqual(ShortID.splitDisplayID('Lab / Joplin (fdfd6c06)'), { name: 'Lab / Joplin', id: 'fdfd6c06' })
+        assert.deepStrictEqual(ShortID.splitDisplayID('  Archive (A1B2C3D4)  '), { name: 'Archive', id: 'a1b2c3d4' }, 'trimmed and lower-cased')
+        assert.deepStrictEqual(ShortID.splitDisplayID('Budget (deadbeef) (c0ffee11)'), { name: 'Budget (deadbeef)', id: 'c0ffee11' },
+            'the LAST bracketed group is the id, so a name with brackets of its own survives')
+        for (const plain of ['Archive', 'Archive (v2)', 'Archive (abcd)', 'Archive (' + 'a'.repeat(33) + ')', '(deadbeef)', '', 'Archive(deadbeef)']){
+            assert.strictEqual(ShortID.splitDisplayID(plain), null, `"${plain}" is all name`)
+        }
     })
 
     // ============================================================ Findings 1-5: overlay scoping + lane fixes
