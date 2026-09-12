@@ -1914,3 +1914,114 @@ The cause was one missing field, and it hid a second defect. "Toggle Cockpit Pan
 
 **The e2e gate found a date-fragile spec.** Playwright: 114 tests in 19 files (107 run, 7 opt-in showcase captures), run in full here as the release gate: 106 passed and one failed twice, `mobile-drag.spec.ts` › "a drop on the No Due Date heading clears the due date". Its retry named the cause itself: the "No Due Date" heading was 20px below the visible list (y=856, list 112..836, scroll top 0 of 1233). The file's fixture seeds exactly enough rows for that last heading to be on screen at scroll top 0, "the geometry the file was last proven green on" — on the 4th. On the 11th an overdue row reads "September 10, 2026 - td-band-up-<stamp>", one character longer than "September 3", and five of them wrapped onto a second line, which is the 20px. Not the plugin: the same single test failed the same way against the origin/main build in a separate worktree. The fix is in the spec only: that one case now scrolls the heading into view before the finger goes down, parked 120px above the bottom edge so it stays clear of the 72px auto-scroll band, and never mid-gesture, which `assertOnScreen` refuses by design; `settle()` returns the next case to the top as before.
 Re-run of the whole `mobile-drag` file after the fix: 20 passed, the pre-scroll moving the list by 118px. The other eighteen spec files were not run a second time: nothing in the plugin changed after the full pass, and the fix touches one case in one file.
+
+## 2026-09-12 — vNEXT: the notebook picker becomes a list Cockpit draws
+
+The owner's screenshot: the "Create to-do in notebook" dialog on a dark theme, over a vault of about a
+hundred and twenty notebooks. Three complaints, and the first two have the same cause. The dialog held a
+native `<select name="folderId">`, and a `<select>`'s open list is not part of the page — it is a platform
+window. So its scrollbar was WHITE against the dark dialog and no stylesheet could reach it, and there was
+nowhere to put a filter box, because there is nothing inside a `<select>` but `<option>`s. The third was
+that the dialog sits too low.
+
+**The replacement is ordinary markup.** `pickNotebook` now emits a `.picker-filter` input, a `.picker-list`
+of `.picker-row` divs (one per notebook, sorted by full path, excluded notebooks already gone, `(top level)`
+first when the caller asks for it) and a HIDDEN `folderId` input inside the same `<form name="picker">`. The
+result shape is therefore byte-identical to what every caller and the three harness checks that already
+drive this dialog expect — `{ picker: { folderId } }` — and the `__root` sentinel still maps back to `""`.
+Being ordinary markup, the list takes `::-webkit-scrollbar` rules exactly as `.cockpit-overlay-body` does in
+the panel, and the box above it narrows the rows through `SearchTokens.matchesFilter`, the very rule behind
+the notebook dropdown's filter and the search suggestion list. The dialog widened 300 → 380px, because
+"Parent / Child / Grandchild" is what these rows say.
+
+**The keyboard is a pure module.** `src/ui/panel/notebookPickerModel.js` (UMD, like `searchTokens.js`)
+answers four questions and owns no DOM: which rows survive a filter, where an arrow key lands, what Enter
+commits, what Escape means. The arrows walk the VISIBLE rows and wrap, so a filtered list behaves as though
+the hidden rows were not there; a highlight the filter has hidden is not a position to step from, so down
+enters at the first visible row and up at the last; Enter commits the highlight when it survived and the
+first visible row when it did not, which is what makes "type three letters, press Enter" work. The harness
+drives all of that directly. `notebookPickerWebview.js` is the glue and stays thin: it reads the rows the
+host emitted, hides and shows them, moves one class, and writes the hidden input. It never builds a row.
+
+**On the vertical placement: nothing can be done from inside, and it was worth proving rather than
+asserting.** Joplin 3.6.14's dialog frame is `dialog.dialog-modal-layer.user-webview-dialog` in the MAIN
+document, appended to `body` and opened with `showModal()`. `gui/styles/dialog-modal-layer.scss:8` sets
+`align-items: flex-start`, but `gui/styles/user-webview-dialog.scss:6` sets `align-items: center`, and in
+the compiled `style.min.css` the second rule comes later (line 887 against 847) at equal specificity — so
+the box is centred, vertically and horizontally. A plugin's stylesheet is injected as a `<link>` into the
+IFRAME's head (`services/plugins/UserWebviewIndex.js:115-120`), so it cannot select the dialog, the
+`.content` box, `.user-dialog-wrapper` or the iframe element: those all live in the parent document, and
+there is no `::part`, no `!important` route and no custom property pointing outward. The one lever a plugin
+does have is SIZE — `#joplin-plugin-content` is measured and its size written as `--content-width` /
+`--content-height` inline on the iframe (`services/plugins/UserWebview.tsx:119-122`) — and because the box
+is centred, extra height grows it symmetrically. You cannot bias it upward. `setFitToContent(false)` was
+checked and rejected on evidence rather than on taste: it does not "fill the window", it falls back to the
+`--content-width: 90vw` / `--content-height: 90vh` declared on the dialog element
+(`gui/styles/user-webview-dialog.scss:7-8`) — a 90-percent box, still centred, still not higher up. So the
+dialog is not moved; it is simply TALLER now, which puts its top edge well above where the old two-line
+dialog's sat. That is the whole of what was available.
+
+**Enter-to-submit is real, and it is the host's.** `services/plugins/UserWebviewIndex.js:234-236` listens
+for `submit` on the dialog DOCUMENT and posts `form-submit`; `services/plugins/hooks/useSubmitHandler.ts:9`
+routes it to `onSubmit`, which in `UserWebviewDialog.tsx:58-63` finds the button whose id is one of
+`ok`/`yes`/`confirm`/`submit` and runs its own handler — serialize the forms, close with the result. So the
+iframe's submit event IS the OK button; nothing clicks the real one. The same file also carries its own
+keydown handler at `:237-243` whose Enter branch fires for `target.tagName === 'INPUT' && target.type ===
+'text'`, on `document`, in the bubble phase, without consulting `defaultPrevented`. Our filter box is
+exactly that, so Enter reaches it whatever the dialog's own script does — and it runs AFTER the box's own
+listener, which is the ordering we want: the row is committed into the hidden input first, then the host
+serializes. The script therefore does NOT dispatch anything on Enter; it only calls `preventDefault`, and
+for the other path — the browser's own implicit submission, which this form (one field that blocks it)
+would otherwise perform, navigating the iframe and reaching the host's submit listener a second time. One
+accept, not two. The double click, which has no host handler of its own, dispatches a synthetic `submit`
+event instead: an untrusted submit event never triggers real form submission, so on a host that did not
+listen it is a harmless no-op rather than a navigated-away dialog.
+
+Two smaller confirmations from the same read. The serializer is `new FormData(form)` over
+`document.getElementsByTagName('form')` (`UserWebviewIndex.js:61-81`), so a `type="hidden"` input with a
+`name` is included like any other — visibility has nothing to do with it — and the form's `name` is the key,
+which is why `formData.picker.folderId` still arrives. And Escape has two routes: the iframe's own
+(`UserWebviewIndex.js:240-242` → `findDismissButton`, matching `cancel`/`no`/`reject`) and the native
+`<dialog>` cancel in the parent document, added for isolated iframes. The filter box swallows the first
+Escape when it has text — `stopPropagation` for the first route, `preventDefault` for the second, which is
+what a close request is specified to respect — so the first press clears the box and the second cancels the
+dialog. **The second route is the one thing here that could not be settled from the source**: whether the
+native cancel fires at all when focus is inside a non-isolated plugin iframe is runtime behaviour, so the
+two-step Escape is designed and pinned but not yet seen on screen. Worth one look during the next round.
+
+**One finding that contradicts a standing rule, reported rather than acted on.** The project's gotcha says
+a fit-to-content dialog is measured ONCE, before its scripts run, and never again. In 3.6.14 that is not
+what the code does: `watchElementSize` (`UserWebviewIndex.js:83-92`) installs a `ResizeObserver` plus an
+initial `requestAnimationFrame`, and every size change posts `updateContentSize`, which
+`hooks/useContentSize.ts:17-32` applies unless width, height and the html hash are all unchanged. Nothing
+here relies on that: the rows are still all in the initial markup, the list is still capped in pixels and
+there is still no `@media` rule — a viewport query inside a webview whose size is derived from its own
+content is circular regardless of how often it is measured, and the harness pins its absence. But the rule
+as written is stale for this app version, and somebody should decide whether to restate it.
+
+**Mobile gets the box too.** `openNotebookOverlay` grows the same `.cockpit-overlay-input` filter pinned
+above its rows, narrowing through the same shared matcher, with Enter selecting the first row still visible
+(selecting, not committing — OK still has to be pressed). It is deliberately NOT focused: a focus pops the
+Android soft keyboard over the list the user opened the overlay to read, which is exactly why the notebook
+dropdown leaves its own box unfocused on mobile. The typed text joins the overlay's reload-survival
+descriptor and is re-applied to the freshly built rows on reconstruct, so a renderer kill brings back the
+narrowed list rather than a full one under a selection that no longer explains itself.
+
+**Pins.** Twelve new checks, and the dialog stubs had to learn to record first: `setHtml` and `addScript`
+kept nothing, so nothing about a dialog could be asserted at all — they now keep `dialogHtml` by handle and
+`dialogScripts` as handle/script pairs, and `workspace.selectedFolder` joins the stub so the pre-selection
+can be driven. Three checks on the markup (a filter box above the list, rows sorted by full path with the
+excluded notebook absent and no `<select>` anywhere; the hidden input inside the form with the shown
+notebook's row pre-marked and its id already in the input; `(top level)` first for "Move notebook under…"
+and never for a note move), one on the CSS (the three `::-webkit-scrollbar` rules, a pixel cap, the 380px
+width, `[hidden]` beating the row's own `display`, and no `@media`), one on the three scripts the dialog
+loads in order plus their presence in `dist/`, one on the glue's shape (reads rows, never builds them; every
+decision through the model; the MutationObserver bootstrap), four driving the pure model, and two on the
+mobile overlay. Three mutations, each caught by the pin written for it: the scrollbar rules removed (the CSS
+pin, on the first assertion), an `@media` rule added (the same pin, on the `@media` assertion), and the
+excluded-notebook filter dropped from `pickNotebook` (two markup pins, both listing the excluded notebook
+among the rows).
+
+Suite: 406 harness checks (twelve new), all passing. Playwright: 117 tests in 20 files (110 run, 7 opt-in
+showcase captures) — the multi-move spec updated off `selectOption` onto type-then-click, and a new
+`notebook-picker.spec.ts` with three cases. Not run on this side; the e2e pass is the verifier's.
