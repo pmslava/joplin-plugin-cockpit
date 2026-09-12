@@ -19,7 +19,8 @@
  *                                                                                                                                                  *
  * CONCURRENT EDITS ARE NOT MERGED. Whole-note last-writer-wins. Two devices changing settings at the same moment produce a Joplin conflict copy,     *
  * which the plugin ignores entirely: it always uses the note at the configured id, and the user resolves the conflict themselves. The ONE exception  *
- * is adoption - the first time a device connects to a note that already exists, its own profiles are folded in by name (see adoptSettingsNote).      *
+ * is adoption - the first time this device connects to a note that already carries a payload, its own profiles are folded in by name, whichever      *
+ * route the connection came in by (see mergeOnFirstConnection).                                                                                       *
  *                                                                                                                                                  *
  * A MANGLED NOTE NEVER STOPS ANYTHING. An unreadable body is logged once, the remembered key is cleared, and the plugin keeps running on local        *
  * state; the next local change rewrites the note wholesale. A note that cannot be read at all (a bad id, a note that has not synced to this device    *
@@ -70,6 +71,10 @@ var unresolvedTitle = ""
 var warnedWrongNote = false
 /** A notice raised before there was a panel to show it in, kept until there is. See announceNotice. */
 var pendingNotice = ""
+/** THE FIRST CONNECTION. Set when this device is pointed at a settings note it has not been reading, and consumed by the next successful read of
+ * that note, which merges instead of replacing (see mergeOnFirstConnection). One flag for every route in - the command, a typed title, a pasted id
+ * or link - so the paths cannot drift apart on what "connecting" means. */
+var pendingAdoption = false
 
 /** ONE SETTINGS-NOTE OPERATION AT A TIME.
  *
@@ -218,6 +223,15 @@ async function settingsNoteMoved(){
     } catch (error) {
         return true
     }
+}
+
+/** markFirstConnection *****************************************************************************************************************************
+ * Arm the one-time merge for the note this device is pointed at, ON THE CHAIN so it cannot be set while a read is already deciding. Used by the      *
+ * command for the case the repoint cannot cover: the field already names the note, so writing the same value changes nothing, but this device has    *
+ * never managed to read it - which is a first connection like any other.                                                                             *
+ ***************************************************************************************************************************************************/
+function markFirstConnection(){
+    return withSettingsNote(async () => { pendingAdoption = true })
 }
 
 /** rememberNotice / announceNotice / flushPendingNotice ********************************************************************************************
@@ -435,6 +449,15 @@ async function refreshFromSettingsNoteLocked(reason){
         console.warn(`Cockpit: the settings note (${reason}) carries profiles this build cannot read`, error)
         return
     }
+
+    // THE FIRST CONNECTION MERGES; every read after it replaces. This is the one place it happens, so the command, a typed title and a pasted
+    // id all behave identically - see mergeOnFirstConnection.
+    if (pendingAdoption){
+        pendingAdoption = false
+        applied = await mergeOnFirstConnection(applied, reason)
+        if (!applied) return
+    }
+
     var key = settingsContentKey(applied)
     if (key === lastContentKey) return      // our own write, or something already applied
     lastContentKey = key
@@ -448,6 +471,61 @@ async function refreshFromSettingsNoteLocked(reason){
         initialized = false
         console.warn(`Cockpit: the settings note (${reason}) could not be applied`, error)
     }
+}
+
+/** mergeOnFirstConnection **************************************************************************************************************************
+ * THE ONE-TIME MERGE, for every way a device can connect to a settings note that already exists.                                                    *
+ *                                                                                                                                                    *
+ * Ongoing sync is wholesale by design - a profile deleted on another device has to be able to disappear here - but the FIRST connection is the one    *
+ * moment where both sides hold profiles that were built independently and neither side's absence is a deletion. A local profile whose NAME the note   *
+ * does not carry is appended with a fresh id (names are compared trimmed and case-sensitively: two profiles called "Work" are the same intent, "work" *
+ * and "Work" are two deliberate names), and a synced setting the payload leaves out keeps this device's value.                                        *
+ *                                                                                                                                                    *
+ * It lives HERE, in the read, rather than in the command that used to own it, because there are four ways to connect - the command, typing the note's *
+ * title, pasting its id, pasting a link - and they were drifting: only the command merged, so a user who set the second device up the way the         *
+ * Settings field tells them to silently lost that device's own profiles. One rule, one place.                                                         *
+ *                                                                                                                                                    *
+ * The merged store is WRITTEN BACK before it is applied, and only when something was actually appended: this device must not start treating the note  *
+ * as the truth while holding profiles the note has never heard of. A write-back that fails aborts the whole connection - nothing is applied, the       *
+ * write gate is shut again and the merge is re-armed - because the alternatives are both destructive: applying the merge would leave the other        *
+ * devices permanently behind, and applying the note alone would throw this device's profiles away.                                                    *
+ *                                                                                                                                                    *
+ * Returns the content to apply, or null when the caller must stop.                                                                                    *
+ ***************************************************************************************************************************************************/
+async function mergeOnFirstConnection(applied, reason){
+    var local = null
+    try {
+        local = await collectSettingsContent()
+    } catch (error) {
+        // This device cannot state its own side, so it cannot know what the merge would add. Stop rather than guess in either direction.
+        pendingAdoption = true
+        initialized = false
+        console.warn(`Cockpit: the settings note (${reason}) could not read this device's own state to connect with`, error)
+        return null
+    }
+    var merged = {
+        profiles: normalizeProfileStore(mergeProfileStores(applied.profiles, local.profiles)),
+        settings: Object.assign({}, local.settings, applied.settings),
+    }
+    // Nothing of this device's was missing from the note: the connection is a plain read, and the note is not given a revision for nothing.
+    if (settingsContentKey(merged) === settingsContentKey(applied)) return applied
+    try {
+        await joplin.data.put(['notes', noteId], null, { body: buildSettingsNoteBody(merged, new Date().toISOString()) })
+    } catch (error) {
+        pendingAdoption = true
+        initialized = false
+        console.warn(`Cockpit: the settings note (${reason}) could not be given this device's own profiles`, error)
+        return null
+    }
+    try {
+        var after: any = await joplin.data.get(['notes', noteId], { fields: ['updated_time'] })
+        lastUpdatedTime = (after && after.updated_time) || lastUpdatedTime
+    } catch (error) {
+        // Best effort: an unknown stamp only costs the next tick a body read.
+    }
+    console.info(`Cockpit: connected to the settings note ${noteId} and folded this device's own profiles in - ` +
+        `${merged.profiles.profiles.length} profile(s) in all`)
+    return merged
 }
 
 /** applySettingsPayload ****************************************************************************************************************************
@@ -525,12 +603,18 @@ export async function onSettingsNoteReferenceChanged(announce?){
         if (seededNote && seededNote.id === resolved){
             // The note this device has just CREATED and seeded. Its content is this device's own handwriting, so the read below must
             // recognise it rather than apply it back as though a second device had sent it - an apply is wholesale, and anything the
-            // user changed between the POST and this read would be taken as absent from the incoming state and thrown away.
+            // user changed between the POST and this read would be taken as absent from the incoming state and thrown away. Nothing to
+            // merge either: the note holds exactly this device's state already.
             lastContentKey = seededNote.key
             initialized = true
+            pendingAdoption = false
         } else {
             lastContentKey = null
             initialized = false
+            // A REPOINT IS A FIRST CONNECTION, whatever the user typed to cause it - a title, a bare id, a Markdown link, a joplin:// URL.
+            // The read it starts therefore folds this device's own profiles into the note instead of replacing them (mergeOnFirstConnection).
+            // Repointing at a DIFFERENT note later is a first connection to that note, and merges again.
+            pendingAdoption = !!resolved
         }
         seededNote = null
     })
@@ -673,9 +757,7 @@ async function connectSettingsNoteLocked(){
             // A stale id: the note was deleted, or this device has never received it. Fall through and look for one by title.
         }
         if (readable){
-            await refreshFromSettingsNote("connect")
-            console.info(`Cockpit: the settings note is note ${noteId}`)
-            showPanelToast("Cockpit: settings note connected")
+            await connectToNote(noteId)
             return
         }
     }
@@ -685,48 +767,27 @@ async function connectSettingsNoteLocked(){
         return
     }
     if (matches.length === 1){
-        await adoptSettingsNote(String(matches[0].id))
+        await connectToNote(String(matches[0].id))
         return
     }
     await createSettingsNote()
 }
 
-/** adoptSettingsNote *******************************************************************************************************************************
- * Connect to a settings note that already exists, folding this device's own profiles into it.                                                       *
+/** connectToNote ***********************************************************************************************************************************
+ * Point this device at an existing settings note, by the ordinary route: write the id into the setting and let the repoint read it - which is where  *
+ * the one-time merge lives (mergeOnFirstConnection), so the command gets exactly what typing the title into the Settings field gets.                 *
  *                                                                                                                                                    *
- * THE MERGE HAPPENS EXACTLY ONCE, HERE, AND NOWHERE ELSE. Ongoing sync is wholesale by design - a profile deleted on the other device has to be able  *
- * to disappear here - but the very first connection is the one moment where both sides hold profiles that were built independently and neither is a   *
- * deletion. A local profile whose NAME is not already in the note is appended with a fresh id (names are compared trimmed and case-sensitively: two    *
- * profiles called "Work" are the same intent, "work" and "Work" are two deliberate names). The merged store is written back to the note before the     *
- * setting is pointed at it, so the read that the repoint starts is what installs the merge on this device - one path, not two.                         *
+ * When the field ALREADY names that note, writing the same value changes nothing and no repoint follows, so the merge is armed by hand here. That     *
+ * case is real: a device whose note had not synced yet read nothing at startup, and running the command is how the user asks it to try again.         *
  ***************************************************************************************************************************************************/
-async function adoptSettingsNote(adoptedId){
-    var body = ""
-    try {
-        var note: any = await joplin.data.get(['notes', adoptedId], { fields: ['body'] })
-        body = (note && note.body) || ""
-    } catch (error) {
-        console.warn(`Cockpit: the settings note ${adoptedId} could not be read`, error)
-        showPanelToast("Cockpit: the settings note could not be read.")
-        return
+async function connectToNote(targetId){
+    if (targetId === noteId){
+        if (!initialized) await markFirstConnection()
+        await refreshFromSettingsNote("connect")
+    } else {
+        await joplin.settings.setValue(settingsNoteIdSettingKey, targetId)
     }
-    var payload = parseSettingsNoteBody(body)
-    var local = await collectSettingsContent()
-    // A note that exists but holds no readable payload (the user made it by hand) is adopted as empty: the merge below is then simply
-    // this device's own state, which is the seed that note was always going to need.
-    var merged = {
-        profiles: payload ? mergeProfileStores(payload.profiles, local.profiles) : local.profiles,
-        settings: payload ? Object.assign({}, local.settings, payload.settings) : local.settings,
-    }
-    // NOTHING TO ADD, NOTHING TO WRITE. When this device holds no profile the note is missing and no setting it leaves out, the merge is
-    // the note's own content and the PUT would be a no-op revision on a note the user may be looking at. Compared through the same
-    // normalisation the read side uses, so "the same" means the same thing on both sides of the connection.
-    var adoptedKey = payload ? settingsContentKey({ profiles: normalizeProfileStore(payload.profiles), settings: payload.settings }) : null
-    if (adoptedKey === null || settingsContentKey(merged) !== adoptedKey){
-        await joplin.data.put(['notes', adoptedId], null, { body: buildSettingsNoteBody(merged, new Date().toISOString()) })
-    }
-    await joplin.settings.setValue(settingsNoteIdSettingKey, adoptedId)
-    console.info(`Cockpit: adopted the settings note ${adoptedId} with ${merged.profiles.profiles.length} profile(s)`)
+    console.info(`Cockpit: the settings note is note ${targetId}`)
     showPanelToast("Cockpit: settings note connected")
 }
 
