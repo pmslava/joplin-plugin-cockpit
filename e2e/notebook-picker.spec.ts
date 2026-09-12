@@ -147,23 +147,28 @@ test.describe('Notebook picker dialog (desktop)', () => {
    * press Enter, without touching the list or the OK button.
    *
    * It also covers the two things that make that route correct. The picker pre-selects the notebook the app is
-   * showing - Picker Beta by now, since the case above created a to-do there - so typing "alp" HIDES the
-   * pre-selection, and the selection has to follow the filter or Enter would commit a notebook that is no longer
-   * on screen. And Enter must accept the dialog exactly once: Joplin answers a submit inside the dialog document
-   * with the OK button, so a second submit (the browser's own implicit one) would close it twice over.
+   * showing, so the case types the OTHER notebook: that HIDES the pre-selection, and the selection has to follow
+   * the filter or Enter would commit a notebook that is no longer on screen. Which notebook is pre-selected is
+   * read from the dialog rather than assumed, because a retry runs in a fresh worker whose beforeAll leaves the
+   * app on a different notebook than the case above does. And Enter must accept the dialog exactly once: Joplin
+   * answers a submit inside the dialog document with the OK button, so a second submit (the browser's own
+   * implicit one) would close it twice over.
    */
   test('typing and pressing Enter picks the typed notebook and accepts the dialog', async () => {
     const { win } = joplin;
     const picker = await openPickerFromNewTodo(win);
 
-    // Precondition: the row that starts selected is NOT the one about to be typed.
-    await expect(picker.locator('.picker-row.-selected')).toHaveText(beta);
+    // The pre-selection is whatever notebook the app is showing; the case types the other one, so the typed
+    // filter always hides the pre-selected row.
+    const preselected = ((await picker.locator('.picker-row.-selected').textContent()) || '').trim();
+    expect([alpha, beta]).toContain(preselected);
+    const target = preselected === alpha ? beta : alpha;
 
-    await picker.locator('.picker-filter').fill('alp');
+    await picker.locator('.picker-filter').fill(target === alpha ? 'alp' : 'bet');
     const visible = picker.locator('.picker-row:not([hidden])');
     await expect(visible).toHaveCount(1, { timeout: 10_000 });
     // The selection followed the filter: it is on the one row still showing, not on the hidden pre-selection.
-    await expect(picker.locator('.picker-row.-selected')).toHaveText(alpha);
+    await expect(picker.locator('.picker-row.-selected')).toHaveText(target);
 
     await picker.locator('.picker-filter').press('Enter');
 
@@ -177,6 +182,6 @@ test.describe('Notebook picker dialog (desktop)', () => {
     await waitForPanelTodo(win, enterCreated);
     await expect
       .poll(async () => notebookOf(win, enterCreated), { timeout: PANEL_REFRESH_TIMEOUT, intervals: [1500, 2500, 4000] })
-      .toBe(alpha);
+      .toBe(target);
   });
 });
