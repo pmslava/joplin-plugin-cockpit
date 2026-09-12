@@ -11,6 +11,11 @@ import { isMobile } from "../../core/platform"
  * Sets up the menu used by the plugin. Menus are a desktop only part of the plugin API; on mobile the same commands are reachable from the buttons *
  * in the panel heading.                                                                                                                            *
  *                                                                                                                                                  *
+ * WHAT IS NOT HERE: 'cockpit.connectSettingsNote'. It had a menu item in 2.6.0 and the owner's first live round took it out again - setting up the  *
+ * settings note is a one-time action, and it belongs in the one place a user goes to configure the plugin, which is Settings > Plugins > Cockpit.   *
+ * Typing the note's title into that field now does everything the item did (see resolveSettingsNoteReference in core/settingsSync.ts). The command  *
+ * stays REGISTERED, reachable from the command palette, exactly like the two commands Whereabouts calls.                                            *
+ *                                                                                                                                                  *
  * The toggle item carries a keyboard shortcut, and it is the accelerator here that puts the command on Joplin's Options > Keyboard Shortcuts       *
  * screen at all: views.menus.create feeds an item to KeymapService.registerCommandAccelerator ONLY when the item has one, and commands.register    *
  * and toolbarButtons.create never do. Without it the command was invisible there and a user could not even bind a key by hand (issue 4). Joplin    *
@@ -30,7 +35,6 @@ import { isMobile } from "../../core/platform"
             {commandName: 'togglePanelVisibility', accelerator: 'Ctrl+Shift+H'},
             {commandName: 'toggleCockpitToolbarButton'},
             {commandName: 'showStylerDialog'},
-            {commandName: 'cockpit.connectSettingsNote'},
         ],
         MenuItemLocation.Tools
     )

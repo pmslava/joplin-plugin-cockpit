@@ -220,7 +220,7 @@ async function settingsNoteMoved(){
     }
 }
 
-/** announceNotice / flushPendingNotice *************************************************************************************************************
+/** rememberNotice / announceNotice / flushPendingNotice ********************************************************************************************
  * Tell the user something short, wherever in the startup order we happen to be.                                                                      *
  *                                                                                                                                                    *
  * setupSettingsSync runs beside the profile store it syncs, which is well before setupPanel - so a notice raised while resolving the setting at       *
@@ -228,11 +228,18 @@ async function settingsNoteMoved(){
  * will never read. The automatic retries are deliberately silent, so that was the ONLY chance to say it. The notice is therefore kept until there is  *
  * a panel, and the startup read - which runs after setupPanel - flushes it. Exactly one notice is ever pending: a second overwrites the first, which  *
  * is right, because the later one describes the state the device is actually in.                                                                     *
+ *                                                                                                                                                    *
+ * rememberNotice is the delivery half on its own, for the things that are not complaints: setting the note up from the Settings field can happen at   *
+ * startup too, and "Cockpit: settings note created" deserves to survive that just as much as a warning does.                                          *
  ***************************************************************************************************************************************************/
-function announceNotice(toast, logLine?){
-    console.warn(logLine || toast)
+function rememberNotice(toast){
     pendingNotice = toast
     flushPendingNotice()
+}
+
+function announceNotice(toast, logLine?){
+    console.warn(logLine || toast)
+    rememberNotice(toast)
 }
 
 function flushPendingNotice(){
@@ -534,12 +541,18 @@ export async function onSettingsNoteReferenceChanged(announce?){
 }
 
 /** resolveSettingsNoteReference ********************************************************************************************************************
- * What the setting names, as a note id, or "" for "nothing usable".                                                                                 *
+ * What the setting names, as a note id, or "" for "nothing usable". THIS IS THE WHOLE SETUP UI.                                                     *
  *                                                                                                                                                    *
- * An ID in any of its four spellings is canonicalised to the bare id, so the field ends up holding the thing the rest of the plugin uses. A TITLE is  *
- * searched for - this is how a phone connects, where there is no comfortable way to carry an id across - and, when exactly one non-trashed note       *
- * carries that title exactly, the field is rewritten to its id. Zero or several matches leave the field exactly as typed (a user who mistyped can see  *
- * what they typed) and turn the feature off until it resolves.                                                                                        *
+ * 2.6.0 shipped a Tools menu item to create the note and a Settings field to point at one; the owner's first live round removed the menu item, and    *
+ * rightly - creating the note is a one-time action, and a user who is configuring a plugin is already in Settings. So the field does all of it:       *
+ *                                                                                                                                                    *
+ *   AN ID, in any of its four spellings, is canonicalised to the bare id - what the rest of the plugin uses.                                          *
+ *   THE CANONICAL TITLE with no note behind it yet is a request to SET THE FEATURE UP: the note is created here, exactly as the command creates it     *
+ *     (same placement, same seed, same token), and the field is rewritten to its id. That makes the first device's whole setup "type the title".      *
+ *   ANY TITLE with exactly one note behind it is that note - which is the second device, where the note has already synced in.                        *
+ *   ANY OTHER TITLE that matches nothing is left exactly as typed (a user who mistyped can see what they typed), with a notice and a silent retry at   *
+ *     the next completed sync. Creating for an arbitrary title would make a typo into a second mailbox, which is the one outcome worth refusing.      *
+ *   SEVERAL matches are refused too: guessing which mailbox a user meant is not a thing a plugin should do.                                            *
  *                                                                                                                                                    *
  * Both writes are guarded by a value comparison, the same loop pattern resolveExcludedNotebooks uses: the setValue re-enters this handler, and on that *
  * pass the field already holds the id, so nothing is written and the recursion stops.                                                                 *
@@ -562,6 +575,18 @@ async function resolveSettingsNoteReference(announce){
         await joplin.settings.setValue(settingsNoteIdSettingKey, String(matches[0].id))
         return String(matches[0].id)
     }
+    if (!matches.length && isCanonicalSettingsNoteTitle(reference.title)){
+        // THE SETUP GESTURE. The user typed the name of the thing they want and there is no such note, so make it - the same
+        // createSettingsNote the command runs, which also writes the field, so the id is what this returns. A creation that fails
+        // has already said so; the title is remembered and the next completed sync tries again.
+        var createdId = await createSettingsNote()
+        if (createdId){
+            unresolvedTitle = ""
+            return createdId
+        }
+        unresolvedTitle = reference.title
+        return ""
+    }
     // Remembered so that a completed sync tries again (see syncSettingsNote). Several matches are remembered too: the user is told to paste
     // an id, but the ambiguity can equally be resolved by them deleting the spare note, and a retry then costs one search.
     unresolvedTitle = reference.title
@@ -572,6 +597,14 @@ async function resolveSettingsNoteReference(announce){
     // otherwise repeat the same toast after every sync. A notice raised at startup is kept until there is a panel to show it in.
     if (announce) announceNotice(complaint)
     return ""
+}
+
+/** isCanonicalSettingsNoteTitle ********************************************************************************************************************
+ * Whether what the user typed is the settings note's own name. Trimmed and case-insensitive, because this is a name a person types from memory on a  *
+ * phone keyboard, not an identifier - and it is the one string that turns "no such note" into "make one".                                            *
+ ***************************************************************************************************************************************************/
+function isCanonicalSettingsNoteTitle(title){
+    return String(title || "").trim().toLowerCase() === String(SETTINGS_NOTE_TITLE).toLowerCase()
 }
 
 /** findNotesTitled *********************************************************************************************************************************
@@ -610,7 +643,8 @@ async function findNotesTitled(title){
 }
 
 /** connectSettingsNote *****************************************************************************************************************************
- * The Tools > Cockpit > "Connect settings note" command, and the whole of the desktop setup flow.                                                   *
+ * The "Cockpit: Connect settings note" command. The SETTINGS FIELD is the setup UI (see resolveSettingsNoteReference); this stays registered for the *
+ * command palette, and for another plugin or a script that wants the same three steps in one call, but it has no menu item any more.                 *
  *                                                                                                                                                    *
  *   (a) ALREADY CONNECTED, and the note reads: nothing to decide. Read it, apply whatever it says, and say so.                                        *
  *   (b) A NOTE ALREADY EXISTS with the exact title - the ordinary second-device case, where the first device made one and it has synced here. Exactly  *
@@ -716,7 +750,8 @@ function mergeProfileStores(rawAdopted, local){
 }
 
 /** createSettingsNote ******************************************************************************************************************************
- * Create the note, seeded from this device's current state, and point the setting at it.                                                            *
+ * Create the note, seeded from this device's current state, and point the setting at it. Returns the new note's id, or "" when the app would not     *
+ * make one - the ONE piece of creation code there is, shared by the Settings field's setup gesture and by the command.                               *
  *                                                                                                                                                    *
  * THE SEED'S CONTENT KEY IS REMEMBERED BEFORE the setting is written and CONSUMED ON THE CHAIN by the repoint that write causes (see                  *
  * onSettingsNoteReferenceChanged). Without it this device reads its OWN freshly written seed as though a second device had sent it - and an apply is  *
@@ -734,9 +769,9 @@ async function createSettingsNote(){
     })
     var createdId = String((created && created.id) || "")
     if (!createdId){
-        console.warn("Cockpit: the settings note was created but the app returned no id for it")
-        showPanelToast("Cockpit: the settings note could not be created.")
-        return
+        announceNotice("Cockpit: the settings note could not be created.",
+            "Cockpit: the settings note was created but the app returned no id for it")
+        return ""
     }
     seededNote = { id: createdId, key: settingsContentKey(content) }
     await joplin.settings.setValue(settingsNoteIdSettingKey, createdId)
@@ -749,7 +784,10 @@ async function createSettingsNote(){
         warnedUnparseable = false
     })
     console.info(`Cockpit: created the settings note ${createdId}`)
-    showPanelToast("Cockpit: settings note created")
+    // Through the pending-notice path, not straight at the panel: the Settings field can trigger this at startup (a field still holding
+    // the title because a previous attempt failed), and that is before there is a panel to toast into.
+    rememberNotice("Cockpit: settings note created")
+    return createdId
 }
 
 /** pickFolderForSettingsNote ***********************************************************************************************************************

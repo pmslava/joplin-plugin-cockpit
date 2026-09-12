@@ -167,7 +167,7 @@ export async function setupSettings(){
 		},
 		[settingsNoteIdSettingKey]: {
 			label: "Settings note",
-			description: "The Joplin note that carries Cockpit's profiles and view settings to your other devices through your normal Joplin sync. Leave empty to keep everything on this device. On desktop run Tools > Cockpit > Connect settings note to create the note and fill this in. On another device, paste the note's id or link here, or type its exact title, and Cockpit finds it. Synced: profiles, custom panel CSS, theme colours, completed-to-do style, day start time and excluded notebooks. Per device: font and circle sizes, refresh interval, toolbar button, title-bar options and which profile is selected.",
+			description: "Type Joplin Cockpit Plugin Settings here. Cockpit creates that note if it does not exist yet, or connects to it if it has already synced in from another device - so on a second device, sync first, then type the same title. A note id or link also works. Leave empty to keep everything on this device. Synced: profiles, custom panel CSS, theme colours, completed-to-do style, day start time and excluded notebooks. Per device: font and circle sizes, refresh interval, toolbar button, title-bar options and which profile is selected.",
 			value: "",
 			type: SettingItemType.String,
 			public: true,
