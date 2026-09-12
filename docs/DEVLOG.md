@@ -1915,7 +1915,7 @@ The cause was one missing field, and it hid a second defect. "Toggle Cockpit Pan
 **The e2e gate found a date-fragile spec.** Playwright: 114 tests in 19 files (107 run, 7 opt-in showcase captures), run in full here as the release gate: 106 passed and one failed twice, `mobile-drag.spec.ts` › "a drop on the No Due Date heading clears the due date". Its retry named the cause itself: the "No Due Date" heading was 20px below the visible list (y=856, list 112..836, scroll top 0 of 1233). The file's fixture seeds exactly enough rows for that last heading to be on screen at scroll top 0, "the geometry the file was last proven green on" — on the 4th. On the 11th an overdue row reads "September 10, 2026 - td-band-up-<stamp>", one character longer than "September 3", and five of them wrapped onto a second line, which is the 20px. Not the plugin: the same single test failed the same way against the origin/main build in a separate worktree. The fix is in the spec only: that one case now scrolls the heading into view before the finger goes down, parked 120px above the bottom edge so it stays clear of the 72px auto-scroll band, and never mid-gesture, which `assertOnScreen` refuses by design; `settle()` returns the next case to the top as before.
 Re-run of the whole `mobile-drag` file after the fix: 20 passed, the pre-scroll moving the list by 118px. The other eighteen spec files were not run a second time: nothing in the plugin changed after the full pass, and the fix touches one case in one file.
 
-## 2026-09-12 — vNEXT: the notebook picker becomes a list Cockpit draws
+## 2026-09-12 — v2.6.0: the notebook picker becomes a list Cockpit draws
 
 The owner's screenshot: the "Create to-do in notebook" dialog on a dark theme, over a vault of about a
 hundred and twenty notebooks. Three complaints, and the first two have the same cause. The dialog held a
@@ -2076,7 +2076,7 @@ and assert both that the to-do landed in the typed notebook and that the dialog 
 case that covers the re-pointed selection and the single accept together. Not run on this side; the e2e
 pass is the verifier's.
 
-## 2026-09-12 — vNEXT: the settings note — profiles and view settings between devices
+## 2026-09-12 — v2.6.0: the settings note — profiles and view settings between devices
 
 Issue 5: Joplin syncs notes and never plugin settings, so every device needs its profiles built again by hand. The owner's decision settled the shape before any code: ONE note, titled exactly `Joplin Cockpit Plugin Settings`, carrying a JSON payload; its id in a new public setting; empty setting means the plugin behaves exactly as it did yesterday. The design is Harper's sync note (same author, same conventions), ported rather than reinvented — a mailbox read whole and written whole, with the loop-prevention token that makes such a scheme terminate.
 
