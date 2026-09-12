@@ -1192,6 +1192,32 @@ async function main() {
         await disp.setSetting('excludedNotebooks', '')
     })
 
+    await test('excluded notebooks display: a full notebook id pasted into the field resolves, and an unknown one is still a typo', async () => {
+        // The field PRINTS ids now, and the setting's own description offers pasting one, so a full id has to be an entry in
+        // its own right - resolveEntry only ever knew titles and paths, so before this a pasted id was read as a name that
+        // matched nothing and kept as a typo. It comes back rewritten like anything else.
+        await disp.setSetting('excludedNotebooks', idArchive)
+        assert.strictEqual(disp.settings.excludedNotebookIds, idArchive, 'the notebook that id names is the one excluded')
+        assert.strictEqual(disp.settings.excludedNotebooks, 'Archive (b0b0b0b0)', 'and the field answers with the name and the short id')
+        // Upper case is the same id: Joplin writes them lower-case, but a user pasting from somewhere else may not.
+        await disp.setSetting('excludedNotebooks', idJoplin.toUpperCase())
+        assert.strictEqual(disp.settings.excludedNotebookIds, idJoplin, 'case is not part of an id')
+        // An id that names nothing here is exactly a typo, and is treated as one - not silently excluded, not dropped.
+        const unknown = 'dddddddd' + '0'.repeat(24)
+        await disp.setSetting('excludedNotebooks', `Archive, ${unknown}`)
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (b0b0b0b0), ${unknown}`, 'an unknown id is kept verbatim, with nothing invented')
+        assert.strictEqual(disp.settings.excludedNotebookIds, idArchive, 'and excludes nothing')
+        await disp.setSetting('excludedNotebooks', '')
+        // THE COPY MUST MATCH THE BEHAVIOUR. The description is the only place a user is told a bare id works at all.
+        const settingsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settings.ts'), 'utf8')
+        const description = /\[EXCLUDED_NOTEBOOKS_KEY\]: \{[\s\S]*?description: "([^"]*)"/.exec(settingsSource)
+        assert.ok(description, 'the Excluded notebooks setting must carry a description')
+        assert.ok(/or a notebook id/i.test(description[1]), 'which promises a notebook id is accepted - the behaviour above')
+        assert.ok(/Name \(id\)/.test(description[1]), 'and says what the field shows back')
+        const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8')
+        assert.ok(/a name, a Parent\/Sub path or a full id/.test(readme), 'and the README says the same three spellings')
+    })
+
     // ---- the short id itself: the pure module both settings share ------------------------------------------------
     const ShortID = require('../src/core/shortId.js')
 
@@ -8485,6 +8511,54 @@ async function main() {
             assert.deepStrictEqual(SettingsNote.splitDisplayID(text), ShortID.splitDisplayID(text),
                 `splitDisplayID("${text}") must mean the same in both copies`)
         }
+        // ...AND THE SAME COMPARISON OVER SHAPES NOBODY THOUGHT OF. The list above only pins what someone wrote down; a
+        // duplicated function drifts in the case that was never written down. So the two copies are also run against a few
+        // thousand generated ids and texts - from a SEEDED generator (an LCG in exact 32-bit arithmetic via Math.imul), so
+        // this is a fixed set of cases that happens to be large, not a coin flip that fails for one person on a Tuesday.
+        let lcg = 20260913 >>> 0
+        const nextInt = (bound) => ((lcg = (Math.imul(lcg, 1664525) + 1013904223) >>> 0) % bound)
+        const HEX_CHARS = '0123456789abcdefABCDEF'
+        const JUNK_CHARS = 'ghijklmnopqrstuvwxyz -_.()/'
+        const pick = (alphabet, length) => {
+            let out = ''
+            for (let index = 0; index < length; index++) out += alphabet[nextInt(alphabet.length)]
+            return out
+        }
+        // A generated id: mostly real-shaped (32 hex), with the near misses that decide the refusals - too short, too long,
+        // exactly six, and outright junk.
+        // Surrounding whitespace is generated on purpose: trimming and lower-casing are normalisation the two copies each do
+        // for themselves, and a drift there is invisible to any case written out by hand (nobody writes " abcdef01 ").
+        const padded = (text) => `${pick(' ', nextInt(2))}${text}${pick(' ', nextInt(2))}`
+        const someID = () => {
+            switch (nextInt(7)){
+                case 0: return pick(HEX_CHARS, 32)
+                case 1: return pick(HEX_CHARS, 1 + nextInt(7))
+                case 2: return pick(HEX_CHARS, 6)
+                case 3: return pick(HEX_CHARS, 8 + nextInt(26))
+                case 4: return pick(HEX_CHARS + JUNK_CHARS, 1 + nextInt(34))
+                case 5: return padded(pick(HEX_CHARS, 6 + nextInt(27)))
+                default: return pick(HEX_CHARS, 32)
+            }
+        }
+        let fuzzed = 0
+        for (let round = 0; round < 3000; round++){
+            const id = someID()
+            const rivals = []
+            for (let index = 0, count = nextInt(4); index < count; index++){
+                // Half the rivals SHARE A PREFIX with the id, because two random ids practically never do - and the
+                // lengthening is the only part of this function with a decision in it.
+                rivals.push(nextInt(2) && id.length > 8 ? id.slice(0, 8 + 2 * nextInt(8)) + pick(HEX_CHARS, 32) : someID())
+            }
+            assert.strictEqual(SettingsNote.shortID(id, rivals), ShortID.shortID(id, rivals),
+                `shortID("${id}", ${JSON.stringify(rivals)}) must mean the same in both copies`)
+            // The split, over names and bracketed groups built from the same alphabets, with and without the bracket.
+            const name = pick(HEX_CHARS + JUNK_CHARS, nextInt(12))
+            const text = padded(nextInt(2) ? `${name}${pick(' ', nextInt(3))}(${someID()})` : name)
+            assert.deepStrictEqual(SettingsNote.splitDisplayID(text), ShortID.splitDisplayID(text),
+                `splitDisplayID(${JSON.stringify(text)}) must mean the same in both copies`)
+            fuzzed++
+        }
+        assert.strictEqual(fuzzed, 3000, 'the generated cases must actually have run')
     })
 
     // ---- OFF: the whole feature is opt-in, and an install that never opts in must pay nothing for it ----------------
@@ -8794,6 +8868,63 @@ async function main() {
         assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_OTHER_ID, OWN_TITLE), 'and the field shows that note by name and id')
         assert.deepStrictEqual(syncProfileNames(state), ['On the other note', 'Shared'],
             'pointing at a different note is a first connection to it, so this device\'s own profile is folded in')
+    })
+
+    await test('settings note display: another device\'s display form NEVER creates a second note - it waits for that one', async () => {
+        // THE PASTE THE README INVITES. A user reads device 1's field, types "Joplin Cockpit Plugin Settings (11111111)" into device 2
+        // before the note has synced down, and the canonical title is sitting right there inside it. Creating for that would hand them a
+        // second mailbox and two devices talking past each other in silence - the very outcome the typed-title guard exists to refuse.
+        // A display form is text COCKPIT wrote on some device, so it always means "this note exists somewhere": it waits.
+        const state = await runSync('display-no-create', {
+            notes: {},
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', 'Joplin Cockpit Plugin Settings (11111111)'))
+        assert.deepStrictEqual(state.dataPosts, [], 'nothing is created for a display form, canonical title inside it or not')
+        assert.strictEqual(state.settings.settingsNoteId, 'Joplin Cockpit Plugin Settings (11111111)', 'the field is left exactly as pasted')
+        assert.strictEqual(state.settings.settingsNoteResolvedId, '', 'and nothing is pointed at')
+        assert.ok(state.panelMessages.some(m => m[0] === 'panelToast' && /no note titled/i.test(String(m[1]))),
+            'the user is told it was not found - which is true, and tells them to wait for the sync')
+        // ...and the promise that notice makes is kept: the retry is armed, so the note arriving with a sync connects it.
+        state.notes[SYNC_NOTE_ID] = syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings()))
+        await state.withTimers(() => state.syncCompleteHandler({}))
+        assert.deepStrictEqual(state.dataPosts, [], 'still nothing created')
+        assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID, 'the retry found the note the paste was always naming')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'and the field now shows it')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop', 'Only on this device'],
+            'connecting to it is this device\'s first connection, so its own profile is folded in - exactly once')
+        const merged = state.notePuts.filter(put => put.id === SYNC_NOTE_ID)
+        assert.strictEqual(merged.length, 1, 'one write, carrying the merged store')
+    })
+
+    await test('settings note display: a note whose own title ends in a hex word is still connected to by that title', async () => {
+        // The price of splitting a display form on faith: there is no map of note ids to check the brackets against, so a note a
+        // user really called "Cockpit Settings (20240101)" has had part of its name eaten - digits are hex. The name half finds
+        // nothing, so the WHOLE text is tried once as the title it turns out to be. Same for (123456), (decade), (facade), (abc123).
+        const oddTitle = 'Cockpit Settings (20240101)'
+        const state = await runSync('display-hex-title', {
+            notes: {
+                [SYNC_NOTE_ID]: { id: SYNC_NOTE_ID, title: oddTitle, updated_time: 10,
+                    body: syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings()) },
+            },
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', oddTitle))
+        assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID, 'the note of that exact name is what was connected to')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID, oddTitle),
+            'and the field shows it by its whole name, with its own short id added')
+        assert.deepStrictEqual(state.dataPosts, [], 'nothing is created - the note was there all along')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop', 'Only on this device'], 'and it is connected to, merge and all')
     })
 
     await test('settings note reference: an ambiguous title is left exactly as typed, and nothing is read or written', async () => {

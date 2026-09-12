@@ -44,6 +44,9 @@ export function parseExcludedIds(raw){
  ***************************************************************************************************************************************************/
 const { shortID, splitDisplayID } = require("./shortId")
 
+/** A full Joplin folder id, as the user pastes it: 32 hex characters. */
+var FULL_ID_PATTERN = /^[0-9a-f]{32}$/
+
 /** idsWithPrefix **********************************************************************************************************************************
  * The notebook ids in the map that begin with this (already lower-cased) prefix. The parse side's whole question: a bracketed group is only an id     *
  * when it actually names something here.                                                                                                             *
@@ -124,6 +127,10 @@ export function displayLabel(map, id){
  * the name, so a notebook genuinely titled "Budget (deadbeef)" keeps working. When the stripped prefix names exactly one notebook, THAT ID WINS over   *
  * the name in front of it: the user may not have re-typed the field since the notebook was renamed, and the id is the thing that was true. A prefix    *
  * several notebooks share settles nothing, so the name part is resolved exactly as it always was.                                                      *
+ *                                                                                                                                                     *
+ * A BARE FULL ID is an entry in its own right, and has to be: the field now PRINTS ids, so a user who wants to be exact will paste one, and the        *
+ * setting's own description offers it. It is matched against the map rather than against titles (resolveEntry only ever knew names and paths), and     *
+ * comes back rewritten as "Name (short id)" like everything else. An unknown 32-hex string matches nothing and is kept verbatim, like any typo.        *
  ***************************************************************************************************************************************************/
 function resolveTypedEntry(map, entry){
     var text = String(entry || "").trim()
@@ -133,6 +140,12 @@ function resolveTypedEntry(map, entry){
         var hits = idsWithPrefix(map, split.id)
         if (hits.length === 1) return hits
         if (hits.length > 1) return resolveEntry(map, split.name)
+    }
+    var pasted = text.toLowerCase()
+    if (FULL_ID_PATTERN.test(pasted)){
+        // A 32-character prefix match IS an exact match, so this is the one lookup rather than a second spelling of it.
+        var exact = idsWithPrefix(map, pasted)
+        if (exact.length === 1) return exact
     }
     return resolveEntry(map, text)
 }

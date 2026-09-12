@@ -692,8 +692,9 @@ export async function onSettingsNoteReferenceChanged(announce?){
  *     every read and write of the note actually uses. The visible field becomes "<title> (<short id>)" as soon as the read knows the title.           *
  *   THE DISPLAY FORM this device wrote, whose short id is still the start of the stored id, means UNCHANGED: no search, no repoint, no re-merge. That *
  *     is the path every startup of a connected device takes. One whose short id does NOT match is resolved from scratch by its title, like any title.  *
- *   THE CANONICAL TITLE with no note behind it yet is a request to SET THE FEATURE UP: the note is created here, exactly as the command creates it     *
- *     (same placement, same seed, same token), and the field is rewritten to its id. That makes the first device's whole setup "type the title".      *
+ *   THE CANONICAL TITLE, TYPED, with no note behind it yet is a request to SET THE FEATURE UP: the note is created here, exactly as the command      *
+ *     creates it (same placement, same seed, same token), and the field is rewritten to it. That makes the first device's whole setup "type the       *
+ *     title". Only a TYPED title creates: a display form says the note exists somewhere, so it waits for it instead of making a second one.           *
  *   ANY TITLE with exactly one note behind it is that note - which is the second device, where the note has already synced in.                        *
  *   ANY OTHER TITLE that matches nothing is left exactly as typed (a user who mistyped can see what they typed), with a notice and a silent retry at   *
  *     the next completed sync. Creating for an arbitrary title would make a typo into a second mailbox, which is the one outcome worth refusing.      *
@@ -732,12 +733,21 @@ async function resolveSettingsNoteReference(announce){
     // A TITLE - or a display form whose short id is NOT the note this device is holding, which means the user edited the box or pasted someone
     // else's text. Both are resolved from scratch by the name, through the one search path, and both are repoints like any other.
     var matches = await findNotesTitled(reference.title)
+    // A DISPLAY FORM IS SPLIT ON FAITH, and this is where that is paid for. The notebook field can ask its map whether the bracketed group is
+    // really an id; there is no such map for notes - which is the whole reason the full id is stored beside the field - so a note a user
+    // genuinely called "Cockpit Settings (20240101)" has just had a real part of its name eaten (digits are hex). When the name half finds
+    // nothing, the WHOLE text is tried once as the title it may well be, before anything is given up on.
+    if (!matches.length && reference.kind === "display") matches = await findNotesTitled(raw.trim())
     if (matches.length === 1){
         unresolvedTitle = ""
         await writeSettingsNoteReference(String(matches[0].id), String(matches[0].title || ""))
         return String(matches[0].id)
     }
-    if (!matches.length && isCanonicalSettingsNoteTitle(reference.title)){
+    // ...AND THE CREATE GESTURE IS FOR A TYPED TITLE ONLY. A display form is text Cockpit itself wrote on some device, so it always means
+    // "this note exists somewhere" - most often on the device it was copied from, which has simply not synced here yet. Creating for it would
+    // give that user a SECOND mailbox and two devices talking past each other in silence, which is the one outcome worth refusing outright.
+    // It waits instead: the title is remembered, the toast says so, and the next completed sync tries again.
+    if (!matches.length && reference.kind === "title" && isCanonicalSettingsNoteTitle(reference.title)){
         // THE SETUP GESTURE. The user typed the name of the thing they want and there is no such note, so make it - the same
         // createSettingsNote the command runs, which also writes the field, so the id is what this returns. A creation that fails
         // has already said so; the title is remembered and the next completed sync tries again.

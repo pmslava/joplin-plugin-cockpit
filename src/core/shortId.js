@@ -29,7 +29,8 @@
     /** An id in the spelling this display form can carry: 6 to 32 lower-case hex characters. A Joplin item id is 32 of them. */
     var SHORT_ID_PATTERN = /^[0-9a-f]{6,32}$/
 
-    /** "<name> (<id>)", with at least one space before the bracket and a non-blank name in front of it. Lazy, so the LAST bracketed group wins. */
+    /** "<name> (<id>)", with at least one space before the bracket and a non-blank name in front of it. The name is GREEDY, which is what makes the
+     * LAST bracketed group the id: "Budget (deadbeef) (c0ffee11)" is the notebook called "Budget (deadbeef)", not the one called "Budget". */
     var DISPLAY_SUFFIX = /^(.*\S)\s+\(([0-9a-fA-F]{6,32})\)$/
 
     /** shortID *************************************************************************************************************************************
