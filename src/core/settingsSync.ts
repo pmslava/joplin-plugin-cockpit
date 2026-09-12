@@ -1,0 +1,656 @@
+/** README ******************************************************************************************************************************************
+ * THE SETTINGS NOTE, RUNTIME HALF - when the note is written, and when what it says is applied.                                                    *
+ *                                                                                                                                                  *
+ * The note itself (its body, the payload shape, the content key) is src/core/settingsNote.js, which is pure and unit-tested on its own. This file   *
+ * is everything that has to talk to Joplin, and it is deliberately small: four pieces of state and two operations.                                  *
+ *                                                                                                                                                  *
+ *   WRITE  - any local change to synced state (a profile saved, deleted or created, one of the synced settings edited) schedules a debounced write.  *
+ *            The write is skipped when the content matches what this device last wrote or last applied.                                             *
+ *   APPLY  - the startup read, a completed sync, a change to the note itself and the periodic backstop read the note. A payload whose content        *
+ *            differs from that same remembered value is applied WHOLESALE: the profile store is replaced, the synced settings are written.           *
+ *                                                                                                                                                  *
+ * LOOP PREVENTION is that one remembered value, `lastContentKey` (see settingsContentKey). It is the canonical form of the SYNCED CONTENT - not of   *
+ * the body - so the `updatedAt` stamp cannot make a device rewrite what it has just applied, which is the shape every ping-pong in a scheme like     *
+ * this takes. It lives in memory only: a fresh session reads the note and applies it, which is correct (that is how a change made while this device  *
+ * was closed arrives) and idempotent.                                                                                                               *
+ *                                                                                                                                                  *
+ * OFF BY DEFAULT, AND FREE WHEN OFF. With the "Settings note" setting empty there is no note id, so every entry point here returns before it reaches *
+ * a single data call: startup, every refresh and every note change cost exactly what they cost before this feature existed.                          *
+ *                                                                                                                                                  *
+ * CONCURRENT EDITS ARE NOT MERGED. Whole-note last-writer-wins. Two devices changing settings at the same moment produce a Joplin conflict copy,     *
+ * which the plugin ignores entirely: it always uses the note at the configured id, and the user resolves the conflict themselves. The ONE exception  *
+ * is adoption - the first time a device connects to a note that already exists, its own profiles are folded in by name (see adoptSettingsNote).      *
+ *                                                                                                                                                  *
+ * A MANGLED NOTE NEVER STOPS ANYTHING. An unreadable body is logged once, the remembered key is cleared, and the plugin keeps running on local        *
+ * state; the next local change rewrites the note wholesale. A note that cannot be read at all (a bad id, a note that has not synced to this device    *
+ * yet) leaves this device UNINITIALIZED, which is what forbids it from writing over the note it has never seen.                                      *
+ ***************************************************************************************************************************************************/
+
+/** Imports ****************************************************************************************************************************************/
+import joplin from "api"
+import { getProfileStoreSnapshot, replaceProfileStore, setProfileStoreListener } from "./database"
+import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY } from "./exclusion"
+import { invalidateNotebookMap, invalidateResultCaches } from "./joplin"
+import { getCurrentProfileID, settingsNoteIdSettingKey } from "./settings"
+import { refreshInterfaces } from "./timer"
+import { getEditorNoteID, onProfilesReplaced, showPanelToast } from "../ui/panel/panel"
+// The pure note module: the body, the payload and the content key. The same UMD file the Node harness require()s, so the
+// rules the tests pin are the rules that run here. Webpack bundles it in.
+const { SETTINGS_NOTE_TITLE, SYNCED_SETTING_KEYS, buildSettingsNoteBody, isFutureSettingsNote, parseSettingsNoteBody, parseSettingsNoteReference,
+    settingsContentKey } = require("./settingsNote")
+
+/** Variable Setup *********************************************************************************************************************************/
+/** A few seconds: long enough to coalesce a burst of profile edits or colour changes, short enough that the other device sees it on its next sync. */
+const settingsNoteWriteDelayMs = 3000
+/** The note changed under us (our own write, or one that arrived with a sync): wait a beat for the burst to settle, then read it once. */
+const settingsNoteReadDelayMs = 1000
+
+/** The note the settings travel in, as a resolved id, or "" when the feature is off. Mirrored here from the setting so that the hot paths - every
+ * note change, every periodic tick - can answer "is this us?" without a settings round-trip. Kept in step by onSettingsNoteReferenceChanged. */
+var noteId = ""
+/** The canonical content this device last WROTE to, or APPLIED from, the note. `null` means "nothing is known" - the next write always writes and
+ * the next read always applies, which is the correct state after a failed apply and after an unreadable body. */
+var lastContentKey = null
+/** Set once the note has actually been READ this session. Nothing is ever written before that. */
+var initialized = false
+/** A write is wanted. Survives every deferral, so the next drain point performs it. */
+var writePending = false
+var writeTimer = null
+var readTimer = null
+/** The note's `updated_time` as this device last saw it, so the periodic tick can tell "nothing moved" from one cheap field read. */
+var lastUpdatedTime = null
+var warnedUnparseable = false
+var warnedWriteFailure = false
+/** The note this device has just CREATED, with the content key of the seed written into it. See createSettingsNote. */
+var seededNote = null
+
+/** ONE SETTINGS-NOTE OPERATION AT A TIME.
+ *
+ * Reading and writing the note are both read-modify-write over `lastContentKey`, and both straddle real suspension points (a data.get, a data.put, a
+ * whole refresh). Nothing upstream serializes them, and the overlap is the ordinary case rather than an exotic one: the startup read awaits a full
+ * interface refresh, and a sync completing during it fires its own read straight into that. Both would read a null key, both would decide the note
+ * says something new, and the payload would be applied twice - two profile-store replacements and two refreshes for one piece of news.
+ *
+ * `.then(fn, fn)`, not `.then(fn)`: a rejected predecessor must not SKIP the next operation, which would silently wedge the sync for the rest of the
+ * session. The stored chain is kept un-rejected for the same reason. Nothing inside a flush or a refresh re-enters this gate, so it cannot deadlock
+ * on itself - which is why the combined drains below call the *Locked halves directly rather than the public wrappers. */
+var settingsNoteChain: Promise<any> = Promise.resolve()
+
+function withSettingsNote(operation){
+    var next = settingsNoteChain.then(operation, operation)
+    settingsNoteChain = next.catch(() => undefined)
+    return next
+}
+
+/** setupSettingsSync *******************************************************************************************************************************
+ * Wires the feature up: the profile store tells this module when it changes, and the configured note reference is resolved once so that every hot    *
+ * path afterwards can compare against a plain string. Runs after setupDatabase, before anything paints. With the setting empty it costs one settings *
+ * read and nothing else - no data call, no setting write.                                                                                            *
+ ***************************************************************************************************************************************************/
+export async function setupSettingsSync(){
+    setProfileStoreListener(scheduleSettingsNoteWrite)
+    try {
+        noteId = await resolveSettingsNoteReference()
+    } catch (error) {
+        noteId = ""
+        console.warn("Cockpit: could not read the settings note setting", error)
+    }
+}
+
+/** isSettingsNote **********************************************************************************************************************************
+ * Whether a note id is the settings note. The one question the note-change lane asks on every event, so it reads the mirrored id and nothing else.  *
+ ***************************************************************************************************************************************************/
+export function isSettingsNote(id){
+    return !!noteId && String(id || "") === noteId
+}
+
+/** scheduleSettingsNoteWrite ***********************************************************************************************************************
+ * Schedule a debounced write. Called from the profile store listener and from the settings onChange handler, so no profile create/edit/delete and no *
+ * synced setting can be forgotten. Over-triggering is free: the content-key comparison in the flush turns a write with nothing to say into a no-op   *
+ * before any note is touched.                                                                                                                       *
+ ***************************************************************************************************************************************************/
+export function scheduleSettingsNoteWrite(){
+    if (!noteId) return
+    writePending = true
+    if (writeTimer) return
+    writeTimer = setTimeout(() => {
+        writeTimer = null
+        // The promise is RETURNED, not swallowed, so the write is awaitable from the test harness, exactly as the refresh
+        // lanes in timer.ts return theirs. setTimeout ignores the return value.
+        return flushSettingsNote("debounce")
+    }, settingsNoteWriteDelayMs)
+}
+
+/** scheduleSettingsNoteRead ************************************************************************************************************************
+ * The settings note itself changed (our own write coming back, or another device's arriving with a sync). Read it once the burst has settled. This   *
+ * is deliberately NOT the reconcile lane: the note holds no to-dos, so nothing about it belongs in the panel's index-catch-up job.                   *
+ ***************************************************************************************************************************************************/
+export function scheduleSettingsNoteRead(){
+    if (!noteId) return
+    if (readTimer) return
+    readTimer = setTimeout(() => {
+        readTimer = null
+        return drainSettingsNote("note-change", false)   // returned for the same reason as the write above
+    }, settingsNoteReadDelayMs)
+}
+
+/** pollSettingsNote ********************************************************************************************************************************
+ * The periodic backstop, and the one place a CHEAP CHANGE CHECK is worth making: a single `updated_time` field read tells whether the note has moved  *
+ * at all, and the body is fetched only when it has. A tick with nothing to do therefore costs one field of one note - and, with the feature off,     *
+ * nothing whatsoever. Any write this device still owes is drained first, so a change deferred by the editor gate is never left waiting for the user.  *
+ ***************************************************************************************************************************************************/
+export function pollSettingsNote(reason){
+    if (!noteId) return Promise.resolve()
+    return drainSettingsNote(reason, true)
+}
+
+/** syncSettingsNote ********************************************************************************************************************************
+ * The unconditional drain: flush what we owe, then read. Used where something is known to have happened (a completed sync, a change to the note).    *
+ ***************************************************************************************************************************************************/
+export function syncSettingsNote(reason){
+    if (!noteId) return Promise.resolve()
+    return drainSettingsNote(reason, false)
+}
+
+/** drainDeferredSettingsNoteWrite ******************************************************************************************************************
+ * The editor gate's own drain point: the note the editor is showing has changed, so a write deferred because the settings note was open can go now.  *
+ * Costs nothing at all when there is no write owed, which is every selection change but the rare one after an edit.                                  *
+ ***************************************************************************************************************************************************/
+export function drainDeferredSettingsNoteWrite(){
+    if (!noteId || !writePending) return Promise.resolve()
+    return flushSettingsNote("editor-moved")
+}
+
+/** drainSettingsNote *******************************************************************************************************************************
+ * Flush then read, as ONE serialized operation, in that order: never apply a remote body over local changes this device has not published yet.       *
+ ***************************************************************************************************************************************************/
+function drainSettingsNote(reason, cheapCheck){
+    return withSettingsNote(async () => {
+        await flushSettingsNoteLocked(reason)
+        if (!noteId) return
+        if (cheapCheck && !(await settingsNoteMoved())) return
+        await refreshFromSettingsNoteLocked(reason)
+    })
+}
+
+/** settingsNoteMoved *******************************************************************************************************************************
+ * Whether the note's `updated_time` has moved since this device last saw it. Unknown (no stamp yet, or an unreadable note) counts as moved, so the   *
+ * caller falls through to the ordinary read and its own error handling rather than deciding anything from a failure here.                            *
+ ***************************************************************************************************************************************************/
+async function settingsNoteMoved(){
+    if (lastUpdatedTime === null) return true
+    try {
+        var head: any = await joplin.data.get(['notes', noteId], { fields: ['updated_time'] })
+        var stamp = head && head.updated_time
+        return !stamp || stamp !== lastUpdatedTime
+    } catch (error) {
+        return true
+    }
+}
+
+/** flushSettingsNote *******************************************************************************************************************************
+ * Write the note, if there is anything to say and it is safe to say it now.                                                                          *
+ *                                                                                                                                                    *
+ * THREE GATES, and each DEFERS rather than cancels - `writePending` stays set, so the next drain point (a completed sync, a selection change, the     *
+ * periodic tick) retries:                                                                                                                            *
+ *                                                                                                                                                    *
+ *   1. THE NOTE MUST HAVE BEEN READ FIRST. A device that has never successfully read the note does not know what is in it, and writing its own state  *
+ *      over an unread note is how a machine that has just installed Cockpit wipes every other device's profiles.                                      *
+ *   2. NO WRITE WHILE THE SETTINGS NOTE IS THE NOTE OPEN IN THE EDITOR. A plugin PUT evicts the mobile editor mid-edit, and there is no reason to do   *
+ *      that to a user who has opened the note to look at it. The drain points are the selection change away from it, the tick and a completed sync.    *
+ *   3. NOTHING TO SAY. The content key equals what this device last wrote or applied, so the note already holds it: the pending write is cleared       *
+ *      without touching a note at all. This is the gate that makes over-triggering the schedule free.                                                 *
+ ***************************************************************************************************************************************************/
+export function flushSettingsNote(reason){
+    return withSettingsNote(() => flushSettingsNoteLocked(reason))
+}
+
+async function flushSettingsNoteLocked(reason){
+    if (!writePending) return
+    var targetId = noteId
+    if (!targetId){
+        clearWrite()
+        return
+    }
+    if (!initialized) return
+    if (getEditorNoteID() === targetId) return
+
+    var content = null
+    try {
+        content = await collectSettingsContent()
+    } catch (error) {
+        console.warn(`Cockpit: the settings note (${reason}) could not read this device's own state`, error)
+        return
+    }
+    var key = settingsContentKey(content)
+    if (key === lastContentKey){
+        clearWrite()
+        return
+    }
+    // The note id is re-read immediately before the write rather than trusted from the top of this function: everything above is
+    // awaited, and a repoint landing in any of it would send this device's state to whatever note the user has just pointed at.
+    if (noteId !== targetId) return
+    try {
+        await joplin.data.put(['notes', targetId], null, { body: buildSettingsNoteBody(content, new Date().toISOString()) })
+    } catch (error) {
+        // Not synced yet, deleted, or a bad id. Keep the write pending and try again at the next drain point; say so once.
+        if (!warnedWriteFailure){
+            warnedWriteFailure = true
+            console.warn(`Cockpit: the settings note (${reason}) could not be written to note ${targetId}`, error)
+        }
+        return
+    }
+    lastContentKey = key
+    warnedWriteFailure = false
+    clearWrite()
+    try {
+        var after: any = await joplin.data.get(['notes', targetId], { fields: ['updated_time'] })
+        lastUpdatedTime = (after && after.updated_time) || lastUpdatedTime
+    } catch (error) {
+        // Best effort: an unknown stamp only costs the next tick a body read.
+    }
+    console.info(`Cockpit: the settings note (${reason}) was updated with ${content.profiles.profiles.length} profile(s)`)
+}
+
+/** clearWrite **************************************************************************************************************************************
+ * Drops the pending write AND the debounce timer behind it. The timer goes too so that a write settled early at a drain point cannot leave a timer   *
+ * armed that the next local change would then hide behind - the schedule only arms one, and it must belong to the change that is actually waiting.   *
+ ***************************************************************************************************************************************************/
+function clearWrite(){
+    writePending = false
+    if (writeTimer){
+        clearTimeout(writeTimer)
+        writeTimer = null
+    }
+}
+
+/** collectSettingsContent **************************************************************************************************************************
+ * Everything that syncs, as this device currently holds it: the whole profile store (a normalized deep copy) and the synced settings.               *
+ ***************************************************************************************************************************************************/
+async function collectSettingsContent(){
+    var settings = {}
+    for (var key of SYNCED_SETTING_KEYS){
+        var value = await joplin.settings.value(key)
+        settings[key] = value === undefined || value === null ? "" : String(value)
+    }
+    return { profiles: getProfileStoreSnapshot(), settings: settings }
+}
+
+/** refreshFromSettingsNote *************************************************************************************************************************
+ * Read the note and, if it says something new, apply it wholesale.                                                                                  *
+ *                                                                                                                                                    *
+ * The remembered content key is set BEFORE the apply, deliberately: applying writes settings and replaces the profile store, each of which schedules *
+ * a write, and those writes must already see themselves as redundant. If the apply then throws, the key is cleared again so the next read retries    *
+ * rather than this device silently believing it is in sync.                                                                                          *
+ ***************************************************************************************************************************************************/
+export function refreshFromSettingsNote(reason){
+    return withSettingsNote(() => refreshFromSettingsNoteLocked(reason))
+}
+
+async function refreshFromSettingsNoteLocked(reason){
+    if (!noteId){
+        // Nothing to read; writes are irrelevant while the feature is off, and the gate above must not hold a write that can never happen.
+        initialized = true
+        return
+    }
+    var body = ""
+    try {
+        var note: any = await joplin.data.get(['notes', noteId], { fields: ['body', 'updated_time'] })
+        body = (note && note.body) || ""
+        lastUpdatedTime = (note && note.updated_time) || null
+    } catch (error) {
+        // The note is not readable yet (not synced to this device, or a stale id). Nothing to apply, and - because `initialized`
+        // stays false - nothing may be written over it either.
+        return
+    }
+    initialized = true
+
+    var payload = parseSettingsNoteBody(body)
+    if (!payload){
+        lastContentKey = null
+        if (isFutureSettingsNote(body)){
+            // A payload from a NEWER Cockpit. It is not damaged - it is data this build cannot see all of - so it is left strictly alone:
+            // `initialized` goes back off, which is the gate that forbids this device from writing, and a wholesale write is exactly what
+            // would delete the newer build's fields from every device that shares this note. Upgrading this device is the only way out.
+            initialized = false
+            if (!warnedUnparseable){
+                warnedUnparseable = true
+                console.warn(`Cockpit: the settings note ${noteId} was written by a newer version of Cockpit; this device will neither ` +
+                    "apply nor overwrite it. Update Cockpit here to sync with it again.")
+            }
+            return
+        }
+        if (!String(body).trim()){
+            // AN EMPTY NOTE, read perfectly well: this is the user who made the note by hand on a second device and connected it by
+            // title. There is nothing to apply and nothing to refuse - so seed it with this device's state instead of leaving the
+            // pair of devices pointed at a blank mailbox forever.
+            console.info("Cockpit: the settings note is empty - writing this device's profiles and settings into it.")
+            scheduleSettingsNoteWrite()
+            return
+        }
+        if (!warnedUnparseable){
+            warnedUnparseable = true
+            console.warn(`Cockpit: the settings note ${noteId} could not be read as Cockpit settings; working from this device's own ` +
+                "profiles and settings until it is rewritten.")
+        }
+        return
+    }
+    warnedUnparseable = false
+
+    var key = settingsContentKey(payload)
+    if (key === lastContentKey) return      // our own write, or something already applied
+    lastContentKey = key
+    try {
+        await applySettingsPayload(payload, reason)
+    } catch (error) {
+        lastContentKey = null               // the apply is incomplete; do not pretend this device is in sync
+        console.warn(`Cockpit: the settings note (${reason}) could not be applied`, error)
+    }
+}
+
+/** applySettingsPayload ****************************************************************************************************************************
+ * Replace this device's synced state with the note's. WHOLESALE, with no per-profile merging: the store the note carries becomes the store, so a     *
+ * profile deleted on the other device is deleted here too.                                                                                          *
+ *                                                                                                                                                    *
+ * The settings are written ONLY where the value actually differs, so an apply that changes two colours does not fire the settings onChange handler    *
+ * (and its refresh, and its excluded-notebook resolver) eleven times. The excluded-notebook pair is written IDS FIRST: the ids are the source of      *
+ * truth and writing them does not re-enter the resolver, so when the visible names field follows, the resolver it triggers finds the ids already      *
+ * matching the names and writes nothing back.                                                                                                        *
+ ***************************************************************************************************************************************************/
+async function applySettingsPayload(payload, reason){
+    await replaceProfileStore(payload.profiles)
+
+    var exclusionChanged = false
+    var written = 0
+    for (var key of applyOrderedKeys()){
+        if (!Object.prototype.hasOwnProperty.call(payload.settings, key)) continue    // a key the payload leaves out keeps its local value
+        var incoming = payload.settings[key]
+        var current = await joplin.settings.value(key)
+        if (String(current === undefined || current === null ? "" : current) === incoming) continue
+        if (key === EXCLUDED_NOTEBOOKS_KEY || key === EXCLUDED_NOTEBOOK_IDS_KEY) exclusionChanged = true
+        await joplin.settings.setValue(key, incoming)
+        written++
+    }
+
+    // The profile this device had selected may not exist in the incoming store; getCurrentProfileID falls back to the first profile and
+    // records that choice. The selected profile is per device by design, so this is the only thing said about it here.
+    await getCurrentProfileID()
+    if (exclusionChanged){
+        // Every cached result set was computed under a different exclusion, and the notebook map feeds the filter and the picker.
+        invalidateResultCaches()
+        invalidateNotebookMap()
+    }
+    await onProfilesReplaced()
+    await refreshInterfaces()
+    console.info(`Cockpit: the settings note (${reason}) replaced the profiles with ${payload.profiles.profiles.length} profile(s) ` +
+        `and wrote ${written} setting(s)`)
+}
+
+/** applyOrderedKeys ********************************************************************************************************************************
+ * The synced keys in the order an apply writes them: the excluded-notebook IDS first, everything else after. Stated here rather than left to the     *
+ * alphabetical accident that currently puts them in that order anyway - the ordering is a rule, not a coincidence (see applySettingsPayload).        *
+ ***************************************************************************************************************************************************/
+function applyOrderedKeys(){
+    var first = SYNCED_SETTING_KEYS.filter(key => key === EXCLUDED_NOTEBOOK_IDS_KEY)
+    return first.concat(SYNCED_SETTING_KEYS.filter(key => key !== EXCLUDED_NOTEBOOK_IDS_KEY))
+}
+
+/** onSettingsNoteReferenceChanged ******************************************************************************************************************
+ * The user edited the "Settings note" setting. Resolve what they typed (see resolveSettingsNoteReference), and when that names a DIFFERENT note than *
+ * the one this device was using, forget everything believed about the old one and read the new one at once rather than at the next tick.             *
+ *                                                                                                                                                    *
+ * Emptying the field turns the feature off outright: no reads, no writes, and any write still owed is dropped - it was owed to a note the user has    *
+ * just disconnected from.                                                                                                                            *
+ ***************************************************************************************************************************************************/
+export async function onSettingsNoteReferenceChanged(){
+    var resolved = ""
+    try {
+        resolved = await resolveSettingsNoteReference()
+    } catch (error) {
+        console.warn("Cockpit: could not resolve the settings note setting", error)
+        return
+    }
+    if (resolved === noteId) return
+    noteId = resolved
+    await withSettingsNote(async () => {
+        lastUpdatedTime = null
+        warnedUnparseable = false
+        warnedWriteFailure = false
+        clearWrite()
+        if (seededNote && seededNote.id === resolved){
+            // The note this device has just CREATED and seeded. Its content is this device's own handwriting, so the read below must
+            // recognise it rather than apply it back as though a second device had sent it - an apply is wholesale, and anything the
+            // user changed between the POST and this read would be taken as absent from the incoming state and thrown away.
+            lastContentKey = seededNote.key
+            initialized = true
+        } else {
+            lastContentKey = null
+            initialized = false
+        }
+        seededNote = null
+    })
+    // AWAITED, not fired off: a repoint is a user action whose whole point is that the new note takes effect now, and awaiting it makes the
+    // settings change settle before the handler returns - so the command that repoints (createSettingsNote) and a user pasting an id both see a
+    // finished mailbox rather than one still in flight. Nothing here re-enters this handler: an apply writes synced settings, never the reference.
+    if (noteId) await refreshFromSettingsNote("reference")
+}
+
+/** resolveSettingsNoteReference ********************************************************************************************************************
+ * What the setting names, as a note id, or "" for "nothing usable".                                                                                 *
+ *                                                                                                                                                    *
+ * An ID in any of its four spellings is canonicalised to the bare id, so the field ends up holding the thing the rest of the plugin uses. A TITLE is  *
+ * searched for - this is how a phone connects, where there is no comfortable way to carry an id across - and, when exactly one non-trashed note       *
+ * carries that title exactly, the field is rewritten to its id. Zero or several matches leave the field exactly as typed (a user who mistyped can see  *
+ * what they typed) and turn the feature off until it resolves.                                                                                        *
+ *                                                                                                                                                    *
+ * Both writes are guarded by a value comparison, the same loop pattern resolveExcludedNotebooks uses: the setValue re-enters this handler, and on that *
+ * pass the field already holds the id, so nothing is written and the recursion stops.                                                                 *
+ ***************************************************************************************************************************************************/
+async function resolveSettingsNoteReference(){
+    var raw = String(await joplin.settings.value(settingsNoteIdSettingKey) || "")
+    var reference = parseSettingsNoteReference(raw)
+    if (reference.kind === "empty") return ""
+    if (reference.kind === "id"){
+        if (raw !== reference.id) await joplin.settings.setValue(settingsNoteIdSettingKey, reference.id)
+        return reference.id
+    }
+    var matches = await findNotesTitled(reference.title)
+    if (matches.length === 1){
+        await joplin.settings.setValue(settingsNoteIdSettingKey, String(matches[0].id))
+        return String(matches[0].id)
+    }
+    var complaint = matches.length
+        ? `Cockpit: several notes are titled "${reference.title}" - paste the right note's id into the Settings note setting.`
+        : `Cockpit: no note titled "${reference.title}" was found - check the title, or wait for the note to sync to this device.`
+    console.warn(complaint)
+    showPanelToast(complaint)
+    return ""
+}
+
+/** findNotesTitled *********************************************************************************************************************************
+ * The non-trashed notes whose title is EXACTLY this, case-insensitively.                                                                            *
+ *                                                                                                                                                    *
+ * Joplin's `title:` search token is a token match, not an equality test: it answers "Joplin Cockpit Plugin Settings Backup" to a search for the plain *
+ * title. So the query is only the cheap way to narrow the vault, and the exactness is decided here, on the titles that come back. `deleted_time` is    *
+ * checked where the API returns it (builds with a trash); where it does not, the field is simply absent and every result counts.                       *
+ ***************************************************************************************************************************************************/
+async function findNotesTitled(title){
+    var wanted = String(title || "").trim().toLowerCase()
+    if (!wanted) return []
+    var found = []
+    try {
+        // The quotes are the phrase form Joplin's search understands; a quote inside the title would end the phrase early, so it is dropped
+        // from the QUERY only - the exact comparison below still runs against the user's full string.
+        var result: any = await joplin.data.get(['search'], {
+            query: `title:"${wanted.replace(/"/g, " ")}"`,
+            fields: ['id', 'title', 'deleted_time'],
+            limit: 50,
+        })
+        for (var item of (result && result.items) || []){
+            if (item.deleted_time) continue
+            if (String(item.title || "").trim().toLowerCase() !== wanted) continue
+            found.push(item)
+        }
+    } catch (error) {
+        console.warn("Cockpit: could not search for the settings note", error)
+    }
+    return found
+}
+
+/** connectSettingsNote *****************************************************************************************************************************
+ * The Tools > Cockpit > "Connect settings note" command, and the whole of the desktop setup flow.                                                   *
+ *                                                                                                                                                    *
+ *   (a) ALREADY CONNECTED, and the note reads: nothing to decide. Read it, apply whatever it says, and say so.                                        *
+ *   (b) A NOTE ALREADY EXISTS with the exact title - the ordinary second-device case, where the first device made one and it has synced here. Exactly  *
+ *       one match is ADOPTED; several are refused, because guessing which mailbox a user meant is not a thing a plugin should do.                      *
+ *   (c) NOTHING EXISTS: create the note, seeded with this device's own state, so turning the feature on never starts from empty.                       *
+ *                                                                                                                                                    *
+ * Every failure is a console line and a panel toast, never a message box: showMessageBox is a blocking native modal on desktop and renders behind the  *
+ * panel overlay on mobile (see copyToClipboard in panel.ts).                                                                                          *
+ ***************************************************************************************************************************************************/
+export async function connectSettingsNote(){
+    try {
+        await connectSettingsNoteLocked()
+    } catch (error) {
+        console.warn("Cockpit: could not connect the settings note", error)
+        showPanelToast("Cockpit: could not connect the settings note.")
+    }
+}
+
+async function connectSettingsNoteLocked(){
+    if (noteId){
+        var readable = false
+        try {
+            await joplin.data.get(['notes', noteId], { fields: ['id'] })
+            readable = true
+        } catch (error) {
+            // A stale id: the note was deleted, or this device has never received it. Fall through and look for one by title.
+        }
+        if (readable){
+            await refreshFromSettingsNote("connect")
+            console.info(`Cockpit: the settings note is note ${noteId}`)
+            showPanelToast("Cockpit: settings note connected")
+            return
+        }
+    }
+    var matches = await findNotesTitled(SETTINGS_NOTE_TITLE)
+    if (matches.length > 1){
+        var complaint = `Cockpit: several notes are titled "${SETTINGS_NOTE_TITLE}" - paste the right note's id into the Settings note setting.`
+        console.warn(complaint)
+        showPanelToast(complaint)
+        return
+    }
+    if (matches.length === 1){
+        await adoptSettingsNote(String(matches[0].id))
+        return
+    }
+    await createSettingsNote()
+}
+
+/** adoptSettingsNote *******************************************************************************************************************************
+ * Connect to a settings note that already exists, folding this device's own profiles into it.                                                       *
+ *                                                                                                                                                    *
+ * THE MERGE HAPPENS EXACTLY ONCE, HERE, AND NOWHERE ELSE. Ongoing sync is wholesale by design - a profile deleted on the other device has to be able  *
+ * to disappear here - but the very first connection is the one moment where both sides hold profiles that were built independently and neither is a   *
+ * deletion. A local profile whose NAME is not already in the note is appended with a fresh id (names are compared trimmed and case-sensitively: two    *
+ * profiles called "Work" are the same intent, "work" and "Work" are two deliberate names). The merged store is written back to the note before the     *
+ * setting is pointed at it, so the read that the repoint starts is what installs the merge on this device - one path, not two.                         *
+ ***************************************************************************************************************************************************/
+async function adoptSettingsNote(adoptedId){
+    var body = ""
+    try {
+        var note: any = await joplin.data.get(['notes', adoptedId], { fields: ['body'] })
+        body = (note && note.body) || ""
+    } catch (error) {
+        console.warn(`Cockpit: the settings note ${adoptedId} could not be read`, error)
+        showPanelToast("Cockpit: the settings note could not be read.")
+        return
+    }
+    var payload = parseSettingsNoteBody(body)
+    var local = await collectSettingsContent()
+    // A note that exists but holds no readable payload (the user made it by hand) is adopted as empty: the merge below is then simply
+    // this device's own state, which is the seed that note was always going to need.
+    var merged = {
+        profiles: payload ? mergeProfileStores(payload.profiles, local.profiles) : local.profiles,
+        settings: payload ? Object.assign({}, local.settings, payload.settings) : local.settings,
+    }
+    await joplin.data.put(['notes', adoptedId], null, { body: buildSettingsNoteBody(merged, new Date().toISOString()) })
+    await joplin.settings.setValue(settingsNoteIdSettingKey, adoptedId)
+    console.info(`Cockpit: adopted the settings note ${adoptedId} with ${merged.profiles.profiles.length} profile(s)`)
+    showPanelToast("Cockpit: settings note connected")
+}
+
+/** mergeProfileStores ******************************************************************************************************************************
+ * The adopted store, plus every local profile whose name it does not already carry, each given a fresh id from the adopted store's own counter.     *
+ ***************************************************************************************************************************************************/
+function mergeProfileStores(adopted, local){
+    var merged = { nextID: adopted.nextID, profiles: adopted.profiles.slice() }
+    var names = new Set(adopted.profiles.map(profile => String(profile.name || "").trim()))
+    for (var profile of local.profiles){
+        var name = String(profile.name || "").trim()
+        if (names.has(name)) continue
+        names.add(name)
+        merged.profiles.push(Object.assign({}, profile, { id: merged.nextID++ }))
+    }
+    return merged
+}
+
+/** createSettingsNote ******************************************************************************************************************************
+ * Create the note, seeded from this device's current state, and point the setting at it.                                                            *
+ *                                                                                                                                                    *
+ * THE SEED'S CONTENT KEY IS REMEMBERED BEFORE the setting is written and CONSUMED ON THE CHAIN by the repoint that write causes (see                  *
+ * onSettingsNoteReferenceChanged). Without it this device reads its OWN freshly written seed as though a second device had sent it - and an apply is  *
+ * wholesale, so anything the user changed between the POST and that read is taken as absent from the incoming state and thrown away. Recording it     *
+ * before the write rather than after is what makes the order the host delivers the settings change in irrelevant: Joplin's onChange is not            *
+ * synchronous with setValue in the app, and it is in the test harness, and the token is correct either way.                                           *
+ ***************************************************************************************************************************************************/
+async function createSettingsNote(){
+    var parentId = await pickFolderForSettingsNote()
+    var content = await collectSettingsContent()
+    var created: any = await joplin.data.post(['notes'], null, {
+        title: SETTINGS_NOTE_TITLE,
+        body: buildSettingsNoteBody(content, new Date().toISOString()),
+        parent_id: parentId,
+    })
+    var createdId = String((created && created.id) || "")
+    if (!createdId){
+        console.warn("Cockpit: the settings note was created but the app returned no id for it")
+        showPanelToast("Cockpit: the settings note could not be created.")
+        return
+    }
+    seededNote = { id: createdId, key: settingsContentKey(content) }
+    await joplin.settings.setValue(settingsNoteIdSettingKey, createdId)
+    // THE LAST WORD, ON THE CHAIN: queueing behind the read the repoint started makes this command's return mean "this device's mailbox
+    // is settled". When the host has not delivered the settings change yet, the token above is still waiting for it and nothing is done
+    // here - the repoint will do it.
+    await withSettingsNote(async () => {
+        if (noteId !== createdId) return
+        initialized = true
+        warnedUnparseable = false
+    })
+    console.info(`Cockpit: created the settings note ${createdId}`)
+    showPanelToast("Cockpit: settings note created")
+}
+
+/** pickFolderForSettingsNote ***********************************************************************************************************************
+ * Where a newly created settings note goes: the notebook the user is looking at, else the first notebook there is, else a new one called "Cockpit".  *
+ * Every step is guarded - workspace.selectedFolder is desktop-shaped and can be absent or throw on mobile - so the fallback chain always produces a  *
+ * parent rather than failing the command.                                                                                                            *
+ ***************************************************************************************************************************************************/
+async function pickFolderForSettingsNote(){
+    try {
+        var selected: any = await joplin.workspace.selectedFolder()
+        if (selected && selected.id) return String(selected.id)
+    } catch (error) {
+        // No selected folder, or no such call on this platform.
+    }
+    try {
+        var folders: any = await joplin.data.get(['folders'])
+        var items = (folders && folders.items) || []
+        if (items.length) return String(items[0].id)
+    } catch (error) {
+        // No folders readable; fall through and make one.
+    }
+    var folder: any = await joplin.data.post(['folders'], null, { title: "Cockpit" })
+    return String((folder && folder.id) || "")
+}

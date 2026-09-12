@@ -10,6 +10,7 @@ import joplin from 'api'
 import { setupCommands } from './core/commands'
 import { refreshInterfaces, setupTimer, setupWorkspaceEvents } from './core/timer'
 import { reportDatabaseProblems, setupDatabase } from './core/database'
+import { refreshFromSettingsNote, setupSettingsSync } from './core/settingsSync'
 import { setupSettings } from './core/settings'
 import { setupPanel } from './ui/panel/panel'
 import { setupAlarmDialog } from './ui/alarm/alarm'
@@ -31,6 +32,9 @@ joplin.plugins.register({ onStart: setupPlugin })
  export async function setupPlugin(){
     await setupSettings()
     await setupDatabase()
+    // The settings note (v2.6.0) is wired up right after the profile store it syncs, so nothing can change a profile before this
+    // module is listening. It costs one settings read while the feature is off, and no data call at all.
+    await setupSettingsSync()
     await setupCommands()
     await setupToolbar()
     await setupMenu()
@@ -44,6 +48,15 @@ joplin.plugins.register({ onStart: setupPlugin })
     await setupEditor()
     await setupTimer()
     await setupWorkspaceEvents()
+    // THE STARTUP READ, BEFORE THE FIRST PAINT: whatever another device changed while this one was closed arrives here, so the panel's
+    // very first render already shows the synced state instead of flipping to it a moment later. It is also what lets this device write
+    // at all - a device that has not read the note may never write over it (see flushSettingsNote). A settings note that cannot be read,
+    // or an app that answers badly, must never stop the plugin from starting, hence the catch.
+    try {
+        await refreshFromSettingsNote('startup')
+    } catch (error) {
+        console.warn("Cockpit: could not read the settings note at startup", error)
+    }
     await refreshInterfaces()
     await reportDatabaseProblems()
 }

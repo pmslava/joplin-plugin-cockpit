@@ -30,6 +30,7 @@ import { isMobile } from "../../core/platform"
             {commandName: 'togglePanelVisibility', accelerator: 'Ctrl+Shift+H'},
             {commandName: 'toggleCockpitToolbarButton'},
             {commandName: 'showStylerDialog'},
+            {commandName: 'cockpit.connectSettingsNote'},
         ],
         MenuItemLocation.Tools
     )

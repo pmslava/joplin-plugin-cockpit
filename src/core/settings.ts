@@ -11,6 +11,10 @@ import { getAllProfiles, getProfile, profileDataSettingKey } from "./database"
 import { refreshInterfaces, setupTimer } from "./timer"
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, resolveNamesToIds } from "./exclusion"
 import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches } from "./joplin"
+import { onSettingsNoteReferenceChanged, scheduleSettingsNoteWrite } from "./settingsSync"
+// The synced key list lives with the note format it belongs to (src/core/settingsNote.js, pure and harness-tested), so
+// the handler below and the payload builder can never drift apart on which settings actually travel.
+const { SYNCED_SETTING_KEYS } = require("./settingsNote")
 
 /** Variable Setup *********************************************************************************************************************************/
 export const customCssSettingKey = "customCss"
@@ -27,6 +31,8 @@ export const gestureTraceSettingKey = "gestureTrace"
 export const gestureTraceAvailable: boolean = false
 export const updateFrequencySettingKey = "updateFrequency"
 export const dayStartTimeSettingKey = "dayStartTime"
+/** The settings note (src/core/settingsSync.ts). Empty means the feature is off, which is how every install starts. */
+export const settingsNoteIdSettingKey = "settingsNoteId"
 
 /** Theme settings keys. The themes feature (src/core/theme.ts) reads these to build the panel's --cockpit-* override block. */
 export const themeModeSettingKey = "themeMode"
@@ -155,6 +161,14 @@ export async function setupSettings(){
 		[dayStartTimeSettingKey]: {
 			label: "Day start time (HH:MM). A to-do dragged onto a day without a time of its own becomes due at this time",
 			value: "09:00",
+			type: SettingItemType.String,
+			public: true,
+			section: 'section',
+		},
+		[settingsNoteIdSettingKey]: {
+			label: "Settings note",
+			description: "The Joplin note that carries Cockpit's profiles and view settings to your other devices through your normal Joplin sync. Leave empty to keep everything on this device. On desktop run Tools > Cockpit > Connect settings note to create the note and fill this in. On another device, paste the note's id or link here, or type its exact title, and Cockpit finds it. Synced: profiles, custom panel CSS, theme colours, completed-to-do style, day start time and excluded notebooks. Per device: font and circle sizes, refresh interval, toolbar button, title-bar options and which profile is selected.",
+			value: "",
 			type: SettingItemType.String,
 			public: true,
 			section: 'section',
@@ -295,6 +309,10 @@ export async function setupSettings(){
 		// of truth), rewrite the field to the canonical resolved titles, and re-render everything so the
 		// exclusion takes effect at once.
 		if (keys.includes(EXCLUDED_NOTEBOOKS_KEY)) await resolveExcludedNotebooks()
+		// The settings note (v2.6.0). A change to anything that TRAVELS schedules a debounced write of the note; a change to the
+		// note reference itself repoints the whole feature. Both are no-ops while the reference is empty, which is how it ships.
+		if (keys.some(key => SYNCED_SETTING_KEYS.includes(key))) scheduleSettingsNoteWrite()
+		if (keys.includes(settingsNoteIdSettingKey)) await onSettingsNoteReferenceChanged()
 	})
 }
 

@@ -24,6 +24,7 @@ import { updateFrequencySettingKey } from "./settings";
 import { getSyncStatus, markSyncComplete, markSyncStart } from "./syncStatus";
 import { hasPendingOptimistic } from "./optimistic";
 import { isMobile } from "./platform";
+import { drainDeferredSettingsNoteWrite, isSettingsNote, pollSettingsNote, scheduleSettingsNoteRead, syncSettingsNote } from "./settingsSync";
 
 /** Variable Initialization ************************************************************************************************************************/
 const defaultUpdateFrequency = 60
@@ -187,7 +188,15 @@ export async function setupTimer(){
     // Only when the user has left the interval at its default is it raised on mobile; an explicitly set
     // value is always honoured. Desktop keeps the 60s default untouched.
     if (mobile && updateFrequency === defaultUpdateFrequency) updateFrequency = defaultMobileUpdateFrequency
-    timer = setInterval(() => { void refreshInterfaces() }, updateFrequency * 1000);
+    // The callback returns the promise so the tick is awaitable (harnessable); setInterval ignores it.
+    timer = setInterval(() => Promise.all([
+        // The settings note's backstop, and its ONE cheap call: a single updated_time field read tells whether the note moved at all,
+        // and only then is the body fetched (see pollSettingsNote). It also drains any write the editor gate deferred. With the feature
+        // off it returns before touching anything, so this tick costs exactly what it cost before the feature existed. Guarded on its
+        // own, so nothing about the settings note can stop the panel from being repainted.
+        pollSettingsNote("tick").catch(error => console.warn("Cockpit: could not poll the settings note", error)),
+        refreshInterfaces(),
+    ]), updateFrequency * 1000);
 }
 
 /** setupWorkspaceEvents *****************************************************************************************************************************
@@ -196,6 +205,14 @@ export async function setupTimer(){
  ***************************************************************************************************************************************************/
 export async function setupWorkspaceEvents(){
     await registerEvent("onNoteChange", async (event) => {
+        // The settings note is not content: it carries no to-dos, so it belongs in neither the reconcile lane nor the external-change
+        // path (which would fetch it as an ordinary note and hand it to the optimistic layer). It gets its own short-debounced read
+        // instead, which is also a drain point for a write this device still owes. Checked first, and from a mirrored id, so the
+        // question costs a string comparison.
+        if (event && isSettingsNote(event.id)){
+            scheduleSettingsNoteRead()
+            return
+        }
         // Cockpit writes the overview notes itself, so refreshing on those changes would loop.
         if (event && (await getOverviewNoteIDs()).includes(event.id)) return
         // Targeted optimistic reconcile for a single external change, so a note created / moved / trashed
@@ -228,6 +245,9 @@ export async function setupWorkspaceEvents(){
         // button), then arm ONE reconcile job to let the index catch up with whatever the sync pulled in -
         // not an unconditional full cascade.
         await refreshPanelData({ fast: true })
+        // A completed sync is when another device's settings note actually arrives, so it is the natural read point - and the drain
+        // point for any write of our own the editor gate deferred. A no-op while the feature is off.
+        await syncSettingsNote("sync")
         scheduleReconcile()
         // Arm ONE overview pass too. The per-note-change lane armed DURING the sync is not enough on its own:
         // if the sync's last onNoteChange settled more than the overview debounce (10s) before completion, that
@@ -241,7 +261,13 @@ export async function setupWorkspaceEvents(){
     // which row the panel highlights, and nothing else. It changes no note data and no markup, so it arms
     // no lane and issues no search, GET or render - just a message to the webview (see panel.ts). The
     // event carries the selected ids as { value: [...] }.
-    await registerEvent("onNoteSelectionChange", (event) => trackEditorNoteSelection(event && event.value))
+    await registerEvent("onNoteSelectionChange", async (event) => {
+        trackEditorNoteSelection(event && event.value)
+        // The settings note's editor gate drains here: a plugin PUT evicts the mobile editor, so a write deferred while the settings
+        // note was the open note goes the moment the editor moves off it. Nothing is owed on an ordinary selection change, and nothing
+        // at all is done while the feature is off, so this stays the one subscription that issues no search, GET or render.
+        await drainDeferredSettingsNoteWrite()
+    })
 }
 
 /** registerEvent ************************************************************************************************************************************
