@@ -3934,14 +3934,27 @@ function notebookOverlayFilterInput(){
 /** filterNotebookOverlay ***************************************************************************************************************************
  * Shows or hides each overlay row by whether its label survives the filter box, by the shared, tested rule. A hidden row needs the explicit attribute *
  * because .cockpit-overlay-item sets display:flex, which would otherwise beat the user agent's [hidden] rule (see panel.css).                          *
+ *                                                                                                                                                     *
+ * A SELECTION THE FILTER HIDES IS DROPPED. OK commits overlayNotebookSelection, so a selection left on a row the user can no longer see would move the  *
+ * notes into a notebook that is not on screen. Clearing it instead makes OK inert (it returns early on a null selection) until a still-visible row is   *
+ * tapped - the overlay's form of the same rule the desktop dialog's applyPickerFilter follows.                                                          *
  ***************************************************************************************************************************************************/
 function filterNotebookOverlay(){
     var input = notebookOverlayFilterInput()
     var text = input ? input.value : ''
     var rows = document.querySelectorAll('#cockpitOverlay .cockpit-overlay-item')
+    var selectionStillShown = false
     for (var index = 0; index < rows.length; index++){
-        if (window.SearchTokens.matchesFilter(rows[index].textContent, text)) rows[index].removeAttribute('hidden')
-        else rows[index].setAttribute('hidden', '')
+        if (window.SearchTokens.matchesFilter(rows[index].textContent, text)){
+            rows[index].removeAttribute('hidden')
+            if (rows[index].classList.contains('-selected')) selectionStillShown = true
+        } else {
+            rows[index].setAttribute('hidden', '')
+        }
+    }
+    if (overlayNotebookSelection !== null && !selectionStillShown){
+        overlayNotebookSelection = null
+        for (var clear = 0; clear < rows.length; clear++) rows[clear].classList.remove('-selected')
     }
 }
 

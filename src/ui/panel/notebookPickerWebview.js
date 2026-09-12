@@ -5,9 +5,10 @@
  * a filter leaves, where an arrow key lands, what Enter commits, what Escape means) is made by the pure window.NotebookPickerModel, which the Node    *
  * harness drives directly.                                                                                                                          *
  *                                                                                                                                                    *
- * WHY THE ROWS ARE NOT BUILT HERE. Joplin measures a fit-to-content dialog ONCE, from the markup, before any of its scripts run, and never measures   *
- * again. A list built from script would therefore be laid out inside a dialog sized for an empty one. So the host emits every row, and this file only *
- * shows and hides them.                                                                                                                              *
+ * WHY THE ROWS ARE NOT BUILT HERE. Joplin sizes a fit-to-content dialog from the content it can see, and the FIRST measurement is taken from the      *
+ * host's markup, before this script has run. (3.6.14 then keeps a ResizeObserver on it - watchElementSize / updateContentSize / useContentSize - so a  *
+ * later change does resize the frame, but it resizes one that is already on screen.) A list built here would therefore open at the height of an empty  *
+ * dialog and then jump. So the host emits every row, and this file only shows and hides them.                                                          *
  *                                                                                                                                                     *
  * WHY THERE IS A MutationObserver. A dialog's scripts are injected once, after the document is already parsed, and the same document is then REUSED   *
  * for every later open with fresh setHtml markup. So init must run neither on DOMContentLoaded (long past) nor only once (the second open would get   *
@@ -28,8 +29,14 @@ function pickerForm(){
 }
 
 /** applyPickerFilter *******************************************************************************************************************************
- * Shows or hides every row by whether it survives `text`, through the shared, tested matcher. A hidden row keeps its place in pickerRows, so the     *
- * arrow keys step over it rather than renumbering anything.                                                                                          *
+ * Shows or hides every row by whether it survives `text`, through the shared, tested matcher, and then RE-POINTS the selection. A hidden row keeps    *
+ * its place in pickerRows, so the arrow keys step over it rather than renumbering anything.                                                            *
+ *                                                                                                                                                     *
+ * THE RE-POINT IS THE WHOLE POINT OF THE SECOND HALF. The selection is the answer: it is what the hidden input carries and what OK commits. Leaving   *
+ * it on a row the filter has just hidden means the user types "beta", sees one row, presses OK with the mouse and the note lands in the notebook that  *
+ * WAS highlighted - one they can no longer see. So the selection follows the filter, by the very rule Enter uses (the highlight when it survived, else *
+ * the first visible row), and is CLEARED when nothing survived at all: an empty hidden input makes pickNotebook return null, and all three of its      *
+ * callers abort on null. Only the "(top level)" row answers with a deliberate empty string, and it does so through the __root sentinel.                *
  ***************************************************************************************************************************************************/
 function applyPickerFilter(text){
     var visible = window.NotebookPickerModel.visibleIndexes(pickerRows, text)
@@ -39,6 +46,22 @@ function applyPickerFilter(text){
         if (shown[row]) pickerRows[row].el.removeAttribute('hidden')
         else pickerRows[row].el.setAttribute('hidden', '')
     }
+    var target = window.NotebookPickerModel.enterTarget(pickerRows, text, pickerSelectedIndex)
+    if (target >= 0) selectPickerRow(target, true)
+    else clearPickerSelection()
+}
+
+/** clearPickerSelection ****************************************************************************************************************************
+ * Drops the selection entirely: no row highlighted, and an EMPTY hidden input, so OK on a filter that matches nothing commits nothing rather than the  *
+ * row that happened to be selected before the user typed. Reversed by the next keystroke - a backspace brings rows back and applyPickerFilter re-points *
+ * onto the first of them.                                                                                                                              *
+ ***************************************************************************************************************************************************/
+function clearPickerSelection(){
+    pickerSelectedIndex = -1
+    for (var row = 0; row < pickerRows.length; row++) pickerRows[row].el.classList.remove('-selected')
+    var form = pickerForm()
+    var hidden = form ? form.querySelector('input[name="folderId"]') : null
+    if (hidden) hidden.value = ''
 }
 
 /** selectPickerRow *********************************************************************************************************************************
@@ -126,15 +149,29 @@ function pickerRowIndexOf(target){
     return -1
 }
 
+/** focusPickerFilter *******************************************************************************************************************************
+ * Hands the caret back to the filter box. The rows are plain divs, so a click on one drops focus to <body>, and from there Enter reaches nothing and  *
+ * Escape is nobody's to swallow - the dialog would simply cancel on a press the user meant as "clear the filter". Refocusing after every row click    *
+ * keeps the keyboard working for the whole life of the dialog, whatever the mouse has been doing.                                                     *
+ ***************************************************************************************************************************************************/
+function focusPickerFilter(){
+    var form = pickerForm()
+    var filter = form ? form.querySelector('.picker-filter') : null
+    if (filter && filter.focus) filter.focus()
+}
+
 function onPickerListClick(event){
     var index = pickerRowIndexOf(event.target)
-    if (index >= 0) selectPickerRow(index, false)
+    if (index < 0) return
+    selectPickerRow(index, false)
+    focusPickerFilter()
 }
 
 function onPickerListDoubleClick(event){
     var index = pickerRowIndexOf(event.target)
     if (index < 0) return
     selectPickerRow(index, false)
+    focusPickerFilter()
     submitPicker()
 }
 
