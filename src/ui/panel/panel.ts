@@ -278,7 +278,7 @@ export async function setupPanel(){
     await joplin.views.dialogs.addScript(notebookPickerDialog, '/ui/panel/notebookPickerModel.js')
     await joplin.views.dialogs.addScript(notebookPickerDialog, '/ui/panel/notebookPickerWebview.js')
     tagPickerDialog = await joplin.views.dialogs.create('tagPicker')
-    applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+    await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
     setupFolderPoll()
 }
 
@@ -343,6 +343,11 @@ async function pollFoldersOnce(){
         // own guards handle a hidden desktop panel or an open mobile overlay, and its equality guard suppresses
         // the render when nothing visible actually changed (e.g. only an updated_time bumped).
         invalidateNotebookMap()
+        // The notebook the panel is pointed at may be the one that just went. Leaving the filter on a notebook
+        // that is no longer in the map gives the panel a filter its own dropdown cannot mark - an empty list
+        // under an "All notebooks" label, and a create that files the note into a notebook that does not exist.
+        // After invalidateNotebookMap, so the check reads the fresh map.
+        await dropUnshowableNotebookFilter()
         // Rename-safety for the "Excluded notebooks" feature: exclusion is tracked by id, so a rename/move of
         // an excluded notebook does not change WHAT is excluded, but the visible names field must be refreshed
         // to the new title, and a deleted excluded notebook must drop out of the id list.
@@ -392,9 +397,14 @@ async function reconcileExcludedNotebookText(){
  * Applies a profile's stored header state - notebook filter, search text and sorting - so that switching profiles switches the whole view. Header    *
  * controls used afterwards override it for the session without being written back to the profile.                                                   *
  ***************************************************************************************************************************************************/
-function applyProfileHeaderState(profile){
+async function applyProfileHeaderState(profile){
     if (!profile) return
-    notebookFilter = String(profile.notebook || "")
+    // The stored notebook is validated rather than trusted: a profile saved months ago can name a notebook that
+    // has since been deleted or added to the Excluded notebooks setting, and restoring THAT would start the
+    // session with the panel pointed at a notebook it will not list. Such a profile starts at "all notebooks"
+    // instead - for this session only; the profile itself is never rewritten, so un-excluding the notebook brings
+    // its stored filter straight back.
+    notebookFilter = await resolveCreatableNotebookID(String(profile.notebook || ""))
     searchFilter = String(profile.panelSearch || "")
     sortField = sortFieldCycle.includes(profile.sortField) ? profile.sortField : "title"
     sortDirection = profile.sortDirection === "desc" ? "desc" : "asc"
@@ -413,7 +423,7 @@ export async function onProfilesReplaced(){
     clearReveal()
     // The current profile carries its own header state: notebook filter, search and sorting. getCurrentProfileID falls back
     // to the first profile when the id this device held no longer exists in the incoming store.
-    applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+    await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
     // The rendered markup is compared with the last one to decide whether a paint is needed; the incoming profiles can
     // produce the very same html for a different reason, so the guard is dropped rather than trusted.
     lastRenderedHtml = null
@@ -514,7 +524,7 @@ async function eventHandler(message){
         // one does not carry over (nor does its pending flash).
         clearReveal()
         // The profile carries its own header state: notebook filter, search and sorting.
-        applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+        await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
         // Paint the switched-to view immediately, then fill the rings from note bodies in the background.
         // optimistic reuses the switched-to profile's cached result set, so a previously viewed profile paints
         // with ZERO searches (with the host-held override map still layered on); a first visit does one search
@@ -606,7 +616,7 @@ async function eventHandler(message){
         var id = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
         await openEditor(id)
         // Editing the current profile may change its header state, so re-apply it
-        if (id == await getCurrentProfileID()) applyProfileHeaderState(await getProfile(id))
+        if (id == await getCurrentProfileID()) await applyProfileHeaderState(await getProfile(id))
         lastRenderedHtml = null
         // A profile edit changes no note data, only which to-dos this profile shows, so paint (fast) and
         // regenerate only THIS profile's overview note - not every profile's - on the overview lane.
@@ -616,7 +626,7 @@ async function eventHandler(message){
         var deleteID = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
         await openDeleteDialog(deleteID)
         // The deleted profile may have been the current one, in which case another becomes current
-        applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+        await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
         lastRenderedHtml = null
         await refreshInterfaces()
     } else if (message[0] == 'synchronizeClicked'){
@@ -726,7 +736,7 @@ async function eventHandler(message){
         // post-editor refresh as the editProfileClicked branch.
         var savedID = message[1] == null ? await createProfile() : Number(message[1])
         await updateProfile(savedID, message[2])
-        if (savedID == await getCurrentProfileID()) applyProfileHeaderState(await getProfile(savedID))
+        if (savedID == await getCurrentProfileID()) await applyProfileHeaderState(await getProfile(savedID))
         lastRenderedHtml = null
         // Mobile-only path (the editor overlay is never opened on desktop, so this never runs there). Paint
         // fast and defer just THIS profile's overview-note rewrite to the overview lane, mirroring the
@@ -741,7 +751,7 @@ async function eventHandler(message){
         // message box (which shows correctly above the panel on mobile) and the ">1 profile must exist"
         // guard, unchanged. Then refresh as the deleteProfileClicked branch does.
         await openDeleteDialog(Number(message[1]))
-        applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+        await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
         lastRenderedHtml = null
         await refreshInterfaces()
     }
@@ -1014,6 +1024,49 @@ export async function togglePanelVisibility() {
     if (!visibility) await refreshPanelData();
 }
 
+/** creatableNotebookID *****************************************************************************************************************************
+ * THE ONE RULE BEHIND THE NOTEBOOK FILTER: it must never point at a notebook the panel cannot show. Answers the given id when it is a notebook this  *
+ * panel is allowed to list - present in the notebook map, and not excluded (getExcludedNotebookIdSet already carries the descendants of every        *
+ * excluded notebook) - and "" otherwise.                                                                                                             *
+ *                                                                                                                                                     *
+ * The bug it exists to kill, reported from a real vault: with a note open in an excluded "Archive", the filter could be pointed AT Archive - by the    *
+ * Whereabouts chip, by a reveal, or by a profile saved before the notebook was excluded. Nothing then agreed with anything else. The dropdown builds   *
+ * its rows from the excluded-filtered list, so it could not find that id among them and fell back to its "All notebooks" label; the search WAS         *
+ * narrowed to Archive, which the exclusion then emptied, so the panel showed nothing; and New note / New to-do saw a non-empty filter and created      *
+ * straight into Archive without asking. Three wrong answers, one cause. Every writer of notebookFilter now goes through this, and createItem checks it *
+ * again on the way out, so no path can leave the filter pointing somewhere the panel will not list.                                                    *
+ ***************************************************************************************************************************************************/
+function creatableNotebookID(id, notebooks, excludedSet){
+    var wanted = String(id || "")
+    if (!wanted) return ""
+    if (!notebooks || !notebooks.has(wanted)) return ""
+    if (excludedSet && excludedSet.has(wanted)) return ""
+    return wanted
+}
+
+/** resolveCreatableNotebookID **********************************************************************************************************************
+ * creatableNotebookID against the live notebook map and exclusion set, for the callers that do not already hold both.                                *
+ ***************************************************************************************************************************************************/
+async function resolveCreatableNotebookID(id){
+    if (!id) return ""
+    return creatableNotebookID(id, await getNotebookMap(), await getExcludedNotebookIdSet())
+}
+
+/** dropUnshowableNotebookFilter ********************************************************************************************************************
+ * Clears the notebook filter when the notebook it points at has stopped being one the panel may show. Two things do that to a filter the user is      *
+ * already working in, and neither is a write to the filter, so neither could be caught by the writers above: the user adds that notebook to the       *
+ * Excluded notebooks setting (the resolver in settings.ts calls this), and the notebook is DELETED elsewhere in Joplin (the folder poll calls it, on   *
+ * the pass where it notices and drops the cached map). Both call it just before their own repaint, so the render that follows already lists            *
+ * everything. Answers whether it changed anything.                                                                                                     *
+ ***************************************************************************************************************************************************/
+export async function dropUnshowableNotebookFilter(){
+    if (!notebookFilter) return false
+    if (await resolveCreatableNotebookID(notebookFilter)) return false
+    notebookFilter = ""
+    lastScrollTop = 0
+    return true
+}
+
 /** setNotebookFilter *******************************************************************************************************************************
  * Points the panel at one notebook (or at all of them, for "" / undefined) and repaints. THE single state write behind both routes into the notebook  *
  * filter: the panel's own dropdown (the notebookFilterChanged message) and the cockpit.filterByNotebook command another plugin executes. They share    *
@@ -1025,7 +1078,11 @@ export async function togglePanelVisibility() {
  ***************************************************************************************************************************************************/
 export async function setNotebookFilter(folderID){
     clearReveal()
-    notebookFilter = String(folderID || "")
+    // The last gate on the rule above. Both routes in offer only notebooks the panel may show, so this normally
+    // passes the id through untouched; what it catches is a stale one - a mobile webview reloaded from a snapshot
+    // taken before the notebook was excluded, say - which would otherwise aim the panel at a notebook it will not
+    // list. Falling back to "all notebooks" is the honest answer there: it is what the panel is about to show.
+    notebookFilter = await resolveCreatableNotebookID(String(folderID || ""))
     lastScrollTop = 0
     await refreshPanelData()
 }
@@ -1046,6 +1103,15 @@ export async function filterByNotebook(folderID?){
         var notebooks = await getNotebookMap()
         if (!notebooks.has(id)){
             console.warn("Cockpit: filterByNotebook was given a notebook id that does not exist", id)
+            return
+        }
+        // An EXCLUDED notebook is a no-op for the same reason an unknown one is - the caller's filter must not be
+        // blanked on its behalf - but it is not the caller's mistake, it is a setting the user made and has
+        // probably forgotten, so unlike the unknown id this one says so. A chip click that silently did nothing
+        // is exactly how the reported confusion started.
+        if (!creatableNotebookID(id, notebooks, await getExcludedNotebookIdSet())){
+            console.warn("Cockpit: filterByNotebook was given a notebook that is excluded in Cockpit's settings", id)
+            notifyPanel("Cockpit: that notebook is excluded in Cockpit's settings")
             return
         }
     }
@@ -1123,11 +1189,18 @@ export async function revealNote(noteID){
     // setNotebookFilter's, spelled out here rather than called, for two reasons: that function ends in a render
     // of its own (this step needs exactly one, and (c) may still follow) and it CLEARS the reveal, which is
     // right for every other caller and would undo the marker this reveal has just armed.
-    notebookFilter = String(note.parent_id || "")
-    searchFilter = ""
-    lastScrollTop = 0
-    await refreshPanelData()
-    if (renderedRowIsListed(id)) return
+    // A note living in an EXCLUDED notebook (or in one this device cannot see) skips this step entirely: pointing
+    // the filter there would aim the panel at a notebook it is not allowed to list, which is how the filter came
+    // to disagree with its own dropdown. There is nothing to lose by skipping - the row could not appear either
+    // way - and (c) below is the step that actually answers the reveal, by pinning the note.
+    var revealFolderID = await resolveCreatableNotebookID(String(note.parent_id || ""))
+    if (revealFolderID){
+        notebookFilter = revealFolderID
+        searchFilter = ""
+        lastScrollTop = 0
+        await refreshPanelData()
+        if (renderedRowIsListed(id)) return
+    }
     // (c) The profile itself hides it: pin it below the list instead.
     revealedNote = { id: String(note.id), parent_id: String(note.parent_id || ""), is_todo: note.is_todo, todo_completed: note.todo_completed, title: String(note.title || "") }
     await refreshPanelData()
@@ -1549,7 +1622,11 @@ function dropdownHTML(menuID, toggleLabel, itemsHtml){
  * Creates a note or a to-do and opens it. It goes into the notebook the panel is filtered to; with "All notebooks" selected, a dialog asks where.   *
  ***************************************************************************************************************************************************/
 async function createItem(isTodo){
-    var folderID = notebookFilter
+    // The filter is re-checked here rather than trusted, whatever wrote it: creating silently into a notebook the
+    // panel is not showing is the worst of the three symptoms this guards against, because it puts a note
+    // somewhere the user cannot see and did not choose. A filter that does not survive the check is treated as no
+    // filter at all, so the user is asked - which is what "All notebooks" was telling them all along.
+    var folderID = await resolveCreatableNotebookID(notebookFilter)
     if (!folderID){
         // With "All notebooks" selected the user is asked where. Desktop asks with the native notebook
         // picker dialog; mobile asks with the in-panel notebook overlay, which the webview shows itself

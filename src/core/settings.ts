@@ -11,6 +11,7 @@ import { getAllProfiles, getProfile, profileDataSettingKey } from "./database"
 import { refreshInterfaces, setupTimer } from "./timer"
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, parseExcludedIds, resolveNamesToIds } from "./exclusion"
 import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches } from "./joplin"
+import { dropUnshowableNotebookFilter } from "../ui/panel/panel"
 import { isSettingsNoteConnected, onSettingsNoteReferenceChanged, scheduleSettingsNoteWrite } from "./settingsSync"
 // The synced key list lives with the note format it belongs to (src/core/settingsNote.js, pure and harness-tested), so
 // the handler below and the payload builder can never drift apart on which settings actually travel.
@@ -379,6 +380,12 @@ async function resolveExcludedNotebooks(){
 		// not be reused; the notebook map is dropped too so the filter/picker rebuild.
 		invalidateResultCaches()
 		invalidateNotebookMap()
+		// The panel may be pointed AT the notebook that was just excluded. Leaving it there would give the
+		// panel a filter its own dropdown cannot show - an empty list under an "All notebooks" label, and a
+		// New note created into the excluded notebook without asking. Dropped before the repaint below, so
+		// the render that follows already lists everything. After invalidateNotebookMap, so the check reads
+		// the fresh map rather than the one the exclusion was made against.
+		await dropUnshowableNotebookFilter()
 		await refreshInterfaces()
 	}
 }
