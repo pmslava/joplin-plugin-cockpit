@@ -8342,6 +8342,62 @@ async function main() {
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'], 'and applied what it says')
     })
 
+    await test('settings note: a title that names nothing at startup is announced ONCE, after the panel exists', async () => {
+        // The notice used to be raised before there was a panel to put it in - setupSettingsSync runs beside the profile store, well
+        // ahead of setupPanel - so it went nowhere and left only a console line. Since the retries are deliberately silent, that was
+        // the user's only chance to be told. It is now kept until the startup read, which runs after the panel is created.
+        const state = await runSync('startup-notice', {
+            notes: {},
+            initialSettings: {
+                settingsNoteId: SETTINGS_NOTE_TITLE,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        const notices = () => state.panelMessages.filter(m => m[0] === 'panelToast' && /no note titled/i.test(String(m[1])))
+        assert.strictEqual(notices().length, 1, 'the notice reached the panel, though it was raised before the panel existed')
+        // ...and exactly once: the automatic retries say nothing, so a user who leaves the setting as typed is not nagged.
+        await state.syncCompleteHandler({})
+        await state.syncCompleteHandler({})
+        assert.strictEqual(notices().length, 1, 'and is not repeated on later syncs')
+    })
+
+    await test('settings note: a tick after a refused apply re-reads the body instead of trusting the stamp', async () => {
+        const state = await runSync('refused-then-tick', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]), syncSettings())) },
+            initialSettings: {
+                settingsNoteId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            },
+        })
+        state.notes[SYNC_NOTE_ID].body = syncBody(syncStore(3, [syncProfile(2, 'From the phone')]),
+            syncSettings({ customTextColor: '#123456', themeMode: 'nord' }), '2026-09-12T10:00:00.000Z')
+        state.notes[SYNC_NOTE_ID].updated_time = 99
+        let refused = false
+        state.onSettingWrite = (key) => {
+            if (key !== 'customTextColor' || refused) return
+            refused = true
+            throw new Error('the host refused this write')
+        }
+        await state.syncCompleteHandler({})
+        state.onSettingWrite = null
+        assert.ok(refused, 'the apply reached the refused write')
+        assert.strictEqual(state.settings.themeMode, 'matchJoplin', 'and stopped there - the keys written after it never landed')
+        // The read that preceded the refusal recorded the note's updated_time. A tick that trusted that stamp would answer "nothing
+        // moved" for ever: the device stays out of step, its own edit unpublished, until some sync happens to complete - and the
+        // wholesale apply that finally arrives throws that edit away.
+        const bodyReads = () => state.gets.filter(g => g.path[0] === 'notes' && g.path[1] === SYNC_NOTE_ID &&
+            g.query && Array.isArray(g.query.fields) && g.query.fields.includes('body')).length
+        const before = bodyReads()
+        const tick = state.intervals.find(interval => interval.ms === 60000)
+        assert.ok(tick, 'the periodic backstop is the 60 s interval')
+        await state.withTimers(() => tick.fn())
+        assert.strictEqual(bodyReads() - before, 1, 'the tick fetched the body rather than stopping at updated_time')
+        assert.strictEqual(state.settings.customTextColor, '#123456', 'and the apply completed')
+        assert.strictEqual(state.settings.themeMode, 'nord', 'including the keys the refusal had cut short')
+    })
+
     await test('settings note: the applied content key is recorded BEFORE the apply, and cleared again if the apply throws', () => {
         // Not observable from outside - every operation is serialized on one chain, so a write can never interleave with an
         // apply - but it is what makes the design correct if that chain is ever bypassed, and what Harper's sync note learned
