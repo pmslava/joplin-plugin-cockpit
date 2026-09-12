@@ -2022,6 +2022,56 @@ pin, on the first assertion), an `@media` rule added (the same pin, on the `@med
 excluded-notebook filter dropped from `pickNotebook` (two markup pins, both listing the excluded notebook
 among the rows).
 
-Suite: 406 harness checks (twelve new), all passing. Playwright: 117 tests in 20 files (110 run, 7 opt-in
+**The review found two real ones, and both were the same species: state that stops agreeing with itself.**
+
+The first is the one that mattered. `applyPickerFilter` showed and hid rows and did nothing else — so the
+SELECTION, which is the answer the hidden input carries and the thing OK commits, stayed wherever it was
+before the user typed. Reproduced in jsdom against the shipped files: rows Alpha/Beta/Gamma with Alpha
+pre-selected, type "beta", and the one visible row is Beta while the marked row is still Alpha and the
+answer is still `idAlpha`. Click OK and the to-do lands in a notebook that is not on screen. Typing
+something that matches nothing was worse, because it left no visible row to contradict the stale id at all.
+The fix is one call: after every filter pass the selection is re-pointed by the very rule Enter already
+used — the highlight if it survived, else the first visible row — and CLEARED when nothing survived, which
+empties the hidden input. The emptying is safe only because of a contract that was already there and is now
+pinned alongside it: `pickNotebook` returns `picked || null`, all three of its callers abort on null, and
+the one answer that is legitimately an empty string arrives as the `__root` sentinel and is mapped before
+that line. The same hazard existed in the mobile overlay for the same reason, and got the same treatment:
+a selection its filter hides is dropped, so OK is inert (it returns early on a null selection) until a
+visible row is tapped.
+
+The second was a race that had simply not been thought about. The model resolved `SearchTokens` ONCE, at
+load. `joplin.views.dialogs.addScript` appends ordinary classic `<script>` elements with no `async=false`,
+so a dialog's scripts run in whatever order they finish fetching, and nothing makes `searchTokens.js` win.
+Lose that race and the binding is null for the life of the dialog: jsdom, loading the model first,
+throws `TypeError: Cannot read properties of null (reading 'matchesFilter')` on the first keystroke — the
+filter, the arrows and Enter all dead, while the host's own Enter handler goes on cheerfully submitting the
+pre-selection. The lookup now happens per call, in a `tokens()` getter, which is how `alarmWebview.js` and
+`panelWebview.js` have always reached their own pure modules. It is pinned twice: a source check that every
+`window.SearchTokens` read sits inside that getter (a load-time binding cannot), and a behavioural one that
+evaluates the model in a `vm` context holding a window with no matcher on it and no `require` to fall back
+to, then lets the matcher arrive afterwards and proves the filter works from the first call.
+
+Three smaller ones came with them. **"Move notebook under…" no longer pre-selects the notebook the app is
+showing** — in that flow it is very often the notebook being moved, so the dialog was offering to make it
+the parent of itself; with `includeRoot` the pre-selection is the first row, "(top level)", exactly what the
+old dropdown defaulted to, and the host is not even asked which notebook is open. **A row click now hands
+the caret back to the filter box**: the rows are plain divs, so a click dropped focus to `<body>`, after
+which Enter reached nothing and Escape cancelled the dialog instead of clearing the filter — which is what
+makes the README's "Escape clears the filter first" true unconditionally rather than only until the user
+touches the mouse. And the **"measured once" comments were corrected** to what the code actually does (see
+the `ResizeObserver` note above): the first measurement is taken from the host's markup before any script
+runs, and a later change resizes a dialog that is already on screen — so the practice is unchanged (rows in
+the initial HTML, a pixel cap, no `@media`) but for the honest reason, which is that a list built from
+script would open at the height of an empty dialog and then jump.
+
+Five more mutations, each caught by exactly the pin written for it: the re-point dropped from
+`applyPickerFilter` (the new glue check), the model bound at load again (both new model checks), the
+`includeRoot` pre-selection reverted to `selectedFolder()` (the "(top level)" check), the refocus removed
+from the row click (the glue check), and the overlay's selection-clearing removed (the overlay check).
+
+Suite: 409 harness checks (fifteen new), all passing. Playwright: 118 tests in 20 files (111 run, 7 opt-in
 showcase captures) — the multi-move spec updated off `selectOption` onto type-then-click, and a new
-`notebook-picker.spec.ts` with three cases. Not run on this side; the e2e pass is the verifier's.
+`notebook-picker.spec.ts` with four cases, the last of them keyboard-only: type three letters, press Enter,
+and assert both that the to-do landed in the typed notebook and that the dialog is gone, which is the one
+case that covers the re-pointed selection and the single accept together. Not run on this side; the e2e
+pass is the verifier's.
