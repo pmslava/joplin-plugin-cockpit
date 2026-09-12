@@ -4824,7 +4824,7 @@ async function main() {
             'and the hidden input starts on __root, which pickNotebook maps back to ""')
     })
 
-    await test('picker css: the scrollbar is themed here (the point of the rework), the list is capped in pixels, and there is no @media', () => {
+    await test('picker css: the scrollbar is themed here (the point of the rework), the dialog height is fixed in pixels, and there is no @media', () => {
         const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
         const start = panelSource.indexOf('async function pickNotebook(')
         assert.ok(start >= 0, 'pickNotebook not found in panel.ts')
@@ -4839,13 +4839,76 @@ async function main() {
         // Joplin sizes a fit-to-content dialog from this markup; a viewport query has no business in it, and a vh
         // cap would answer to a viewport the dialog does not have.
         assert.ok(!body.includes('@media'), 'a dialog stylesheet must never carry an @media rule')
-        assert.ok(/\.picker-list\s*{[^}]*max-height:\s*\d+px/.test(body), 'the list height must be capped in PIXELS')
-        assert.ok(/#joplin-plugin-content\s*{\s*width:\s*380px/.test(body), 'the dialog is widened for long notebook paths')
+        const contentRule = body.slice(body.indexOf('#joplin-plugin-content {'), body.indexOf('.picker-form {'))
+        assert.ok(/width:\s*380px/.test(contentRule), 'the dialog is widened for long notebook paths')
+        // HEIGHT, not max-height: the frame re-centres itself on every content resize, so a box that can shrink
+        // while the user filters makes the whole dialog jump. A fixed height cannot.
+        assert.ok(/height:\s*\$\{pickerDialogHeight\(\)\}px/.test(contentRule),
+            'the dialog must be given a FIXED pixel height from the reported viewport, never a max-height')
+        assert.ok(!/max-height/.test(contentRule), 'a max-height would let the frame shrink and jump again')
+        // And the list fills whatever that fixed height leaves, rather than sizing itself from its rows.
+        const listRule = body.slice(body.indexOf('.picker-list {'), body.indexOf('.picker-list::-webkit-scrollbar'))
+        assert.ok(/flex:\s*1 1 auto/.test(listRule) && /min-height:\s*0/.test(listRule) && /overflow-y:\s*auto/.test(listRule),
+            'the list must fill the fixed height and scroll inside it (min-height:0, or a flex item refuses to shrink)')
+        assert.ok(!/max-height/.test(listRule), 'the list must not cap itself - the dialog height is what bounds it now')
         // A filtered-out row must actually vanish: .picker-row sets display, which would otherwise beat [hidden].
         assert.ok(/\.picker-row\[hidden\]\s*{[^}]*display:\s*none/.test(body), 'a filtered-out row must be hidden')
         // Colours follow the theme with a literal fallback, as the old <option> rule did.
         assert.ok(/\.picker-row\s*{[^}]*color:\s*var\(--joplin-color,/.test(body), 'row text follows the theme')
         assert.ok(/\.picker-row\.-selected\s*{[^}]*var\(--joplin-selected-color,/.test(body), 'the selected row follows the theme')
+    })
+
+    await test('picker height: fixed, sized from the panel viewport, clamped, and 420px until a panel has reported one', async () => {
+        const dialogCss = () => String(pick.dialogHtml['dialog-notebookPicker'])
+        const openPicker = () => pick.panelMessageHandler(['noteMenuActionMulti', 'moveToFolder', ['1'.repeat(32)]])
+        // (a) The opens above happened before any webview reported a height, which is also every pre-2.6 webview
+        // and every run that never posts: the dialog falls back to a constant rather than to no height at all.
+        assert.ok(pickMoveHtml.includes('height: 420px'), 'with no viewport ever reported the dialog falls back to 420px')
+        // (b) The report itself is pure state - it must not repaint the panel or cost a request. A window resize
+        // posts this, and a resize has no business re-rendering the list.
+        const paintsBefore = pick.setHtmlCalls
+        const getsBefore = pick.gets.length
+        await pick.panelMessageHandler(['viewportHeight', 1000])
+        assert.strictEqual(pick.setHtmlCalls, paintsBefore, 'a viewport report must not repaint the panel')
+        assert.strictEqual(pick.gets.length, getsBefore, 'nor issue a single request')
+        // (c) 0.62 of the reported viewport, in pixels, on the content box Joplin measures.
+        await openPicker()
+        assert.ok(dialogCss().includes('height: 620px'), 'a 1000px panel gives a 620px dialog (0.62 of the viewport)')
+        // (d) Clamped at both ends: a tiny window must not produce a three-row dialog, a huge one must not
+        // produce a strip taller than the screen.
+        await pick.panelMessageHandler(['viewportHeight', 400])
+        await openPicker()
+        assert.ok(dialogCss().includes('height: 360px'), 'a small panel is clamped up to the 360px floor')
+        await pick.panelMessageHandler(['viewportHeight', 2000])
+        await openPicker()
+        assert.ok(dialogCss().includes('height: 880px'), 'a large panel is clamped down to the 880px ceiling')
+        // (e) A nonsense report is ignored rather than stored, so the last good height stands.
+        await pick.panelMessageHandler(['viewportHeight', 0])
+        await openPicker()
+        assert.ok(dialogCss().includes('height: 880px'), 'a zero height is ignored, not taken as a new viewport')
+        // (f) The webview end: posted on load and on a throttled resize, never on every frame of a drag.
+        const webviewSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panelWebview.js'), 'utf8')
+        assert.ok(/webviewApi\.postMessage\(\['viewportHeight', height\]\)/.test(webviewSrc), 'the panel must report its own inner height')
+        assert.ok(/window\.addEventListener\('resize', queueViewportPost\)/.test(webviewSrc), 'and re-report it when the window is resized')
+        const queueBody = handlerBody('queueViewportPost')
+        assert.ok(/setTimeout\([\s\S]*300\)/.test(queueBody), 'the resize report must be throttled, like the scroll post')
+        assert.ok(handlerBody('startPanelObserver').includes('postViewportHeight()'), 'and posted once on load, before any resize happens')
+    })
+
+    await test('notebook overlay: its height is locked on open, so filtering cannot shrink and re-centre it (mobile)', () => {
+        const overlayBody = handlerBody('openNotebookOverlay')
+        // The same jump as the desktop dialog: the overlay panel is centred and capped at 90vh, so hiding rows
+        // shrinks it and it re-centres under the finger.
+        assert.ok(/overlayPanelEl\.style\.height = overlayPanelEl\.offsetHeight \+ 'px'/.test(overlayBody),
+            'the overlay panel must be locked to its rendered height')
+        assert.ok(overlayBody.includes('if (IS_MOBILE){'), 'mobile only - the desktop panel has no overlay')
+        // Taken AFTER the rows are in the DOM, or the measurement is of an empty panel.
+        const lockAt = overlayBody.indexOf('overlayPanelEl.offsetHeight')
+        const rowsAt = overlayBody.indexOf('body.appendChild(list)')
+        assert.ok(rowsAt >= 0 && lockAt > rowsAt, 'the height must be read after the rows are in the DOM, not before')
+        // The 90vh cap stays: it is what produced the height being locked in.
+        const css = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.css'), 'utf8')
+        assert.ok(/\.cockpit-overlay-panel\s*{[^}]*max-height:\s*90vh/.test(css), 'the overlay must keep its 90vh cap')
     })
 
     await test('picker scripts: the dialog loads the shared matcher, then the pure model, then the glue - and all three ship in dist', () => {
