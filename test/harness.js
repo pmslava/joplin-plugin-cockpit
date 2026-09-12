@@ -32,6 +32,12 @@ function makeJoplin(options) {
         registeredSettings: null,
         panels: [],
         dialogs: [],
+        // The markup each dialog was last given, by handle. The notebook picker rewrites its whole list on every
+        // open, so this is where a check reads its rows, its filter box and its hidden input.
+        dialogHtml: {},
+        // Every views.dialogs.addScript, as { handle, script }, in order: which files a dialog loads, and in which
+        // order (the picker's pure model must arrive before the glue that calls it).
+        dialogScripts: [],
         panelHtml: {},
         panelScripts: [],
         // Every views.panels.postMessage the plugin sends to the panel webview, in order.
@@ -190,8 +196,8 @@ function makeJoplin(options) {
             },
             dialogs: {
                 create: async (id) => { state.dialogs.push(id); return `dialog-${id}` },
-                addScript: async () => {},
-                setHtml: async () => {},
+                addScript: async (handle, script) => { state.dialogScripts.push({ handle, script }) },
+                setHtml: async (handle, html) => { state.dialogHtml[handle] = html },
                 setButtons: async () => {},
                 open: async () => state.dialogResult || { id: 'cancel' },
                 showMessageBox: async (message) => { state.messageBoxes.push(message); return 0 },
@@ -209,6 +215,10 @@ function makeJoplin(options) {
             onSyncComplete: async (h) => { state.workspaceEvents.push('onSyncComplete'); state.syncCompleteHandler = withTimerCapture(h) },
             onNoteAlarmTrigger: async (h) => { state.workspaceEvents.push('onNoteAlarmTrigger'); state.noteAlarmHandler = withTimerCapture(h) },
             onNoteSelectionChange: async (h) => { state.workspaceEvents.push('onNoteSelectionChange'); state.noteSelectionHandler = withTimerCapture(h) },
+            // The notebook the app is showing. The notebook picker pre-selects its row, so a test puts the app on a
+            // notebook with options.selectedFolder and proves that row starts selected. Nothing selected -> null, which
+            // is also what every run that does not set it answers, so the picker falls back to its first row there.
+            selectedFolder: async () => options.selectedFolder || null,
         },
         data: {
             get: async (pathParts, query) => {

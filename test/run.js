@@ -4731,6 +4731,195 @@ async function main() {
             'opening the notebook menu must reset and (desktop-only) focus the filter box')
     })
 
+    // ============================================================ the notebook picker DIALOG: a drawn list with a filter box
+    // The desktop picker ("Create to-do in notebook", "Move to notebook", "Move notebook under...") used to hold a native
+    // <select name="folderId">. On a vault with a hundred notebooks that cost it two things: the open popup is a PLATFORM
+    // window, so its scrollbar stayed white over a dark theme and no stylesheet could reach it, and there was no way to
+    // narrow the list. It is now an ordinary list the plugin draws and themes itself - a filter box pinned above it, one
+    // .picker-row per notebook, and a HIDDEN folderId input the dialog's script rewrites, so the result shape stays
+    // { picker: { folderId } } and the three checks that already drive this dialog are untouched.
+    //
+    // The harness renders markup but never runs a dialog's script, so this splits the same way the notebook menu above
+    // does: the MARKUP and the CSS the host emits are driven for real here, the runtime behaviour is proved by the pure
+    // NotebookPickerModel (below, unit-tested directly - it is the module the dialog's glue asks every question) and by
+    // e2e/notebook-picker.spec.ts in the real app.
+    const PK_BETA = 'p'.repeat(32), PK_ALPHA = 'q'.repeat(32), PK_ZETA = 'r'.repeat(32), PK_HIDDEN = 's'.repeat(32)
+    const pick = await run({
+        dataDir: path.join(tmp, 'picker-data'),
+        installationDir: path.join(tmp, 'picker-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [],
+        folders: [
+            { id: PK_BETA, title: 'Beta', parent_id: '' },
+            { id: PK_ALPHA, title: 'Alpha', parent_id: '' },
+            { id: PK_ZETA, title: 'Zeta', parent_id: PK_ALPHA },      // "Alpha / Zeta" - sorts between Alpha and Beta
+            { id: PK_HIDDEN, title: 'Hidden', parent_id: '' },        // excluded below, so it must never be offered
+        ],
+        // The app is showing Beta, so Beta's row is the one that starts selected.
+        selectedFolder: { id: PK_BETA, title: 'Beta' },
+    })
+    await pick.setSetting('excludedNotebooks', 'Hidden')
+    // Two opens, captured one at a time - the dialog is reused, so each setHtml overwrites the last. (1) the move
+    // picker, which offers notebooks only; (2) "Move notebook under...", the one flow that offers (top level).
+    await pick.panelMessageHandler(['noteMenuActionMulti', 'moveToFolder', ['1'.repeat(32)]])
+    const pickMoveHtml = pick.dialogHtml['dialog-notebookPicker']
+    await pick.panelMessageHandler(['moveNotebookClicked', PK_ZETA])
+    const pickUnderHtml = pick.dialogHtml['dialog-notebookPicker']
+    // Every row of one picker's markup, as [id, path] pairs, in emitted order, plus which one carries -selected.
+    const pickerRowsOf = (html) => [...String(html).matchAll(/<div class="picker-row([^"]*)" data-id="([^"]*)">([^<]*)<\/div>/g)]
+        .map(match => ({ selected: match[1].includes('-selected'), id: match[2], path: match[3] }))
+
+    await test('picker markup: a filter box above a drawn list of every kept notebook, sorted by path, and no native select', () => {
+        assert.ok(pickMoveHtml, 'the notebook picker must have been given markup')
+        // The form's NAME is what carries the answer back as formData.picker.folderId.
+        const formAt = pickMoveHtml.indexOf('<form name="picker"')
+        assert.ok(formAt >= 0, 'the picker must still post a form named "picker"')
+        const formEnd = pickMoveHtml.indexOf('</form>', formAt)
+        assert.ok(formEnd > formAt, 'the picker form must be closed')
+        // The filter box is pinned ABOVE the list, and both are inside the form.
+        const filterAt = pickMoveHtml.indexOf('class="picker-filter"', formAt)
+        const listAt = pickMoveHtml.indexOf('class="picker-list"', formAt)
+        assert.ok(filterAt > formAt && listAt > filterAt && listAt < formEnd, 'the filter input must sit above the list, inside the form')
+        assert.ok(pickMoveHtml.includes('placeholder="Filter notebooks..."'), 'the filter box must say what it narrows')
+        assert.ok(/class="picker-filter"[^>]*\bautofocus\b/.test(pickMoveHtml), 'the filter box must be autofocused (desktop dialog, no soft keyboard)')
+        // The white-scrollbar popup this replaced must be gone entirely.
+        assert.ok(!pickMoveHtml.includes('<select'), 'the native select must be gone - it is the whole reason for the rework')
+        // Rows: every KEPT notebook, by full path, in path order.
+        assert.deepStrictEqual(pickerRowsOf(pickMoveHtml).map(row => row.path), ['Alpha', 'Alpha / Zeta', 'Beta'],
+            'the rows are every kept notebook, sorted by full path')
+        assert.ok(!pickMoveHtml.includes('Hidden'), 'an excluded notebook is never offered')
+        assert.ok(!pickMoveHtml.includes(PK_HIDDEN), "nor is the excluded notebook's id")
+    })
+
+    await test('picker markup: the answer rides a hidden folderId input inside the form, pre-set to the selected notebook', () => {
+        const formAt = pickMoveHtml.indexOf('<form name="picker"')
+        const formEnd = pickMoveHtml.indexOf('</form>', formAt)
+        const hiddenAt = pickMoveHtml.indexOf('<input type="hidden" name="folderId"', formAt)
+        assert.ok(hiddenAt > formAt && hiddenAt < formEnd,
+            'the hidden folderId input must live inside form[name=picker] - that is what keeps formData.picker.folderId')
+        // Pre-selection: the notebook the app is showing starts selected, in the markup AND in the hidden input, so
+        // OK commits it without the user touching anything.
+        const rows = pickerRowsOf(pickMoveHtml)
+        const selected = rows.filter(row => row.selected)
+        assert.strictEqual(selected.length, 1, 'exactly one row starts selected')
+        assert.strictEqual(selected[0].path, 'Beta', 'the selected row is the notebook the app is showing')
+        assert.ok(pickMoveHtml.includes(`<input type="hidden" name="folderId" value="${PK_BETA}">`),
+            'and the hidden input carries that same id, so a bare OK returns it')
+    })
+
+    await test('picker markup: "(top level)" is offered first for "Move notebook under...", and never for a note move', () => {
+        assert.ok(!pickMoveHtml.includes('(top level)'), 'a note must go into a notebook, so the move picker offers no root row')
+        const underRows = pickerRowsOf(pickUnderHtml)
+        assert.strictEqual(underRows[0].path, '(top level)', 'the root row is offered FIRST when includeRoot')
+        assert.strictEqual(underRows[0].id, '__root', 'and carries the __root sentinel pickNotebook maps back to ""')
+        assert.deepStrictEqual(underRows.slice(1).map(row => row.path), ['Alpha', 'Alpha / Zeta', 'Beta'],
+            'with the same excluded-filtered, path-sorted notebooks under it')
+    })
+
+    await test('picker css: the scrollbar is themed here (the point of the rework), the list is capped in pixels, and there is no @media', () => {
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const start = panelSource.indexOf('async function pickNotebook(')
+        assert.ok(start >= 0, 'pickNotebook not found in panel.ts')
+        const end = panelSource.indexOf('\n}', panelSource.indexOf('openPluginDialog(notebookPickerDialog)', start))
+        assert.ok(end > start, 'could not delimit pickNotebook')
+        const body = panelSource.slice(start, end)
+        // The reason the <select> went: a drawn list CAN be given a themed, thin scrollbar.
+        assert.ok(/\.picker-list::-webkit-scrollbar\s*{[^}]*width:\s*6px/.test(body), 'the list must carry a thin ::-webkit-scrollbar')
+        assert.ok(/\.picker-list::-webkit-scrollbar-track\s*{[^}]*background:\s*transparent/.test(body), 'with a transparent track')
+        assert.ok(/\.picker-list::-webkit-scrollbar-thumb\s*{[^}]*background:\s*var\(--joplin-/.test(body),
+            'and a thumb coloured from the theme, which is what the white platform scrollbar could never be')
+        // Joplin sizes a fit-to-content dialog from this markup; a viewport query has no business in it, and a vh
+        // cap would answer to a viewport the dialog does not have.
+        assert.ok(!body.includes('@media'), 'a dialog stylesheet must never carry an @media rule')
+        assert.ok(/\.picker-list\s*{[^}]*max-height:\s*\d+px/.test(body), 'the list height must be capped in PIXELS')
+        assert.ok(/#joplin-plugin-content\s*{\s*width:\s*380px/.test(body), 'the dialog is widened for long notebook paths')
+        // A filtered-out row must actually vanish: .picker-row sets display, which would otherwise beat [hidden].
+        assert.ok(/\.picker-row\[hidden\]\s*{[^}]*display:\s*none/.test(body), 'a filtered-out row must be hidden')
+        // Colours follow the theme with a literal fallback, as the old <option> rule did.
+        assert.ok(/\.picker-row\s*{[^}]*color:\s*var\(--joplin-color,/.test(body), 'row text follows the theme')
+        assert.ok(/\.picker-row\.-selected\s*{[^}]*var\(--joplin-selected-color,/.test(body), 'the selected row follows the theme')
+    })
+
+    await test('picker scripts: the dialog loads the shared matcher, then the pure model, then the glue - and all three ship in dist', () => {
+        const loaded = pick.dialogScripts.filter(entry => entry.handle === 'dialog-notebookPicker').map(entry => entry.script)
+        assert.deepStrictEqual(loaded, ['/ui/panel/searchTokens.js', '/ui/panel/notebookPickerModel.js', '/ui/panel/notebookPickerWebview.js'],
+            'the matcher and the model must be in place before the glue that calls them')
+        // The registered paths are a promise the build has to keep: a webview script is copied verbatim into dist
+        // (and from there into the .jpl), so a file that is not there is a dialog that throws on open.
+        for (const file of ['searchTokens.js', 'notebookPickerModel.js', 'notebookPickerWebview.js']){
+            assert.ok(fs.existsSync(path.join(__dirname, '..', 'dist', 'ui', 'panel', file)),
+                `dist/ui/panel/${file} must be built - the dialog asks Joplin for it by that path`)
+        }
+    })
+
+    await test('picker glue: the rows are read from the markup, never built, and every decision goes through the pure model', () => {
+        const glue = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'notebookPickerWebview.js'), 'utf8')
+        // Joplin sizes the dialog from the markup the host wrote, so a list built from script would be laid out
+        // inside a dialog measured for an empty one. The glue may only read rows.
+        assert.ok(glue.includes("querySelectorAll('.picker-row')"), 'the glue must read the rows the host emitted')
+        assert.ok(!/createElement\(/.test(glue), 'the glue must never build rows (the dialog is sized before it runs)')
+        // No forked logic: the four questions are all asked of the shared module.
+        for (const call of ['visibleIndexes(', 'moveHighlight(', 'enterTarget(', 'escapeAction(']){
+            assert.ok(glue.includes('window.NotebookPickerModel.' + call), `the glue must ask the model ${call}`)
+        }
+        // The bootstrap: a dialog's scripts are injected after the document is parsed and the SAME document is
+        // reused for the next open, so init can be gated neither on DOMContentLoaded alone nor on running once.
+        assert.ok(/new MutationObserver\(initNotebookPickerIfNeeded\)/.test(glue), 'init must re-run for each freshly written form')
+        assert.ok(glue.includes("document.readyState === 'loading'"), 'and must not wait for a DOMContentLoaded that has already fired')
+    })
+
+    // The pure model itself, driven directly - this is where the runtime behaviour of the filter and the keyboard is
+    // actually proved, since the Node harness cannot execute a dialog webview.
+    const NotebookPickerModel = require('../src/ui/panel/notebookPickerModel.js')
+    const pickerModelRows = [
+        { id: 'a', path: 'Alpha' },
+        { id: 'b', path: 'Alpha / Beta' },
+        { id: 'c', path: 'Gamma' },
+        { id: 'd', path: 'Gamma / Beta' },
+    ]
+
+    await test('picker model: the filter is a case-insensitive substring of the FULL path, and an empty box keeps everything', () => {
+        assert.deepStrictEqual(NotebookPickerModel.visibleIndexes(pickerModelRows, ''), [0, 1, 2, 3], 'an empty filter keeps every row')
+        assert.deepStrictEqual(NotebookPickerModel.visibleIndexes(pickerModelRows, '   '), [0, 1, 2, 3], 'so does a blank one')
+        assert.deepStrictEqual(NotebookPickerModel.visibleIndexes(pickerModelRows, 'BETA'), [1, 3], 'case-insensitive')
+        assert.deepStrictEqual(NotebookPickerModel.visibleIndexes(pickerModelRows, 'alpha /'), [1], 'the PARENT part of the path matches too')
+        assert.deepStrictEqual(NotebookPickerModel.visibleIndexes(pickerModelRows, 'zzz'), [], 'no match leaves nothing visible')
+        assert.strictEqual(NotebookPickerModel.isVisible(pickerModelRows, 2, 'beta'), false, 'a row the filter hid is not visible')
+        assert.strictEqual(NotebookPickerModel.isVisible(pickerModelRows, 3, 'beta'), true, 'a row it kept is')
+    })
+
+    await test('picker model: the arrows walk the VISIBLE rows and wrap, and a hidden highlight enters from the near end', () => {
+        // Unfiltered: plain stepping, wrapping at both ends.
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, '', 0, 1), 1, 'down steps to the next row')
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, '', 3, 1), 0, 'down from the last wraps to the first')
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, '', 0, -1), 3, 'up from the first wraps to the last')
+        // Filtered: the hidden rows are stepped OVER, not through - 1 and 3 are the only visible ones.
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, 'beta', 1, 1), 3, 'down skips the hidden rows between')
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, 'beta', 3, 1), 1, 'and wraps over them')
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, 'beta', 1, -1), 3, 'up wraps the same way')
+        // A highlight the filter has hidden is not a position to step from: enter from the near end instead.
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, 'beta', 0, 1), 1, 'down from a hidden row lands on the first visible')
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, 'beta', 0, -1), 3, 'up from a hidden row lands on the last visible')
+        assert.strictEqual(NotebookPickerModel.moveHighlight(pickerModelRows, 'zzz', 0, 1), -1, 'with nothing visible there is nowhere to go')
+    })
+
+    await test('picker model: Enter commits the highlight when it survived the filter, otherwise the first visible row', () => {
+        assert.strictEqual(NotebookPickerModel.enterTarget(pickerModelRows, '', 2), 2, 'an unfiltered Enter commits what is highlighted')
+        assert.strictEqual(NotebookPickerModel.enterTarget(pickerModelRows, 'beta', 3), 3, 'a highlight that survived the filter is kept')
+        assert.strictEqual(NotebookPickerModel.enterTarget(pickerModelRows, 'beta', 0), 1,
+            'a highlight the filter hid gives way to the first visible row - type, press Enter, done')
+        assert.strictEqual(NotebookPickerModel.enterTarget(pickerModelRows, 'beta', -1), 1, 'so does having no highlight at all')
+        assert.strictEqual(NotebookPickerModel.enterTarget(pickerModelRows, 'zzz', 1), -1, 'and a filter matching nothing commits nothing')
+    })
+
+    await test('picker model: Escape is the dropdown\'s two-step - clear the text first, then leave the press to Joplin', () => {
+        assert.strictEqual(NotebookPickerModel.escapeAction('fam'), 'clear', 'the first Escape clears the filter')
+        assert.strictEqual(NotebookPickerModel.escapeAction(' '), 'clear', 'even a lone space is text the user typed')
+        assert.strictEqual(NotebookPickerModel.escapeAction(''), 'dismiss', 'an empty box is left to Joplin, which cancels the dialog')
+        assert.strictEqual(NotebookPickerModel.escapeAction(null), 'dismiss', 'and so is an absent one')
+    })
+
     // ============================================================ 1.9.5: outside dismissal, editor-note highlight, create buttons
     // Three changes ship together here. (1) The custom context menu (Cockpit draws its own, because Joplin's native note
     // menu cannot be opened from a plugin webview) stayed open when the user clicked the main editor: the panel is an
