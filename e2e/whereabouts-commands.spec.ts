@@ -179,6 +179,10 @@ test.describe('Commands for other plugins (the Whereabouts contract)', () => {
     // The id has to be read while the notebook is still listed - excluding it takes its row out of the dropdown.
     const betaId = await notebookIdByName(panel, betaNotebook);
     expect(betaId).not.toBe('');
+    // Back to "All notebooks" first, which is where the owner's report starts: the two cases above leave the
+    // filter pointed at alphaNotebook, and BOTH halves below are about a filter that is empty - the label the
+    // refusal must leave alone, and the create that has no notebook of its own and therefore asks.
+    await executePluginCommand(win, 'cockpit.filterByNotebook', '');
 
     await setCockpitTextSetting(win, 'Excluded notebooks', betaNotebook);
     await expect
@@ -191,10 +195,14 @@ test.describe('Commands for other plugins (the Whereabouts contract)', () => {
 
     // The filter is left exactly where it was, and the user is told why rather than left with an empty panel.
     await expect.poll(async () => panelToastVisible(win), { timeout: 20_000 }).toBe(true);
-    expect(await currentNotebookLabel(panel)).toBe('All notebooks');
+    // A FRESH frame handle: the Options visit above unmounts the panel webview and Joplin mounts a new one on the
+    // way back, so the `panel` captured at the top of this case is detached by now and every call on it throws.
+    // The helpers that take `win` re-find the frame themselves, which is why only these two lines need it.
+    const livePanel = await agendaPanel(win);
+    expect(await currentNotebookLabel(livePanel)).toBe('All notebooks');
     // ...and because the filter really is empty, the create asks: the picker dialog opens instead of a note
     // appearing silently inside the excluded notebook.
-    await panel.locator('#profileControls button[title="New to-do"]').click();
+    await livePanel.locator('#profileControls button[title="New to-do"]').click();
     const pickerShowing = async () => {
       for (const frame of win.frames()) {
         if (await frame.locator('.picker-filter').count().catch(() => 0)) return true;
