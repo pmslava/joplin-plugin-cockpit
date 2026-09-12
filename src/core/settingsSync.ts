@@ -71,6 +71,9 @@ var unresolvedTitle = ""
 var warnedWrongNote = false
 /** A notice raised before there was a panel to show it in, kept until there is. See announceNotice. */
 var pendingNotice = ""
+/** How many more completed syncs should look for a RIVAL settings note. Armed only when this device created its own note (see
+ * createSettingsNote), counted down one per sync, and dropped to zero the moment a rival is found and reported. */
+var duplicateChecksLeft = 0
 /** THE FIRST CONNECTION. Set when this device is pointed at a settings note it has not been reading, and consumed by the next successful read of
  * that note, which merges instead of replacing (see mergeOnFirstConnection). One flag for every route in - the command, a typed title, a pasted id
  * or link - so the paths cannot drift apart on what "connecting" means. */
@@ -176,12 +179,38 @@ export function pollSettingsNote(reason){
 /** syncSettingsNote ********************************************************************************************************************************
  * The unconditional drain: flush what we owe, then read. Used where something is known to have happened (a completed sync, a change to the note).    *
  ***************************************************************************************************************************************************/
-export function syncSettingsNote(reason){
+export async function syncSettingsNote(reason){
     // A TITLE THAT NAMED NOTHING IS TRIED AGAIN HERE. "Wait for the note to sync to this device" is what the toast tells the user, and a
     // completed sync is precisely when that can have happened - so the promise the message makes is kept rather than left to the user to
     // re-save the setting. Silent: the notice has already been given once, and repeating it every sync would be nagging.
-    if (!noteId) return unresolvedTitle ? onSettingsNoteReferenceChanged(false) : Promise.resolve()
-    return drainSettingsNote(reason, false)
+    if (!noteId){
+        if (unresolvedTitle) await onSettingsNoteReferenceChanged(false)
+        return
+    }
+    await drainSettingsNote(reason, false)
+    await checkForRivalSettingsNote()
+}
+
+/** checkForRivalSettingsNote ***********************************************************************************************************************
+ * CHEAP INSURANCE FOR THE ONE CASE THE UNION CANNOT COVER.                                                                                          *
+ *                                                                                                                                                    *
+ * findNotesTitled looks in the index AND in the most-recently-updated page, so a note that is already on this device is found however stale the       *
+ * index is. What neither half can see is a note that has not ARRIVED yet: a user who installs Cockpit on the second device and types the title        *
+ * before the first sync has brought the note down gets a second, perfectly legitimate-looking settings note, and from then on the two devices are     *
+ * each talking to their own mailbox in silence.                                                                                                       *
+ *                                                                                                                                                    *
+ * So a device that CREATED its note looks once on each of the next three completed syncs - by then the first sync has certainly finished - and, if it *
+ * ever sees two notes of that name, says so once and stops. Bounded to three searches, armed only by a creation (an adopt connects to the note that   *
+ * already exists, so there is nothing to collide with), and it never acts on its own: which mailbox to keep is the user's decision, not the plugin's. *
+ ***************************************************************************************************************************************************/
+async function checkForRivalSettingsNote(){
+    if (duplicateChecksLeft <= 0) return
+    duplicateChecksLeft--
+    var matches = await findNotesTitled(SETTINGS_NOTE_TITLE)
+    if (matches.length < 2) return
+    duplicateChecksLeft = 0
+    announceNotice("Cockpit: another Cockpit settings note arrived from a different device - paste its id into the Settings note field " +
+        "to use that one instead")
 }
 
 /** drainDeferredSettingsNoteWrite ******************************************************************************************************************
@@ -692,16 +721,34 @@ function isCanonicalSettingsNoteTitle(title){
 }
 
 /** findNotesTitled *********************************************************************************************************************************
- * The non-trashed notes whose title is EXACTLY this, case-insensitively.                                                                            *
+ * The non-trashed notes whose title is EXACTLY this, case-insensitively. TWO SOURCES, UNIONED, because neither is sufficient on its own.             *
  *                                                                                                                                                    *
- * Joplin's `title:` search token is a token match, not an equality test: it answers "Joplin Cockpit Plugin Settings Backup" to a search for the plain *
- * title. So the query is only the cheap way to narrow the vault, and the exactness is decided here, on the titles that come back. `deleted_time` is    *
- * checked where the API returns it (builds with a trash); where it does not, the field is simply absent and every result counts.                       *
+ * THE SEARCH is index-backed, and Joplin's FTS index is NOT live: SearchEngine.syncTables() rebuilds it on a fixed 10s timer after notes change and   *
+ * once at app start. So for up to ten seconds after another device's settings note arrives with a sync - and at startup for notes changed late in the *
+ * previous session - a search for its title answers NOTHING. That window is exactly when this code is asked the question, and the answer it used to    *
+ * get was fatal: "no note of that name" sends the canonical-title branch off to CREATE a second one, the field points at the duplicate, and the two    *
+ * devices never converge again. It is also a token match rather than an equality test (it answers "... Settings Backup" to a search for the plain      *
+ * title), so exactness is decided here either way.                                                                                                    *
+ *                                                                                                                                                    *
+ * THE SCAN is the index-independent half: one page of the plain ['notes'] listing, most-recently-updated first. A note that has just synced in is by   *
+ * definition among the most recently updated, so one page of 100 finds it while the index is still catching up. It cannot replace the search (a note   *
+ * that has sat untouched for a year is nowhere near the first page), which is why this is a union and not a choice.                                    *
+ *                                                                                                                                                    *
+ * `deleted_time` is checked on both halves, where the API returns it (builds with a trash); where it does not, the field is simply absent and every    *
+ * result counts. Results are deduped by id, so a note both halves see is one note.                                                                     *
  ***************************************************************************************************************************************************/
 async function findNotesTitled(title){
     var wanted = String(title || "").trim().toLowerCase()
     if (!wanted) return []
     var found = []
+    var seen = new Set()
+    var keep = function(item){
+        if (!item || !item.id || seen.has(item.id)) return
+        if (item.deleted_time) return
+        if (String(item.title || "").trim().toLowerCase() !== wanted) return
+        seen.add(item.id)
+        found.push(item)
+    }
     try {
         // PAGED, not capped. The token match means the result set is "every note whose title contains these words", which in a big vault
         // can be far more than one page - and the note we want could be on any of them. A fixed limit would silently answer "no such note"
@@ -713,15 +760,22 @@ async function findNotesTitled(title){
                 fields: ['id', 'title', 'deleted_time'],
                 page: page,
             })
-            for (var item of (result && result.items) || []){
-                if (item.deleted_time) continue
-                if (String(item.title || "").trim().toLowerCase() !== wanted) continue
-                found.push(item)
-            }
+            for (var item of (result && result.items) || []) keep(item)
             if (!result || !result.has_more) break
         }
     } catch (error) {
         console.warn("Cockpit: could not search for the settings note", error)
+    }
+    try {
+        var recent: any = await joplin.data.get(['notes'], {
+            fields: ['id', 'title', 'deleted_time'],
+            order_by: 'updated_time',
+            order_dir: 'DESC',
+            limit: 100,
+        })
+        for (var candidate of (recent && recent.items) || []) keep(candidate)
+    } catch (error) {
+        console.warn("Cockpit: could not list recent notes while looking for the settings note", error)
     }
     return found
 }
@@ -844,6 +898,8 @@ async function createSettingsNote(){
         initialized = true
         warnedUnparseable = false
     })
+    // Arm the rival watch: this device made its own note, which is the only way two of them can come to exist.
+    duplicateChecksLeft = 3
     console.info(`Cockpit: created the settings note ${createdId}`)
     // Through the pending-notice path, not straight at the panel: the Settings field can trigger this at startup (a field still holding
     // the title because a previous attempt failed), and that is before there is a panel to toast into.
