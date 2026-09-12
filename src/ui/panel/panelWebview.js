@@ -64,6 +64,36 @@ function queueScrollPost(el, nonce){
     }, 300)
 }
 
+/** Viewport height *********************************************************************************************************************************
+ * The panel's own inner height, posted to the host on load and (throttled) whenever the window is resized. The host caches it and uses it for ONE    *
+ * thing: sizing the notebook picker dialog, which is given a fixed pixel height derived from it (see pickNotebook in panel.ts). The dialog frame is  *
+ * centred by Joplin's own stylesheet and re-centres itself whenever its content resizes, so a list that shrinks as rows are filtered made the whole  *
+ * dialog jump under the cursor. A height fixed for the dialog's lifetime removes the jump AND puts the top edge near the top of the window, which is  *
+ * the only lever a plugin has over where the frame sits.                                                                                             *
+ *                                                                                                                                                    *
+ * Throttled like queueScrollPost (300ms, trailing edge) so a drag-resize posts once rather than per frame, and skipped when the height has not        *
+ * actually changed. The host ignores the message when it never arrives, so an older webview costs nothing.                                             *
+ ***************************************************************************************************************************************************/
+var viewportPostTimer = null
+var lastPostedViewportHeight = -1
+
+function postViewportHeight(){
+    var height = Math.round(window.innerHeight || 0)
+    if (height <= 0 || height === lastPostedViewportHeight) return
+    lastPostedViewportHeight = height
+    void webviewApi.postMessage(['viewportHeight', height])
+}
+
+function queueViewportPost(){
+    if (viewportPostTimer) return
+    viewportPostTimer = setTimeout(function(){
+        viewportPostTimer = null
+        postViewportHeight()
+    }, 300)
+}
+
+window.addEventListener('resize', queueViewportPost)
+
 /** The one-shot reveal (cockpit.revealNote) ********************************************************************************************************
  * The host embeds a reveal marker on the .todos container of the render that answers a reveal: data-reveal-id is the reveal's own sequence number and *
  * data-reveal-note the note it points at. It rides in the MARKUP rather than arriving as a message because a message races the render it is about -   *
@@ -521,6 +551,9 @@ function startPanelObserver(){
     // the dialogGuardReset post has to know the platform first).
     applyPlatformClass()
     startThemeAppearanceObserver()
+    // Tell the host how tall this panel is, so the notebook picker dialog can be sized from it. Posted at
+    // once rather than through the throttle: the first picker may be opened before any resize ever happens.
+    postViewportHeight()
     if (IS_MOBILE){
         // Clear any overlay refresh-guard leaked by a previous webview torn down mid-overlay, and drive the
         // overlay reload-survival handshake. message[1] tells the host whether THIS freshly loaded document
@@ -4035,6 +4068,15 @@ function openNotebookOverlay(purpose, opts, restore){
     body.appendChild(list)
     // A reconstruct comes back with text already in the box, so narrow the freshly built rows to match it.
     if (overlayContext.filter) filterNotebookOverlay()
+    // Mobile: the overlay panel is centred and capped at 90vh, so it SHRINKS and re-centres as the filter hides
+    // rows - the same jump the desktop dialog had, for the same reason. Locking the panel to the height it was
+    // just rendered at stops it: the lock is taken after the rows are in the DOM, so it is a real measurement,
+    // and it can never exceed the 90vh cap because that cap produced the height being read. The list inside
+    // keeps its own scrolling, so a long list is no less usable than before.
+    if (IS_MOBILE){
+        var overlayPanelEl = body.parentElement
+        if (overlayPanelEl && overlayPanelEl.offsetHeight) overlayPanelEl.style.height = overlayPanelEl.offsetHeight + 'px'
+    }
     pushOverlayState()
 }
 

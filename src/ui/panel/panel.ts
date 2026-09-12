@@ -164,6 +164,30 @@ function resetCalendarViewState(){
  ***************************************************************************************************************************************************/
 var notebookFilter = ""
 
+/** lastViewportHeight ******************************************************************************************************************************
+ * The panel webview's own inner height, as it last reported it (['viewportHeight', n], posted on load and on a throttled resize). Used for ONE       *
+ * thing: giving the notebook picker dialog a fixed pixel height (see pickNotebook). Zero until a webview has reported, which is the state every      *
+ * harness run and every pre-2.6 webview is in - the picker falls back to a sensible constant there, so nothing depends on the message arriving.      *
+ ***************************************************************************************************************************************************/
+var lastViewportHeight = 0
+
+/** pickerDialogHeight ******************************************************************************************************************************
+ * The fixed height, in pixels, of the notebook picker dialog's content. Roughly five-eighths of the panel's viewport, clamped so a tiny window does  *
+ * not produce a dialog with three visible rows and a tall one does not produce a strip taller than the screen. The FIXED part is the point: Joplin   *
+ * watches the content box with a ResizeObserver and re-centres the frame on every change, so a list that shrinks while the user filters made the      *
+ * dialog jump. A height that never changes removes the jump, and because the frame is centred, a tall dialog is also the only way to put its top edge  *
+ * near the top of the window.                                                                                                                        *
+ ***************************************************************************************************************************************************/
+const pickerViewportFraction = 0.62
+const pickerHeightMin = 360
+const pickerHeightMax = 880
+const pickerHeightFallback = 420
+
+function pickerDialogHeight(){
+    if (!lastViewportHeight) return pickerHeightFallback
+    return Math.min(pickerHeightMax, Math.max(pickerHeightMin, Math.round(lastViewportHeight * pickerViewportFraction)))
+}
+
 /** searchFilter ************************************************************************************************************************************
  * A search string appended to the profile's search criteria, supporting the full Joplin search syntax (tag:, notebook:, plain words). Empty for no  *
  * extra filtering. Held in memory for the same reason as the notebook filter.                                                                       *
@@ -417,6 +441,13 @@ async function eventHandler(message){
         // nonce; a post tagged with an older nonce is a late one from an outgoing webview whose position
         // has since been deliberately reset, so it is dropped. Never triggers a refresh of its own.
         if (Number(message[2]) === renderNonce) lastScrollTop = Number(message[1]) || 0
+        return
+    } else if (message[0] == 'viewportHeight'){
+        // How tall the panel is, for sizing the notebook picker dialog. Pure state: no render, no refresh,
+        // nothing scheduled - a window resize must not repaint the panel, and a webview that never posts
+        // this simply leaves the picker on its fallback height.
+        var reportedHeight = Number(message[1]) || 0
+        if (reportedHeight > 0) lastViewportHeight = reportedHeight
         return
     } else if (message[0] == 'searchFocusChanged'){
         // Mobile only: hold refreshes while the search field is focused (a setHtml there is a full webview
@@ -1629,9 +1660,14 @@ async function runNotebookAction(action, folderID){
  * formData.picker.folderId - now from a hidden input the script rewrites - so every caller and the harness see the unchanged shape.                  *
  *                                                                                                                                                    *
  * EVERY ROW IS EMITTED HERE. Joplin sizes a fit-to-content dialog from the content it can see, and the FIRST measurement is taken from this markup,   *
- * before any dialog script has run - 3.6.14 keeps a ResizeObserver on it afterwards, so a later change does resize the frame, but it resizes one that  *
- * is already on screen. A list built from script would therefore open at the height of an empty dialog and then jump. The pixel cap on the list and    *
- * the absence of any @media rule follow from the same shape: a webview sized from its own content cannot sensibly answer a viewport query.             *
+ * before any dialog script has run - it then keeps a ResizeObserver on the content box, so a later change resizes a dialog that is already on screen.  *
+ * A list built from script would therefore open at the height of an empty dialog and then jump. The absence of any @media rule follows from the same   *
+ * shape: a webview sized from its own content cannot sensibly answer a viewport query.                                                                 *
+ *                                                                                                                                                      *
+ * THE HEIGHT IS FIXED, AND THAT IS THE POINT. The frame is centred by the app's own stylesheet and a plugin cannot move it; what a plugin CAN set is    *
+ * the content's size, and the frame follows. So the dialog is given one height in pixels, derived from the panel's reported viewport                    *
+ * (pickerDialogHeight above), and it keeps it for its whole life. That answers both halves of the owner's report: the list no longer shrinks as rows    *
+ * are filtered, so the re-centring that made the dialog jump has nothing to react to, and a tall dialog's top edge sits near the top of the window.     *
  ***************************************************************************************************************************************************/
 async function pickNotebook(promptTitle, includeRoot = false){
     var excludedSet = await getExcludedNotebookIdSet()
@@ -1663,19 +1699,38 @@ async function pickNotebook(promptTitle, includeRoot = false){
     var selectedValue = selectedIndex >= 0 ? choices[selectedIndex].id : ""
     await joplin.views.dialogs.setHtml(notebookPickerDialog, `
         <style>
-            /* The paths are long ("Parent / Child / Grandchild"), so the dialog is wider than the old two-line one. */
-            #joplin-plugin-content { width: 380px; }
-            .picker-form { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
+            /* The paths are long ("Parent / Child / Grandchild"), so the dialog is wider than the old two-line one -
+             * and its height is FIXED for the life of the dialog, in pixels, at a fraction of the panel's own
+             * viewport. Both halves of the owner's complaint come from the same place: Joplin watches this element
+             * with a ResizeObserver and re-centres the frame on every change, so a list that shrank as rows were
+             * filtered made the whole dialog jump, and a short dialog centred vertically sits too low. A height that
+             * never changes cannot jump, and a tall one puts the top edge near the top of the window - which is the
+             * only lever a plugin has, the frame's own position being set by the app's stylesheet.
+             *
+             * display:flex is Joplin's own rule on this element, restated here so the form below can be told to fill
+             * the fixed height rather than depending on a default we do not own. */
+            #joplin-plugin-content {
+                width: 380px; height: ${pickerDialogHeight()}px;
+                display: flex; flex-direction: column;
+                box-sizing: border-box;
+            }
+            .picker-form {
+                flex: 1 1 auto; min-height: 0;
+                display: flex; flex-direction: column; gap: 10px; padding: 14px;
+                box-sizing: border-box;
+            }
             .picker-filter {
+                flex: 0 0 auto;
                 padding: 4px 6px;
                 font-family: inherit; font-size: inherit; color: inherit; background: inherit;
                 border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;
             }
             .picker-filter:focus { outline: none; border-color: var(--joplin-url-color, #2D6BDC); }
-            /* Twelve 28px rows, then it scrolls - a pixel cap rather than a vh one, because this webview's own
-             * size is derived from its content, so a viewport query here would be circular. */
+            /* The list takes whatever the fixed height leaves and scrolls inside it. min-height:0 because a flex
+             * item's default min-height:auto refuses to shrink below its content, which would push the list past
+             * the dialog and give the rows their own height back - the very shrinking this is here to stop. */
             .picker-list {
-                max-height: 336px; overflow-y: auto;
+                flex: 1 1 auto; min-height: 0; overflow-y: auto;
                 border: 1px solid var(--joplin-divider-color, #888); border-radius: 3px;
                 background-color: var(--joplin-background-color, #ffffff);
             }
