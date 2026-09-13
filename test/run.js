@@ -1409,6 +1409,52 @@ async function main() {
         assert.strictEqual(state.settings.excludedNotebookIds, idArchive, 'and nothing was added for it')
     })
 
+    await test('excluded notebooks at startup: the pass\'s own write is not read back as a user edit', async () => {
+        // THE RE-ENTRY, and the last way anything could add an exclusion nobody asked for. Writing the visible field
+        // re-enters the settings onChange handler, whose resolver reads the TEXT and writes the IDS. Three states line
+        // up here and all three are ordinary: a leftover entry the user never cleaned up ("Work" - the setting's own
+        // description promises a typo stays visible), a notebook of that name created elsewhere since, and a rewrite,
+        // which is guaranteed on the first launch of every install still holding a 2.6.0 or 2.6.1 form. The resolver
+        // then excluded the new notebook and published it. The pass has already computed the text FROM the ids, so the
+        // re-entry has nothing correct to add and is suppressed outright.
+        const idWork = 'cafe0002' + '0'.repeat(24)
+        const state = await runStartup('own-write-not-an-edit', {
+            excludedNotebooks: 'Archive, Work',            // "Archive" is the excluded notebook's old name; "Work" was always a typo
+            excludedNotebookIds: idArchive,
+        }, [
+            { id: idArchive, title: 'Archived', parent_id: '', updated_time: 12 },   // renamed while Joplin was closed
+            { id: idWork, title: 'Work', parent_id: '', updated_time: 13 },          // created while Joplin was closed
+        ])
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive,
+            'the notebook that has since taken the leftover name is NOT excluded by it')
+        assert.strictEqual(state.settings.excludedNotebooks, `Archived (${idArchive}), Work`,
+            'the id is relabelled and the leftover entry is left exactly where the user left it')
+        assert.deepStrictEqual(exclusionWrites(state).map(w => w.key), ['excludedNotebooks'],
+            'and the write sequence carries no id write at all - the resolver did not run on our own write')
+        assert.ok(String(state.panelHtml['panel-panel'] || '').includes('InTheArchive') === false, 'the real exclusion still holds')
+    })
+
+    await test('excluded notebooks: a USER edit still resolves normally through the same handler', async () => {
+        // The other half of the suppression: it is one shot, and it is spent on the pass's own write. Everything the
+        // user does afterwards goes through the resolver exactly as it always has.
+        const idWork = 'cafe0002' + '0'.repeat(24)
+        const state = await runStartup('user-edit-after-startup', {
+            excludedNotebooks: 'Archive, Work',
+            excludedNotebookIds: idArchive,
+        }, [
+            { id: idArchive, title: 'Archived', parent_id: '', updated_time: 12 },
+            { id: idWork, title: 'Work', parent_id: '', updated_time: 13 },
+        ])
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive, 'precondition: startup added nothing')
+        // The user now really does want that notebook excluded, and types it.
+        await state.setSetting('excludedNotebooks', 'Work')
+        assert.strictEqual(state.settings.excludedNotebookIds, idWork, 'a name the USER typed resolves to its notebook, as it always did')
+        assert.strictEqual(state.settings.excludedNotebooks, `Work (${idWork})`, 'and comes back with the id beside it')
+        // ...and a second user edit is still resolved: nothing about the one-shot leaks into later changes.
+        await state.setSetting('excludedNotebooks', 'Archived')
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive, 'and so does the next one')
+    })
+
     // ---- the display form itself: the pure module both settings share --------------------------------------------
     const DisplayID = require('../src/core/displayId.js')
 
@@ -1425,24 +1471,41 @@ async function main() {
         assert.strictEqual(DisplayID.displayID('abcdef'), 'abcdef', 'six characters is the shortest the parse side reads, and is shown whole')
         // NO TRUNCATION IN THE SOURCE EITHER. 2.6.1 cut the id to its first eight characters and lengthened that on a
         // collision; the owner reversed it, and this is the pin that stops any of it creeping back into a display path.
-        // Every file that builds or writes one of the two fields, not only the two pure modules: settingsSync.ts writes
-        // the note reference and panel.ts rebuilds the notebook text from ids.
+        // NO TRUNCATION IN THE SOURCE EITHER, over every file that builds or writes one of the two fields - the two
+        // pure modules, settingsSync.ts (which writes the note reference) and panel.ts (which rebuilds the notebook
+        // text from ids). The shapes are matched on the CUT, not on the name of the thing being cut: 2.6.1's own line
+        // was `var prefix = text.slice(0, length)`, whose receiver is not called "id" at all, and a backstop that
+        // insisted on an id-shaped name would have let exactly the code it exists to catch straight through. Array
+        // receivers that have every right to be sliced are named instead, which is a list of two words rather than a
+        // rule about names.
+        const ARRAY_RECEIVERS = ['profiles', 'items']
+        const truncationHits = (source) => {
+            // Comment lines go first: they talk about the eight characters 2.6.1 wrote, and must go on doing so.
+            const code = source.split('\n').filter(line => !/^\s*[*/]/.test(line) && !/^\s*\/\//.test(line)).join('\n')
+            const hits = []
+            for (const match of code.matchAll(/(\w+)\s*\.\s*(?:slice|substr|substring)\s*\(\s*[^)]/g)){
+                if (!ARRAY_RECEIVERS.includes(match[1])) hits.push(match[0])
+            }
+            // "keep the first n characters" by regex, and a string literal that is nothing but an ellipsis. A real
+            // sentence that happens to end in one ("Syncing... (click to cancel)") is prose, and is left alone.
+            for (const pattern of [/\.replace\(\s*\/\^?\(?\.\{\d+\}/, /(['"`])\s*(?:\.\.\.|…)\s*\1/]){
+                const found = pattern.exec(code)
+                if (found) hits.push(found[0])
+            }
+            return hits
+        }
+        // THE BACKSTOP IS ITSELF TESTED, against the exact line 2.6.1 shipped and the two other shapes - because a
+        // scan that quietly matches nothing is worse than no scan at all.
+        assert.deepStrictEqual(truncationHits('var prefix = text.slice(0, length)'), ['text.slice(0'],
+            'the line 2.6.1 actually shortened ids with must be caught')
+        assert.strictEqual(truncationHits("settingsNoteDisplay(title, String(id).replace(/^(.{8}).*/, '$1'))").length, 1,
+            'and so must a first-n-characters regex')
+        assert.strictEqual(truncationHits("label + ' (' + id.slice(0, 8) + '...' + ')'").length, 2, 'and a cut with an ellipsis on it')
+        assert.deepStrictEqual(truncationHits('var merged = adopted.profiles.slice()'), [], 'while an array slice is not a truncation')
+        assert.deepStrictEqual(truncationHits('return "Syncing… (click to cancel)"'), [], 'nor is an ellipsis inside a real sentence')
         for (const name of ['core/displayId.js', 'core/settingsNote.js', 'core/exclusion.ts', 'core/settingsSync.ts', 'ui/panel/panel.ts']){
             const source = fs.readFileSync(path.join(__dirname, '..', 'src', ...name.split('/')), 'utf8')
-            // Comment lines are dropped first: they talk about the eight characters 2.6.1 wrote, and must go on doing so.
-            const code = source.split('\n').filter(line => !/^\s*[*/]/.test(line) && !/^\s*\/\//.test(line)).join('\n')
-            // Cutting a string that is an id, by any of the shapes that do it - a slice/substr/substring of something
-            // called an id, a "keep the first n characters" regex replace, or an ellipsis pasted on the end. A plain
-            // .slice on an array (the peek's fifteen rows) is not an id and is deliberately not matched.
-            for (const [shape, pattern] of [
-                ['slice/substr/substring of an id', /\b\w*(?:id|Id|ID)\w*\s*\.\s*(?:slice|substr|substring)\s*\(/],
-                ['a first-n-characters regex', /\.replace\(\s*\/\^?\(?\.\{\d+\}/],
-                // A string literal that is NOTHING BUT an ellipsis, which is the shape an id gets truncated with. A real
-                // sentence that happens to end in one ("Syncing... (click to cancel)") is prose, and is left alone.
-                ['an ellipsis stuck on the end', /(['"`])\s*(?:\.\.\.|\u2026)\s*\1/],
-            ]){
-                assert.ok(!pattern.test(code), `src/${name} must not cut an id down in the display path (${shape})`)
-            }
+            assert.deepStrictEqual(truncationHits(source), [], `src/${name} must not cut an id down in the display path`)
         }
     })
 

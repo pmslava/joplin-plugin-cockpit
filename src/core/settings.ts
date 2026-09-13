@@ -324,7 +324,9 @@ export async function setupSettings(){
 		// The user edited the visible "Excluded notebooks" names field: resolve the names to ids (the source
 		// of truth), rewrite the field to the canonical resolved titles, and re-render everything so the
 		// exclusion takes effect at once.
-		if (keys.includes(EXCLUDED_NOTEBOOKS_KEY)) await resolveExcludedNotebooks()
+		// ...unless this change IS the startup pass's own write (see excludedTextWrittenByStartup above), which was
+		// built from the stored ids and must not be read back as though the user had typed it.
+		if (keys.includes(EXCLUDED_NOTEBOOKS_KEY) && !(await consumeStartupExcludedWrite())) await resolveExcludedNotebooks()
 		// The settings note (v2.6.0). A change to anything that TRAVELS schedules a debounced write of the note; a change to the
 		// note reference itself repoints the whole feature. Both are no-ops while the reference is empty, which is how it ships.
 		if (keys.some(key => SYNCED_SETTING_KEYS.includes(key))) scheduleSettingsNoteWrite()
@@ -345,6 +347,22 @@ export async function resetUnavailableGestureTrace(){
 	await joplin.settings.setValue(gestureTraceSettingKey, false)
 	console.info("Cockpit: the hidden gesture trace was still stored ON in this profile - switched off, as this build does not offer it.")
 }
+
+/** THE TEXT THE STARTUP PASS WROTE, held until the onChange handler has seen it - "this change is not a user edit".
+ *
+ * Writing the visible field re-enters the handler below, whose resolver reads the TEXT and writes the IDS. For the two
+ * writers that are user actions that is exactly right. For the startup pass it is not: the text it writes was computed
+ * FROM the stored ids and has nothing left to contribute, while the resolver reading it back can ADD an exclusion
+ * nobody asked for. A typo the user left in the box ("Work") is kept verbatim, as the setting's description promises -
+ * and if a notebook of that name has since been created, the re-entering resolver excludes it and publishes it. Three
+ * states that do line up: a leftover entry is an expected one, and a rewrite is guaranteed on the first launch of every
+ * install still holding a 2.6.0 or 2.6.1 form.
+ *
+ * A TOKEN RATHER THAN A BOOLEAN AROUND THE AWAIT, because the host decides when onChange fires: Joplin batches a
+ * settings save and fires the handler once, afterwards, so a flag cleared when setValue resolves may already be false
+ * by then. The token is consumed by the first change of this key and only while the field still holds exactly what the
+ * pass wrote - so a change that is the user's own edit is resolved normally, whatever order the host delivers it in. */
+var excludedTextWrittenByStartup: string | null = null
 
 /** refreshExcludedNotebookDisplay ******************************************************************************************************************
  * THE STARTUP PASS, and the whole of the owner's second 2.6.1 defect: his Excluded notebooks field still read "Archive", with no id in it at all,     *
@@ -376,7 +394,23 @@ export async function refreshExcludedNotebookDisplay(){
 	if (!raw && !storedIdsCsv) return
 	var map = await getNotebookMap()
 	var text = canonicalTextForStoredIds(map, parseExcludedIds(storedIdsCsv), raw)
-	if (text !== raw) await joplin.settings.setValue(EXCLUDED_NOTEBOOKS_KEY, text)
+	if (text === raw) return
+	// Set BEFORE the write, so a handler the host fires synchronously inside setValue already sees it.
+	excludedTextWrittenByStartup = text
+	await joplin.settings.setValue(EXCLUDED_NOTEBOOKS_KEY, text)
+}
+
+/** consumeStartupExcludedWrite ********************************************************************************************************************
+ * Whether the "Excluded notebooks" change now being handled is the startup pass's own write, and therefore not a user edit. One shot: the token is    *
+ * dropped whether or not it matches, so nothing can suppress a second change. It matches only while the field still holds exactly what the pass       *
+ * wrote, so a user edit that arrives before the host got round to reporting ours is resolved normally - and an edit that happens to produce the very  *
+ * same text has nothing for the resolver to do anyway.                                                                                                *
+ ***************************************************************************************************************************************************/
+async function consumeStartupExcludedWrite(){
+	var written = excludedTextWrittenByStartup
+	excludedTextWrittenByStartup = null
+	if (written === null) return false
+	return String(await joplin.settings.value(EXCLUDED_NOTEBOOKS_KEY) || "") === written
 }
 
 /** resolveExcludedNotebooks ************************************************************************************************************************
