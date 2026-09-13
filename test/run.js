@@ -1002,7 +1002,7 @@ async function main() {
     })
 
     // (e) Excluded notebooks: hidden everywhere, id-tracked (rename-safe), and a same-titled namesake is spared.
-    // Every folder id is HEX, as a real Joplin id is: the visible field now shows each excluded notebook's short id beside its name,
+    // Every folder id is HEX, as a real Joplin id is: the visible field now shows each excluded notebook's id beside its name, whole,
     // and an id that is not 6-32 hex characters could not be read back out of that text, so it is deliberately not written into it.
     const K = 'c'.repeat(32), P = 'd'.repeat(32), AC = 'a'.repeat(32), AP = 'b'.repeat(32), T = 'e'.repeat(32), S = 'f'.repeat(32)
     const exFolders = [
@@ -1049,8 +1049,8 @@ async function main() {
     })
     await test('budget e / exclude: resolution stores ids and canonicalises the visible text', () => {
         assert.strictEqual(ex.settings.excludedNotebookIds, `${AC},${T}`, 'the resolved ids are stored (source of truth)')
-        assert.strictEqual(ex.settings.excludedNotebooks, 'Client / Archive (aaaaaaaa), Trash (eeeeeeee)',
-            'the visible text is rewritten to name AND id (path form where the title is ambiguous, short id in brackets)')
+        assert.strictEqual(ex.settings.excludedNotebooks, `Client / Archive (${AC}), Trash (${T})`,
+            'the visible text is rewritten to name AND id (path form where the title is ambiguous, the whole id in brackets)')
     })
     await test('budget e / exclude: no checkbox body is fetched for an excluded to-do (even when every body is stale)', async () => {
         // Make every to-do's body stale so a fresh render must refetch the KEPT ones - proving the excluded
@@ -1092,7 +1092,7 @@ async function main() {
         exOptions.folders = exFolders.map(f => f.id === AC ? { ...f, title: 'ArchivedFolder', updated_time: 999 } : f)
         await pollEntry.fn()                                   // detects the change -> reconciles the excluded text
         assert.strictEqual(ex.settings.excludedNotebookIds, `${AC},${T}`, 'the id list is unchanged - exclusion survives the rename')
-        assert.strictEqual(ex.settings.excludedNotebooks, 'ArchivedFolder (aaaaaaaa), Trash (eeeeeeee)',
+        assert.strictEqual(ex.settings.excludedNotebooks, `ArchivedFolder (${AC}), Trash (${T})`,
             'the visible text is refreshed to the new (now unique) title, and the id beside it is unchanged')
         // No onChange loop: another poll with the same folders changes nothing further.
         const textBefore = ex.settings.excludedNotebooks
@@ -1103,16 +1103,18 @@ async function main() {
         assert.ok(!ex.panelHtml['panel-panel'].includes('ArchivedC'), 'the renamed notebook\'s to-do stays excluded')
     })
 
-    // ------------------------------------------------------- the field shows the NAME and the ID (2.6.1)
+    // ------------------------------------------------------- the field shows the NAME and the WHOLE ID (2.6.1, 2.6.2)
     // The owner's refinement: both of Cockpit's reference-holding settings must show what they point at, not just
-    // what it is called. "Excluded notebooks" therefore reads "Lab / Joplin (fdfd6c06), Archive (a1b2c3d4)" - the
-    // canonical label it always built, plus the short id - and still PARSES BACK, so the field stays a field the
-    // user types into. The pure half (how long the id is, and what counts as one) is src/core/shortId.js, which the
-    // harness requires directly, three checks below.
+    // what it is called. "Excluded notebooks" therefore reads "Lab / Joplin (fdfd6c06...)" - the canonical label it
+    // always built, plus the id - and still PARSES BACK, so the field stays a field the user types into. 2.6.1 showed
+    // the first eight characters of the id and the owner's live round reversed that: a prefix of an id reads as a
+    // DIFFERENT id, so the whole thing is shown. The pure half (what counts as an id, and how a bracketed one is read
+    // back) is src/core/displayId.js, which the harness requires directly, three checks below.
     const idLab = 'fdfd6c06' + '0'.repeat(24)
     const idJoplin = 'a1b2c3d4' + '0'.repeat(24)
     const idArchive = 'b0b0b0b0' + '0'.repeat(24)
-    // Two ids sharing their first EIGHT characters and differing at the ninth: the shown id has to lengthen to ten.
+    // Two ids sharing their first EIGHT characters and differing at the ninth: 2.6.1 showed eight and had to lengthen
+    // them to ten to tell these apart; showing the whole id tells them apart with no rule at all.
     const idTwinA = 'abcdef01' + '22' + '0'.repeat(22)
     const idTwinB = 'abcdef01' + '33' + '0'.repeat(22)
     // A notebook a user REALLY named with a bracketed hex word. Nothing may read that as an id - and nothing does,
@@ -1142,7 +1144,7 @@ async function main() {
 
     await test('excluded notebooks display: a typed name comes back as "Name (id)", and reading that back writes nothing', async () => {
         await disp.setSetting('excludedNotebooks', 'Archive')
-        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (b0b0b0b0)`, 'the user typed a name and gets the name AND the id')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (${idArchive})`, 'the user typed a name and gets the name AND the whole id')
         assert.strictEqual(disp.settings.excludedNotebookIds, idArchive, 'the hidden id list is the full id, as it always was')
         // THE ROUND TRIP, which is the whole reason the id is written in a form that parses: saving the field again
         // resolves to the same id and rebuilds the same text, so the second pass has nothing to write at all.
@@ -1150,14 +1152,20 @@ async function main() {
         await disp.setSetting('excludedNotebooks', disp.settings.excludedNotebooks)
         assert.deepStrictEqual(disp.settingWrites.slice(mark).filter(w => w.key !== 'excludedNotebooks').map(w => w.key), [],
             'a second resolve pass over Cockpit\'s own text writes nothing back')
-        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (b0b0b0b0)`, 'and leaves the text byte-identical')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (${idArchive})`, 'and leaves the text byte-identical')
     })
 
-    await test('excluded notebooks display: a path entry keeps its path, and the id lengthens only where eight would be ambiguous', async () => {
+    await test('excluded notebooks display: a path entry keeps its path, and two ids sharing eight characters are still told apart', async () => {
         await disp.setSetting('excludedNotebooks', 'Lab/Joplin, TwinOne')
-        assert.strictEqual(disp.settings.excludedNotebooks, 'Joplin (a1b2c3d4), TwinOne (abcdef0122)',
-            'a unique title stays a bare title, and the twin ids lengthen to ten characters because eight name both')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Joplin (${idJoplin}), TwinOne (${idTwinA})`,
+            'a unique title stays a bare title, and the whole id is shown - which is what makes the twins distinguishable')
         assert.strictEqual(disp.settings.excludedNotebookIds, `${idJoplin},${idTwinA}`)
+        // The twins differ only at the ninth character, which is exactly the case 2.6.1 needed a lengthening rule for.
+        assert.notStrictEqual(idTwinA, idTwinB)
+        assert.strictEqual(idTwinA.slice(0, 8), idTwinB.slice(0, 8), 'precondition: eight characters name both of them')
+        await disp.setSetting('excludedNotebooks', 'TwinTwo')
+        assert.strictEqual(disp.settings.excludedNotebooks, `TwinTwo (${idTwinB})`, 'and the other twin shows its own id, in full')
+        assert.strictEqual(disp.settings.excludedNotebookIds, idTwinB)
     })
 
     await test('excluded notebooks display: THE ID WINS over a name the user has not re-typed since the rename', async () => {
@@ -1170,10 +1178,11 @@ async function main() {
         await poll.fn()                                     // ...and now the rename is seen
         await disp.setSetting('excludedNotebooks', 'Archive (b0b0b0b0)')
         assert.strictEqual(disp.settings.excludedNotebookIds, idArchive, 'the exclusion survives a rename the user never re-typed')
-        assert.strictEqual(disp.settings.excludedNotebooks, 'Archived (b0b0b0b0)', 'and the shown name catches up with the notebook')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archived (${idArchive})`,
+            'the shown name catches up with the notebook - and the short id 2.6.1 wrote is rewritten whole')
         dispOptions.folders = dispFolders
         await poll.fn()                                     // put the fixture back for the checks below
-        assert.strictEqual(disp.settings.excludedNotebooks, 'Archive (b0b0b0b0)', 'and follows it back again')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (${idArchive})`, 'and follows it back again')
     })
 
     await test('excluded notebooks display: a notebook genuinely NAMED "Budget (deadbeef)" is not read as an id', async () => {
@@ -1181,12 +1190,12 @@ async function main() {
         // two apart. It is not, so the WHOLE entry is the name - and the notebook gets its own real id beside it.
         await disp.setSetting('excludedNotebooks', 'Budget (deadbeef)')
         assert.strictEqual(disp.settings.excludedNotebookIds, idBudget, 'the notebook of that name is what was excluded')
-        assert.strictEqual(disp.settings.excludedNotebooks, 'Budget (deadbeef) (c0ffee11)', 'its own id is added; the name keeps its brackets')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Budget (deadbeef) (${idBudget})`, 'its own id is added; the name keeps its brackets')
     })
 
     await test('excluded notebooks display: an entry that names nothing is kept verbatim, with no id invented for it', async () => {
         await disp.setSetting('excludedNotebooks', 'Archive, Nosuchnotebook')
-        assert.strictEqual(disp.settings.excludedNotebooks, 'Archive (b0b0b0b0), Nosuchnotebook',
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (${idArchive}), Nosuchnotebook`,
             'the typo stays exactly as typed, so the user can see and fix it, and carries no bracket')
         assert.strictEqual(disp.settings.excludedNotebookIds, idArchive)
         await disp.setSetting('excludedNotebooks', '')
@@ -1198,14 +1207,14 @@ async function main() {
         // matched nothing and kept as a typo. It comes back rewritten like anything else.
         await disp.setSetting('excludedNotebooks', idArchive)
         assert.strictEqual(disp.settings.excludedNotebookIds, idArchive, 'the notebook that id names is the one excluded')
-        assert.strictEqual(disp.settings.excludedNotebooks, 'Archive (b0b0b0b0)', 'and the field answers with the name and the short id')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (${idArchive})`, 'and the field answers with the name and the whole id')
         // Upper case is the same id: Joplin writes them lower-case, but a user pasting from somewhere else may not.
         await disp.setSetting('excludedNotebooks', idJoplin.toUpperCase())
         assert.strictEqual(disp.settings.excludedNotebookIds, idJoplin, 'case is not part of an id')
         // An id that names nothing here is exactly a typo, and is treated as one - not silently excluded, not dropped.
         const unknown = 'dddddddd' + '0'.repeat(24)
         await disp.setSetting('excludedNotebooks', `Archive, ${unknown}`)
-        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (b0b0b0b0), ${unknown}`, 'an unknown id is kept verbatim, with nothing invented')
+        assert.strictEqual(disp.settings.excludedNotebooks, `Archive (${idArchive}), ${unknown}`, 'an unknown id is kept verbatim, with nothing invented')
         assert.strictEqual(disp.settings.excludedNotebookIds, idArchive, 'and excludes nothing')
         await disp.setSetting('excludedNotebooks', '')
         // THE COPY MUST MATCH THE BEHAVIOUR. The description is the only place a user is told a bare id works at all.
@@ -1241,35 +1250,45 @@ async function main() {
         await poll.fn()
     })
 
-    // ---- the short id itself: the pure module both settings share ------------------------------------------------
-    const ShortID = require('../src/core/shortId.js')
+    // ---- the display form itself: the pure module both settings share --------------------------------------------
+    const DisplayID = require('../src/core/displayId.js')
 
-    await test('short id: eight characters, lengthened two at a time only for as long as something else shares them', () => {
+    await test('display id: the id is shown WHOLE - nothing is truncated anywhere in the display path', () => {
         const full = 'abcdef0123456789abcdef0123456789'
-        assert.strictEqual(ShortID.shortID(full, []), 'abcdef01', 'eight characters is the default, and what a narrow box can show')
-        assert.strictEqual(ShortID.shortID(full, [full]), 'abcdef01', 'the id itself is not a rival to itself')
-        assert.strictEqual(ShortID.shortID(full, ['abcdef01' + '9'.repeat(24)]), 'abcdef0123',
-            'a rival sharing eight lengthens it to ten')
-        assert.strictEqual(ShortID.shortID(full, ['abcdef0123' + '9'.repeat(22)]), 'abcdef012345',
-            'a rival sharing ten lengthens it to twelve - two at a time, never one')
-        assert.strictEqual(ShortID.shortID(full, [full.slice(0, 31) + 'a']), full,
-            'a rival that differs only in the last character is the one case the whole id is shown')
-        assert.strictEqual(ShortID.shortID('ABCDEF0123456789ABCDEF0123456789', []), 'abcdef01', 'ids are shown lower-case')
+        assert.strictEqual(DisplayID.displayID(full), full, 'the whole id, because a prefix of an id reads as a different id')
+        assert.strictEqual(DisplayID.displayID('ABCDEF0123456789ABCDEF0123456789'), full, 'ids are shown lower-case')
+        assert.strictEqual(DisplayID.displayID(`  ${full}  `), full, 'and trimmed')
         // The one refusal: what cannot be read back is not written. A Joplin id is always 32 hex characters, so this
         // is only ever reached by a fixture or something foreign - and it gets a bare name rather than a broken id.
         for (const notAnID of ['', 'f1', 'abcde', 'not-hex-at-all', 'zzzzzzzz', 'a'.repeat(33)]){
-            assert.strictEqual(ShortID.shortID(notAnID, []), '', `"${notAnID}" is not an id this display form can carry`)
+            assert.strictEqual(DisplayID.displayID(notAnID), '', `"${notAnID}" is not an id this display form can carry`)
         }
-        assert.strictEqual(ShortID.shortID('abcdef', []), 'abcdef', 'six characters is the shortest there is, and is shown whole')
+        assert.strictEqual(DisplayID.displayID('abcdef'), 'abcdef', 'six characters is the shortest the parse side reads, and is shown whole')
+        // NO TRUNCATION IN THE SOURCE EITHER. 2.6.1 cut the id to its first eight characters and lengthened that on a
+        // collision; the owner reversed it, and this is the pin that stops any of it creeping back into a display path.
+        const displaySource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'displayId.js'), 'utf8')
+        const noteSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settingsNote.js'), 'utf8')
+        const exclusionSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'exclusion.ts'), 'utf8')
+        for (const [name, source] of [['displayId.js', displaySource], ['settingsNote.js', noteSource], ['exclusion.ts', exclusionSource]]){
+            const code = source.split('\n').filter(line => !/^\s*[*/]/.test(line)).join('\n')
+            assert.ok(!/\.slice\(0,|\.substr|\.substring|\u2026|'\.\.\.'/.test(code),
+                `${name} must not cut an id down anywhere in the display path`)
+        }
     })
 
-    await test('short id: a display form is split back only when the brackets hold 6-32 hex characters', () => {
-        assert.deepStrictEqual(ShortID.splitDisplayID('Lab / Joplin (fdfd6c06)'), { name: 'Lab / Joplin', id: 'fdfd6c06' })
-        assert.deepStrictEqual(ShortID.splitDisplayID('  Archive (A1B2C3D4)  '), { name: 'Archive', id: 'a1b2c3d4' }, 'trimmed and lower-cased')
-        assert.deepStrictEqual(ShortID.splitDisplayID('Budget (deadbeef) (c0ffee11)'), { name: 'Budget (deadbeef)', id: 'c0ffee11' },
+    await test('display id: a display form is split back only when the brackets hold 6-32 hex characters', () => {
+        assert.deepStrictEqual(DisplayID.splitDisplayID('Lab / Joplin (fdfd6c06)'), { name: 'Lab / Joplin', id: 'fdfd6c06' })
+        assert.deepStrictEqual(DisplayID.splitDisplayID('  Archive (A1B2C3D4)  '), { name: 'Archive', id: 'a1b2c3d4' }, 'trimmed and lower-cased')
+        assert.deepStrictEqual(DisplayID.splitDisplayID('Budget (deadbeef) (c0ffee11)'), { name: 'Budget (deadbeef)', id: 'c0ffee11' },
             'the LAST bracketed group is the id, so a name with brackets of its own survives')
+        // THE 2.6.1 MIGRATION LIVES HERE: the parse side stays WIDER than the display side, so eight characters in
+        // brackets - all any 2.6.1 field holds - is still read back as the id it is a prefix of.
+        assert.deepStrictEqual(DisplayID.splitDisplayID('Archive (a1b2c3d4)'), { name: 'Archive', id: 'a1b2c3d4' },
+            'a short id written by 2.6.1 is still a display form')
+        assert.deepStrictEqual(DisplayID.splitDisplayID(`Archive (${'a1b2c3d4' + '0'.repeat(24)})`),
+            { name: 'Archive', id: 'a1b2c3d4' + '0'.repeat(24) }, 'and so is the whole id this build writes')
         for (const plain of ['Archive', 'Archive (v2)', 'Archive (abcd)', 'Archive (' + 'a'.repeat(33) + ')', '(deadbeef)', '', 'Archive(deadbeef)']){
-            assert.strictEqual(ShortID.splitDisplayID(plain), null, `"${plain}" is all name`)
+            assert.strictEqual(DisplayID.splitDisplayID(plain), null, `"${plain}" is all name`)
         }
     })
 
@@ -8503,9 +8522,12 @@ async function main() {
     await test('settings note: the display form is read as a display reference, and its two implementations agree', () => {
         // The sixth spelling, and the one the field holds most of the time: what Cockpit itself wrote there.
         const shown = SettingsNote.settingsNoteDisplay(SETTINGS_NOTE_TITLE, SYNC_NOTE_ID)
-        assert.strictEqual(shown, 'Joplin Cockpit Plugin Settings (11111111)', 'name, a space, and the first eight characters of the id')
+        assert.strictEqual(shown, `Joplin Cockpit Plugin Settings (${SYNC_NOTE_ID})`, 'name, a space, and the WHOLE id')
         assert.deepStrictEqual(parseSettingsNoteReference(shown),
-            { kind: 'display', id: '11111111', title: SETTINGS_NOTE_TITLE }, 'and it reads back as both halves')
+            { kind: 'display', id: SYNC_NOTE_ID, title: SETTINGS_NOTE_TITLE }, 'and it reads back as both halves')
+        // ...and what 2.6.1 wrote is still read back as a display form, which is what lets an existing field migrate.
+        assert.deepStrictEqual(parseSettingsNoteReference('Joplin Cockpit Plugin Settings (11111111)'),
+            { kind: 'display', id: '11111111', title: SETTINGS_NOTE_TITLE }, 'the short form 2.6.1 wrote still reads as both halves')
         assert.deepStrictEqual(parseSettingsNoteReference(`  ${shown}  `), parseSettingsNoteReference(shown), 'whitespace is trimmed off it too')
         // The five older spellings are untouched by it: a Markdown link ends in a bracket as well, and must still be an id.
         assert.strictEqual(parseSettingsNoteReference(`[x](:/${SYNC_NOTE_ID})`).kind, 'id', 'a Markdown link is still an id, not a display form')
@@ -8516,22 +8538,22 @@ async function main() {
         // searches for. There is no map of note ids to check it against, so the stored full id is the check instead.
         assert.deepStrictEqual(parseSettingsNoteReference('Budget (deadbeef)'), { kind: 'display', id: 'deadbeef', title: 'Budget' })
         // THE TWO COPIES. settingsNote.js is loaded in webviews and by the harness on its own, so it cannot require
-        // shortId.js and carries its own copy of both functions. Neither may drift from the other.
-        for (const [id, others] of [
-            [SYNC_NOTE_ID, []],
-            ['abcdef0123456789abcdef0123456789', ['abcdef0199999999999999999999999']],
-            ['abcdef0123456789abcdef0123456789', ['abcdef0123999999999999999999999']],
-            ['ABCDEF0123456789ABCDEF0123456789', []],
-            ['abcdef', []],
-            ['f1', []],
-            ['not-hex', []],
-            ['', []],
+        // displayId.js and carries its own copy of both functions. Neither may drift from the other.
+        for (const id of [
+            SYNC_NOTE_ID,
+            'abcdef0123456789abcdef0123456789',
+            'ABCDEF0123456789ABCDEF0123456789',
+            '  abcdef0123456789abcdef0123456789  ',
+            'abcdef',
+            'f1',
+            'not-hex',
+            '',
         ]) {
-            assert.strictEqual(SettingsNote.shortID(id, others), ShortID.shortID(id, others), `shortID("${id}") must mean the same in both copies`)
+            assert.strictEqual(SettingsNote.displayID(id), DisplayID.displayID(id), `displayID("${id}") must mean the same in both copies`)
         }
         for (const text of ['Lab / Joplin (fdfd6c06)', 'Archive (A1B2C3D4)', 'Budget (deadbeef) (c0ffee11)', 'Archive', 'Archive (v2)',
             'Archive (abcd)', '(deadbeef)', '', 'Archive(deadbeef)']) {
-            assert.deepStrictEqual(SettingsNote.splitDisplayID(text), ShortID.splitDisplayID(text),
+            assert.deepStrictEqual(SettingsNote.splitDisplayID(text), DisplayID.splitDisplayID(text),
                 `splitDisplayID("${text}") must mean the same in both copies`)
         }
         // ...AND THE SAME COMPARISON OVER SHAPES NOBODY THOUGHT OF. The list above only pins what someone wrote down; a
@@ -8548,7 +8570,8 @@ async function main() {
             return out
         }
         // A generated id: mostly real-shaped (32 hex), with the near misses that decide the refusals - too short, too long,
-        // exactly six, and outright junk.
+        // exactly six, and outright junk. Retargeted at displayID when the lengthening rule went: the decision left in the
+        // function is the REFUSAL (is this 6-32 hex at all?) plus the trimming and lower-casing around it.
         // Surrounding whitespace is generated on purpose: trimming and lower-casing are normalisation the two copies each do
         // for themselves, and a drift there is invisible to any case written out by hand (nobody writes " abcdef01 ").
         const padded = (text) => `${pick(' ', nextInt(2))}${text}${pick(' ', nextInt(2))}`
@@ -8566,18 +8589,12 @@ async function main() {
         let fuzzed = 0
         for (let round = 0; round < 3000; round++){
             const id = someID()
-            const rivals = []
-            for (let index = 0, count = nextInt(4); index < count; index++){
-                // Half the rivals SHARE A PREFIX with the id, because two random ids practically never do - and the
-                // lengthening is the only part of this function with a decision in it.
-                rivals.push(nextInt(2) && id.length > 8 ? id.slice(0, 8 + 2 * nextInt(8)) + pick(HEX_CHARS, 32) : someID())
-            }
-            assert.strictEqual(SettingsNote.shortID(id, rivals), ShortID.shortID(id, rivals),
-                `shortID("${id}", ${JSON.stringify(rivals)}) must mean the same in both copies`)
+            assert.strictEqual(SettingsNote.displayID(id), DisplayID.displayID(id),
+                `displayID(${JSON.stringify(id)}) must mean the same in both copies`)
             // The split, over names and bracketed groups built from the same alphabets, with and without the bracket.
             const name = pick(HEX_CHARS + JUNK_CHARS, nextInt(12))
             const text = padded(nextInt(2) ? `${name}${pick(' ', nextInt(3))}(${someID()})` : name)
-            assert.deepStrictEqual(SettingsNote.splitDisplayID(text), ShortID.splitDisplayID(text),
+            assert.deepStrictEqual(SettingsNote.splitDisplayID(text), DisplayID.splitDisplayID(text),
                 `splitDisplayID(${JSON.stringify(text)}) must mean the same in both copies`)
             fuzzed++
         }
@@ -8776,8 +8793,8 @@ async function main() {
         await test(`settings note reference: ${label} is rewritten to the note's name and id, and that note is read once`, async () => {
             const state = await runSyncRef(name, syncRefNotes())
             await state.withTimers(() => state.setSetting('settingsNoteId', typed))
-            assert.strictEqual(state.settings.settingsNoteId, 'Joplin Cockpit Plugin Settings (11111111)',
-                'the field ends up holding the note\'s name and the first eight characters of its id - the literal a user reads')
+            assert.strictEqual(state.settings.settingsNoteId, `Joplin Cockpit Plugin Settings (${SYNC_NOTE_ID})`,
+                'the field ends up holding the note\'s name and its WHOLE id - the literal a user reads')
             assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID,
                 'and the full id is kept beside it, out of sight, which is what every read and write of the note uses')
             const reads = state.gets.filter(g => g.path[0] === 'notes' && g.path[1] === SYNC_NOTE_ID &&
@@ -8817,7 +8834,7 @@ async function main() {
                 currentProfileID: 1,
             },
         })
-        assert.strictEqual(state.settings.settingsNoteId, 'Joplin Cockpit Plugin Settings (11111111)', 'the field now shows the note by name and id')
+        assert.strictEqual(state.settings.settingsNoteId, `Joplin Cockpit Plugin Settings (${SYNC_NOTE_ID})`, 'the field now shows the note by name and whole id')
         assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID, 'and the full id it was pointing at is kept, out of sight')
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'],
             'the note wins WHOLESALE, as it has since this device first connected - a migration is not a first connection')
@@ -8827,19 +8844,19 @@ async function main() {
     })
 
     await test('settings note display: a field already holding the display form costs one read and re-arms nothing', async () => {
-        // THE COMMON CASE - every startup of a connected device, after the migration above. The short id in the field is
-        // the start of the stored full id, so the reference is UNCHANGED: no title search, no repoint, no merge, and not
-        // one settings write either.
+        // THE COMMON CASE - every startup of a connected device, after the migration above. The id in the field IS the
+        // stored full id, so the reference is UNCHANGED: no title search, no repoint, no merge, and not one settings
+        // write either.
         const state = await runSync('display-steady', {
             notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings())) },
             initialSettings: {
-                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteId: syncDisplayed(SYNC_NOTE_ID),
                 settingsNoteResolvedId: SYNC_NOTE_ID,
                 profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
                 currentProfileID: 1,
             },
         })
-        assert.strictEqual(state.settings.settingsNoteId, 'Joplin Cockpit Plugin Settings (11111111)', 'the field is left exactly as it stood')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'the field is left exactly as it stood')
         assert.deepStrictEqual(state.settingWrites.filter(w => w.key === 'settingsNoteId' || w.key === 'settingsNoteResolvedId'), [],
             'and neither half of the reference is written')
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'], 'the note wins wholesale - the merge was NOT re-armed')
@@ -8848,11 +8865,38 @@ async function main() {
             'and the note is never searched for by name: the stored id already names it')
     })
 
+    await test('settings note display: a field 2.6.1 left holding a SHORT id is the same note, and is rewritten whole', async () => {
+        // THE 2.6.1 MIGRATION, and the one that would hurt most to get wrong. Every device set up under 2.6.1 has
+        // "Joplin Cockpit Plugin Settings (11111111)" sitting in its field. Those eight characters are still the START of
+        // the stored full id, so this is the UNCHANGED path, exactly as before: no title search, no repoint, no re-merge
+        // and no PUT. Counting it as a repoint would fold every 2.6.1 user's profiles back into their note on first launch.
+        const state = await runSync('display-short-migrate', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings())) },
+            initialSettings: {
+                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteResolvedId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+            },
+        })
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'the field is rewritten to the whole id')
+        assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID, 'and the stored id it always named is untouched')
+        assert.deepStrictEqual(state.settingWrites.filter(w => w.key === 'settingsNoteResolvedId'), [],
+            'the hidden half is not written at all - nothing moved')
+        assert.strictEqual(state.settingWrites.filter(w => w.key === 'settingsNoteId').length, 1, 'and the visible half exactly once')
+        assert.deepStrictEqual(state.gets.filter(g => g.path[0] === 'search' && String(g.query && g.query.query || '').includes('title:')), [],
+            'the note is never searched for by name - it was never lost')
+        assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'],
+            'the note wins WHOLESALE: this is not a first connection, so the one-time merge did not run again')
+        assert.strictEqual(state.notePuts.length, 0, 'and nothing is published back')
+        assert.deepStrictEqual(state.dataPosts, [], 'nor is a second note created')
+    })
+
     await test('settings note display: the shown name follows the note when the note is renamed', async () => {
         const state = await runSync('display-rename', {
             notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(3, [syncProfile(2, 'From the laptop')]), syncSettings())) },
             initialSettings: {
-                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteId: syncDisplayed(SYNC_NOTE_ID),
                 settingsNoteResolvedId: SYNC_NOTE_ID,
                 profileData: JSON.stringify(syncStore(3, [syncProfile(2, 'From the laptop')])),
                 currentProfileID: 2,
@@ -8863,7 +8907,7 @@ async function main() {
         state.notes[SYNC_NOTE_ID].title = 'Our shared Cockpit settings'
         state.notes[SYNC_NOTE_ID].updated_time = 99
         await state.withTimers(() => state.syncCompleteHandler({}))
-        assert.strictEqual(state.settings.settingsNoteId, 'Our shared Cockpit settings (11111111)', 'the shown name catches up with the note')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID, 'Our shared Cockpit settings'), 'the shown name catches up with the note')
         assert.strictEqual(state.settings.settingsNoteResolvedId, SYNC_NOTE_ID, 'the id behind it is untouched - the note did not move')
         assert.strictEqual(state.notePuts.length, 0, 'a rename is not news to publish')
         assert.deepStrictEqual(syncProfileNames(state), ['From the laptop'], 'nor is it a first connection')
@@ -8880,7 +8924,7 @@ async function main() {
                     body: syncBody(syncStore(3, [syncProfile(2, 'On the other note')]), syncSettings()) },
             },
             initialSettings: {
-                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteId: syncDisplayed(SYNC_NOTE_ID),
                 settingsNoteResolvedId: SYNC_NOTE_ID,
                 profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
                 currentProfileID: 1,
@@ -8894,7 +8938,7 @@ async function main() {
     })
 
     await test('settings note display: another device\'s display form NEVER creates a second note - it waits for that one', async () => {
-        // THE PASTE THE README INVITES. A user reads device 1's field, types "Joplin Cockpit Plugin Settings (11111111)" into device 2
+        // THE PASTE THE README INVITES. A user reads device 1's field, types "Joplin Cockpit Plugin Settings (<its id>)" into device 2
         // before the note has synced down, and the canonical title is sitting right there inside it. Creating for that would hand them a
         // second mailbox and two devices talking past each other in silence - the very outcome the typed-title guard exists to refuse.
         // A display form is text COCKPIT wrote on some device, so it always means "this note exists somewhere": it waits.
@@ -8907,9 +8951,9 @@ async function main() {
                 currentProfileID: 1,
             },
         })
-        await state.withTimers(() => state.setSetting('settingsNoteId', 'Joplin Cockpit Plugin Settings (11111111)'))
+        await state.withTimers(() => state.setSetting('settingsNoteId', syncDisplayed(SYNC_NOTE_ID)))
         assert.deepStrictEqual(state.dataPosts, [], 'nothing is created for a display form, canonical title inside it or not')
-        assert.strictEqual(state.settings.settingsNoteId, 'Joplin Cockpit Plugin Settings (11111111)', 'the field is left exactly as pasted')
+        assert.strictEqual(state.settings.settingsNoteId, syncDisplayed(SYNC_NOTE_ID), 'the field is left exactly as pasted')
         assert.strictEqual(state.settings.settingsNoteResolvedId, '', 'and nothing is pointed at')
         assert.ok(state.panelMessages.some(m => m[0] === 'panelToast' && /no note titled/i.test(String(m[1]))),
             'the user is told it was not found - which is true, and tells them to wait for the sync')
@@ -9469,16 +9513,16 @@ async function main() {
             folders: [{ id: seenId, title: 'Family' }],
             notes: {
                 [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]),
-                    syncSettings({ excludedNotebookIds: `${seenId},${unseenId}`, excludedNotebooks: 'Family (a1b2c3d4), Work' }))),
+                    syncSettings({ excludedNotebookIds: `${seenId},${unseenId}`, excludedNotebooks: `Family (${seenId}), Work` }))),
             },
             initialSettings: {
-                settingsNoteId: 'Joplin Cockpit Plugin Settings (11111111)',
+                settingsNoteId: syncDisplayed(SYNC_NOTE_ID),
                 settingsNoteResolvedId: SYNC_NOTE_ID,
                 profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
                 currentProfileID: 1,
             },
         })
-        assert.strictEqual(state.settings.excludedNotebooks, 'Family (a1b2c3d4), Work',
+        assert.strictEqual(state.settings.excludedNotebooks, `Family (${seenId}), Work`,
             'the entry that resolves keeps its id, and the one this device cannot see is kept verbatim, with none invented for it')
         assert.strictEqual(state.settings.excludedNotebookIds, `${seenId},${unseenId}`, 'and the unseen id is still in the hidden list')
         // ONE write of each, which is the apply putting the payload in place - and not a second from the resolver that

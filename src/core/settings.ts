@@ -35,8 +35,9 @@ export const dayStartTimeSettingKey = "dayStartTime"
 /** The settings note (src/core/settingsSync.ts). Empty means the feature is off, which is how every install starts. */
 export const settingsNoteIdSettingKey = "settingsNoteId"
 /** The full 32-character id of the note the visible field names - the source of truth for every read and write of the settings note, exactly as
- * excludedNotebookIds is for the excluded notebooks. The visible field is the user's input AND the display, and shows only the id's first 8
- * characters, which nothing could look a note up by. Managed by Cockpit; see resolveSettingsNoteReference in settingsSync.ts. */
+ * excludedNotebookIds is for the excluded notebooks. The visible field is the user's input AND the display; the id it shows is the whole id, but
+ * it is never what a note is looked up by (a field written by 2.6.1 holds only the first eight characters of one, and the display form is text a
+ * user can edit either way). Managed by Cockpit; see resolveSettingsNoteReference in settingsSync.ts. */
 export const settingsNoteResolvedIdSettingKey = "settingsNoteResolvedId"
 
 /** Theme settings keys. The themes feature (src/core/theme.ts) reads these to build the panel's --cockpit-* override block. */
@@ -172,7 +173,7 @@ export async function setupSettings(){
 		},
 		[settingsNoteIdSettingKey]: {
 			label: "Settings note",
-			description: "Type Joplin Cockpit Plugin Settings here. Cockpit creates that note if it does not exist yet, or connects to it if it has already synced in from another device - so on a second device, sync first, then type the same title. A note id or link also works. Once connected, the field shows the note as Name (id): the id in brackets is how Cockpit tells two notes of the same name apart. Leave empty to keep everything on this device. Synced: profiles, custom panel CSS, theme colours, completed-to-do style, day start time and excluded notebooks. Per device: font and circle sizes, refresh interval, toolbar button, title-bar options and which profile is selected.",
+			description: "Type Joplin Cockpit Plugin Settings here. Cockpit creates that note if it does not exist yet, or connects to it if it has already synced in from another device - so on a second device, sync first, then type the same title. A note id or link also works. Once connected, the field shows the note as Name (id), the brackets holding the note's full id: that is how Cockpit tells two notes of the same name apart. Leave empty to keep everything on this device. Synced: profiles, custom panel CSS, theme colours, completed-to-do style, day start time and excluded notebooks. Per device: font and circle sizes, refresh interval, toolbar button, title-bar options and which profile is selected.",
 			value: "",
 			type: SettingItemType.String,
 			public: true,
@@ -180,8 +181,8 @@ export async function setupSettings(){
 		},
 		[settingsNoteResolvedIdSettingKey]: {
 			// The full id of the note the visible field above names: the single source of truth for every read and
-			// write of the settings note. A short id cannot be resolved back to a note without scanning every note
-			// there is, so the field's display form is checked against this. Managed by Cockpit; not shown.
+			// write of the settings note. A bracketed id cannot be resolved back to a note without scanning every
+			// note there is, so the field's display form is checked against this. Managed by Cockpit; not shown.
 			label: "The resolved id of the settings note (managed by Cockpit)",
 			value: "",
 			type: SettingItemType.String,
@@ -190,7 +191,7 @@ export async function setupSettings(){
 		},
 		[EXCLUDED_NOTEBOOKS_KEY]: {
 			label: "Excluded notebooks",
-			description: "Comma-separated notebooks to hide from Cockpit everywhere: search results, panel rows, checkbox counts, the overview notes and the notebook filter/picker. Sub-notebooks of an excluded notebook are hidden too. Type a name, a Parent/Sub path, or a notebook id. Cockpit rewrites each entry as Name (id): the id in brackets is how it tells two notebooks of the same name apart, and it keeps tracking the notebook by that id, so renaming it later keeps the exclusion working. Leave empty to turn the feature off.",
+			description: "Comma-separated notebooks to hide from Cockpit everywhere: search results, panel rows, checkbox counts, the overview notes and the notebook filter/picker. Sub-notebooks of an excluded notebook are hidden too. Type a name, a Parent/Sub path, or a notebook id. Cockpit rewrites each entry as Name (id), the brackets holding the notebook's full id: that is how it tells two notebooks of the same name apart, and it keeps tracking the notebook by that id, so renaming it later keeps the exclusion working. Leave empty to turn the feature off.",
 			value: "",
 			type: SettingItemType.String,
 			public: true,

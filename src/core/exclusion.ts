@@ -4,9 +4,10 @@
  * ID, so renaming a notebook never breaks it. The visible comma-separated names field is only an entry/display surface; the hidden id list is the      *
  * single source of truth for every exclusion decision.                                                                                               *
  *                                                                                                                                                    *
- * THE FIELD SHOWS BOTH: "Lab / Joplin (fdfd6c06), Archive (a1b2c3d4)". The name is what a person recognises, the short id is what Cockpit is holding   *
- * on to - so a field pointed at the wrong one of two same-named notebooks says so at a glance. It still PARSES BACK: the user goes on typing plain     *
- * names, paths or ids, and a " (id)" Cockpit wrote is read as the id it names (see resolveTypedEntry, and shortID for why the id is shortened).        *
+ * THE FIELD SHOWS BOTH: "Lab / Joplin (fdfd6c06e6f549df944a4fb442e1f318)". The name is what a person recognises, the id is what Cockpit is             *
+ * holding on to - WHOLE, because an id cut down to a prefix reads as a different id - so a field pointed at the wrong one of two same-named            *
+ * notebooks says so at a glance. It still PARSES BACK: the user goes on typing plain names, paths or ids, and a " (id)" Cockpit wrote is read          *
+ * as the id it names, a SHORT one written by 2.6.1 included (see resolveTypedEntry, and src/core/displayId.js for both halves of the form).            *
  *                                                                                                                                                    *
  * Every function here takes the notebook map (Map<id,{id,title,path,parentID}>, path = "Parent / Child") as a parameter rather than fetching it, so    *
  * this module stays a leaf with no dependency on joplin.ts (which would be circular).                                                                 *
@@ -37,19 +38,20 @@ export function parseExcludedIds(raw){
     return String(raw || "").split(",").map(part => part.trim()).filter(Boolean)
 }
 
-/** The short id, shared with the settings note *****************************************************************************************************
- * src/core/shortId.js: one pure, dependency-free leaf (the same UMD shape as horizons.js) holding the whole display form - how an id is shortened for *
- * a single-line setting box, and how a " (id)" is read back out of one. Required rather than reimplemented so the notebook field and the settings     *
- * note cannot drift apart on what the brackets mean.                                                                                                 *
+/** The display form, shared with the settings note *************************************************************************************************
+ * src/core/displayId.js: one pure, dependency-free leaf (the same UMD shape as horizons.js) holding the whole display form - the id as it             *
+ * is shown, whole, and how a " (id)" is read back out of one (6 to 32 hex, so a short id written by 2.6.1 still reads). Required rather               *
+ * than reimplemented so the notebook field and the settings note cannot drift apart on what the brackets mean.                                       *
  ***************************************************************************************************************************************************/
-const { shortID, splitDisplayID } = require("./shortId")
+const { displayID, splitDisplayID } = require("./displayId")
 
 /** A full Joplin folder id, as the user pastes it: 32 hex characters. */
 var FULL_ID_PATTERN = /^[0-9a-f]{32}$/
 
 /** idsWithPrefix **********************************************************************************************************************************
  * The notebook ids in the map that begin with this (already lower-cased) prefix. The parse side's whole question: a bracketed group is only an id     *
- * when it actually names something here.                                                                                                             *
+ * when it actually names something here. PREFIX, not equality, is also what reads back a field 2.6.1 wrote, whose brackets hold the first            *
+ * eight characters of the id rather than all of them; a full id is a 32-character prefix of itself.                                                  *
  ***************************************************************************************************************************************************/
 function idsWithPrefix(map, prefix){
     var out = []
@@ -109,9 +111,10 @@ export function canonicalLabel(map, id){
 }
 
 /** displayLabel ***********************************************************************************************************************************
- * WHAT THE USER READS IN THE FIELD: the name (or the Parent / Sub path) followed by the short id in brackets - "Lab / Joplin (fdfd6c06)". The name is *
- * the part a person recognises and the id is what Cockpit is actually holding on to, so a field pointed at the wrong one of two same-named notebooks   *
- * says so at a glance instead of looking right. Falls back to the bare name for an id that cannot be shown in a form the parser would take back.       *
+ * WHAT THE USER READS IN THE FIELD: the name (or the Parent / Sub path) followed by the WHOLE id in brackets - "Lab / Joplin                          *
+ * (fdfd6c06e6f549df944a4fb442e1f318)". The name is the part a person recognises and the id is what Cockpit is actually holding on to - and            *
+ * an id is not a prefix of one - so a field pointed at the wrong one of two same-named notebooks says so at a glance instead of looking                *
+ * right. Falls back to the bare name for an id that cannot be shown in a form the parser would take back.                                              *
  *                                                                                                                                                     *
  * NOTHING THAT CANNOT BE READ BACK IS EVER WRITTEN, which is what the blank-title case is about. A notebook with no title at all would give the label  *
  * " (e1e1e1e1)", and the parser refuses that - it wants a non-blank name in front of the brackets - so the id would be dropped by the very next        *
@@ -121,10 +124,10 @@ export function canonicalLabel(map, id){
 export function displayLabel(map, id){
     var label = canonicalLabel(map, id)
     if (label == null) return null
-    var short = shortID(id, map.keys())
-    if (!short) return label
+    var shown = displayID(id)
+    if (!shown) return label
     if (!String(label).trim()) return FULL_ID_PATTERN.test(String(id).toLowerCase()) ? String(id) : label
-    return label + " (" + short + ")"
+    return label + " (" + shown + ")"
 }
 
 /** resolveTypedEntry ******************************************************************************************************************************
@@ -134,10 +137,13 @@ export function displayLabel(map, id){
  * the name, so a notebook genuinely titled "Budget (deadbeef)" keeps working. When the stripped prefix names exactly one notebook, THAT ID WINS over   *
  * the name in front of it: the user may not have re-typed the field since the notebook was renamed, and the id is the thing that was true. A prefix    *
  * several notebooks share settles nothing, so the name part is resolved exactly as it always was.                                                      *
+ *                                                                                                                                                      *
+ * A SHORT ID WRITTEN BY 2.6.1 IS READ BY THAT SAME PREFIX RULE, which is the whole of that release's migration: "Archive (a1b2c3d4)" sitting           *
+ * in a field resolves to the notebook whose id starts with those eight characters, and is written straight back with the id whole.                     *
  *                                                                                                                                                     *
  * A BARE FULL ID is an entry in its own right, and has to be: the field now PRINTS ids, so a user who wants to be exact will paste one, and the        *
  * setting's own description offers it. It is matched against the map rather than against titles (resolveEntry only ever knew names and paths), and     *
- * comes back rewritten as "Name (short id)" like everything else. An unknown 32-hex string matches nothing and is kept verbatim, like any typo.        *
+ * comes back rewritten as "Name (id)" like everything else. An unknown 32-hex string matches nothing and is kept verbatim, like any typo.              *
  ***************************************************************************************************************************************************/
 function resolveTypedEntry(map, entry){
     var text = String(entry || "").trim()
@@ -175,7 +181,7 @@ function dedupeLabels(parts){
 /** resolveNamesToIds ******************************************************************************************************************************
  * Resolves the visible names field to { ids, canonicalText }. Each entry is resolved case-insensitively (title, Parent/Sub path, or the "Name (id)"   *
  * display form Cockpit itself writes - see resolveTypedEntry); a bare title matching several notebooks contributes all of them. The canonical text is  *
- * rebuilt from the resolved ids (path form where a bare title is ambiguous, each with its short id), with any entry that resolved to nothing kept      *
+ * rebuilt from the resolved ids (path form where a bare title is ambiguous, each with its full id), with any entry that resolved to nothing kept       *
  * verbatim - and unadorned, there being no id to show - so the user can still see and fix their typo.                                                  *
  ***************************************************************************************************************************************************/
 export function resolveNamesToIds(map, raw){

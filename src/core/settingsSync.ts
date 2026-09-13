@@ -15,9 +15,10 @@
  * was closed arrives) and idempotent.                                                                                                               *
  *                                                                                                                                                  *
  * THE REFERENCE IS A PAIR, exactly as the excluded notebooks are: the visible "Settings note" field is what the user types and what they read back    *
- * ("Joplin Cockpit Plugin Settings (310b413d)"), and the hidden settingsNoteResolvedId holds the full 32-character id every operation here uses. The   *
- * field shows a SHORT id because a Joplin String setting is one narrow single-line input that cannot wrap; a short id cannot be looked up, which is    *
- * exactly why the full one is kept beside it. See resolveSettingsNoteReference.                                                                        *
+ * ("Joplin Cockpit Plugin Settings (310b413d415e40a0a80a883c65bda866)"), and the hidden settingsNoteResolvedId holds the same full                     *
+ * 32-character id, which is what every operation here uses. The field carries the id WHOLE - a prefix of an id reads as a different id - but the       *
+ * bracketed half is never looked a note up by: it is checked against the stored id, which is why the stored id exists. A field written by 2.6.1        *
+ * holds only the first eight characters and is checked the same way, as the prefix it is. See resolveSettingsNoteReference.                            *
  *                                                                                                                                                    *
  * OFF BY DEFAULT, AND FREE WHEN OFF. With the "Settings note" setting empty there is no note id, so every entry point here returns before it reaches *
  * a single data call: startup, every refresh and every note change cost exactly what they cost before this feature existed.                          *
@@ -422,7 +423,7 @@ async function refreshFromSettingsNoteLocked(reason){
 
     var payload = parseSettingsNoteBody(body)
     // THE DISPLAYED NAME FOLLOWS THE NOTE. This read is the one place that knows the note's TITLE (it is fetched with the body, for the wrong-note
-    // guard below), so it is where the visible field becomes "<title> (<short id>)" - which is the rename refresh and, on an install made before
+    // guard below), so it is where the visible field becomes "<title> (<id>)" - which is the rename refresh and, on an install made before
     // the field showed an id at all, the migration from the bare id it still holds. Guarded by a value comparison, so the ordinary pass writes
     // nothing; and NOT for a note that is not a settings note at all, where the user should go on seeing exactly what they pasted.
     if (payload || title.trim() === SETTINGS_NOTE_TITLE) await refreshSettingsNoteDisplay(title)
@@ -689,9 +690,10 @@ export async function onSettingsNoteReferenceChanged(announce?){
  * rightly - creating the note is a one-time action, and a user who is configuring a plugin is already in Settings. So the field does all of it:       *
  *                                                                                                                                                    *
  *   AN ID, in any of its four spellings, is canonicalised to the bare id - and stored, in full, in the hidden settingsNoteResolvedId, which is what   *
- *     every read and write of the note actually uses. The visible field becomes "<title> (<short id>)" as soon as the read knows the title.           *
- *   THE DISPLAY FORM this device wrote, whose short id is still the start of the stored id, means UNCHANGED: no search, no repoint, no re-merge. That *
- *     is the path every startup of a connected device takes. One whose short id does NOT match is resolved from scratch by its title, like any title.  *
+ *     every read and write of the note actually uses. The visible field becomes "<title> (<id>)" as soon as the read knows the title.                 *
+ *   THE DISPLAY FORM this device wrote, whose bracketed id is still the start of the stored id, means UNCHANGED: no search, no repoint, no            *
+ *     re-merge. That is the path every startup of a connected device takes, and the path a field written by 2.6.1 takes too, its eight                 *
+ *     characters being a prefix of the same id. One whose bracketed id does NOT match is resolved from scratch by its title, like any title.           *
  *   THE CANONICAL TITLE, TYPED, with no note behind it yet is a request to SET THE FEATURE UP: the note is created here, exactly as the command      *
  *     creates it (same placement, same seed, same token), and the field is rewritten to it. That makes the first device's whole setup "type the       *
  *     title". Only a TYPED title creates: a display form says the note exists somewhere, so it waits for it instead of making a second one.           *
@@ -714,7 +716,7 @@ async function resolveSettingsNoteReference(announce){
         if (stored) await joplin.settings.setValue(settingsNoteResolvedIdSettingKey, "")
         return ""
     }
-    // UNCHANGED, AND THEREFORE FREE. The field holds the display text this device wrote and its short id is still the start of the full id stored
+    // UNCHANGED, AND THEREFORE FREE. The field holds the display text this device wrote and its bracketed id is still the start of the full id stored
     // beside it, so it names the very note this device has been reading: no search, no repoint, no re-merge. This is the path EVERY startup of a
     // connected device takes, and re-arming the one-time merge here would fold this device's profiles into the note on every launch.
     if (reference.kind === "display" && stored && stored.indexOf(reference.id) === 0){
@@ -730,7 +732,7 @@ async function resolveSettingsNoteReference(announce){
         if (raw !== reference.id) await joplin.settings.setValue(settingsNoteIdSettingKey, reference.id)
         return reference.id
     }
-    // A TITLE - or a display form whose short id is NOT the note this device is holding, which means the user edited the box or pasted someone
+    // A TITLE - or a display form whose bracketed id is NOT the note this device is holding, which means the user edited the box or pasted someone
     // else's text. Both are resolved from scratch by the name, and both are repoints like any other.
     //
     // A DISPLAY FORM IS SPLIT ON FAITH, and this is where that is paid for. The notebook field can ask its map whether the bracketed group is
@@ -790,10 +792,10 @@ function isCanonicalSettingsNoteTitle(title){
  * THE TWO HALVES OF THE REFERENCE, WRITTEN IN THE ONE ORDER THAT WORKS.                                                                             *
  *                                                                                                                                                    *
  * The hidden `settingsNoteResolvedId` holds the full 32-character id and is what every read and write of the note uses; the visible field holds what  *
- * the user typed and, once the note is known, "<title> (<short id>)". The pair is exactly the pair excludedNotebookIds/excludedNotebooks already is.  *
+ * the user typed and, once the note is known, "<title> (<id>)"      . The pair is exactly the pair excludedNotebookIds/excludedNotebooks already is.  *
  *                                                                                                                                                    *
  * THE HIDDEN ID GOES FIRST, always. Writing the visible field re-enters the settings onChange handler, and the resolve that runs on that pass has to  *
- * read the new text as "the note we already have" - which it can only do by comparing its short id against the stored one. Both writes are guarded by *
+ * read the new text as "the note we already have" - which it can only do by comparing its bracketed id against the stored one. Both writes are guarded by *
  * a value comparison, the same loop pattern resolveExcludedNotebooks uses, so the re-entry settles instead of looping.                                *
  ***************************************************************************************************************************************************/
 async function rememberSettingsNoteId(id){
