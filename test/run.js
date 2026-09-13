@@ -1263,12 +1263,15 @@ async function main() {
         { id: idJoplin, title: 'Joplin', parent_id: idLab, updated_time: 11 },
         { id: idArchive, title: 'Archive', parent_id: '', updated_time: 12 },
     ]
+    // A to-do INSIDE the excluded notebook, so a check can ask the one question that matters to the user: is the
+    // exclusion still doing its job on the very first paint of the session?
+    const startupTodos = [{ id: '9'.repeat(32), title: 'InTheArchive', todo_completed: 0, todo_due: 0, parent_id: idArchive, user_updated_time: 1 }]
     const runStartup = (name, initialSettings, folders) => run({
         dataDir: path.join(tmp, `startup-${name}-data`),
         installationDir: path.join(tmp, 'desktop-install'),
         require: desktopRequire,
         versionInfo: { version: '3.7.0', platform: 'desktop' },
-        todos: [],
+        todos: startupTodos,
         folders: folders || startupFolders,
         initialSettings: Object.assign({
             profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'All', searchCriteria: '', noteID: '', showNotes: false }] }),
@@ -1321,10 +1324,10 @@ async function main() {
         // by some other route or drops the cache; the guard that makes the call unnecessary in the first place is the
         // early return, and that is what this reads.
         const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settings.ts'), 'utf8')
-        const resolver = /async function resolveExcludedNotebooks\([\s\S]*?\n\}/.exec(source)
-        assert.ok(resolver, 'the resolver must be findable in the source')
-        const guard = resolver[0].indexOf('if (!raw && !storedIdsBefore) return')
-        const map = resolver[0].indexOf('getNotebookMap()')
+        const pass = /export async function refreshExcludedNotebookDisplay\([\s\S]*?\n\}/.exec(source)
+        assert.ok(pass, 'the startup pass must be findable in the source')
+        const guard = pass[0].indexOf('if (!raw && !storedIdsCsv) return')
+        const map = pass[0].indexOf('getNotebookMap()')
         assert.ok(guard > 0, 'the empty-pair early return must be there')
         assert.ok(guard < map, 'and it must come BEFORE the notebook map is asked for')
     })
@@ -1346,6 +1349,66 @@ async function main() {
             'so the entry is rewritten to the notebook it always named, with its id whole')
     })
 
+    // ---- ...AND THE WORLD CHANGES UNDER THE TEXT WHILE JOPLIN IS CLOSED -------------------------------------------
+    // The review's finding, and the reason the startup pass reads the IDS and not the text. A name goes stale with
+    // nobody typing anything: another device renames the notebook, or takes the name, or makes it ambiguous, and the
+    // sync brings that in before this device ever looks at the field. Resolving the stale TEXT then deletes, moves or
+    // adds an exclusion that the user never touched. Nothing here may change WHAT is excluded - only how it is shown.
+
+    await test('excluded notebooks at startup: a notebook RENAMED while Joplin was closed keeps its exclusion, and the text follows it', async () => {
+        const state = await runStartup('renamed-while-closed', {
+            excludedNotebooks: 'Archive',                    // the 2.6.0 text, written when the notebook was called that
+            excludedNotebookIds: idArchive,
+        }, [{ id: idArchive, title: 'Archived', parent_id: '', updated_time: 12 }])
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive,
+            'the stored id comes through untouched - a rename is not a request to stop excluding anything')
+        assert.strictEqual(state.settings.excludedNotebooks, `Archived (${idArchive})`,
+            'and the text is rebuilt from that id, so it shows the name the notebook has NOW')
+        assert.deepStrictEqual(state.settingWrites.filter(w => w.key === 'excludedNotebookIds'), [],
+            'the id list is never written by the startup pass at all')
+        assert.strictEqual(state.notePuts.length, 0, 'and nothing is published')
+        assert.ok(!String(state.panelHtml['panel-panel'] || '').includes('InTheArchive'),
+            'the to-do in it is absent from the very first paint, which is the whole point of the exclusion')
+    })
+
+    await test('excluded notebooks at startup: a notebook that TOOK the freed name does not take the exclusion with it', async () => {
+        const idImpostor = 'cafe0001' + '0'.repeat(24)
+        const state = await runStartup('renamed-and-taken', {
+            excludedNotebooks: 'Archive',
+            excludedNotebookIds: idArchive,
+        }, [
+            { id: idArchive, title: 'Archived', parent_id: '', updated_time: 12 },
+            { id: idImpostor, title: 'Archive', parent_id: '', updated_time: 13 },   // created elsewhere, under the old name
+        ])
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive, 'the exclusion stays on the notebook it was put on')
+        assert.strictEqual(state.settings.excludedNotebooks, `Archived (${idArchive})`, 'and the text names that notebook, not its namesake')
+    })
+
+    await test('excluded notebooks at startup: a stale name that has become AMBIGUOUS adds nothing', async () => {
+        const idSecond = 'cafe0001' + '0'.repeat(24)
+        const state = await runStartup('became-ambiguous', {
+            excludedNotebooks: 'Archive',
+            excludedNotebookIds: idArchive,
+        }, [
+            { id: idLab, title: 'Lab', parent_id: '', updated_time: 10 },
+            { id: idArchive, title: 'Archive', parent_id: '', updated_time: 12 },
+            { id: idSecond, title: 'Archive', parent_id: idLab, updated_time: 13 },  // a second one of that name, created elsewhere
+        ])
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive,
+            'exactly the stored id survives: a name the user typed once must not start excluding a notebook they never saw')
+        assert.strictEqual(state.settings.excludedNotebooks, `Archive (${idArchive})`, 'and the text names that one, with its id to say which')
+    })
+
+    await test('excluded notebooks at startup: an entry that stands for no stored id is kept exactly as the user left it', async () => {
+        const state = await runStartup('typo-kept', {
+            excludedNotebooks: 'Archive, Nosuchnotebook',
+            excludedNotebookIds: idArchive,
+        })
+        assert.strictEqual(state.settings.excludedNotebooks, `Archive (${idArchive}), Nosuchnotebook`,
+            'the entry that names something is upgraded; the typo beside it is not touched, invented for, or tidied away')
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive, 'and nothing was added for it')
+    })
+
     // ---- the display form itself: the pure module both settings share --------------------------------------------
     const DisplayID = require('../src/core/displayId.js')
 
@@ -1362,13 +1425,24 @@ async function main() {
         assert.strictEqual(DisplayID.displayID('abcdef'), 'abcdef', 'six characters is the shortest the parse side reads, and is shown whole')
         // NO TRUNCATION IN THE SOURCE EITHER. 2.6.1 cut the id to its first eight characters and lengthened that on a
         // collision; the owner reversed it, and this is the pin that stops any of it creeping back into a display path.
-        const displaySource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'displayId.js'), 'utf8')
-        const noteSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settingsNote.js'), 'utf8')
-        const exclusionSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'exclusion.ts'), 'utf8')
-        for (const [name, source] of [['displayId.js', displaySource], ['settingsNote.js', noteSource], ['exclusion.ts', exclusionSource]]){
-            const code = source.split('\n').filter(line => !/^\s*[*/]/.test(line)).join('\n')
-            assert.ok(!/\.slice\(0,|\.substr|\.substring|\u2026|'\.\.\.'/.test(code),
-                `${name} must not cut an id down anywhere in the display path`)
+        // Every file that builds or writes one of the two fields, not only the two pure modules: settingsSync.ts writes
+        // the note reference and panel.ts rebuilds the notebook text from ids.
+        for (const name of ['core/displayId.js', 'core/settingsNote.js', 'core/exclusion.ts', 'core/settingsSync.ts', 'ui/panel/panel.ts']){
+            const source = fs.readFileSync(path.join(__dirname, '..', 'src', ...name.split('/')), 'utf8')
+            // Comment lines are dropped first: they talk about the eight characters 2.6.1 wrote, and must go on doing so.
+            const code = source.split('\n').filter(line => !/^\s*[*/]/.test(line) && !/^\s*\/\//.test(line)).join('\n')
+            // Cutting a string that is an id, by any of the shapes that do it - a slice/substr/substring of something
+            // called an id, a "keep the first n characters" regex replace, or an ellipsis pasted on the end. A plain
+            // .slice on an array (the peek's fifteen rows) is not an id and is deliberately not matched.
+            for (const [shape, pattern] of [
+                ['slice/substr/substring of an id', /\b\w*(?:id|Id|ID)\w*\s*\.\s*(?:slice|substr|substring)\s*\(/],
+                ['a first-n-characters regex', /\.replace\(\s*\/\^?\(?\.\{\d+\}/],
+                // A string literal that is NOTHING BUT an ellipsis, which is the shape an id gets truncated with. A real
+                // sentence that happens to end in one ("Syncing... (click to cancel)") is prose, and is left alone.
+                ['an ellipsis stuck on the end', /(['"`])\s*(?:\.\.\.|\u2026)\s*\1/],
+            ]){
+                assert.ok(!pattern.test(code), `src/${name} must not cut an id down in the display path (${shape})`)
+            }
         }
     })
 
@@ -9692,6 +9766,33 @@ async function main() {
         const published = parseSettingsNoteBody(state.notePuts[0].body).settings
         assert.strictEqual(published.excludedNotebookIds, `${seenId},${unseenId}`, 'with both ids intact')
         assert.strictEqual(published.excludedNotebooks, `Family (${seenId}), Work`, 'and the text in the form this build writes')
+    })
+
+    await test('settings note: a rename while the device was closed publishes the ID, never an empty exclusion', async () => {
+        // THE DESTRUCTIVE SHAPE, end to end. The pair travels between devices, so a startup pass that resolved the stale
+        // TEXT would not merely forget the exclusion here - it would publish the forgetting, and every other device would
+        // apply it. The ids are read and never written, so what goes out carries the id it always carried.
+        const archiveId = 'b0b0b0b0' + '0'.repeat(24)
+        const stale = { excludedNotebookIds: archiveId, excludedNotebooks: 'Archive' }
+        const state = await runSync('exclusion-startup-rename', {
+            folders: [{ id: archiveId, title: 'Archived' }],       // renamed on the other device while this one was closed
+            notes: {
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]), syncSettings(stale))),
+            },
+            initialSettings: Object.assign({
+                settingsNoteId: syncDisplayed(SYNC_NOTE_ID),
+                settingsNoteResolvedId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            }, stale),
+        })
+        assert.strictEqual(state.settings.excludedNotebookIds, archiveId, 'the exclusion survives the rename on this device')
+        assert.strictEqual(state.settings.excludedNotebooks, `Archived (${archiveId})`, 'and the text catches up with the new name')
+        await fireArmedSyncWrite(state)
+        assert.strictEqual(state.notePuts.length, 1, 'the refreshed pair is published once')
+        const published = parseSettingsNoteBody(state.notePuts[0].body).settings
+        assert.strictEqual(published.excludedNotebookIds, archiveId, 'carrying the id - NEVER an empty list, which every device would apply')
+        assert.strictEqual(published.excludedNotebooks, `Archived (${archiveId})`, 'and the text the other devices will show')
     })
 
     await test('settings note: a note that is not a Cockpit settings note is never written over', async () => {

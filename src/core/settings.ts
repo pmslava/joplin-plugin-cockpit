@@ -9,7 +9,7 @@ import joplin from "api"
 import { SettingItemType } from "api/types"
 import { getAllProfiles, getProfile, profileDataSettingKey } from "./database"
 import { refreshInterfaces, setupTimer } from "./timer"
-import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, parseExcludedIds, resolveNamesToIds } from "./exclusion"
+import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextForStoredIds, parseExcludedIds, resolveNamesToIds } from "./exclusion"
 import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches } from "./joplin"
 import { dropUnshowableNotebookFilter } from "../ui/panel/panel"
 import { isSettingsNoteConnected, onSettingsNoteReferenceChanged, scheduleSettingsNoteWrite } from "./settingsSync"
@@ -347,23 +347,36 @@ export async function resetUnavailableGestureTrace(){
 }
 
 /** refreshExcludedNotebookDisplay ******************************************************************************************************************
- * THE STARTUP PASS, and the whole of the owner's second 2.6.1 defect: his Excluded notebooks field still read "Archive", with no id in it at all,       *
- * however many times he restarted Joplin.                                                                                                              *
- *                                                                                                                                                      *
- * The visible text had exactly two rewrite sites and NEITHER of them runs at startup. resolveExcludedNotebooks below is reached only from the settings  *
- * onChange handler, so it needs the user to edit that very field; reconcileExcludedNotebookText (src/ui/panel/panel.ts) is reached only from the folder  *
- * poll, and only when the folder signature CHANGES - the first poll of a session merely records the baseline and returns. So an install that already     *
- * held "Archive" went on holding it until the user either retyped the setting or created, renamed or deleted a notebook. The Settings note field looked  *
- * fixed for the same reason in reverse: its own startup read is what rewrites it.                                                                       *
- *                                                                                                                                                      *
- * This is that missing pass, and it is deliberately the SAME function the onChange handler runs rather than a third rewrite site with rules of its own:  *
- * whatever a stored field holds - 2.6.0's bare names, 2.6.1's short ids, or the current form - startup leaves it in the form this build writes, and the  *
- * keep-rule below protects it exactly as it protects the other two callers. It pays for itself only when there is something to do: with the field empty  *
- * and no ids stored (which is how the feature ships, and how it stays for anyone who never turns it on) it returns before the notebook map is asked for, *
- * so an install without the feature makes not one data call for it. The caller repaints immediately afterwards, so this pass does not repaint.           *
+ * THE STARTUP PASS, and the whole of the owner's second 2.6.1 defect: his Excluded notebooks field still read "Archive", with no id in it at all,     *
+ * however many times he restarted Joplin.                                                                                                            *
+ *                                                                                                                                                    *
+ * The visible text had exactly two rewrite sites and NEITHER of them runs at startup. resolveExcludedNotebooks below is reached only from the settings *
+ * onChange handler, so it needs the user to edit that very field; reconcileExcludedNotebookText (src/ui/panel/panel.ts) is reached only from the folder *
+ * poll, and only when the folder signature CHANGES - the first poll of a session merely records the baseline and returns. So an install that already   *
+ * held "Archive" went on holding it until the user either retyped the setting or created, renamed or deleted a notebook. The Settings note field       *
+ * looked fixed for the same reason in reverse: its own startup read is what rewrites it.                                                              *
+ *                                                                                                                                                    *
+ * NOTHING NOBODY ASKED FOR MAY CHANGE WHAT IS EXCLUDED, which is why this is not simply resolveExcludedNotebooks under another name. That function     *
+ * reads the TEXT and writes the IDS, which is right when the user has just typed in the box and wrong when nobody has touched anything: a name goes    *
+ * stale on its own - another device renames the notebook while this one is closed - and resolving the stale name DELETES the exclusion and, with a     *
+ * settings note connected, publishes the deletion to every device a debounce later. If a different notebook has taken the freed name, it moves the     *
+ * exclusion onto that one instead; if the name has merely become ambiguous, it adds an exclusion nobody asked for. So this pass is ID-AUTHORITATIVE:   *
+ * the stored ids are read and never written, and only the visible text is rebuilt around them (canonicalTextForStoredIds in exclusion.ts, which keeps  *
+ * the text of an id it cannot label - the keep-rule's half - and the user's own typos, verbatim). That is also what makes it rename-proof, and it is   *
+ * the direction the folder poll's reconcile has always worked in.                                                                                     *
+ *                                                                                                                                                    *
+ * It pays for itself only when there is something to do: with the field empty and no ids stored (which is how the feature ships, and how it stays for  *
+ * anyone who never turns it on) it returns before the notebook map is asked for, so an install without the feature makes not one data call for it.     *
+ * The one write it can make re-enters the onChange handler, whose resolver reads the text it has just been given - built from the stored ids, in the    *
+ * form this build writes - and resolves it straight back to those same ids, so the pair settles on the first pass.                                     *
  ***************************************************************************************************************************************************/
 export async function refreshExcludedNotebookDisplay(){
-	await resolveExcludedNotebooks(false)
+	var raw = String(await joplin.settings.value(EXCLUDED_NOTEBOOKS_KEY) || "")
+	var storedIdsCsv = String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")
+	if (!raw && !storedIdsCsv) return
+	var map = await getNotebookMap()
+	var text = canonicalTextForStoredIds(map, parseExcludedIds(storedIdsCsv), raw)
+	if (text !== raw) await joplin.settings.setValue(EXCLUDED_NOTEBOOKS_KEY, text)
 }
 
 /** resolveExcludedNotebooks ************************************************************************************************************************
@@ -376,19 +389,12 @@ export async function refreshExcludedNotebookDisplay(){
  *                                                                                                                                                      *
  * While a settings note is connected, a stored id whose notebook is not in the map is KEPT rather than resolved away - see the block below, which is    *
  * what stops an exclusion being deleted on every device by whichever device has not synced that notebook yet.                                           *
- *                                                                                                                                                      *
- * `repaint` is false for the startup pass above, whose caller renders everything immediately afterwards: dropping caches that are still empty and       *
- * painting twice before the first paint would be work for nothing.                                                                                      *
  ***************************************************************************************************************************************************/
-async function resolveExcludedNotebooks(repaint = true){
+async function resolveExcludedNotebooks(){
 	var raw = String(await joplin.settings.value(EXCLUDED_NOTEBOOKS_KEY) || "")
-	var storedIdsBefore = String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")
-	// THE FEATURE IS OFF: nothing is named and nothing is stored, so there is nothing to resolve and no reason to
-	// fetch the notebook map. This is what keeps the startup pass free for every install that never turns it on.
-	if (!raw && !storedIdsBefore) return
 	var map = await getNotebookMap()
 	var resolved = resolveNamesToIds(map, raw)
-	var storedIdsCsv = storedIdsBefore
+	var storedIdsCsv = String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")
 	var ids = resolved.ids
 	// AN ID THIS DEVICE CANNOT SEE YET IS KEPT, NOT DROPPED - but only while a settings note is carrying the exclusion between devices.
 	//
@@ -418,7 +424,7 @@ async function resolveExcludedNotebooks(repaint = true){
 		await joplin.settings.setValue(EXCLUDED_NOTEBOOKS_KEY, resolved.canonicalText)
 		changed = true
 	}
-	if (changed && repaint){
+	if (changed){
 		// The cached result sets were computed without this exclusion (or with a previous one), so they must
 		// not be reused; the notebook map is dropped too so the filter/picker rebuild.
 		invalidateResultCaches()

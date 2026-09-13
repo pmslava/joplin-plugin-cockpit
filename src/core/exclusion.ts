@@ -205,6 +205,105 @@ export function resolveNamesToIds(map, raw){
     return { ids: ids, canonicalText: dedupeLabels(labelParts) }
 }
 
+/** storedIdsNamedByEntry **************************************************************************************************************************
+ * Which of the STORED ids one visible entry is the text for - the association canonicalTextForStoredIds is built on, and the one question the        *
+ * startup pass is allowed to ask of the text. Deliberately narrower than resolveTypedEntry: that one asks "what does this name?", which is the        *
+ * right question when the user has just typed it, and this one asks "which id already in the list does this stand for?", which is the only thing a    *
+ * pass that must not change the exclusion set is entitled to work out. A notebook that merely HAPPENS to carry the name is not an answer.             *
+ *                                                                                                                                                    *
+ * The id in brackets is tried first and matched by PREFIX, so text written by any version reads - 2.6.1's eight characters included - and it works    *
+ * even for an id whose notebook is not in this device's map, which is exactly the entry that must be kept verbatim. Then a bare id, then the name     *
+ * (the whole entry first, so a notebook really called "Budget (deadbeef)" answers for itself, then the name half of a display form).                  *
+ ***************************************************************************************************************************************************/
+function storedIdsNamedByEntry(map, storedIds, storedSet, entry){
+    var text = String(entry || "").trim()
+    if (!text) return []
+    var split = splitDisplayID(text)
+    if (split){
+        var byPrefix = storedIds.filter(id => String(id).toLowerCase().indexOf(split.id) === 0)
+        // Exactly one, as everywhere else: a prefix several stored ids share settles nothing and the name is asked instead.
+        if (byPrefix.length === 1) return byPrefix
+    }
+    var lower = text.toLowerCase()
+    var bare = storedIds.filter(id => String(id).toLowerCase() === lower)
+    if (bare.length) return bare
+    var byName = resolveEntry(map, text).filter(id => storedSet.has(id))
+    if (byName.length) return byName
+    if (split){
+        var bySplitName = resolveEntry(map, split.name).filter(id => storedSet.has(id))
+        if (bySplitName.length) return bySplitName
+    }
+    return []
+}
+
+/** canonicalTextForStoredIds **********************************************************************************************************************
+ * THE VISIBLE TEXT FOR A SET OF STORED IDS - ID-AUTHORITATIVE, and the one thing a pass that nobody asked for may do to this setting.                *
+ *                                                                                                                                                    *
+ * resolveNamesToIds above reads the TEXT and produces the ids: exactly right when the user has just typed in the field, and exactly wrong when        *
+ * nobody has touched anything. A name goes stale on its own - another device renames the notebook while this one is closed - and then the text        *
+ * resolves to nothing while the id it was written for is still perfectly good. Resolving THAT would delete the exclusion, and (with a settings note   *
+ * connected) publish the deletion to every device; if a different notebook has taken the freed name, it would move the exclusion onto it instead.     *
+ * So this function never decides what is excluded. The ids it is given come back untouched, all of them and only them.                                *
+ *                                                                                                                                                    *
+ * What it decides is only how those ids are SHOWN:                                                                                                    *
+ *   An id the map can label gets its label, built fresh - which is what upgrades an older display form and what makes this rename-proof.              *
+ *   An id the map cannot label (the notebook has not synced to this device yet - see the keep-rule in settings.ts) keeps the text that named it,       *
+ *     verbatim, because there is nothing to build a label from and inventing one would lose it.                                                       *
+ *   An entry that stands for no stored id at all - a typo the user left in the box - is kept verbatim too, unless a stored id with no text of its own  *
+ *     needs the slot, which is precisely the stale name above: the entry it takes over IS the text that id used to have.                              *
+ ***************************************************************************************************************************************************/
+export function canonicalTextForStoredIds(map, ids, raw){
+    var entries = String(raw || "").split(",").map(part => part.trim()).filter(Boolean)
+    var storedIds = []
+    var storedSet = new Set()
+    for (var id of (ids || [])){
+        if (!id || storedSet.has(id)) continue
+        storedSet.add(id)
+        storedIds.push(id)
+    }
+    // Each part is either an id (rendered from the map, falling back to the text that named it) or standing text.
+    var parts = []
+    var claimed = new Set()
+    for (var entry of entries){
+        var matches = storedIdsNamedByEntry(map, storedIds, storedSet, entry)
+        if (!matches.length){
+            parts.push({ text: entry })
+            continue
+        }
+        for (var matchedId of matches){
+            if (claimed.has(matchedId)) continue      // a second entry for the same id is a duplicate, and is dropped
+            claimed.add(matchedId)
+            parts.push({ id: matchedId, text: entry })
+        }
+    }
+    // A stored id no entry spoke for, in stored order. One that can be labelled takes over the first standing entry -
+    // that entry is the stale name it was written under - and is appended when there is none left to take.
+    var standing = []
+    for (var index = 0; index < parts.length; index++){
+        if (parts[index].id === undefined) standing.push(index)
+    }
+    var nextSlot = 0
+    for (var storedId of storedIds){
+        if (claimed.has(storedId)) continue
+        // No label means no text can be built for it, so whatever is standing there is left alone and the id simply
+        // goes on being excluded without a line of its own - the keep-rule's half of this.
+        if (displayLabel(map, storedId) == null) continue
+        claimed.add(storedId)
+        if (nextSlot < standing.length) parts[standing[nextSlot++]] = { id: storedId }
+        else parts.push({ id: storedId })
+    }
+    var labelParts = []
+    for (var part of parts){
+        if (part.id === undefined){
+            labelParts.push(part.text)
+            continue
+        }
+        var label = displayLabel(map, part.id)
+        labelParts.push(label != null ? label : (part.text !== undefined ? part.text : part.id))
+    }
+    return dedupeLabels(labelParts)
+}
+
 /** canonicalTextFromIds ***************************************************************************************************************************
  * Rebuilds the visible names field from stored ids, used to refresh the display after an excluded notebook is renamed or moved (its id, and therefore  *
  * its exclusion, is unchanged; only the shown title needs updating). Ids no longer present in the map are skipped.                                     *
