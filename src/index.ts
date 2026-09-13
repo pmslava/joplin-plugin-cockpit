@@ -11,7 +11,7 @@ import { setupCommands } from './core/commands'
 import { refreshInterfaces, setupTimer, setupWorkspaceEvents } from './core/timer'
 import { reportDatabaseProblems, setupDatabase } from './core/database'
 import { refreshFromSettingsNote, setupSettingsSync } from './core/settingsSync'
-import { setupSettings } from './core/settings'
+import { refreshExcludedNotebookDisplay, setupSettings } from './core/settings'
 import { setupPanel } from './ui/panel/panel'
 import { setupAlarmDialog } from './ui/alarm/alarm'
 import { setupMenu } from './ui/menu/menu'
@@ -56,6 +56,20 @@ joplin.plugins.register({ onStart: setupPlugin })
         await refreshFromSettingsNote('startup')
     } catch (error) {
         console.warn("Cockpit: could not read the settings note at startup", error)
+    }
+    // THE EXCLUDED-NOTEBOOK TEXT, BROUGHT UP TO DATE ONCE PER SESSION (v2.6.2). Its two rewrite sites are the settings
+    // onChange handler (the user edits that field) and the folder poll (a notebook actually changed), so a stored value
+    // in an older form - 2.6.0's bare names, 2.6.1's short ids - sat there unchanged for ever, which is exactly what the
+    // owner saw. HERE, and not earlier: it needs the notebook map, so the data API has to be usable; it must run after
+    // setupSettingsSync, whose isSettingsNoteConnected() decides whether an id this device cannot see yet may be tidied
+    // away; and it must run after the startup READ above, because that read can apply another device's exclusion pair
+    // and this pass has to canonicalise the pair that won rather than the one it replaced. Before refreshInterfaces, so
+    // the first paint already uses the reconciled exclusion and nothing is drawn twice. It costs nothing at all while
+    // the feature is off, and a failure must no more stop the plugin from starting than the read above does.
+    try {
+        await refreshExcludedNotebookDisplay()
+    } catch (error) {
+        console.warn("Cockpit: could not refresh the excluded notebooks at startup", error)
     }
     await refreshInterfaces()
     await reportDatabaseProblems()

@@ -1250,6 +1250,102 @@ async function main() {
         await poll.fn()
     })
 
+    // ------------------------------------------- the stored field is brought up to date AT STARTUP (2.6.2)
+    // THE OWNER'S SECOND DEFECT, and the one the 2.6.1 review missed because every check drove the resolver
+    // directly (set the value -> onChange -> rewrite) and none of them modelled A STARTUP THAT CHANGES NOTHING.
+    // The visible text had exactly two rewrite sites: the settings onChange handler (the user edits that very
+    // field) and the folder poll (and only when the folder signature CHANGES - the first poll of a session just
+    // records the baseline). Neither runs at startup, so a field holding 2.6.0's bare "Archive" went on holding
+    // it for ever. These checks are all the same shape: a device starts up, nothing else happens, and the field
+    // is looked at.
+    const startupFolders = [
+        { id: idLab, title: 'Lab', parent_id: '', updated_time: 10 },
+        { id: idJoplin, title: 'Joplin', parent_id: idLab, updated_time: 11 },
+        { id: idArchive, title: 'Archive', parent_id: '', updated_time: 12 },
+    ]
+    const runStartup = (name, initialSettings, folders) => run({
+        dataDir: path.join(tmp, `startup-${name}-data`),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [],
+        folders: folders || startupFolders,
+        initialSettings: Object.assign({
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'All', searchCriteria: '', noteID: '', showNotes: false }] }),
+            currentProfileID: 1,
+        }, initialSettings),
+    })
+    // Only the two exclusion keys: startup writes profileData (the store is normalised) whatever else happens.
+    const exclusionWrites = (state) => state.settingWrites.filter(w => w.key === 'excludedNotebooks' || w.key === 'excludedNotebookIds')
+    // The notebook map's own request, as opposed to the folder poll's (which carries order_by).
+    const notebookMapGets = (state) => state.gets.filter(g => g.path[0] === 'folders' && !(g.query && g.query.order_by))
+
+    await test('excluded notebooks at startup: a field 2.6.0 left holding a bare NAME gains the id, and the second startup writes nothing', async () => {
+        const state = await runStartup('legacy-name', { excludedNotebooks: 'Archive', excludedNotebookIds: idArchive })
+        assert.strictEqual(state.settings.excludedNotebooks, `Archive (${idArchive})`,
+            'the field is brought up to date without the user touching it - which is the whole defect')
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive, 'the hidden ids are untouched: WHAT is excluded did not change')
+        assert.deepStrictEqual(exclusionWrites(state).map(w => w.key), ['excludedNotebooks'], 'exactly one write, and only of the visible half')
+        assert.strictEqual(state.notePuts.length, 0, 'and nothing is published - there is no settings note here')
+        assert.strictEqual(notebookMapGets(state).length, 1, 'the notebook map is fetched once, which the panel does anyway')
+        // ...AND IT SETTLES. The pass is idempotent, so the next launch of the same profile has nothing to say at all.
+        const second = await runStartup('legacy-name-again', {
+            excludedNotebooks: state.settings.excludedNotebooks,
+            excludedNotebookIds: state.settings.excludedNotebookIds,
+        })
+        assert.deepStrictEqual(exclusionWrites(second), [], 'a second startup writes nothing at all')
+        assert.strictEqual(second.settings.excludedNotebooks, `Archive (${idArchive})`, 'and leaves the text byte-identical')
+    })
+
+    await test('excluded notebooks at startup: a field 2.6.1 left holding a SHORT id is rewritten whole', async () => {
+        const state = await runStartup('short-id', { excludedNotebooks: 'Archive (b0b0b0b0)', excludedNotebookIds: idArchive })
+        assert.strictEqual(state.settings.excludedNotebooks, `Archive (${idArchive})`, 'the eight characters 2.6.1 wrote become the whole id')
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive, 'the hidden ids are untouched')
+        assert.deepStrictEqual(exclusionWrites(state).map(w => w.key), ['excludedNotebooks'], 'one write of the visible half, and nothing else')
+        assert.strictEqual(state.notePuts.length, 0, 'and nothing is published')
+    })
+
+    await test('excluded notebooks at startup: a field already in the current form is not written at all', async () => {
+        const state = await runStartup('current-form', { excludedNotebooks: `Archive (${idArchive})`, excludedNotebookIds: idArchive })
+        assert.deepStrictEqual(exclusionWrites(state), [], 'nothing to do, so nothing is written - the steady state every later launch is in')
+        assert.strictEqual(state.settings.excludedNotebooks, `Archive (${idArchive})`)
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive)
+    })
+
+    await test('excluded notebooks at startup: with the feature OFF it costs no data call and no write', async () => {
+        const state = await runStartup('feature-off', {})
+        assert.deepStrictEqual(exclusionWrites(state), [], 'nothing is written into a feature nobody turned on')
+        assert.strictEqual(notebookMapGets(state).length, 1, 'and the only notebook-map request is the one the panel makes for itself')
+        // The count above cannot see the difference on its own - the map is TTL-cached, so a needless fetch here would be
+        // served to the panel a moment later and still be one request. What it does catch is a pass that fetches folders
+        // by some other route or drops the cache; the guard that makes the call unnecessary in the first place is the
+        // early return, and that is what this reads.
+        const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settings.ts'), 'utf8')
+        const resolver = /async function resolveExcludedNotebooks\([\s\S]*?\n\}/.exec(source)
+        assert.ok(resolver, 'the resolver must be findable in the source')
+        const guard = resolver[0].indexOf('if (!raw && !storedIdsBefore) return')
+        const map = resolver[0].indexOf('getNotebookMap()')
+        assert.ok(guard > 0, 'the empty-pair early return must be there')
+        assert.ok(guard < map, 'and it must come BEFORE the notebook map is asked for')
+    })
+
+    await test('excluded notebooks at startup: a short id is matched by PREFIX, so a renamed notebook keeps its exclusion', async () => {
+        // THE MIGRATION'S REAL TEST. The notebook was renamed while Joplin was closed, and another notebook now carries
+        // the name the field still shows - so the NAME half names the wrong notebook and only the eight characters 2.6.1
+        // wrote name the right one. Matching them as a prefix is what keeps the exclusion where the user put it.
+        const idImpostor = 'cafe0001' + '0'.repeat(24)
+        const state = await runStartup('short-id-prefix', {
+            excludedNotebooks: 'Archive (b0b0b0b0)',
+            excludedNotebookIds: idArchive,
+        }, [
+            { id: idArchive, title: 'Archived', parent_id: '', updated_time: 12 },
+            { id: idImpostor, title: 'Archive', parent_id: '', updated_time: 13 },
+        ])
+        assert.strictEqual(state.settings.excludedNotebookIds, idArchive, 'the id in the brackets won, as it does on every other route in')
+        assert.strictEqual(state.settings.excludedNotebooks, `Archived (${idArchive})`,
+            'so the entry is rewritten to the notebook it always named, with its id whole')
+    })
+
     // ---- the display form itself: the pure module both settings share --------------------------------------------
     const DisplayID = require('../src/core/displayId.js')
 
@@ -9531,6 +9627,71 @@ async function main() {
         assert.strictEqual(state.settingWrites.filter(w => w.key === 'excludedNotebookIds').length, 1, 'nor to the id list')
         await fireArmedSyncWrite(state)
         assert.strictEqual(state.notePuts.length, 0, 'so the pair is byte-identical to the payload and there is nothing to say back')
+    })
+
+    await test('settings note: the STARTUP pass obeys the keep-rule - a notebook this device cannot see is not dropped', async () => {
+        // THE SHAPE THAT WOULD HURT MOST. 2.6.2 brings the visible exclusion text up to date once at startup, and a naive
+        // version of that is exactly the thing that deletes a user's exclusion on every device: at startup a sync may not
+        // have brought the notebook in yet, so an id that resolves to nothing here does NOT mean the user deleted it. The
+        // pair is already in the current form and nothing else happens, so the right answer is to write nothing at all.
+        const seenId = 'a1b2c3d4' + '0'.repeat(24)
+        const unseenId = 'b9b9b9b9' + '0'.repeat(24)
+        const pair = { excludedNotebookIds: `${seenId},${unseenId}`, excludedNotebooks: `Family (${seenId}), Work` }
+        const state = await runSync('exclusion-startup-keep', {
+            folders: [{ id: seenId, title: 'Family' }],
+            notes: {
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]), syncSettings(pair))),
+            },
+            initialSettings: Object.assign({
+                settingsNoteId: syncDisplayed(SYNC_NOTE_ID),
+                settingsNoteResolvedId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            }, pair),
+        })
+        assert.strictEqual(state.settings.excludedNotebooks, pair.excludedNotebooks, 'the visible text comes through byte-identical')
+        assert.strictEqual(state.settings.excludedNotebookIds, pair.excludedNotebookIds, 'and so does the hidden id list, unseen id included')
+        assert.deepStrictEqual(state.settingWrites.filter(w => w.key === 'excludedNotebooks' || w.key === 'excludedNotebookIds'), [],
+            'neither half is written: there was nothing to do')
+        assert.strictEqual(state.notePuts.length, 0, 'and nothing is published back to the other devices')
+        // Startup normalises the profile store, which arms a write whatever else happens; firing it is the proof that the
+        // pair this device holds is still the pair the note holds, so there is nothing to say to the other devices.
+        await fireArmedSyncWrite(state)
+        assert.strictEqual(state.notePuts.length, 0, 'and the armed write finds nothing to publish')
+    })
+
+    await test('settings note: the startup pass UPGRADES what it can label and keeps verbatim what it cannot', async () => {
+        // The same device, one release earlier: the pair it is holding is 2.6.1's. The entry whose notebook is in the map
+        // is rewritten with the id whole; the entry whose notebook is not - which has no label to rebuild and no id to
+        // show - is left exactly as it stands, and ITS ID STAYS IN THE HIDDEN LIST. That is the keep-rule doing its work
+        // during a rewrite rather than instead of one.
+        const seenId = 'a1b2c3d4' + '0'.repeat(24)
+        const unseenId = 'b9b9b9b9' + '0'.repeat(24)
+        const oldPair = { excludedNotebookIds: `${seenId},${unseenId}`, excludedNotebooks: 'Family (a1b2c3d4), Work' }
+        const state = await runSync('exclusion-startup-upgrade', {
+            folders: [{ id: seenId, title: 'Family' }],
+            notes: {
+                [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Shared')]), syncSettings(oldPair))),
+            },
+            initialSettings: Object.assign({
+                settingsNoteId: syncDisplayed(SYNC_NOTE_ID),
+                settingsNoteResolvedId: SYNC_NOTE_ID,
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Shared')])),
+                currentProfileID: 1,
+            }, oldPair),
+        })
+        assert.strictEqual(state.settings.excludedNotebooks, `Family (${seenId}), Work`,
+            'the entry that resolves is rewritten whole, and the one this device cannot see is kept exactly as it stands')
+        assert.strictEqual(state.settings.excludedNotebookIds, `${seenId},${unseenId}`, 'and the unseen id is still excluded')
+        assert.deepStrictEqual(state.settingWrites.filter(w => w.key === 'excludedNotebooks' || w.key === 'excludedNotebookIds').map(w => w.key),
+            ['excludedNotebooks'], 'one write, of the visible half only')
+        // The pair now differs from the note's, so it is published - and what is published carries BOTH ids, which is the
+        // thing a device that has not synced that notebook must never be able to take away from the others.
+        await fireArmedSyncWrite(state)
+        assert.strictEqual(state.notePuts.length, 1, 'the upgraded pair is published once')
+        const published = parseSettingsNoteBody(state.notePuts[0].body).settings
+        assert.strictEqual(published.excludedNotebookIds, `${seenId},${unseenId}`, 'with both ids intact')
+        assert.strictEqual(published.excludedNotebooks, `Family (${seenId}), Work`, 'and the text in the form this build writes')
     })
 
     await test('settings note: a note that is not a Cockpit settings note is never written over', async () => {

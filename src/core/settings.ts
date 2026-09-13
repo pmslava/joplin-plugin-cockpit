@@ -346,21 +346,49 @@ export async function resetUnavailableGestureTrace(){
 	console.info("Cockpit: the hidden gesture trace was still stored ON in this profile - switched off, as this build does not offer it.")
 }
 
+/** refreshExcludedNotebookDisplay ******************************************************************************************************************
+ * THE STARTUP PASS, and the whole of the owner's second 2.6.1 defect: his Excluded notebooks field still read "Archive", with no id in it at all,       *
+ * however many times he restarted Joplin.                                                                                                              *
+ *                                                                                                                                                      *
+ * The visible text had exactly two rewrite sites and NEITHER of them runs at startup. resolveExcludedNotebooks below is reached only from the settings  *
+ * onChange handler, so it needs the user to edit that very field; reconcileExcludedNotebookText (src/ui/panel/panel.ts) is reached only from the folder  *
+ * poll, and only when the folder signature CHANGES - the first poll of a session merely records the baseline and returns. So an install that already     *
+ * held "Archive" went on holding it until the user either retyped the setting or created, renamed or deleted a notebook. The Settings note field looked  *
+ * fixed for the same reason in reverse: its own startup read is what rewrites it.                                                                       *
+ *                                                                                                                                                      *
+ * This is that missing pass, and it is deliberately the SAME function the onChange handler runs rather than a third rewrite site with rules of its own:  *
+ * whatever a stored field holds - 2.6.0's bare names, 2.6.1's short ids, or the current form - startup leaves it in the form this build writes, and the  *
+ * keep-rule below protects it exactly as it protects the other two callers. It pays for itself only when there is something to do: with the field empty  *
+ * and no ids stored (which is how the feature ships, and how it stays for anyone who never turns it on) it returns before the notebook map is asked for, *
+ * so an install without the feature makes not one data call for it. The caller repaints immediately afterwards, so this pass does not repaint.           *
+ ***************************************************************************************************************************************************/
+export async function refreshExcludedNotebookDisplay(){
+	await resolveExcludedNotebooks(false)
+}
+
 /** resolveExcludedNotebooks ************************************************************************************************************************
  * Turns the visible, human-typed names field into the hidden id list that every exclusion decision reads, and canonicalises the visible field in       *
- * return. Each entry is resolved case-insensitively against the current notebook map (a bare title, or a Parent/Sub path to disambiguate duplicate     *
- * titles; a bare title matching several notebooks resolves to all of them). Unresolvable entries are kept verbatim so a typo stays visible. Both        *
- * writes are guarded by a value comparison so the setValue that re-enters this handler settles immediately instead of looping, and the caches are       *
- * cleared and the interfaces re-rendered only when something actually changed.                                                                         *
+ * return. Each entry is resolved case-insensitively against the current notebook map (a bare title, a Parent/Sub path to disambiguate duplicate        *
+ * titles, a full id, or the "Name (id)" display form Cockpit itself writes - a short one written by 2.6.1 included; a bare title matching several       *
+ * notebooks resolves to all of them). Unresolvable entries are kept verbatim so a typo stays visible. Both writes are guarded by a value comparison     *
+ * so the setValue that re-enters this handler settles immediately instead of looping, and the caches are cleared and the interfaces re-rendered only    *
+ * when something actually changed.                                                                                                                     *
  *                                                                                                                                                      *
  * While a settings note is connected, a stored id whose notebook is not in the map is KEPT rather than resolved away - see the block below, which is    *
  * what stops an exclusion being deleted on every device by whichever device has not synced that notebook yet.                                           *
+ *                                                                                                                                                      *
+ * `repaint` is false for the startup pass above, whose caller renders everything immediately afterwards: dropping caches that are still empty and       *
+ * painting twice before the first paint would be work for nothing.                                                                                      *
  ***************************************************************************************************************************************************/
-async function resolveExcludedNotebooks(){
+async function resolveExcludedNotebooks(repaint = true){
 	var raw = String(await joplin.settings.value(EXCLUDED_NOTEBOOKS_KEY) || "")
+	var storedIdsBefore = String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")
+	// THE FEATURE IS OFF: nothing is named and nothing is stored, so there is nothing to resolve and no reason to
+	// fetch the notebook map. This is what keeps the startup pass free for every install that never turns it on.
+	if (!raw && !storedIdsBefore) return
 	var map = await getNotebookMap()
 	var resolved = resolveNamesToIds(map, raw)
-	var storedIdsCsv = String(await joplin.settings.value(EXCLUDED_NOTEBOOK_IDS_KEY) || "")
+	var storedIdsCsv = storedIdsBefore
 	var ids = resolved.ids
 	// AN ID THIS DEVICE CANNOT SEE YET IS KEPT, NOT DROPPED - but only while a settings note is carrying the exclusion between devices.
 	//
@@ -390,7 +418,7 @@ async function resolveExcludedNotebooks(){
 		await joplin.settings.setValue(EXCLUDED_NOTEBOOKS_KEY, resolved.canonicalText)
 		changed = true
 	}
-	if (changed){
+	if (changed && repaint){
 		// The cached result sets were computed without this exclusion (or with a previous one), so they must
 		// not be reused; the notebook map is dropped too so the filter/picker rebuild.
 		invalidateResultCaches()
