@@ -2262,7 +2262,7 @@ So the literal text the user typed is searched FIRST, and the guess that Cockpit
 
 **Release.** v2.6.1 ships with 486 harness checks, all passing, and the full Playwright suite run locally as the release gate on the release commit: 115 passed, 7 opt-in showcase captures skipped, in 22 minutes 6 seconds. One case (`search-commit` › "a re-render mid-selection keeps the dropdown filter text, its caret and the focus") stalled to its 240 s timeout once and passed on retry in 4.6 s; it touches nothing this release changed. The two specs that drive the changed settings fields, `settings-note` and `whereabouts-commands`, both passed unmodified, which is what the implementer's argument predicted: Joplin's config screen stages a String setting in its own state and only saves on OK, so a rewrite cannot land while the Options screen is open.
 
-## 2026-09-13 — vNEXT: the whole id in both fields, and the excluded text catches up at startup
+## 2026-09-13 — v2.6.2: the whole id in both fields, and the excluded text catches up at startup
 
 The owner installed 2.6.1 and came back with two things, both real, both reproduced against the built bundle.
 
