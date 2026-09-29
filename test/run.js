@@ -5055,11 +5055,20 @@ async function main() {
             'and nothing in the judgement may read the live notebookFilter')
     })
 
-    await test('type flip (stale index row): a search row whose own is_todo contradicts its list is dropped, on the ordinary path too', () => {
+    await test('type flip (stale index row): a search row whose own is_todo contradicts its list is dropped, on the ordinary path too', async () => {
         const html = contradict.panelHtml['panel-panel']
         assert.ok(html.includes('RealTodo') && html.includes('RealNote'), 'the rows that agree with their list are kept')
-        assert.ok(!html.includes('NotATodoAnyMore'), 'a type:todo row that is no longer a to-do is dropped')
-        assert.ok(!html.includes('NotANoteAnyMore'), 'a type:note row that is no longer a note is dropped')
+        assert.strictEqual(rowCount(contradict, '4'.repeat(32), 'todo'), 0, 'a type:todo row that is no longer a to-do is dropped')
+        // The unfiltered view reads its notes from the live listing, which files every item by its CURRENT type: the ex-to-do is a note
+        // now and shows there once, and the ex-note is a to-do the listing keeps out of Notes.
+        assert.strictEqual(rowCount(contradict, '4'.repeat(32), 'note'), 1, 'the live listing lists the ex-to-do as the note it now is')
+        assert.strictEqual(rowCount(contradict, '6'.repeat(32), 'note'), 0, 'and keeps the ex-note out of Notes')
+        // A notebook filter keeps the view locally evaluable but sends the notes to the SEARCH, whose stale type:note row must go too.
+        await contradict.panelMessageHandler(['notebookFilterChanged', flipFolder])
+        const filtered = contradict.panelHtml['panel-panel']
+        assert.ok(filtered.includes('RealTodo') && filtered.includes('RealNote'), 'the rows that agree with their list are kept under the filter')
+        assert.ok(!filtered.includes('NotATodoAnyMore'), 'a type:todo row that is no longer a to-do is dropped')
+        assert.ok(!filtered.includes('NotANoteAnyMore'), 'a type:note row that is no longer a note is dropped')
     })
 
     // ============================================================ notebook picker UX (taller menu, ESC-close, embedded filter)
@@ -6833,8 +6842,9 @@ async function main() {
         const cacheSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'joplin.ts'), 'utf8')
         assert.ok(cacheSource.includes('`any|c${showCompleted ? 1 : 0}|d${showNoDue ? 1 : 0}|x${excluded.clauses}|${query}`'),
             'the any-mode to-do key must carry the narrowing state it applied')
-        assert.ok(cacheSource.includes('var cacheKey = anyMode ? `any|x${excluded.clauses}|${query}` : query'),
-            'and the notes key its own')
+        assert.ok(cacheSource.includes('var cacheKey = unfiltered ? `listing|x${excluded.clauses}` : anyMode ? `any|x${excluded.clauses}|${query}` : query'),
+            'and the notes key its own, with the listing path naming its source and exclusion state')
+        assert.ok(cacheSource.includes('if (limit) cacheKey += `|n${limit}`'), 'a capped notes set is keyed by its cap')
         for (const site of ['todosResultCache.has(cacheKey)', 'todosResultCache.get(cacheKey)',
                             'notesResultCache.has(cacheKey)', 'notesResultCache.get(cacheKey)',
                             'cacheResult(todosResultCache, cacheKey, allTodos)',
@@ -10077,6 +10087,131 @@ async function main() {
         assert.ok(assign > 0 && apply > 0, 'both statements must be present')
         assert.ok(assign < apply, 'the key is recorded before the apply, so the writes the apply causes see themselves as redundant')
         assert.ok(/lastContentKey = null\s/.test(refresh.slice(apply)), 'and a failed apply clears it again, so the next read retries')
+    })
+
+    // ============================================================ large collections (the 2026-09-29 freeze)
+    // Joplin's search route re-runs the whole search for every page it returns, so paging a 20,000-note collection through it froze
+    // Joplin for minutes. An unfiltered view now reads its notes from the live ['notes'] listing, the Notes section stops at a cap
+    // with a "show more" footer, and an unfiltered to-do search that runs past its page budget moves to the listing.
+    const bigFolder = 'b'.repeat(31) + '1'
+    const bigArchive = 'b'.repeat(31) + '2'
+    const bigNotes = (count, folder, start) => Array.from({ length: count }, (_, i) => ({
+        id: (start + i).toString(16).padStart(32, '0'), title: `Big note ${start + i}`, parent_id: folder,
+        user_updated_time: 1000 + start + i, user_created_time: 1,
+    }))
+    const bigProfile = { ...baseProfile, name: 'Big', showNotes: true }
+    const bigRun = async (extra) => await run(Object.assign({
+        dataDir: path.join(tmp, 'big-data-' + Math.random().toString(36).slice(2)),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [],
+        searchNotes: bigNotes(250, bigFolder, 1),
+        folders: [{ id: bigFolder, title: 'Box', parent_id: '' }, { id: bigArchive, title: 'Archive', parent_id: '' }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...bigProfile, id: 1, sortOrder: 0, noteID: '' }] }),
+            currentProfileID: 1,
+        },
+    }, extra || {}))
+    const noteRows = (state) => (String(state.panelHtml['panel-panel'] || '').match(/data-note-id="/g) || []).length
+    const noteSearches = (state) => state.gets.filter(g => g.path[0] === 'search' && String(g.query.query).includes('type:note'))
+    const listingReads = (state) => state.gets.filter(g => g.path[0] === 'notes' && g.path.length === 1 && g.query && (g.query.fields || []).includes('todo_due'))
+
+    await test('large collection: an unfiltered view reads its notes from the live listing, never from the search', async () => {
+        const state = await bigRun()
+        assert.strictEqual(noteSearches(state).length, 0, 'no type:note search runs for a view with no criteria and nothing typed')
+        assert.ok(listingReads(state).length > 0, 'the live listing is read instead')
+        const read = listingReads(state)[0].query
+        assert.strictEqual(read.order_by, 'user_updated_time', 'newest first, so a capped read keeps the recent notes')
+        assert.strictEqual(read.order_dir, 'DESC')
+        assert.ok(read.limit <= 100, 'within the API page limit')
+    })
+
+    await test('large collection: the Notes section stops at 200 rows and says so, and "show more" adds the next batch', async () => {
+        const state = await bigRun()
+        assert.strictEqual(noteRows(state), 200, 'the first render draws the 200 most recent notes')
+        const html = state.panelHtml['panel-panel']
+        assert.ok(html.includes('Big note 250') && !html.includes('Big note 50<'), 'the kept ones are the most recently updated')
+        assert.ok(html.includes('notes-more-message') && html.includes('onShowMoreNotesClicked()'), 'the footer says the list is capped and offers more')
+        assert.ok(listingReads(state).every(g => g.query.page <= 3), 'the listing is read only as far as the cap needs')
+        await state.panelMessageHandler(['showMoreNotes'])
+        assert.strictEqual(noteRows(state), 250, 'the next batch brings the rest')
+        assert.ok(!state.panelHtml['panel-panel'].includes('notes-more-message'), 'and with nothing left out, the footer goes')
+    })
+
+    await test('large collection: a section under the cap draws every note and no footer', async () => {
+        const state = await bigRun({ searchNotes: bigNotes(12, bigFolder, 1) })
+        assert.strictEqual(noteRows(state), 12)
+        assert.ok(!state.panelHtml['panel-panel'].includes('notes-more-message'), 'no footer when nothing was left out')
+    })
+
+    await test('large collection: the listing path drops excluded notebooks and trashed notes before counting the cap', async () => {
+        const trashed = { id: 'f'.repeat(32), title: 'Big trashed', parent_id: bigFolder, user_updated_time: 999999, deleted_time: 5 }
+        const state = await bigRun({
+            searchNotes: bigNotes(150, bigFolder, 1).concat(bigNotes(150, bigArchive, 1001), [trashed]),
+            initialSettings: {
+                profileData: JSON.stringify({ nextID: 2, profiles: [{ ...bigProfile, id: 1, sortOrder: 0, noteID: '' }] }),
+                currentProfileID: 1,
+                excludedNotebookIds: bigArchive,
+            },
+        })
+        const html = state.panelHtml['panel-panel']
+        assert.strictEqual(noteRows(state), 150, 'all 150 kept notes fit under the cap once the excluded 150 are dropped')
+        assert.ok(!html.includes('Big note 1001') && !html.includes('Big trashed'), 'no excluded or trashed note is drawn')
+        assert.ok(!html.includes('notes-more-message'), 'and the excluded ones do not count as "more"')
+    })
+
+    await test('large collection: a notebook the query cannot name still narrows the capped listing, not just its result', async () => {
+        // A title with a double quote cannot go into notebook:"...", so the section reads the listing - where 250 newer notes from another
+        // notebook would use up the whole cap if the notebook were only filtered afterwards.
+        const quoted = 'q'.repeat(32)
+        const state = await bigRun({
+            searchNotes: bigNotes(250, bigFolder, 100).concat(bigNotes(5, quoted, 1)),
+            folders: [{ id: bigFolder, title: 'Box', parent_id: '' }, { id: quoted, title: 'Say "hi"', parent_id: '' }],
+        })
+        await state.panelMessageHandler(['notebookFilterChanged', quoted])
+        const html = state.panelHtml['panel-panel']
+        assert.strictEqual(noteRows(state), 5, 'all five notes of the quoted notebook are shown')
+        assert.ok(html.includes('Big note 1<') && html.includes('Big note 5<'))
+        assert.ok(!html.includes('notes-more-message'), 'and nothing of that notebook was left out')
+    })
+
+    await test('large collection: a filtered notes search is read newest first and stops at the cap', async () => {
+        const state = await bigRun()
+        state.gets.length = 0
+        await state.panelMessageHandler(['searchFilterChanged', 'Big'])
+        const searches = noteSearches(state)
+        assert.ok(searches.length > 0, 'typed text still goes to the search, which is what understands it')
+        assert.ok(searches.every(g => g.query.order_by === 'user_updated_time' && g.query.order_dir === 'DESC'), 'newest first')
+        assert.strictEqual(noteRows(state), 200, 'capped like the listing path')
+        assert.ok(state.panelHtml['panel-panel'].includes('notes-more-message'), 'with the same footer')
+    })
+
+    await test('large collection: an unfiltered to-do search past its page budget moves to the listing, and stays there', async () => {
+        const bigTodo = { id: 'c'.repeat(32), title: 'Big open todo', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: bigFolder, user_updated_time: 5 }
+        const state = await bigRun({ todos: [bigTodo], todoSearchPages: 50 })
+        const todoSearches = (s) => s.gets.filter(g => g.path[0] === 'search' && String(g.query.query).includes('type:todo'))
+        assert.ok(todoSearches(state).length <= 10, `the search stops at its budget (took ${todoSearches(state).length} pages)`)
+        assert.ok(state.panelHtml['panel-panel'].includes('Big open todo'), 'the listing answers the to-dos instead')
+        const fullWalk = listingReads(state).filter(g => g.query.order_by === 'id')
+        assert.ok(fullWalk.length > 0, 'the to-dos come from a full listing walk')
+        const before = todoSearches(state).length
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(todoSearches(state).length, before, 'once large, the next refresh goes straight to the listing')
+    })
+
+    await test('large collection: a FILTERED to-do search is never cut short, whatever its size', async () => {
+        const bigTodo = { id: 'c'.repeat(32), title: 'Big tagged todo', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: bigFolder, user_updated_time: 5 }
+        const state = await bigRun({
+            todos: [bigTodo], todoSearchPages: 14,
+            initialSettings: {
+                profileData: JSON.stringify({ nextID: 2, profiles: [{ ...bigProfile, id: 1, sortOrder: 0, noteID: '', searchCriteria: 'tag:big' }] }),
+                currentProfileID: 1,
+            },
+        })
+        const pages = state.gets.filter(g => g.path[0] === 'search' && String(g.query.query).includes('type:todo')).map(g => g.query.page)
+        assert.ok(pages.includes(14), 'a query the listing cannot answer pages the search to the end')
+        assert.ok(state.panelHtml['panel-panel'].includes('Big tagged todo'))
     })
 
     await fs.remove(tmp)

@@ -2296,6 +2296,13 @@ async function onTodoChecked(todoID, checked){
     await webviewApi.postMessage(['todoChecked', todoID, checked]);
 }
 
+/** onShowMoreNotesClicked ***************************************************************************************************************************
+ * The Notes section's footer button: asks the plugin for the next batch of notes.                                                                  *
+ ***************************************************************************************************************************************************/
+async function onShowMoreNotesClicked(){
+    await webviewApi.postMessage(['showMoreNotes']);
+}
+
 /** onSortFieldClicked / onSortDirectionClicked ******************************************************************************************************/
 async function onSortFieldClicked(){
     await webviewApi.postMessage(['sortFieldClicked']);

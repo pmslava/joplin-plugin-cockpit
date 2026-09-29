@@ -50,6 +50,8 @@ function filterExcluded(items, set){
 const resultCacheCap = 24
 var todosResultCache = new Map()
 var notesResultCache = new Map()
+// Whether the capped notes set cached under the same key left notes out; kept beside the items because the cache stores bare arrays.
+var notesMoreByKey = new Map()
 // The unfiltered "results outside current filters" peek, keyed by the verbatim search text. Read only on the
 // non-primary renders (optimistic / fill), so the fast-paint -> fill -> optimistic sequence of one logical
 // refresh reuses a single outside search instead of issuing one per render; a primary (committed) search
@@ -69,6 +71,7 @@ var excludedResultCache = new Map()
 export function invalidateResultCaches(){
     todosResultCache = new Map()
     notesResultCache = new Map()
+    notesMoreByKey = new Map()
     peekResultCache = new Map()
     excludedResultCache = new Map()
 }
@@ -140,6 +143,77 @@ export function applyNoteNarrowing(items){
     return (items || []).filter(function(item){ return !item.is_todo })
 }
 
+/** Large collections: the live listing instead of paging the search ********************************************************************************
+ * Joplin's search route answers every page by running the WHOLE search again, loading and sorting every match, then slicing out one page of at most   *
+ * 100 (verified in the 3.6 bundle). Paging through M matches therefore costs about M^2/100 row loads, and it runs in Joplin's main window. On a       *
+ * 20,000-note collection one `type:note` page took ~1 s, the full walk ~3.5 minutes, and the 60 s timer started it again - the 2026-09-29 forum       *
+ * report of Joplin freezing on Cockpit's first run. The plain notes listing (GET /notes) is paged in SQL instead: 10-30 ms a page at the same size.   *
+ *                                                                                                                                                     *
+ * So a query with nothing for the search engine to do - no criteria from the profile and nothing typed in the search box, which is exactly the fresh  *
+ * install's "All todo and notes" view - reads the listing and narrows it here, with the same client-side terms the any:1 path already uses. Anything   *
+ * the user asked for (a tag, a word, a notebook) still goes to the search, which is what understands it; the Notes section caps how much of either   *
+ * it reads (see getNotes), and a to-do search that turns out to be huge moves to the listing for the rest of the session (see getTodos).               *
+ ***************************************************************************************************************************************************/
+// deleted_time rides along so a trashed note is dropped here whatever the listing itself does with the trash (the search always excludes it).
+const listingFields = ['id', 'title', 'is_todo', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time', 'deleted_time']
+// How many pages an UNFILTERED to-do search may take before the collection counts as large. Ten pages is 1,000 to-dos, where a page still costs
+// tens of milliseconds; past it the per-page cost grows with the whole set and the listing is the cheaper walk.
+const todoSearchPageBudget = 10
+// Set once an unfiltered to-do search ran past the budget: from then on that view reads the listing straight away. Per session - a collection that
+// big does not shrink back under the budget between two refreshes, and a wrong "large" only costs a listing walk.
+var preferTodoListing = false
+
+function isUnfilteredQuery(criteria){
+    return !usesAnyMode(criteria) && !String(criteria || "").trim()
+}
+
+/** listAllNotes ***********************************************************************************************************************************
+ * Every note and to-do (not trashed), from the live listing, deduplicated by id: a note updated while the walk runs can shift between two pages.    *
+ ***************************************************************************************************************************************************/
+async function listAllNotes(){
+    var seen = new Set()
+    var items = []
+    var pageNum = 1
+    var response
+    do {
+        countData('listing')
+        response = await joplin.data.get(['notes'], { fields: listingFields, order_by: 'id', limit: 100, page: pageNum++ })
+        for (var item of response.items){
+            if (item.deleted_time || seen.has(item.id)) continue
+            seen.add(item.id)
+            items.push(item)
+        }
+    } while (response.has_more)
+    return items
+}
+
+/** listRecentNotes ********************************************************************************************************************************
+ * The most recently updated regular notes, at most `limit` of them, from the live listing, which is walked newest first and only as far as needed.   *
+ * `keep` is the caller's own filter (the excluded notebooks), applied before counting so the cap counts rows that will be shown. `more` says whether *
+ * one more qualifying note exists past the cap.                                                                                                     *
+ ***************************************************************************************************************************************************/
+async function listRecentNotes(limit, keep){
+    var seen = new Set()
+    var items = []
+    var more = false
+    var pageNum = 1
+    var response
+    do {
+        countData('listing')
+        response = await joplin.data.get(['notes'], { fields: listingFields, order_by: 'user_updated_time', order_dir: 'DESC', limit: 100, page: pageNum++ })
+        for (var item of response.items){
+            if (item.is_todo || item.deleted_time || seen.has(item.id) || !keep(item)) continue
+            seen.add(item.id)
+            if (items.length >= limit){
+                more = true
+                break
+            }
+            items.push(item)
+        }
+    } while (!more && response.has_more)
+    return { items: items, more: more }
+}
+
 /** getTodos ****************************************************************************************************************************************
  * Returns the list of todos, sorted by due date. If show completed is true, it will include completed todos. If show no due is true, it will       *
  * include todos without due dates.                                                                                                                 *
@@ -190,9 +264,19 @@ export function applyNoteNarrowing(items){
             cacheResult(todosResultCache, cacheKey, allTodos)
         }
     } else {
+        // An unfiltered view (see isUnfilteredQuery) is answered by the search while the to-do set is small, and by the live
+        // listing once it has proved large: past todoSearchPageBudget pages every further page costs more than the whole
+        // listing walk. The listing is narrowed with the same terms the query carries, so both paths return the same rows.
+        var unfiltered = isUnfilteredQuery(searchCritera)
+        var useListing = unfiltered && preferTodoListing
         allTodos = [];
         let pageNum = 1;
-        do {
+        while (!useListing) {
+            if (unfiltered && pageNum > todoSearchPageBudget){
+                preferTodoListing = true
+                useListing = true
+                break
+            }
             countData('search')
             var response = await joplin.data.get(['search'], {
                 query: query,
@@ -204,7 +288,9 @@ export function applyNoteNarrowing(items){
                 page: pageNum++,
             })
             allTodos = allTodos.concat(response.items)
-        } while (response.has_more)
+            if (!response.has_more) break
+        }
+        if (useListing) allTodos = applyTodoNarrowing(await listAllNotes(), showCompleted, showNoDue)
         // The any:1 path asked for none of Cockpit's narrowing in the query, so it is applied here - in the
         // same place, and before the same body fetch and cache write, as the query terms it replaces.
         if (anyMode) allTodos = applyTodoNarrowing(allTodos, showCompleted, showNoDue)
@@ -318,57 +404,90 @@ export async function searchTitleSuggestions(partial){
 /** getNotes ****************************************************************************************************************************************
  * Returns the regular (non to-do) notes matching the given search criteria, sorted by title, each with its checkbox counts. Used when a profile     *
  * shows notes alongside the to-dos.                                                                                                                *
+ *                                                                                                                                                  *
+ * opts.limit caps how many notes are read (absent or 0: all of them). Under a cap the most recently updated notes are the ones kept, read newest    *
+ * first so a large collection is never walked to the end: an unfiltered view reads the live listing (see isUnfilteredQuery), anything else pages   *
+ * the search. Returns { notes, more }, where more says whether the cap left a matching note out.                                                   *
  ***************************************************************************************************************************************************/
 export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var excluded = await excludedContext()
     // See usesAnyMode: under any:1 `type:note` would be an alternative, not a constraint.
     var anyMode = usesAnyMode(searchCriteria)
+    var unfiltered = isUnfilteredQuery(searchCriteria)
+    var limit = Math.max(0, Number(opts && opts.limit) || 0)
     var query = anyMode
         ? String(searchCriteria || "")
         : `type:note ${searchCriteria}${excluded.clauses ? " " + excluded.clauses : ""}`
-    // Self-describing on the any-mode path, for the reason given in getTodos.
-    var cacheKey = anyMode ? `any|x${excluded.clauses}|${query}` : query
+    // Self-describing on the any-mode path, for the reason given in getTodos. The listing path runs no query at all, so its key names the
+    // source and the exclusion state it was narrowed with; the cap is part of every key, since a capped set is a different set.
+    var cacheKey = unfiltered ? `listing|x${excluded.clauses}` : anyMode ? `any|x${excluded.clauses}|${query}` : query
+    if (limit) cacheKey += `|n${limit}`
+    // opts.listingNotebooks narrows the listing path to one notebook and its sub-notebooks (see renderNotesSection), so it keys it too.
+    var listingNotebooks = unfiltered && opts && opts.listingNotebooks ? opts.listingNotebooks : null
+    if (listingNotebooks) cacheKey += `|nb${listingNotebooks.key}`
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
     // Keyed by the flag for the reason given in getTodos.
     var keepMistypedRows = !!(opts && opts.keepMistypedRows)
     if (keepMistypedRows) cacheKey += "|keepmistyped"
     var allNotes;
+    var more = false
     if ((useCache || fillCounts) && notesResultCache.has(cacheKey)){
         allNotes = cloneItems(notesResultCache.get(cacheKey))
+        more = !!notesMoreByKey.get(cacheKey)
         if (fillCounts){
             await attachCheckboxCounts(allNotes, false, priorityStart)
             cacheResult(notesResultCache, cacheKey, allNotes)
         }
     } else {
-        allNotes = [];
-        let pageNum = 1;
-        do {
-            countData('search')
-            var response = await joplin.data.get(['search'], {
-                query: query,
-                fields: ['id', 'title', 'is_todo', 'parent_id', 'user_updated_time', 'user_created_time'],
-                type: 'note',
-                page: pageNum++,
-            })
-            allNotes = allNotes.concat(response.items)
-        } while (response.has_more)
-        // The any:1 path applies `type:note` itself, for the same reason getTodos does.
-        if (anyMode) allNotes = applyNoteNarrowing(allNotes)
-        // The mirror of getTodos' re-check, with the same opts.keepMistypedRows escape: while the index lags a
-        // type flip, `type:note` still returns a row that is now a to-do (and the to-do query returns it as
-        // well). The row's own is_todo is current, so it decides, and the section keeps only genuine notes.
-        if (!keepMistypedRows) allNotes = allNotes.filter(item => !item.is_todo)
-        allNotes = filterExcluded(allNotes, excluded.set)
+        if (unfiltered){
+            // The listing carries every note's current is_todo, so there is no index lag to keep mistyped rows for.
+            var recent = await listRecentNotes(limit || Infinity, item =>
+                !(excluded.set && excluded.set.has(item.parent_id)) && (!listingNotebooks || listingNotebooks.ids.has(item.parent_id)))
+            allNotes = recent.items
+            more = recent.more
+        } else {
+            allNotes = [];
+            let pageNum = 1;
+            do {
+                countData('search')
+                var response = await joplin.data.get(['search'], {
+                    query: query,
+                    fields: ['id', 'title', 'is_todo', 'parent_id', 'user_updated_time', 'user_created_time'],
+                    type: 'note',
+                    order_by: 'user_updated_time',
+                    order_dir: 'DESC',
+                    page: pageNum++,
+                })
+                var kept = response.items
+                // The any:1 path applies `type:note` itself, for the same reason getTodos does.
+                if (anyMode) kept = applyNoteNarrowing(kept)
+                // The mirror of getTodos' re-check, with the same opts.keepMistypedRows escape: while the index lags a
+                // type flip, `type:note` still returns a row that is now a to-do (and the to-do query returns it as
+                // well). The row's own is_todo is current, so it decides, and the section keeps only genuine notes.
+                if (!keepMistypedRows) kept = kept.filter(item => !item.is_todo)
+                kept = filterExcluded(kept, excluded.set)
+                allNotes = allNotes.concat(kept)
+                // Narrowed page by page, so the cap counts rows that will be shown; one kept row past it is the proof that more exist.
+                if (limit && allNotes.length > limit){
+                    more = true
+                    allNotes = allNotes.slice(0, limit)
+                    break
+                }
+            } while (response.has_more)
+        }
         await attachCheckboxCounts(allNotes, fast, priorityStart)
         cacheResult(notesResultCache, cacheKey, allNotes)
+        notesMoreByKey.set(cacheKey, more)
+        for (var key of Array.from(notesMoreByKey.keys())) if (!notesResultCache.has(key)) notesMoreByKey.delete(key)
     }
     // A created regular note (is_todo 0) shows here before the index returns it; the overlay filters to
     // the notes list, so a created to-do never leaks into this section. View-scoped by opts.viewKey, so a
     // note created in one profile's view never surfaces in another's (the overview-note path passes none).
     mergeOptimisticNotes(allNotes, opts && opts.viewKey)
     allNotes = filterExcluded(allNotes, excluded.set)
-    return allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
+    allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
+    return { notes: allNotes, more: more }
 }
 
 /** searchOutsideFilters ****************************************************************************************************************************

@@ -318,6 +318,12 @@ function makeJoplin(options) {
                     // options.todos may be a function of the query, so a test can give different profiles
                     // different to-do sets (e.g. distinct ids, so a switch hits uncached checkbox bodies).
                     const todoItems = typeof options.todos === 'function' ? (options.todos(q) || []) : (options.todos || [])
+                    // `todoSearchPages` models a to-do set too large for one page: the fixtures come back on page 1 and every page
+                    // up to that number still reports has_more, so a test can prove where the plugin stops paging.
+                    if (options.todoSearchPages) {
+                        const todoPage = Math.max(1, Number((query && query.page) || 1))
+                        return { items: todoPage === 1 ? typedItems(todoItems, true) : [], has_more: todoPage < options.todoSearchPages }
+                    }
                     return { items: typedItems(todoItems, true), has_more: false }
                 }
                 // The notebook map and the tag autocomplete page through these endpoints.
@@ -333,6 +339,24 @@ function makeJoplin(options) {
                     // FTS index being current). `options.recentNotes` still answers it wholesale for the suggestion checks that pin an
                     // exact list; otherwise the note fixtures are served most-recently-updated first, honouring `limit`, which is what
                     // lets a test model a note that has synced in but is not yet in the index.
+                    // The live listing an UNFILTERED view reads instead of paging the search (no profile criteria, nothing typed - see
+                    // isUnfilteredQuery in core/joplin.ts), told apart from the two callers below by asking for todo_due. It lists every
+                    // note and to-do, so it serves both search fixture sets - to-dos typed 1, notes typed 0 - with a query function
+                    // called on an empty query, since there is none. Newest first when asked, and paged like the real SQL route.
+                    if (pathParts.length === 1 && query && Array.isArray(query.fields) && query.fields.includes('todo_due')) {
+                        const listedTodos = typeof options.todos === 'function' ? (options.todos('') || []) : (options.todos || [])
+                        const listedNotes = typeof options.searchNotes === 'function' ? (options.searchNotes('') || []) : (options.searchNotes || [])
+                        let listed = typedItems(listedTodos, true).concat(typedItems(listedNotes, false))
+                        if (query.order_by === 'user_updated_time') {
+                            listed = listed.slice().sort((first, second) => (Number(second.user_updated_time) || 0) - (Number(first.user_updated_time) || 0))
+                        }
+                        const size = Number(query.limit) || 100
+                        const page = Math.max(1, Number(query.page) || 1)
+                        return {
+                            items: listed.slice((page - 1) * size, page * size).map(item => projectFields(item, query.fields)),
+                            has_more: page * size < listed.length,
+                        }
+                    }
                     if (pathParts.length === 1) {
                         if (options.recentNotes) return { items: options.recentNotes, has_more: false }
                         const listed = Object.keys(notes)

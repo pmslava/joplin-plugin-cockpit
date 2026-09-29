@@ -1211,6 +1211,24 @@ table {
     font-size: 0.9em;
 }
 
+/* The capped Notes section's footer: the same muted line as the peek's messages, with its "show more" drawn as an inline link. */
+.notes-more-message {
+    margin: 0.5em 0;
+    padding: 0 0.2em;
+    color: var(--cockpit-color-faded, #999999);
+    font-size: 0.9em;
+}
+
+.notes-more-button {
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
 /* The deep last-resort tier's heading ("Results in excluded notebooks"). It reuses the sticky group
  * <h2> like the ordinary peek heading, then tones itself down with the same faded colour and a lighter
  * weight the muted message lines already use, so it reads as an intentional, softer deeper tier rather

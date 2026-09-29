@@ -15,11 +15,12 @@ const DEBUG = false
  * Monotonic per-session tallies. A refresh reads a snapshot on entry and diffs it against the counters when it paints, so the numbers it logs are the  *
  * calls that refresh alone made.                                                                                                                       *
  ***************************************************************************************************************************************************/
-var counters = { search: 0, get: 0, put: 0, post: 0, del: 0, bodies: 0 }
+var counters = { search: 0, listing: 0, get: 0, put: 0, post: 0, del: 0, bodies: 0 }
 
 /** countData **************************************************************************************************************************************
- * Tallies one data call. A ['search'] GET counts as a search; a single-note body-only GET counts as a body fetch; any other single-note GET counts as  *
- * a plain get. Called from the joplin.ts data helpers so every categorised call is captured in one place.                                              *
+ * Tallies one data call. A ['search'] GET counts as a search, a page of the live ['notes'] listing as a listing, a single-note                         *
+ * body-only GET as a body fetch, and any other single-note GET as a plain get. Called from the joplin.ts data helpers so every                         *
+ * categorised call is captured in one place.                                                                                                           *
  ***************************************************************************************************************************************************/
 export function countData(kind){
     if (counters[kind] === undefined) return
@@ -28,11 +29,12 @@ export function countData(kind){
 
 /** snapshot / delta *******************************************************************************************************************************/
 export function snapshot(){
-    return { search: counters.search, get: counters.get, put: counters.put, post: counters.post, del: counters.del, bodies: counters.bodies }
+    return { search: counters.search, listing: counters.listing, get: counters.get, put: counters.put, post: counters.post, del: counters.del, bodies: counters.bodies }
 }
 function delta(before){
     return {
         search: counters.search - before.search,
+        listing: counters.listing - before.listing,
         get: counters.get - before.get,
         put: counters.put - before.put,
         bodies: counters.bodies - before.bodies,
@@ -47,5 +49,5 @@ export function logRefresh(label, before, startedAt){
     if (!DEBUG) return
     var d = delta(before)
     var ms = Date.now() - startedAt
-    console.info(`Cockpit refresh [${label}] ${ms}ms — search:${d.search} get:${d.get} put:${d.put} bodies:${d.bodies}`)
+    console.info(`Cockpit refresh [${label}] ${ms}ms — search:${d.search} listing:${d.listing} get:${d.get} put:${d.put} bodies:${d.bodies}`)
 }

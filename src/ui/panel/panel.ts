@@ -241,6 +241,13 @@ var sortDirection = "asc"
 const sortFieldCycle = ["title", "updated", "created"]
 const sortFieldLabels = { title: "Title", updated: "Updated", created: "Created" }
 
+/** Notes section size ********************************************************************************************************************************
+ * How many notes the Notes section reads and draws: the most recently updated ones, NOTES_BATCH more each time its "show more" button is clicked.   *
+ * A collection of tens of thousands of notes would otherwise be read and drawn whole on every refresh (the 2026-09-29 freeze). Per session.          *
+ ***************************************************************************************************************************************************/
+const NOTES_BATCH = 200
+var notesLimit = NOTES_BATCH
+
 /** notebookPickerDialog ****************************************************************************************************************************/
 var notebookPickerDialog = null
 
@@ -488,6 +495,10 @@ async function eventHandler(message){
         if (sortFieldCycle.includes(String(message[1]))) sortField = String(message[1])
         lastScrollTop = 0
         await refreshPanelData()
+    } else if (message[0] == 'showMoreNotes'){
+        // The next batch of notes. The scroll position is kept: the user is at the footer, and the new rows land around it.
+        notesLimit += NOTES_BATCH
+        await refreshPanelFastThenFill()
     } else if (message[0] == 'sortDirectionClicked'){
         sortDirection = sortDirection === "asc" ? "desc" : "asc"
         lastScrollTop = 0
@@ -1317,7 +1328,7 @@ export async function revealNote(noteID){
     // the row from BOTH sections for the whole index lag (the user's own type flip would look like a delete).
     // Such a view therefore keeps the row where the index still files it, exactly as before the re-check existed;
     // the two lists can never both hold it, since the index answers type:todo and type:note from one stale value.
-    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable }
+    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     var notesHtml = ""

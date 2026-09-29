@@ -770,7 +770,15 @@ export async function renderNotesSection(profile, viewState){
     var notesViewKey = viewKeyFor(profile.id, viewState ? viewState.notebookFilter : null)
     // The notes section renders after the to-dos, so it inherits no separate viewport estimate; its bodies
     // are fetched in list order (0), while the to-dos above it get the viewport-first ordering.
-    var notes = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false })
+    // The section reads at most notesLimit notes, the most recently updated first; the panel raises the limit when "Show more" is clicked.
+    var notesLimit = viewState && viewState.notesLimit ? viewState.notesLimit : 0
+    // A notebook whose title cannot go into the query (it holds a double quote) leaves the criteria empty, which sends the section to the
+    // capped listing. The notebook must then narrow the listing itself: filtered only afterwards, the cap would be spent on other notebooks.
+    var listingNotebooks = viewState && viewState.notebookFilter && !(sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"'))
+        ? { key: viewState.notebookFilter, ids: notebookWithDescendants(notebooks, viewState.notebookFilter) }
+        : null
+    var fetched = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks })
+    var notes = fetched.notes
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
         note.notebookTitle = notebook ? notebook.title : ""
@@ -791,10 +799,16 @@ export async function renderNotesSection(profile, viewState){
     // pill carry action lines); selectable stays true here so ordinary Notes-section rows are unchanged.
     var mobile = !!(viewState && viewState.isMobile)
     var rows = notes.map(note => renderNoteRowHtml(note, { mobile: mobile })).join("")
+    // A capped section says so, and offers the next batch; search and the notebook filter reach any note directly.
+    var moreFooter = fetched.more
+        ? `<p class="notes-more-message">Showing the ${notesLimit} most recently updated notes. Search or pick a notebook to find others, or
+            <button type="button" class="notes-more-button" onclick="onShowMoreNotesClicked()">show more</button></p>`
+        : ""
     return `
         <section class="notes-section">
             <h2>Notes</h2>
             ${rows}
+            ${moreFooter}
         </section>
     `
 }
