@@ -245,7 +245,7 @@ const sortFieldLabels = { title: "Title", updated: "Updated", created: "Created"
  * How many notes the Notes section reads and draws: the most recently updated ones, NOTES_BATCH more each time its "show more" button is clicked.   *
  * A collection of tens of thousands of notes would otherwise be read and drawn whole on every refresh (the 2026-09-29 freeze). Per session.          *
  ***************************************************************************************************************************************************/
-const NOTES_BATCH = 200
+const NOTES_BATCH = 1000
 var notesLimit = NOTES_BATCH
 
 /** notebookPickerDialog ****************************************************************************************************************************/

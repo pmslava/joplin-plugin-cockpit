@@ -10093,6 +10093,8 @@ async function main() {
     // Joplin's search route re-runs the whole search for every page it returns, so paging a 20,000-note collection through it froze
     // Joplin for minutes. An unfiltered view now reads its notes from the live ['notes'] listing, the Notes section stops at a cap
     // with a "show more" footer, and an unfiltered to-do search that runs past its page budget moves to the listing.
+    // NOTES_BATCH in src/ui/panel/panel.ts: how many notes the section draws before its "show more" footer.
+    const CAP = 1000
     const bigFolder = 'b'.repeat(31) + '1'
     const bigArchive = 'b'.repeat(31) + '2'
     const bigNotes = (count, folder, start) => Array.from({ length: count }, (_, i) => ({
@@ -10106,7 +10108,7 @@ async function main() {
         require: desktopRequire,
         versionInfo: { version: '3.7.0', platform: 'desktop' },
         todos: [],
-        searchNotes: bigNotes(250, bigFolder, 1),
+        searchNotes: bigNotes(CAP + 50, bigFolder, 1),
         folders: [{ id: bigFolder, title: 'Box', parent_id: '' }, { id: bigArchive, title: 'Archive', parent_id: '' }],
         initialSettings: {
             profileData: JSON.stringify({ nextID: 2, profiles: [{ ...bigProfile, id: 1, sortOrder: 0, noteID: '' }] }),
@@ -10127,28 +10129,29 @@ async function main() {
         assert.ok(read.limit <= 100, 'within the API page limit')
     })
 
-    await test('large collection: the Notes section stops at 200 rows and says so, and "show more" adds the next batch', async () => {
+    await test('large collection: the Notes section stops at 1,000 rows and says so, and "show more" adds the next batch', async () => {
         const state = await bigRun()
-        assert.strictEqual(noteRows(state), 200, 'the first render draws the 200 most recent notes')
+        assert.strictEqual(noteRows(state), CAP, 'the first render draws the most recent notes up to the cap')
         const html = state.panelHtml['panel-panel']
-        assert.ok(html.includes('Big note 250') && !html.includes('Big note 50<'), 'the kept ones are the most recently updated')
+        assert.ok(html.includes(`Big note ${CAP + 50}<`) && !html.includes('Big note 50<'), 'the kept ones are the most recently updated')
         assert.ok(html.includes('notes-more-message') && html.includes('onShowMoreNotesClicked()'), 'the footer says the list is capped and offers more')
-        assert.ok(listingReads(state).every(g => g.query.page <= 3), 'the listing is read only as far as the cap needs')
+        assert.ok(html.includes(`Showing the ${CAP} most recently updated notes`), 'and says how many it shows')
+        assert.ok(listingReads(state).every(g => g.query.page <= CAP / 100 + 1), 'the listing is read only as far as the cap needs')
         await state.panelMessageHandler(['showMoreNotes'])
-        assert.strictEqual(noteRows(state), 250, 'the next batch brings the rest')
+        assert.strictEqual(noteRows(state), CAP + 50, 'the next batch brings the rest')
         assert.ok(!state.panelHtml['panel-panel'].includes('notes-more-message'), 'and with nothing left out, the footer goes')
     })
 
     await test('large collection: a section under the cap draws every note and no footer', async () => {
-        const state = await bigRun({ searchNotes: bigNotes(12, bigFolder, 1) })
-        assert.strictEqual(noteRows(state), 12)
+        const state = await bigRun({ searchNotes: bigNotes(881, bigFolder, 1) })
+        assert.strictEqual(noteRows(state), 881, 'a collection of the owner\'s size is drawn whole')
         assert.ok(!state.panelHtml['panel-panel'].includes('notes-more-message'), 'no footer when nothing was left out')
     })
 
     await test('large collection: the listing path drops excluded notebooks and trashed notes before counting the cap', async () => {
         const trashed = { id: 'f'.repeat(32), title: 'Big trashed', parent_id: bigFolder, user_updated_time: 999999, deleted_time: 5 }
         const state = await bigRun({
-            searchNotes: bigNotes(150, bigFolder, 1).concat(bigNotes(150, bigArchive, 1001), [trashed]),
+            searchNotes: bigNotes(CAP - 50, bigFolder, 1).concat(bigNotes(150, bigArchive, 5001), [trashed]),
             initialSettings: {
                 profileData: JSON.stringify({ nextID: 2, profiles: [{ ...bigProfile, id: 1, sortOrder: 0, noteID: '' }] }),
                 currentProfileID: 1,
@@ -10156,17 +10159,17 @@ async function main() {
             },
         })
         const html = state.panelHtml['panel-panel']
-        assert.strictEqual(noteRows(state), 150, 'all 150 kept notes fit under the cap once the excluded 150 are dropped')
-        assert.ok(!html.includes('Big note 1001') && !html.includes('Big trashed'), 'no excluded or trashed note is drawn')
+        assert.strictEqual(noteRows(state), CAP - 50, 'every kept note fits under the cap once the excluded 150 are dropped')
+        assert.ok(!html.includes('Big note 5001') && !html.includes('Big trashed'), 'no excluded or trashed note is drawn')
         assert.ok(!html.includes('notes-more-message'), 'and the excluded ones do not count as "more"')
     })
 
     await test('large collection: a notebook the query cannot name still narrows the capped listing, not just its result', async () => {
-        // A title with a double quote cannot go into notebook:"...", so the section reads the listing - where 250 newer notes from another
+        // A title with a double quote cannot go into notebook:"...", so the section reads the listing - where a cap's worth of newer notes from another
         // notebook would use up the whole cap if the notebook were only filtered afterwards.
         const quoted = 'q'.repeat(32)
         const state = await bigRun({
-            searchNotes: bigNotes(250, bigFolder, 100).concat(bigNotes(5, quoted, 1)),
+            searchNotes: bigNotes(CAP + 50, bigFolder, 100).concat(bigNotes(5, quoted, 1)),
             folders: [{ id: bigFolder, title: 'Box', parent_id: '' }, { id: quoted, title: 'Say "hi"', parent_id: '' }],
         })
         await state.panelMessageHandler(['notebookFilterChanged', quoted])
@@ -10183,7 +10186,7 @@ async function main() {
         const searches = noteSearches(state)
         assert.ok(searches.length > 0, 'typed text still goes to the search, which is what understands it')
         assert.ok(searches.every(g => g.query.order_by === 'user_updated_time' && g.query.order_dir === 'DESC'), 'newest first')
-        assert.strictEqual(noteRows(state), 200, 'capped like the listing path')
+        assert.strictEqual(noteRows(state), CAP, 'capped like the listing path')
         assert.ok(state.panelHtml['panel-panel'].includes('notes-more-message'), 'with the same footer')
     })
 
