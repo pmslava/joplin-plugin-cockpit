@@ -97,33 +97,57 @@ export function logTick(before, startedAt){
 
 /** The note store's memory (2.7) *******************************************************************************************************************
  * The one figure the 2.7 acceptance list wants from the app itself: what the note store costs the plugin's renderer. noteStore.ts marks the start  *
- * of its build and the end of the build's replay; each mark reads performance.memory.usedJSHeapSize - Chromium's, in the plugin's own window - and *
- * the end also records how many notes the mirror then holds. Where the engine offers no performance.memory (Node, the harness) a reading is null.  *
+ * of its build and the end of the build's replay, and the end also records how many notes the mirror then holds. Each mark reads the heap from the *
+ * first source that answers: process.memoryUsage().heapUsed, which a desktop plugin has through its node integration and which is exact; then      *
+ * performance.memory.usedJSHeapSize, Chromium's, which quantises and rate-limits its values unless precise memory info is enabled - the release    *
+ * gate's run read 53,500,000 bytes before and after a build of 21,000 notes, blind to a few megabytes; then nothing, which reads as null. The end  *
+ * reads the same source the start did, so the two can be subtracted, and source says which it was.                                                 *
+ *                                                                                                                                                  *
  * Only the first build that reaches its replay is kept: a later rebuild starts from a heap that already holds a store, so its difference would say *
- * nothing about the store's size. Published through CockpitInstrument.snapshot() as storeHeap: { beforeBuild, afterBuild, notes }, all null until  *
- * measured.                                                                                                                                        *
+ * nothing about the store's size. Published through CockpitInstrument.snapshot() as storeHeap: { beforeBuild, afterBuild, notes, source }, all     *
+ * null until measured.                                                                                                                             *
  ***************************************************************************************************************************************************/
-var storeHeap = { beforeBuild: null, afterBuild: null, notes: null }
+var storeHeap = { beforeBuild: null, afterBuild: null, notes: null, source: null }
 var storeHeapTaken = false
 
-function usedHeap(){
+// Each source is read and called in one guarded expression, and answers null rather than throwing when it is missing or odd.
+function processHeap(){
     try {
-        var memory = (globalThis as any).performance && (globalThis as any).performance.memory
-        return memory && typeof memory.usedJSHeapSize === 'number' ? memory.usedJSHeapSize : null
+        var used = (globalThis as any).process.memoryUsage().heapUsed
+        return typeof used === 'number' ? used : null
     } catch (error) {
         return null
     }
 }
 
+function performanceHeap(){
+    try {
+        var used = (globalThis as any).performance.memory.usedJSHeapSize
+        return typeof used === 'number' ? used : null
+    } catch (error) {
+        return null
+    }
+}
+
+function heapFrom(source){
+    return source === 'process' ? processHeap() : source === 'performance' ? performanceHeap() : null
+}
+
 export function markStoreBuildStart(){
     if (storeHeapTaken) return
-    storeHeap = { beforeBuild: usedHeap(), afterBuild: null, notes: null }
+    var source = 'process'
+    var used = processHeap()
+    if (used === null){
+        used = performanceHeap()
+        source = used === null ? null : 'performance'
+    }
+    storeHeap = { beforeBuild: used, afterBuild: null, notes: null, source: source }
 }
 
 export function markStoreBuildEnd(notes){
     if (storeHeapTaken) return
     storeHeapTaken = true
-    storeHeap = { beforeBuild: storeHeap.beforeBuild, afterBuild: usedHeap(), notes: notes }
+    storeHeap = { beforeBuild: storeHeap.beforeBuild, afterBuild: heapFrom(storeHeap.source), notes: notes, source: storeHeap.source }
 }
 
 /** The inspection handle **************************************************************************************************************************/

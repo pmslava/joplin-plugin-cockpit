@@ -11680,30 +11680,53 @@ async function main() {
         assert.ok(/const walkPagePauseMs = 0\n/.test(storeSource), 'the walk\'s page pause is prepared, and off')
     })
 
-    await test('note store reads: the instrument snapshot carries the store\'s memory - the renderer\'s heap before the first build and after its replay, with the mirror\'s size - null where the engine has no performance.memory', async () => {
+    await test('note store reads: the instrument snapshot carries the store\'s memory - the heap before the first build and after its replay, with the mirror\'s size and the source it was read from: process.memoryUsage first, performance.memory next, else null', async () => {
         const items = [readTodo(1), readTodo(2), readNote(3)]
-        const plain = await readRun(items)
         const counters = ['search', 'listing', 'get', 'put', 'post', 'del', 'bodies', 'events', 'folders', 'tags', 'renders', 'paints']
-        assert.deepStrictEqual(Object.keys(plain.instrument.snapshot()), counters.concat(['storeHeap']), 'the counters as before, and storeHeap beside them')
-        assert.deepStrictEqual(plain.instrument.snapshot().storeHeap, { beforeBuild: null, afterBuild: null, notes: null }, 'nothing measured before the build')
-        await buildStore(plain)
-        assert.deepStrictEqual(plain.instrument.snapshot().storeHeap, { beforeBuild: null, afterBuild: null, notes: 3 }, 'Node has no performance.memory: the readings are null, the size is not')
-        // An engine that has it (Chromium, in the plugin's window): one reading as the build starts, one after its replay.
-        const measured = await readRun(items)
-        let readings = 0
-        Object.defineProperty(globalThis.performance, 'memory', { configurable: true, get: () => ({ usedJSHeapSize: ++readings * 1000 }) })
-        try {
-            await buildStore(measured)
-        } finally {
-            delete globalThis.performance.memory
+        // Builds a store with the two heap sources stubbed as given (undefined takes a source away), and answers its storeHeap.
+        const measuredWith = async (processUsage, performanceMemory, check) => {
+            const state = await readRun(items)
+            const realUsage = process.memoryUsage
+            process.memoryUsage = processUsage
+            if (performanceMemory) Object.defineProperty(globalThis.performance, 'memory', { configurable: true, get: performanceMemory })
+            try {
+                if (check) await check(state)
+                await buildStore(state)
+            } finally {
+                process.memoryUsage = realUsage
+                delete globalThis.performance.memory
+            }
+            return state
         }
-        assert.deepStrictEqual(measured.instrument.snapshot().storeHeap, { beforeBuild: 1000, afterBuild: 2000, notes: 3 }, 'before the build and after its replay')
+        let processReads = 0, performanceReads = 0
+        const fromProcess = () => ({ heapUsed: ++processReads * 1000 })
+        const fromPerformance = () => ({ usedJSHeapSize: ++performanceReads * 7 })
+        // Desktop: the plugin's node integration answers first and exactly, whatever Chromium would say.
+        const desktop = await measuredWith(fromProcess, fromPerformance, (state) => {
+            assert.deepStrictEqual(Object.keys(state.instrument.snapshot()), counters.concat(['storeHeap']), 'the counters as before, and storeHeap beside them')
+            assert.deepStrictEqual(state.instrument.snapshot().storeHeap, { beforeBuild: null, afterBuild: null, notes: null, source: null }, 'nothing measured before the build')
+        })
+        assert.deepStrictEqual(desktop.instrument.snapshot().storeHeap, { beforeBuild: 1000, afterBuild: 2000, notes: 3, source: 'process' }, 'process.memoryUsage, before the build and after its replay')
+        assert.strictEqual(performanceReads, 0, 'performance.memory is not read when process answers')
+        // No process: Chromium's performance.memory, both readings from it.
+        const chromium = await measuredWith(undefined, fromPerformance)
+        assert.deepStrictEqual(chromium.instrument.snapshot().storeHeap, { beforeBuild: 7, afterBuild: 14, notes: 3, source: 'performance' }, 'performance.memory when process has none')
+        // Neither: null readings, the size all the same.
+        const bare = await measuredWith(() => { throw new Error('no memoryUsage here') }, null)
+        assert.deepStrictEqual(bare.instrument.snapshot().storeHeap, { beforeBuild: null, afterBuild: null, notes: 3, source: null }, 'no source at all: null readings, never a throw')
+        // The harness's own Node answers through process, with real numbers.
+        const node = await readRun(items)
+        await buildStore(node)
+        const nodeHeap = node.instrument.snapshot().storeHeap
+        assert.ok(nodeHeap.source === 'process' && nodeHeap.beforeBuild > 0 && nodeHeap.afterBuild > 0 && nodeHeap.notes === 3, 'Node itself: process.memoryUsage')
         // A later rebuild starts from a heap that already holds a store, so the first build's figures stand.
-        measured.eventsFailNext = 1
-        await measured.withTimers(() => measured.noteStore.pollNow())
-        await storeTick(measured)
-        assert.ok(measured.noteStore.isReady(), 'precondition: the store was rebuilt')
-        assert.deepStrictEqual(measured.instrument.snapshot().storeHeap, { beforeBuild: 1000, afterBuild: 2000, notes: 3 }, 'and a rebuild leaves them')
+        const rebuilt = await measuredWith(fromProcess, null)
+        const first = rebuilt.instrument.snapshot().storeHeap
+        rebuilt.eventsFailNext = 1
+        await rebuilt.withTimers(() => rebuilt.noteStore.pollNow())
+        await storeTick(rebuilt)
+        assert.ok(rebuilt.noteStore.isReady(), 'precondition: the store was rebuilt')
+        assert.deepStrictEqual(rebuilt.instrument.snapshot().storeHeap, first, 'and a rebuild leaves them')
     })
 
     // ============================================================ note store triggers (2.7 phase 4): drain the feed, render once
