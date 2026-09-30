@@ -1,0 +1,13 @@
+{
+	"manifest_version": 1,
+	"id": "io.github.pmslava.eventsprobe",
+	"app_min_version": "3.6",
+	"version": "0.1.0",
+	"name": "Events probe (e2e fixture)",
+	"description": "Test fixture for e2e/events-probe.spec.ts: exposes Joplin's change feed (the events route) to the spec through one command. Never shipped.",
+	"author": "pmslava",
+	"homepage_url": "https://github.com/pmslava/joplin-plugin-cockpit",
+	"platforms": [
+		"desktop"
+	]
+}

@@ -521,12 +521,27 @@ export async function panelToastVisible(win: Page): Promise<boolean> {
  * CommandService.execute(name, ...args) is the same entry point a plugin's own
  * `joplin.commands.execute(...)` ends up in, so a command driven from here is driven exactly as the
  * Whereabouts plugin drives it.
+ *
+ * Resolves to whatever the command returned (see callPluginCommand); a caller that only drives a command
+ * ignores it.
  */
 export async function executePluginCommand(
   win: Page,
   name: string,
   ...args: unknown[]
-): Promise<void> {
+): Promise<unknown> {
+  const result = await callPluginCommand(win, name, ...args);
+  await win.waitForTimeout(SETTLE);
+  return result;
+}
+
+/**
+ * executePluginCommand without the settle afterwards: runs the command through the app's CommandService and
+ * resolves to what it returned. A plugin command's return value crosses back from the plugin's own window
+ * (the host resolves the command's promise with the plugin's answer), so a spec can read a RESULT out of a
+ * command it drives; the change-feed probe (events-probe.spec.ts) is built on that. Needs `--env dev` too.
+ */
+export async function callPluginCommand(win: Page, name: string, ...args: unknown[]): Promise<unknown> {
   await expect
     .poll(
       async () =>
@@ -537,14 +552,10 @@ export async function executePluginCommand(
       { timeout: 60_000 }
     )
     .toBe(true);
-  await win.evaluate(
-    async (call) => {
-      await (window as any).joplin.commandService.execute(call.name, ...call.args);
-      return true;
-    },
+  return win.evaluate(
+    async (call) => (window as any).joplin.commandService.execute(call.name, ...call.args),
     { name, args }
   );
-  await win.waitForTimeout(SETTLE);
 }
 
 /**
