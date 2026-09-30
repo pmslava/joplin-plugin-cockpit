@@ -5,12 +5,12 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, searchTitleSuggestions, setTodoCompleted, setTodoDueDates, setTodoDuesPerId } from "../../core/joplin";
+import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, ringBodiesDeferred, searchTitleSuggestions, setTodoCompleted, setTodoDueDates, setTodoDuesPerId } from "../../core/joplin";
 import { clearOptimisticItem, clearTodoCompletionOverride, finalizeOverlay, hasPendingItemOverlay, removeOptimisticItem, revalidateOptimisticInserts, setTodoCompletionOverride, upsertOptimisticItem, viewKeyFor } from "../../core/optimistic";
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
-import { logRefresh, snapshot } from "../../core/instrument";
+import { countPaint, countRender, logRefresh, snapshot } from "../../core/instrument";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
-import { catchUpNoteStore, refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
+import { beginPanelRedraw, catchUpNoteStore, recordPanelRedraw, redrawStamp, refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
 import { applyLocalCreate, applyLocalRemoval, applyLocalWrite, isReady as isStoreReady, pollNow } from "../../core/noteStore";
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
@@ -201,6 +201,14 @@ function pickerDialogHeight(){
  * extra filtering. Held in memory for the same reason as the notebook filter.                                                                       *
  ***************************************************************************************************************************************************/
 var searchFilter = ""
+
+/** getPanelSearchFilter ****************************************************************************************************************************
+ * The committed search text, for the refresh triggers (2.7): with the profile's own criteria it decides whether the note store can answer the      *
+ * panel's view, the question allConsumersStoreServed in timer.ts asks before each trigger picks its path.                                          *
+ ***************************************************************************************************************************************************/
+export function getPanelSearchFilter(){
+    return searchFilter
+}
 
 /** revealedNote / revealID (cockpit.revealNote) ****************************************************************************************************
  * The state behind the reveal command Whereabouts calls. Both live in memory beside the notebook and search filters, for the same reason: they are   *
@@ -1257,6 +1265,9 @@ export async function revealNote(noteID){
     // on top (getTodos/getNotes via the viewState flag below), so a tick/create/external-change shows at once
     // without another search. Any-platform; the equality guard still suppresses a render that changes nothing.
     var optimistic = !!(options && options.optimistic)
+    // The note store's render of a drain (2.7, renderStoreChange in timer.ts): its fill reads only the changed rings - those read before whose note
+    // changed since, and those of the notes the drain fetched (the Set this carries).
+    var ringsChangedOnly = options && options.ringsChangedOnly ? options.ringsChangedOnly : null
     // Dialog guard (mobile only): while a Cockpit dialog is open, a panel refresh calls setHtml, which
     // re-asserts the panel viewer's native React Native Modal on top of the dialog's Modal - the "the
     // dialog popped up behind the panel" bug. Skipping the refresh keeps the dialog on top. The guard
@@ -1294,6 +1305,13 @@ export async function revealNote(noteID){
     // guard rather than clobbering the newer paint. Claimed after the early no-paint returns above so those
     // do not needlessly supersede an in-flight run.
     var myGeneration = ++refreshGeneration
+    // The redraw stamp (2.7): what this render is drawn from, taken before any of it is read, so a change that lands while it runs leaves the
+    // stamp older than the markup and the next tick draws again - never the other way round. Taken only for a render that can finish complete:
+    // not a fast paint (rings from the cache), not an optimistic one (the cached answer and the overlay). A render under way means the panel is
+    // not known to be current, so the last stamp is dropped first; only a render that finishes complete puts one back (recordPanelRedraw).
+    var redrawnFrom = !fast && !optimistic ? await redrawStamp() : null
+    beginPanelRedraw()
+    var ringsDeferredBefore = ringBodiesDeferred()
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile) return
@@ -1334,7 +1352,7 @@ export async function revealNote(noteID){
     // the row from BOTH sections for the whole index lag (the user's own type flip would look like a delete).
     // Such a view therefore keeps the row where the index still files it, exactly as before the re-check existed;
     // the two lists can never both hold it, since the index answers type:todo and type:note from one stale value.
-    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit }
+    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit, ringsChangedOnly: ringsChangedOnly }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     var notesHtml = ""
@@ -1412,11 +1430,17 @@ export async function revealNote(noteID){
         .replace("<<TODOS>>", () => todosHtml)
         .replace("<<OVERLAY_STATE>>", () => overlayStateIsland)
         .replace("<<SEARCH_STATE>>", () => searchStateIsland)
+    // The markup has been computed, which is the cost the per-tick record counts as a render (instrument.ts), painted or not.
+    countRender()
     // Out-of-order guard: if a newer run has started while this one was awaiting its data, discard this run
     // now - BEFORE touching lastRenderedHtml or painting - so a slow older run cannot overwrite the newer
     // paint (nor corrupt the equality baseline with markup that never reached the panel). The newer run owns
     // the paint. Any note bodies this run fetched already warmed the shared cache, so nothing is wasted.
     if (myGeneration !== refreshGeneration) return
+    // The panel now shows this markup (painted below, or already on screen). It is COMPLETE when nothing about it is provisional: a stamp was
+    // taken (neither fast nor optimistic), and no ring was left unread (the per-refresh body cap, or a changed-only fill). Only then may the
+    // periodic tick take it as current until one of its inputs moves.
+    recordPanelRedraw(redrawnFrom && ringBodiesDeferred() === ringsDeferredBefore ? redrawnFrom : null)
     // The equality guard compares content only: the scroll-top and render-nonce placeholders are still
     // present here and are filled in below. Comparing before they are stamped keeps the guard working -
     // otherwise the ever-incrementing nonce would defeat it, forcing a setHtml (a full webview reload on
@@ -1429,6 +1453,7 @@ export async function revealNote(noteID){
     var htmlString = contentHtml
         .replace("<<SCROLL_TOP>>", () => String(lastScrollTop))
         .replace("<<RENDER_NONCE>>", () => String(renderNonce))
+    countPaint()
     await joplin.views.panels.setHtml(panel, htmlString);
     logRefresh(fast ? "fast" : fillCounts ? "fill" : optimistic ? "optimistic" : "full", instrumentBefore, instrumentStart)
 }

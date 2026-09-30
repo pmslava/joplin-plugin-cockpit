@@ -509,12 +509,15 @@ async function run(options) {
     delete require.cache[require.resolve(bundlePath)]
     delete global.CockpitNoteStore
     delete global.CockpitInstrument
+    delete global.CockpitTriggers
     require(bundlePath)
     // The note store's inspection handle (src/core/noteStore.ts publishes it on the global when the bundle loads). Taken now, because the next
     // run's bundle replaces the global with its own store.
     state.noteStore = global.CockpitNoteStore || null
     // The data-call counters and the per-tick record (src/core/instrument.ts), published the same way and taken for the same reason.
     state.instrument = global.CockpitInstrument || null
+    // The refresh triggers' own question (src/core/timer.ts, 2.7 phase 4): whether the note store serves every view right now.
+    state.triggers = global.CockpitTriggers || null
     if (!state.onStart) throw new Error('Plugin did not register an onStart handler')
     // Capture the intervals the plugin arms at startup (the periodic refresh timer and the folder poll)
     // instead of scheduling them on a real clock: the suite invokes them by hand, and leaving many run()s'

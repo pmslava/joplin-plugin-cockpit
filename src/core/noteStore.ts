@@ -93,6 +93,13 @@ var listeners = []
 // that may have missed a note (see applyLocalRemoval), and the build then ends not ready.
 var building = false
 var buildLostNote = false
+// What the burst of runs in progress did, which its listeners are told (see timer.ts), so a render can tell the news apart:
+//  - built:   it ran the build that makes the store ready (runOnce's) - every note at once, most rings never read;
+//  - rebuilt: a ready store's drain was too large to fetch note by note and walked the listing instead - any note may have changed;
+//  - fetched: the ids its drains fetched by id - the notes that changed, new ones included.
+var burstBuilt = false
+var burstRebuilt = false
+var burstFetched = new Set()
 
 // The listing's own fields plus is_conflict, which a fetch by id needs (GET /notes/:id returns conflict copies; the listing does not). Read at
 // call time rather than at load: joplin.ts imports this module for its write helpers and its store reads, so its exports are not filled in yet
@@ -220,7 +227,8 @@ export function getModel(){
 }
 
 // Called once a burst of runs (one run and the reruns asked for while it lasted) has changed the mirror's revision; timer.ts schedules a render from
-// it. A burst that changed nothing calls nobody. Returns the unsubscribe function.
+// it. A burst that changed nothing calls nobody. The listener is handed { built, rebuilt, fetched } (see burstBuilt above). Returns the unsubscribe
+// function.
 export function subscribe(listener){
     listeners.push(listener)
     return () => { listeners = listeners.filter(entry => entry !== listener) }
@@ -258,6 +266,9 @@ async function pump(mayBuild){
     // The listeners hear about the burst, not about each run in it: a poll asked for while one runs is folded into this pump, and so is its news,
     // so a burst of drains is one notification and, in timer.ts, one render.
     var revisionBefore = model.revision
+    burstBuilt = false
+    burstRebuilt = false
+    burstFetched = new Set()
     try {
         await runOnce(mayBuild)
         while (rerunRequested && available){
@@ -275,18 +286,21 @@ async function pump(mayBuild){
         rerunRequested = false
         rerunMayBuild = false
     }
-    if (model.revision !== revisionBefore) notifyListeners()
+    if (model.revision !== revisionBefore) notifyListeners({ built: burstBuilt, rebuilt: burstRebuilt, fetched: burstFetched })
 }
 
 async function runOnce(mayBuild){
     if (ready) await poll()
-    else if (mayBuild) await build()
+    else if (mayBuild){
+        burstBuilt = true
+        await build()
+    }
 }
 
-function notifyListeners(){
+function notifyListeners(news){
     for (var listener of listeners.slice()){
         try {
-            listener()
+            listener(news)
         } catch (error) {
             console.warn("Cockpit: a note store listener failed", error)
         }
@@ -414,9 +428,11 @@ async function drainFeed(mayRebuild){
     if (plan.rebuild){
         if (!mayRebuild) return false
         // build() retakes the cursor itself, and handles its own failure.
+        burstRebuilt = true
         await build()
         return true
     }
+    for (var fetchId of plan.fetch) burstFetched.add(fetchId)
     var removedKnown = false
     for (var id of plan.fetch){
         var note = null

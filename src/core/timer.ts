@@ -16,20 +16,27 @@
  *                          reconcile lane's polls drains it before its render. Since phase 3 the unfiltered views are drawn from the store once it is  *
  *                          ready, so a burst of polls that changed it schedules ONE fast render of its own (the note store lane below). It costs       *
  *                          nothing at all until the store's startup build has been kicked off.                                                         *
+ *   - all store-served   : (2.7 phase 4) when the store serves EVERY view - the panel's and each overview note's (allConsumersStoreServed below) -     *
+ *                          the machinery that exists to chase the search index stands down: a note change (outside a sync) and a completed sync drain  *
+ *                          the feed and render once (no per-note read, no reconcile ladder), and the tick redraws only when something the panel or the *
+ *                          notes are drawn from has moved (the redraw stamps below). One view that still needs the search puts every trigger back.     *
  *                                                                                                                                                    *
  *  A profile switch is deliberately none of these: it changes no note data, so it paints (from cache / one search) and stops - see panel.ts.          *
  ***************************************************************************************************************************************************/
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { reconcileExternalNoteChange, refreshPanelData, trackEditorNoteSelection } from "../ui/panel/panel";
+import { getPanelSearchFilter, reconcileExternalNoteChange, refreshPanelData, trackEditorNoteSelection } from "../ui/panel/panel";
 import { getOverviewNoteIDs, refreshNoteData } from "./markdown";
-import { updateFrequencySettingKey } from "./settings";
+import { getCurrentProfileID, updateFrequencySettingKey } from "./settings";
+import { getAllProfiles, getProfile } from "./database";
 import { getSyncStatus, markSyncComplete, markSyncStart } from "./syncStatus";
 import { hasPendingOptimistic } from "./optimistic";
 import { isMobile } from "./platform";
 import { drainDeferredSettingsNoteWrite, isSettingsNote, pollSettingsNote, scheduleSettingsNoteRead, syncSettingsNote } from "./settingsSync";
-import { catchUp, pollNow, pollOnTick, scheduleNoteStorePoll, subscribe as subscribeToNoteStore } from "./noteStore";
+import { catchUp, getModel as getStoreModel, pollNow, pollOnTick, scheduleNoteStorePoll, subscribe as subscribeToNoteStore } from "./noteStore";
+import { getAllTags, getNotebookMap, notebookMapGeneration, storeServes, tagListGeneration, viewCriteria } from "./joplin";
+import { toISODate } from "./calendar";
 import { logTick, snapshot } from "./instrument";
 
 /** Variable Initialization ************************************************************************************************************************/
@@ -64,7 +71,7 @@ export async function refreshInterfaces(){
             await refreshPanelData({ fast: true })
             // The overview notes never render checkbox rings, so this refresh fetches zero note bodies
             // (fetchTodos forces the fast path for markdown) and only writes a note whose content changed.
-            await refreshNoteData()
+            await regenerateOverviewNotes()
             // Background count-fill: fetch the note bodies (nearest the viewport first) and repaint once with
             // the real rings. A no-op via the equality guard whenever the cache is already warm.
             await refreshPanelData({ fillCounts: true })
@@ -181,17 +188,39 @@ async function runOverviewLane(){
     var scope = overviewScope
     overviewScope = undefined
     try {
-        await refreshNoteData(scope === "all" ? undefined : scope)
+        await regenerateOverviewNotes(scope === "all" ? undefined : scope)
     } catch (error) {
         console.error("Cockpit: could not refresh the overview notes", error)
     }
 }
 
+/** regenerateOverviewNotes *************************************************************************************************************************
+ * refreshNoteData (markdown.ts), with the overview notes' redraw stamp kept beside it (see the redraw stamps below). A pass over EVERY overview    *
+ * note records what it was drawn from, taken before it read anything; a scoped pass (one profile's edit) regenerates only its own note, so it      *
+ * leaves the stamp as it is unless it fails - a note left unwritten is a note the next tick must write.                                            *
+ ***************************************************************************************************************************************************/
+async function regenerateOverviewNotes(scope?){
+    if (scope !== undefined){
+        try {
+            await refreshNoteData(scope)
+        } catch (error) {
+            overviewsRedrawnFrom = null
+            throw error
+        }
+        return
+    }
+    var stamp = await redrawStamp()
+    overviewsRedrawnFrom = null
+    await refreshNoteData()
+    overviewsRedrawnFrom = settledStamp(stamp)
+}
+
 /** Note store lane (2.7) ***************************************************************************************************************************
  * The note store (noteStore.ts) tells its subscribers when a burst of its runs has changed the mirror: a drain that brought an edit, a sync or a   *
  * trash, or the build that has just made it ready. A view drawn from the store is then out of date, and nothing else would repaint it until the    *
- * next trigger, so ONE fast render is scheduled - the kind the sync events use: no note bodies, rings from the cache. A notification that arrives  *
- * while that render is still pending folds into it, and the store itself folds a burst of drains into one notification.                            *
+ * next trigger, so ONE render is scheduled: the fast one the sync events use (no note bodies, rings from the cache), followed, once the store      *
+ * serves every view and the news is a drain's rather than a build's, by a ring fill (renderStoreChange). A notification that arrives while that    *
+ * render is still pending folds into it, and the store itself folds a burst of drains into one notification.                                       *
  *                                                                                                                                                  *
  * The listener only schedules. It never polls - that would loop through the store's own notification - and never waits, since the store calls it   *
  * as a burst ends. The equality guard in refreshPanelData still stops a repaint when nothing visible changed, and a drain that changed nothing     *
@@ -199,14 +228,54 @@ async function runOverviewLane(){
  ***************************************************************************************************************************************************/
 const storeRenderDelayMs = 0
 var storeRenderTimer = null
+// The ring fill the pending render owes, from the news folded into it (see renderStoreChange): none (only the build's news), the plain fill (a ready
+// store's rebuild was among it), or the changed-only fill with the ids its drains fetched.
+var storeRenderFill = null
 
-function scheduleStoreRender(){
+function scheduleStoreRender(news?){
+    if (!(news && news.built)){
+        if (!storeRenderFill) storeRenderFill = { plain: false, fetched: new Set() }
+        if (news && news.rebuilt) storeRenderFill.plain = true
+        if (news && news.fetched) for (var id of news.fetched) storeRenderFill.fetched.add(id)
+    }
     if (storeRenderTimer) return
     // The callback returns the render's promise so the harness can await it; setTimeout ignores it.
     storeRenderTimer = setTimeout(() => {
         storeRenderTimer = null
-        return refreshPanelData({ fast: true }).catch(error => console.warn("Cockpit: could not repaint after a note store change", error))
+        var fill = storeRenderFill
+        storeRenderFill = null
+        return renderStoreChange(fill).catch(error => console.warn("Cockpit: could not repaint after a note store change", error))
     }, storeRenderDelayMs)
+}
+
+/** renderStoreChange *******************************************************************************************************************************
+ * The render itself. While any view still needs the search, it is the fast render alone, as in phase 3: the reconcile lane that a note change or a *
+ * sync arms comes after it with full renders, and those read the rings of the notes that changed. When the store serves every view (phase 4) no    *
+ * such lane follows - this render is the only one a change gets - so a drain's render is followed by a ring fill, the reconcile lane's first rung  *
+ * less its search, which keeps a checkbox ticked inside a note in the editor showing on its ring within the second, as it always has. The fill     *
+ * reads the changed rings only: a ring read before whose note's user_updated_time has moved since, and the ring of every note the drain fetched,   *
+ * which covers a note new to the mirror - created in the editor, by another plugin, over REST or synced in - whose ring was never read. Any other  *
+ * ring never read is the tick's, counted as deferred, as in phase 3. A ready store's rebuild (a drain of more than 200 notes) fetched nothing by   *
+ * id and any note may have changed, so its render takes the plain fill, 300 rings per list, as the lane's first rung read. The news of the build   *
+ * that makes the store ready gets no fill at all: it is every note at once, most rings never read, and filling them in one go right after the      *
+ * build was the one spike the perf run found.                                                                                                      *
+ ***************************************************************************************************************************************************/
+async function renderStoreChange(fill){
+    var complete = !!fill && await allConsumersStoreServed()
+    await refreshPanelData({ fast: true })
+    if (complete) await refreshPanelData({ fillCounts: true, ringsChangedOnly: fill.plain ? null : fill.fetched })
+}
+
+/** dropStoreRender *********************************************************************************************************************************
+ * Takes back the store render a drain armed, when the caller is about to render the same mirror itself (catchUpNoteStore, the tick). Answers       *
+ * whether one was pending - the tick takes that as a change it owes a render for.                                                                  *
+ ***************************************************************************************************************************************************/
+function dropStoreRender(){
+    if (!storeRenderTimer) return false
+    clearTimeout(storeRenderTimer)
+    storeRenderTimer = null
+    storeRenderFill = null
+    return true
 }
 
 /** catchUpNoteStore ********************************************************************************************************************************
@@ -217,13 +286,156 @@ function scheduleStoreRender(){
  ***************************************************************************************************************************************************/
 export async function catchUpNoteStore(){
     await catchUp()
-    clearTimeout(storeRenderTimer)
-    storeRenderTimer = null
+    dropStoreRender()
+}
+
+/** allConsumersStoreServed (2.7 phase 4) ***********************************************************************************************************
+ * Whether the note store answers EVERY view Cockpit draws, right now. The consumers are the panel's current view - its profile's criteria and the  *
+ * committed search text, whatever the format: the calendar formats build their criteria exactly as the lists do (fetchTodos in formats.ts) - and   *
+ * each overview note, drawn from its profile's own criteria with no view state. The notebook filter plays no part: the store narrows by the        *
+ * notebook's id set itself. Each view is judged by storeServes in joplin.ts, the very function its read asks, on the very string its read is built *
+ * from (viewCriteria), so a trigger can never take a view for store-served while the read goes to the search, or the other way round.              *
+ *                                                                                                                                                  *
+ * Every trigger asks this before it picks a path: while it answers true, the reconcile ladder and the per-note read on a note change stand down    *
+ * (nothing is left to chase the index for), and the tick redraws only when something has moved. One view that needs the search - a filtered        *
+ * profile's overview note, a word typed into the panel - is enough to put every trigger back on its 2.6.3 path, since the ladder and the per-note  *
+ * read are what that view is kept fresh by.                                                                                                        *
+ *                                                                                                                                                  *
+ * The store's own state is asked first, and without an await: before the build, and for the whole session when the store is off, this costs no     *
+ * setting read at all. Published on the plugin's global (CockpitTriggers) for the harness, like the store's own handle.                            *
+ ***************************************************************************************************************************************************/
+export async function allConsumersStoreServed(){
+    return !!(await storeServedConsumers())
+}
+
+// The consumers themselves when the store serves every one of them, null otherwise: the stamp below reads the same profiles it was judged on. A read
+// that throws answers "not all": every trigger then takes its 2.6.3 path, whose own reads, if they fail again, fail where they always did.
+async function storeServedConsumers(){
+    if (!storeServes("")) return null
+    try {
+        var currentProfileID = await getCurrentProfileID()
+        var panelProfile = await getProfile(currentProfileID)
+        if (!panelProfile) return null
+        if (!storeServes(viewCriteria(panelProfile.searchCriteria, getPanelSearchFilter()))) return null
+        var profiles = await getAllProfiles()
+        for (var profile of profiles){
+            if (profile.noteID && !storeServes(viewCriteria(profile.searchCriteria, ""))) return null
+        }
+        return { currentProfileID: currentProfileID, panelProfile: panelProfile, profiles: profiles }
+    } catch (error) {
+        return null
+    }
+}
+
+/** The redraw stamps (2.7 phase 4) *****************************************************************************************************************
+ * The periodic tick exists for what changes with no event of its own: the date (a to-do due yesterday moving from Today to Overdue), and, before   *
+ * 2.7, whatever the index had caught up with. With every view drawn from the store, the second half is gone - a change reaches the store through   *
+ * the feed and renders at once - so a tick that recomputed the whole panel every minute would redo, at full cost, work whose answer is already on  *
+ * screen; the equality guard in refreshPanelData only hides the identical repaint, not the computing. So each complete drawing records a STAMP of  *
+ * everything it was drawn from that can change without Cockpit drawing again, and the tick draws only when the stamp no longer holds:              *
+ *                                                                                                                                                  *
+ *   served    - every view was store-served (a stamp taken on the search paths never holds)                                                        *
+ *   revision  - the store's revision: any note that changed                                                                                        *
+ *   day, zone - the local date, and the time zone it is taken in. Every day boundary in the markup is local midnight (horizons.js, the completed   *
+ *               buckets, the calendars' today); the day-start setting only places a dropped to-do, so it is not an input here                      *
+ *   due       - the month calendar alone depends on the time of day: a dot turns overdue the moment its to-do's due time passes. For that view,    *
+ *               how many of the store's to-dos are past due; any due time passing moves it (0 for every other format)                              *
+ *   folders   - the notebook map's generation (joplin.ts): notebooks write no feed row, and their names, nesting and exclusions are drawn          *
+ *   tags      - the tag list's generation: the search field's autocomplete carries it, and tags write no feed row either                           *
+ *   profiles  - every profile (the overview notes' views), and for the panel which one is current                                                  *
+ *                                                                                                                                                  *
+ * and, beside the stamp, whether the optimistic layer was empty both when the stamp was taken and when the drawing finished: an entry retires on a *
+ * clock of its own (optimistic.ts), which no stamp can see - one merged into a drawing may run out before the drawing ends - so while one is held, *
+ * or was at any point of the last drawing, the tick draws as it always did.                                                                        *
+ *                                                                                                                                                  *
+ * Two stamps are kept, because two things are drawn. The panel's is recorded by refreshPanelData for a COMPLETE render only (not a fast or an      *
+ * optimistic one, and not a fill the per-refresh body cap cut short) and dropped by every other render; the overview notes' by a pass over all of  *
+ * them (regenerateOverviewNotes). A render the panel skips - hidden on desktop, held on mobile while a dialog or the search field is open -        *
+ * records nothing, so once something moves the stamp stays behind and the ticks go on drawing, as they always did, until the panel draws again.    *
+ * The settings, the theme, the sync button and the panel's own controls (profile, notebook filter, search, sort, calendar) are not in the stamp:   *
+ * each of them already draws, completely, when it changes.                                                                                         *
+ ***************************************************************************************************************************************************/
+const panelStampKeys = ["served", "revision", "day", "zone", "due", "folders", "tags", "profiles", "current"]
+const overviewStampKeys = ["served", "revision", "day", "zone", "folders", "profiles"]
+var panelRedrawnFrom = null
+var overviewsRedrawnFrom = null
+
+export async function redrawStamp(){
+    var consumers = await storeServedConsumers()
+    if (!consumers) return { served: false }
+    var now = new Date()
+    return {
+        served: true,
+        overlayIdle: !hasPendingOptimistic(),
+        revision: getStoreModel().revision,
+        day: toISODate(now),
+        zone: timeZoneOf(now),
+        due: consumers.panelProfile.displayFormat === "month" ? pastDueCount(now.getTime()) : 0,
+        folders: notebookMapGeneration(),
+        tags: tagListGeneration(),
+        profiles: JSON.stringify(consumers.profiles),
+        current: String(consumers.currentProfileID),
+    }
+}
+
+// A render has started: until one finishes complete, the panel is not known to be current.
+export function beginPanelRedraw(){
+    panelRedrawnFrom = null
+}
+
+// A render has finished, drawn from `stamp` - or from something provisional, when the caller passes null.
+export function recordPanelRedraw(stamp){
+    panelRedrawnFrom = stamp ? settledStamp(stamp) : null
+}
+
+// The stamp as a finished drawing leaves it: the optimistic layer counts as empty only if it was when the stamp was taken AND is now. A stamp taken
+// on the search paths never holds, so it is kept as it is, and those paths do not so much as sweep the layer for it.
+function settledStamp(stamp){
+    if (!stamp.served) return stamp
+    return { ...stamp, overlayIdle: stamp.overlayIdle && !hasPendingOptimistic() }
+}
+
+function stampHolds(recorded, now, keys){
+    return !!recorded && recorded.overlayIdle && now.served && keys.every(key => recorded[key] === now[key])
+}
+
+function timeZoneOf(now){
+    var zone = ""
+    try {
+        zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ""
+    } catch (error) {
+        zone = ""
+    }
+    return `${now.getTimezoneOffset()} ${zone}`
+}
+
+function pastDueCount(nowMs){
+    var count = 0
+    for (var todo of getStoreModel().todos()) if (todo.todo_due > 0 && todo.todo_due < nowMs) count++
+    return count
+}
+
+/** nothingToRedraw *********************************************************************************************************************************
+ * The tick's question: do both stamps still hold? The notebook map and the tag list are refreshed first, exactly as a render would refresh them -  *
+ * one page each once their 20 s caches have lapsed, which at the default interval is every tick - so a notebook or a tag changed elsewhere moves   *
+ * its generation before the stamps are compared. A read that fails answers "redraw", and the render that follows reports the failure.              *
+ ***************************************************************************************************************************************************/
+async function nothingToRedraw(){
+    if (hasPendingOptimistic()) return false
+    try {
+        await getNotebookMap()
+        await getAllTags()
+    } catch (error) {
+        return false
+    }
+    var now = await redrawStamp()
+    return stampHolds(panelRedrawnFrom, now, panelStampKeys) && stampHolds(overviewsRedrawnFrom, now, overviewStampKeys)
 }
 
 /** setupTimer ***************************************************************************************************************************************
  * Starts, or restarts, the periodic backstop refresh. It is the date-boundary safety net (a to-do rolling from Today to Overdue as time passes, and    *
  * the same in the overview notes), so it runs the full refreshInterfaces - but that already takes the fast paint path, so it never stalls on bodies.    *
+ * Since 2.7 phase 4 it runs it only when there is something to draw, once the note store serves every view (see refreshOnTick).                    *
  ***************************************************************************************************************************************************/
 export async function setupTimer(){
     clearInterval(timer)
@@ -233,8 +445,8 @@ export async function setupTimer(){
     // Only when the user has left the interval at its default is it raised on mobile; an explicitly set
     // value is always honoured. Desktop keeps the 60s default untouched.
     if (mobile && updateFrequency === defaultUpdateFrequency) updateFrequency = defaultMobileUpdateFrequency
-    // The callback returns the promise so the tick is awaitable (harnessable); setInterval ignores it. What the tick cost in data calls is
-    // recorded once all three jobs have settled (logTick in instrument.ts): the number the 2.7 perf run reads as "calls per tick".
+    // The callback returns the promise so the tick is awaitable (harnessable); setInterval ignores it. What the tick cost in data calls, renders
+    // and paints is recorded once its jobs have settled (logTick in instrument.ts): the number the 2.7 perf run reads as "calls per tick".
     timer = setInterval(() => {
         var tickStartedAt = Date.now()
         var tickBefore = snapshot()
@@ -244,15 +456,43 @@ export async function setupTimer(){
             // off it returns before touching anything, so this tick costs exactly what it cost before the feature existed. Guarded on its
             // own, so nothing about the settings note can stop the panel from being repainted.
             pollSettingsNote("tick").catch(error => console.warn("Cockpit: could not poll the settings note", error)),
-            refreshInterfaces(),
-            // The note store's poll (2.7): one events call when nothing changed, and no follow-up - that is for saves, and every save fires
-            // onNoteChange, which arms its own. Not while a sync runs: onSyncComplete catches up once. It guards itself and never rejects.
-            getSyncStatus().syncing ? null : pollOnTick(),
+            // The panel, the overview notes and the note store's poll (see refreshOnTick).
+            refreshOnTick(),
         ]).then(results => {
             logTick(tickBefore, tickStartedAt)
             return results
         })
     }, updateFrequency * 1000);
+}
+
+/** refreshOnTick ***********************************************************************************************************************************
+ * The tick's own work. While any view needs the search (and before the store is ready, or for the whole session when it is off), it is what it has *
+ * always been: the full refreshInterfaces, and beside it the note store's poll (2.7) - one events call when nothing changed, and no follow-up,     *
+ * which is for saves; every save fires onNoteChange, which arms its own. Not while a sync runs: onSyncComplete catches up once. Decided without an *
+ * await when the store cannot serve, so that tick starts its work exactly as it always did.                                                        *
+ *                                                                                                                                                  *
+ * When the store serves every view (phase 4), the poll comes FIRST, and what it brought decides the rest:                                          *
+ *  - it changed the mirror: its notification has just armed the store render, which is taken back here and replaced by ONE full refresh - the tick *
+ *    owes the overview notes that change as well, and the drain is then drawn once, not twice;                                                     *
+ *  - it changed nothing: the full refresh runs only when a redraw stamp no longer holds (nothingToRedraw) - the day turned, a due time passed on   *
+ *    the month calendar, a notebook or a tag changed, a held optimistic entry may have run out, a render since the last tick was provisional or    *
+ *    left rings unread, or an earlier change has not reached the overview notes yet. On an idle minute that is one events call, the notebook map's *
+ *    and the tag list's pages once their caches lapse, and no render at all.                                                                       *
+ * The poll's continuation runs before the store render's zero-delay timer can fire (a resolved promise is a microtask, the timer a task), so the   *
+ * render it armed is always still there to take back.                                                                                              *
+ ***************************************************************************************************************************************************/
+function refreshOnTick(){
+    var syncing = getSyncStatus().syncing
+    if (!storeServes("")) return Promise.all([refreshInterfaces(), syncing ? null : pollOnTick()])
+    return refreshOnStoreTick(syncing)
+}
+
+async function refreshOnStoreTick(syncing){
+    if (!(await allConsumersStoreServed())) return Promise.all([refreshInterfaces(), syncing ? null : pollOnTick()])
+    if (!syncing) await pollOnTick()
+    var drainOwed = dropStoreRender()
+    if (!drainOwed && await nothingToRedraw()) return
+    await refreshInterfaces()
 }
 
 /** setupWorkspaceEvents *****************************************************************************************************************************
@@ -278,6 +518,15 @@ export async function setupWorkspaceEvents(){
         }
         // Cockpit writes the overview notes itself, so refreshing on those changes would loop.
         if (event && (await getOverviewNoteIDs()).includes(event.id)) return
+        // Every view read from the note store (2.7 phase 4): the debounced poll armed above IS the whole of the panel's update - its drain fetches
+        // the note, and the store's notification renders it, rings and all (renderStoreChange). The per-note read and the overlay entry below, and
+        // the reconcile ladder, exist to beat the search index, and no view is waiting on one. The overview notes are rewritten on their debounce,
+        // from the store as well. NOT while a sync runs: no poll was armed above then, the tick does not poll either, and the reconcile ladder's
+        // rungs are what drain the store until the sync completes (catchUpNoteStore) - so a change to the open note mid-sync takes that path.
+        if (!getSyncStatus().syncing && await allConsumersStoreServed()){
+            scheduleOverview()
+            return
+        }
         // Targeted optimistic reconcile for a single external change, so a note created / moved / trashed
         // elsewhere shows or disappears without waiting for the periodic timer. Skipped while a sync runs -
         // sync changes hundreds of notes, which would be hundreds of per-note GETs, and the post-sync
@@ -311,6 +560,14 @@ export async function setupWorkspaceEvents(){
         // A completed sync is when another device's settings note actually arrives, so it is the natural read point - and the drain
         // point for any write of our own the editor gate deferred. A no-op while the feature is off.
         await syncSettingsNote("sync")
+        // Every view read from the note store (2.7 phase 4): no index to let catch up, so no reconcile job. The overview pass is armed as below,
+        // and the poll at the end drains what the sync brought, whose notification renders it once (renderStoreChange). Asked after the settings
+        // note's read, which may just have replaced the profiles - and with them the views.
+        if (await allConsumersStoreServed()){
+            scheduleOverview()
+            await pollNow()
+            return
+        }
         scheduleReconcile()
         // Arm ONE overview pass too. The per-note-change lane armed DURING the sync is not enough on its own:
         // if the sync's last onNoteChange settled more than the overview debounce (10s) before completion, that
@@ -346,3 +603,6 @@ async function registerEvent(eventName, handler){
         console.warn(`Cockpit: could not subscribe to ${eventName}`, error)
     }
 }
+
+/** The inspection handle **************************************************************************************************************************/
+;(globalThis as any).CockpitTriggers = Object.freeze({ allConsumersStoreServed })

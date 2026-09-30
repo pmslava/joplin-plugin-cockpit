@@ -31,6 +31,9 @@ export default defineConfig({
   // (the suite still gets its full 30 minutes once its turn comes); on CI each repo has its own VM,
   // the lock is never contended, and the cap stays exactly where the job's own limit needs it.
   //
+  // Left at 34 for 2.7's twenty-first file (the note store's freshness): one more Joplin launch, one visit to
+  // the Options screen and four short cases, each measured in seconds once the store is ready.
+  //
   // Left at 34 for the twentieth file (the notebook picker dialog): one more Joplin launch and three short
   // cases against a cap a healthy run does not come near - the same call the eighteenth file got.
   //

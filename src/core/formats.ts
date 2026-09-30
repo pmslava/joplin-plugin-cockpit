@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getTodos, getNotes, getExcludedNotebookIdSet, getNotebookMap, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks } from "./joplin";
+import { getTodos, getNotes, getExcludedNotebookIdSet, getNotebookMap, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks, viewCriteria } from "./joplin";
 import { viewKeyFor } from "./optimistic";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
@@ -216,7 +216,8 @@ abstract class BaseFormat {
     protected async fetchTodos(){
         var notebooks = await getNotebookMap()
         var searchFilter = this.viewState ? (this.viewState as any).searchFilter : null
-        var searchCriteria = searchFilter ? `${this.profile.searchCriteria} ${searchFilter}` : this.profile.searchCriteria
+        // The profile's criteria and the typed text, built by the one function the refresh triggers also ask (viewCriteria in joplin.ts).
+        var searchCriteria = viewCriteria(this.profile.searchCriteria, searchFilter)
         var notebookFilter = this.viewState ? (this.viewState as any).notebookFilter : null
         // The notebook filter is also pushed into the query (Joplin's notebook: filter is
         // recursive), so the server does not return the whole vault only for most of it to be
@@ -251,7 +252,8 @@ abstract class BaseFormat {
         // cover (see refreshPanelData), where dropping it would leave the item in neither section. The overview
         // markdown carries no such view state, so it keeps the ordinary drop.
         var keepMistypedRows = this.viewState ? !!(this.viewState as any).keepMistypedRows : false
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows, storeView: storeView })
+        var ringsChangedOnly = this.viewState ? (this.viewState as any).ringsChangedOnly || null : null
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows, storeView: storeView, ringsChangedOnly: ringsChangedOnly })
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -758,7 +760,7 @@ export function itemComparator(sort){
 export async function renderNotesSection(profile, viewState){
     var notebooks = await getNotebookMap()
     var searchFilter = viewState ? viewState.searchFilter : null
-    var searchCriteria = searchFilter ? `${profile.searchCriteria} ${searchFilter}` : profile.searchCriteria
+    var searchCriteria = viewCriteria(profile.searchCriteria, searchFilter)
     // Same server side notebook narrowing as fetchTodos, so showing notes does not pull the vault
     var sectionFilterNotebook = viewState && viewState.notebookFilter ? notebooks.get(viewState.notebookFilter) : null
     // What the note store (2.7) reads this section by, as in fetchTodos: the criteria before the notebook clause, and the notebook as an id set.
@@ -782,7 +784,7 @@ export async function renderNotesSection(profile, viewState){
     var listingNotebooks = viewState && viewState.notebookFilter && !(sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"'))
         ? { key: viewState.notebookFilter, ids: notebookWithDescendants(notebooks, viewState.notebookFilter) }
         : null
-    var fetched = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks, storeView: storeView })
+    var fetched = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks, storeView: storeView, ringsChangedOnly: viewState ? viewState.ringsChangedOnly || null : null })
     var notes = fetched.notes
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)

@@ -169,6 +169,16 @@ function isUnfilteredQuery(criteria){
     return !usesAnyMode(criteria) && !String(criteria || "").trim()
 }
 
+/** viewCriteria ************************************************************************************************************************************
+ * The criteria a view searches by, BEFORE the notebook clause: the profile's own criteria, with the text typed into the panel's search field after *
+ * them. formats.ts builds every view's query from this (the to-dos, the Notes section, the calendar formats, the overview notes, which have no     *
+ * typed text), and the refresh triggers in timer.ts ask storeServes the same question of the same string, so the views and the triggers can never  *
+ * disagree about which views the note store answers.                                                                                               *
+ ***************************************************************************************************************************************************/
+export function viewCriteria(profileCriteria, typedText){
+    return typedText ? `${profileCriteria} ${typedText}` : profileCriteria
+}
+
 /** The note store (2.7): the unfiltered views read the local mirror ********************************************************************************
  * Once the note store (noteStore.ts) is built and exact, a view with nothing for the search engine to do is computed from it with no data call at  *
  * all, and with no index lag: the mirror's is_todo, dates and notebooks are the live ones. "Nothing to do" is isUnfilteredQuery on the view's OWN  *
@@ -191,8 +201,11 @@ function isUnfilteredQuery(criteria){
  *                                                                                                                                                  *
  * Before the store is ready, and for the whole session when it is off, every read takes its 2.6.3 path unchanged. That is deliberate: the first    *
  * paint at 20,000 notes keeps 2.6.3's timing, and the store takes over after its build.                                                            *
+ *                                                                                                                                                  *
+ * Exported since phase 4: the refresh triggers (allConsumersStoreServed in timer.ts) ask this very function about every view, so a trigger never   *
+ * decides a view is store-served while the read itself goes to the search, or the other way round.                                                 *
  ***************************************************************************************************************************************************/
-function storeServes(criteria){
+export function storeServes(criteria){
     return isUnfilteredQuery(criteria) && isStoreAvailable() && isStoreReady()
 }
 
@@ -305,6 +318,9 @@ async function listRecentNotes(limit, keep){
     // fetched before the rest of the (body-fetch-capped) set.
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
+    // The note store's render of a drain (2.7, timer.ts) fills only the changed rings: those read before whose note has changed since, and those of
+    // the notes the drain fetched (the Set this carries), new ones included. A ring never read of a note the drain did not fetch is the tick's.
+    var ringsChangedOnly = opts && opts.ringsChangedOnly ? opts.ringsChangedOnly : null
     // A view that keeps mistyped rows caches a DIFFERENT list under the same query as one that drops them, so
     // the flag belongs in the key - the same reason the any-mode key carries the narrowing it applied.
     var keepMistypedRows = !!(opts && opts.keepMistypedRows)
@@ -328,7 +344,7 @@ async function listRecentNotes(limit, keep){
         if (fillCounts){
             // The fast paint cached these with empty rings; fetch the bodies now (viewport first) and
             // refresh the cache so the follow-up render and any later optimistic paint show real counts.
-            await attachCheckboxCounts(allTodos, false, priorityStart)
+            await attachCheckboxCounts(allTodos, false, priorityStart, ringsChangedOnly)
             cacheResult(todosResultCache, cacheKey, allTodos)
         }
     } else if (fromStore){
@@ -336,7 +352,7 @@ async function listRecentNotes(limit, keep){
         allTodos = readStoreTodos(showCompleted, showNoDue, excluded.set, storeNotebooks)
         // An optimistic repaint lands here whenever the revision moved (every own write moves it), and it must paint before any body is read, as it
         // does on the search path, where it is served from the cache: its rings come from the cache, and the fill or the next full render reads them.
-        await attachCheckboxCounts(allTodos, fast || !!useCache, priorityStart)
+        await attachCheckboxCounts(allTodos, fast || !!useCache, priorityStart, ringsChangedOnly)
         cacheResult(todosResultCache, cacheKey, allTodos)
     } else {
         // An unfiltered view (see isUnfilteredQuery) is answered by the search while the to-do set is small, and by the live
@@ -503,6 +519,8 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     if (listingNotebooks) cacheKey += `|nb${listingNotebooks.key}`
     var fillCounts = !!(opts && opts.fillCounts)
     var priorityStart = (opts && opts.priorityStart) || 0
+    // See getTodos.
+    var ringsChangedOnly = opts && opts.ringsChangedOnly ? opts.ringsChangedOnly : null
     // Keyed by the flag for the reason given in getTodos.
     var keepMistypedRows = !!(opts && opts.keepMistypedRows)
     if (keepMistypedRows) cacheKey += "|keepmistyped"
@@ -521,7 +539,7 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
         allNotes = cloneItems(notesResultCache.get(cacheKey))
         more = !!notesMoreByKey.get(cacheKey)
         if (fillCounts){
-            await attachCheckboxCounts(allNotes, false, priorityStart)
+            await attachCheckboxCounts(allNotes, false, priorityStart, ringsChangedOnly)
             cacheResult(notesResultCache, cacheKey, allNotes)
         }
     } else {
@@ -567,7 +585,7 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
             } while (response.has_more)
         }
         // The store's optimistic repaints fetch no body, for the reason given in getTodos; the other two paths are unchanged.
-        await attachCheckboxCounts(allNotes, fast || (fromStore && !!useCache), priorityStart)
+        await attachCheckboxCounts(allNotes, fast || (fromStore && !!useCache), priorityStart, ringsChangedOnly)
         cacheResult(notesResultCache, cacheKey, allNotes)
         notesMoreByKey.set(cacheKey, more)
         for (var key of Array.from(notesMoreByKey.keys())) if (!notesResultCache.has(key)) notesMoreByKey.delete(key)
@@ -708,6 +726,15 @@ export async function searchExcludedNotebooks(searchText, fast?, useCache?, opts
 var checkboxCounts = new Map()
 const bodyFetchChunk = 20
 const maxBodyFetchesPerRefresh = 300
+// How many stale rings a refresh has left for a later one, over the session: rows past the per-refresh cap, and never-read rings of notes the note
+// store's changed-only fill was not told to read. A render that saw this move left rows with rings it did not read, so the panel is not finished with that view yet: the periodic
+// tick (timer.ts) takes that as a reason to render again, which is how the rest fill in "on following refreshes" once a tick no longer repaints an
+// unchanged panel.
+var deferredRingBodies = 0
+
+export function ringBodiesDeferred(){
+    return deferredRingBodies
+}
 
 /** viewportRank ************************************************************************************************************************************
  * Orders a row for the background body-fetch pass by its distance from the viewport: rows at or below the estimated first-visible row rank first     *
@@ -718,14 +745,18 @@ function viewportRank(idx, start, total){
     return idx >= start ? idx - start : total + (start - idx)
 }
 
-async function attachCheckboxCounts(items, fast?, priorityStart?){
+async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: Set<string>){
     if (!fast){
         // Collect the rows whose body needs (re)fetching, keeping each row's position in the rendered
         // list so the fetch order can be biased toward the viewport.
         var staleEntries = []
         items.forEach((item, idx) => {
             var cached = checkboxCounts.get(item.id)
-            if (!cached || cached.stamp !== item.user_updated_time) staleEntries.push({ item: item, idx: idx })
+            // changedOnly (the note store's render of a drain, 2.7: the Set of ids the drain fetched): a ring never read is left for a later
+            // refresh - counted as deferred, like the rows past the cap - unless the drain fetched its note; a ring read before is read again when
+            // its note has changed since, as always.
+            if (changedOnly && !cached && !changedOnly.has(item.id)) deferredRingBodies++
+            else if (!cached || cached.stamp !== item.user_updated_time) staleEntries.push({ item: item, idx: idx })
         })
         // Viewport-first: when the caller passed the estimated first-visible row (from the host-held
         // scroll position), fetch the rows at/after it before the rows above it, so what the user is
@@ -735,6 +766,7 @@ async function attachCheckboxCounts(items, fast?, priorityStart?){
             staleEntries.sort((first, second) => viewportRank(first.idx, priorityStart, total) - viewportRank(second.idx, priorityStart, total))
         }
         var stale = staleEntries.slice(0, maxBodyFetchesPerRefresh).map(entry => entry.item)
+        deferredRingBodies += staleEntries.length - stale.length
         for (var index = 0; index < stale.length; index += bodyFetchChunk){
             await Promise.all(stale.slice(index, index + bodyFetchChunk).map(async item => {
                 try {
@@ -773,6 +805,25 @@ function countCheckboxes(body){
 var notebookMapCache = { stamp: 0, map: null }
 const notebookMapTTL = 20000
 
+/** The generation of the notebook map and of the tag list (2.7 phase 4) ****************************************************************************
+ * Both feed the panel's markup - the notebook pills, the notebook dropdown and the search field's autocomplete island - and neither leaves a row   *
+ * in the change feed when it changes (phase 1: folders and tags write none). So the periodic tick, which no longer repaints a panel whose inputs   *
+ * have not moved, has to be told when either did. A read that finds exactly what the previous read found leaves its generation alone; any          *
+ * difference - a notebook renamed, moved, created or deleted, a tag created or renamed, even the same set in another order - moves it by one.      *
+ ***************************************************************************************************************************************************/
+var notebookMapSignature = null
+var notebookMapGenerationCount = 0
+var tagListSignature = null
+var tagListGenerationCount = 0
+
+export function notebookMapGeneration(){
+    return notebookMapGenerationCount
+}
+
+export function tagListGeneration(){
+    return tagListGenerationCount
+}
+
 /** invalidateNotebookMap ***************************************************************************************************************************
  * Drops the cached notebook map. Called after the panel itself creates, renames, moves or deletes a notebook, so the change shows immediately       *
  * rather than when the cache expires.                                                                                                              *
@@ -806,6 +857,11 @@ export async function getNotebookMap(){
         notebooks.set(id, { id: id, title: folder.title, path: titles.join(" / "), parentID: folder.parent_id || "" })
     }
     notebookMapCache = { stamp: Date.now(), map: notebooks }
+    var signature = JSON.stringify(Array.from(folders.values()).map(folder => [folder.id, folder.title, folder.parent_id]))
+    if (signature !== notebookMapSignature){
+        notebookMapSignature = signature
+        notebookMapGenerationCount++
+    }
     return notebooks
 }
 
@@ -829,6 +885,7 @@ export async function getAllTags(){
     var tags = []
     let pageNum = 1;
     do {
+        countData('tags')
         var response = await joplin.data.get(['tags'], {
             fields: ['id', 'title'],
             page: pageNum++,
@@ -836,6 +893,11 @@ export async function getAllTags(){
         tags = tags.concat(response.items)
     } while (response.has_more)
     tagsCache = { stamp: Date.now(), list: tags }
+    var signature = JSON.stringify(tags.map(tag => [tag.id, tag.title]))
+    if (signature !== tagListSignature){
+        tagListSignature = signature
+        tagListGenerationCount++
+    }
     return tags
 }
 
