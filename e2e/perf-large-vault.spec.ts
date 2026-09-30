@@ -266,6 +266,21 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
     // Every window and webview Joplin has open, so a renderer in the breakdown can be told apart (a plugin runs in its own window).
     const pages = joplin.browser.contexts().flatMap((ctx) => ctx.pages().map((pg) => pg.url().replace(/^file:\/\/.*\/(?=[^/]+$)/, '')));
     const mainHeapMb = await within(win.evaluate(() => Math.round(((performance as any).memory?.usedJSHeapSize || 0) / 1048576)), 10_000, -1);
+    // What each periodic tick cost in data calls (2.7): Cockpit keeps the record in its own plugin window, on the global CockpitInstrument
+    // (src/core/instrument.ts). Every page is asked, since the plugin window's URL is Joplin's business; the one that answers is Cockpit's.
+    let dataCallsPerTick: unknown = null;
+    if (withPlugin) {
+      for (const pg of joplin.browser.contexts().flatMap((ctx) => ctx.pages())) {
+        const answer = await within(pg.evaluate(() => {
+          const instrument = (globalThis as any).CockpitInstrument;
+          return instrument ? { ticks: instrument.ticks(), totals: instrument.snapshot() } : null;
+        }), 5_000, null);
+        if (answer) {
+          dataCallsPerTick = answer;
+          break;
+        }
+      }
+    }
     const probes = samples.map((s) => s.probeMs);
     const report = {
       withPlugin,
@@ -291,6 +306,7 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
       rssEndMb: samples.length ? samples[samples.length - 1].rssMb : 0,
       maxDomNodes: Math.max(0, ...samples.map((s) => s.domNodes)),
       mainHeapMb,
+      dataCallsPerTick,
       processes,
       pages,
       samples,

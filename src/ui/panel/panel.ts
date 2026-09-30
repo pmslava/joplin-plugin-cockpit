@@ -10,7 +10,8 @@ import { clearOptimisticItem, clearTodoCompletionOverride, finalizeOverlay, hasP
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
 import { logRefresh, snapshot } from "../../core/instrument";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
-import { refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
+import { catchUpNoteStore, refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
+import { applyLocalCreate, applyLocalRemoval, applyLocalWrite, isReady as isStoreReady, pollNow } from "../../core/noteStore";
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
@@ -555,6 +556,9 @@ async function eventHandler(message){
         // mutates no note). refreshPanelData's generation guard discards it if a newer refresh supersedes it,
         // and its equality guard makes it a no-op paint when the cached view was already the truth. This also
         // narrows the window in which a stale cross-view optimistic entry could be observed after a switch.
+        // On a store-served view (2.7) "external edits" means what the store has not heard of yet - a REST or another plugin's write fires no
+        // onNoteChange - so the store drains once first (one events call; see catchUpNoteStore in timer.ts).
+        await catchUpNoteStore()
         await refreshPanelData()
     } else if (message[0] == 'notebookFilterChanged'){
         // The dropdown and cockpit.filterByNotebook share ONE state write (see setNotebookFilter), so the
@@ -1102,6 +1106,8 @@ export async function setNotebookFilter(folderID){
     // list. Falling back to "all notebooks" is the honest answer there: it is what the panel is about to show.
     notebookFilter = await resolveCreatableNotebookID(String(folderID || ""))
     lastScrollTop = 0
+    // A notebook view read from the note store (2.7) shows outside writes the store has not drained yet only after this one drain.
+    await catchUpNoteStore()
     await refreshPanelData()
 }
 
@@ -1664,6 +1670,9 @@ async function createItem(isTodo){
 async function createItemInFolder(isTodo, folderID){
     if (!folderID) return
     var newItem = await joplin.data.post(['notes'], null, { parent_id: folderID, is_todo: isTodo ? 1 : 0, title: "" })
+    // The note store (2.7) takes the saved note from the answer at once, like every write the panel makes through joplin.data (see the
+    // "Cockpit's own writes" banner in joplin.ts): the feed's row lands after the save returns, and the follow-up poll this arms brings it.
+    applyLocalCreate(newItem)
     await openTodo(newItem.id)
     // Honour Joplin's own "When creating a new note/to-do" setting (title vs body). A data-API note is not
     // provisional, so the app's own auto-focus never fires for it; this applies the same choice. Desktop-only
@@ -1687,7 +1696,10 @@ async function createItemInFolder(isTodo, folderID){
 async function applyNotebookPicked(purpose, folderId, extra){
     if (purpose === 'moveNotes'){
         var moveIDs = Array.isArray(extra) ? extra : []
-        for (var id of moveIDs) await joplin.data.put(['notes', id], null, { parent_id: folderId })
+        for (var id of moveIDs){
+            await joplin.data.put(['notes', id], null, { parent_id: folderId })
+            applyLocalWrite(id, { parent_id: folderId })
+        }
         await refreshInterfaces()
         scheduleReconcile()
         scheduleOverview()
@@ -1736,6 +1748,8 @@ async function runNotebookAction(action, folderID){
         if (answer === 0){
             await joplin.data.delete(['folders', folderID])
             if (notebookFilter === folderID) notebookFilter = ""
+            // Joplin trashed the notebook's notes itself, so the note store (2.7) hears of them only through the feed (see pollStoreAfterAppWrite).
+            await pollStoreAfterAppWrite()
         }
     }
     await refreshInterfaces()
@@ -1905,7 +1919,10 @@ async function tryAppCommandWithFallback(commandName, args, fallback){
 async function moveNotesFallback(noteIDs){
     var target = await pickNotebook("Move to notebook")
     if (target === null) return                              // cancelled
-    for (var id of noteIDs) await joplin.data.put(['notes', id], null, { parent_id: target })
+    for (var id of noteIDs){
+        await joplin.data.put(['notes', id], null, { parent_id: target })
+        applyLocalWrite(id, { parent_id: target })               // the note store (2.7), as createItemInFolder explains
+    }
 }
 
 /** duplicateNoteFallback ***************************************************************************************************************************
@@ -1916,12 +1933,13 @@ async function moveNotesFallback(noteIDs){
 async function duplicateNoteFallback(noteID){
     var note = await joplin.data.get(['notes', noteID], { fields:
         ['title', 'body', 'parent_id', 'is_todo', 'todo_due', 'markup_language', 'source_url', 'author', 'latitude', 'longitude', 'altitude'] })
-    await joplin.data.post(['notes'], null, {
+    var duplicate = await joplin.data.post(['notes'], null, {
         title: note.title, body: note.body, parent_id: note.parent_id,
         is_todo: note.is_todo, todo_due: note.todo_due, todo_completed: 0,
         markup_language: note.markup_language, source_url: note.source_url, author: note.author,
         latitude: note.latitude, longitude: note.longitude, altitude: note.altitude,
     })
+    applyLocalCreate(duplicate)                                  // the note store (2.7), as createItemInFolder explains
 }
 
 /** setTagsFallback *********************************************************************************************************************************
@@ -2044,6 +2062,33 @@ async function copyToClipboard(text){
     }
 }
 
+/** pollStoreAfterAppWrite **************************************************************************************************************************
+ * After a write Joplin itself made for the panel - a command (duplicateNote) or a notebook moved to the trash with its notes - the note store      *
+ * (2.7) hears of it only through the feed, and the repaint that follows would still draw the old rows. So the store is polled first, as a trigger: *
+ * the drain now, and the follow-up half a second later, whose notification repaints if the feed's row (written after the save returns) was not     *
+ * there yet. Only a ready store is polled: otherwise the views read live anyway, and the poll would be a whole build the repaint would wait for.   *
+ ***************************************************************************************************************************************************/
+async function pollStoreAfterAppWrite(){
+    if (isStoreReady()) await pollNow()
+}
+
+/** removeFromStoreIfTrashed ************************************************************************************************************************
+ * The same for the desktop's own Delete, the deleteNote command: the note is read back and taken out of the note store (2.7) at once, but only     *
+ * when the read says it IS gone - trashed (deleted_time set), or Not Found after a permanent delete. A command can also end without deleting (a    *
+ * dialog the user cancelled), and an unverified removal would hide a live note until the next rebuild. Only while the store is ready, for the      *
+ * reason given above; while it is building, the replay sees the trash itself. Never throws, so the caller's fallback cannot mistake a failed read  *
+ * for a failed delete.                                                                                                                             *
+ ***************************************************************************************************************************************************/
+async function removeFromStoreIfTrashed(noteID){
+    if (!isStoreReady()) return
+    try {
+        var note = await joplin.data.get(['notes', noteID], { fields: ['id', 'deleted_time'] })
+        if (note && Number(note.deleted_time) > 0) applyLocalRemoval(noteID)
+    } catch (error) {
+        if (String((error && error.message) || error).indexOf("Not Found") >= 0) applyLocalRemoval(noteID)
+    }
+}
+
 /** runNoteMenuAction *******************************************************************************************************************************
  * Applies an action from the panel's context menu to the given note. Actions with no matching command on all platforms are done through the data    *
  * API instead.                                                                                                                                     *
@@ -2062,6 +2107,9 @@ async function runNoteMenuAction(action, noteID){
         var note = await joplin.data.get(['notes', noteID], { fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'] })
         var flipped = note.is_todo ? 0 : 1
         await joplin.data.put(['notes', noteID], null, { is_todo: flipped })
+        // The note store (2.7) moves the item to its new section at once, as createItemInFolder explains: a store-served view shows the flip
+        // on the very next render, with no index to wait for.
+        applyLocalWrite(noteID, { is_todo: flipped })
         flipCaptured = await applyTypeFlipOptimistically({ ...note, id: noteID, is_todo: flipped })
     } else if (action == 'tags'){
         // Desktop opens its native tag-autocomplete dialog; mobile (no such command) falls back to a
@@ -2071,6 +2119,7 @@ async function runNoteMenuAction(action, noteID){
         await tryAppCommandWithFallback('moveToFolder', [noteID], () => moveNotesFallback([noteID]))
     } else if (action == 'duplicate'){
         await tryAppCommandWithFallback('duplicateNote', [noteID], () => duplicateNoteFallback(noteID))
+        await pollStoreAfterAppWrite()
     } else if (action == 'copyMarkdownLink'){
         var linkNote = await joplin.data.get(['notes', noteID], { fields: ['title'] })
         await copyToClipboard(markdownNoteLink(linkNote.title, noteID))
@@ -2081,9 +2130,11 @@ async function runNoteMenuAction(action, noteID){
     } else if (action == 'delete'){
         try {
             await joplin.commands.execute('deleteNote', [noteID])
+            await removeFromStoreIfTrashed(noteID)
         } catch (error) {
             // The command is desktop only; the data API delete moves the note to the trash
             await joplin.data.delete(['notes', noteID])
+            applyLocalRemoval(noteID)                            // the note store (2.7), as createItemInFolder explains
         }
     } else {
         return
@@ -2125,6 +2176,7 @@ async function runNoteMenuActionMulti(action, ids){
             var toggleNote = await joplin.data.get(['notes', toggleID], { fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'] })
             var toggleFlipped = toggleNote.is_todo ? 0 : 1
             await joplin.data.put(['notes', toggleID], null, { is_todo: toggleFlipped })
+            applyLocalWrite(toggleID, { is_todo: toggleFlipped })   // the note store (2.7), as createItemInFolder explains
             // Overlay only - the single paint happens after the loop, so a batch still repaints once, not N times.
             if (await applyTypeFlipOptimistically({ ...toggleNote, id: toggleID, is_todo: toggleFlipped })) flipsCaptured++
         }
@@ -2138,6 +2190,7 @@ async function runNoteMenuActionMulti(action, ids){
     } else if (action == 'duplicate'){
         // duplicateNote natively takes an id array and appends " - Copy" to each title.
         await runAppCommand('duplicateNote', ids)
+        await pollStoreAfterAppWrite()
     } else if (action == 'copyMarkdownLink'){
         var links = []
         for (var linkID of ids){
@@ -2150,8 +2203,11 @@ async function runNoteMenuActionMulti(action, ids){
         await copyToClipboard(ids.join("\n"))
         return
     } else if (action == 'delete'){
-        // Batch delete to the trash (reversible), a DELETE per note.
-        for (var deleteID of ids) await joplin.data.delete(['notes', deleteID])
+        // Batch delete to the trash (reversible), a DELETE per note, each one taken out of the note store (2.7) at once.
+        for (var deleteID of ids){
+            await joplin.data.delete(['notes', deleteID])
+            applyLocalRemoval(deleteID)
+        }
     } else {
         return
     }

@@ -1,8 +1,9 @@
 /** README ******************************************************************************************************************************************
  * THE NOTE STORE (2.7) - a local mirror of every note's metadata, built once from the GET /notes listing and kept exact by Joplin's change feed,   *
  * joplin.data.get(['events'], { cursor }). This file is the driver: when to build, when to poll, what to call and what to do when a call fails.    *
- * What the mirror holds, and how a feed row or a fetched note changes it, is the pure model in noteStoreModel.js. Nothing reads the store yet      *
- * (phase 3 switches the unfiltered read paths over); this phase builds it, keeps it exact, and proves both in the harness.                         *
+ * What the mirror holds, and how a feed row or a fetched note changes it, is the pure model in noteStoreModel.js. Since phase 3 the unfiltered     *
+ * views read it (getTodos and getNotes in joplin.ts, once isReady() says so); until then they take the 2.6.3 paths, which is also what they do     *
+ * for the whole session when the store is off.                                                                                                     *
  *                                                                                                                                                  *
  * THE BUILD runs AFTER the first paint, from a timeout index.ts arms once refreshInterfaces has painted, and is never awaited: on a 20,000-note    *
  * collection the walk is 201 pages (the route answers has_more whenever a page is full, so an exact multiple of 100 costs one more, empty page),   *
@@ -35,15 +36,18 @@
  * rebuilds it, retaking the cursor. A build that fails is retried on the next trigger - at most one build per trigger; the follow-up poll never    *
  * builds - and after three failed builds in a row the store is off for the session, with one warning. A build whose walk may have missed a note is *
  * not trusted either (see drainFeed): it ends not ready, which is not a failure, and the next trigger walks again.                                 *
+ * Cockpit's own trash counts as such a note (see applyLocalRemoval): it hides the evidence the replay would otherwise have found.                  *
  *                                                                                                                                                  *
- * FOR PHASE 3 the surface is isAvailable, isReady, getModel, pollNow, applyLocalWrite and subscribe (pollOnTick is the tick's own). The same six   *
- * functions are also put on the plugin's global, in a frozen object called CockpitNoteStore, the way the pure modules publish themselves, so the   *
- * harness (and a DevTools console in the plugin's window) can inspect the mirror without a command or a menu entry.                                *
+ * THE READERS' SURFACE is isAvailable, isReady, getModel, pollNow, applyLocalWrite and subscribe (pollOnTick is the tick's own); phase 3 added     *
+ * applyLocalCreate and applyLocalRemoval for the panel's own creates and trashes, and catchUp for the renders that must show outside writes (see   *
+ * catchUpNoteStore in timer.ts). The first six functions are also put on the plugin's global, in a frozen object called CockpitNoteStore, the way  *
+ * the pure modules publish themselves, so the harness (and a DevTools console in the plugin's window) can inspect the mirror without a command or  *
+ * a menu entry.                                                                                                                                    *
  ***************************************************************************************************************************************************/
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { listingFields } from "./joplin";
+import { invalidateResultCaches, listingFields } from "./joplin";
 import { countData } from "./instrument";
 const { createNoteStoreModel } = require("./noteStoreModel");
 
@@ -59,6 +63,11 @@ const noteChangeDelayMs = 250
 const rebuildThreshold = 200
 // How many builds may fail in a row before the store is switched off for the session.
 const maxFailedBuilds = 3
+// A pause between two pages of the build's walk, in ms. Every page is a full scan and sort of the notes table in Joplin's MAIN window (10 to 32 ms a
+// page at 21,000 notes, 211 pages), and the walk runs while the user is working. The pages are separate calls, so the window can react between two of
+// them - but whether back-to-back pages still show as lag is for the perf run to say (docs/BRIEF-2.7-local-mirror.md, section 7). If they do, this is
+// the one place to spread the walk out; 0 (the default) adds no pause and no timer at all, so the build is exactly what phase 2 shipped.
+const walkPagePauseMs = 0
 
 /** State ******************************************************************************************************************************************/
 var model = createNoteStoreModel()
@@ -80,9 +89,14 @@ var rerunMayBuild = false
 var followUpTimer = null
 var noteChangeTimer = null
 var listeners = []
+// A build is in flight from its first call until it has decided whether it is ready. A trash Cockpit applies in that window marks the build as one
+// that may have missed a note (see applyLocalRemoval), and the build then ends not ready.
+var building = false
+var buildLostNote = false
 
 // The listing's own fields plus is_conflict, which a fetch by id needs (GET /notes/:id returns conflict copies; the listing does not). Read at
-// call time rather than at load: joplin.ts imports this module for its write helpers, so its exports are not filled in yet when this one loads.
+// call time rather than at load: joplin.ts imports this module for its write helpers and its store reads, so its exports are not filled in yet
+// when this one loads.
 function storeFields(){
     return listingFields.concat(['is_conflict'])
 }
@@ -100,7 +114,7 @@ export function scheduleNoteStoreBuild(){
 
 /** pollNow *****************************************************************************************************************************************
  * A triggered poll: drains the feed now (or builds, if the store is not ready) and arms the follow-up. onSyncComplete and the note-change debounce *
- * call it; so will phase 3. Never rejects - every failure is handled inside - so a caller never needs its own guard.                               *
+ * call it. Never rejects - every failure is handled inside - so a caller never needs its own guard.                                                *
  ***************************************************************************************************************************************************/
 export function pollNow(){
     if (!started || !available) return Promise.resolve()
@@ -140,7 +154,57 @@ export function applyLocalWrite(id, fields){
     armFollowUp()
 }
 
-/** The phase 3 surface ****************************************************************************************************************************/
+/** applyLocalCreate ********************************************************************************************************************************
+ * Cockpit created this note (a POST from the panel). The answer is the saved note, so it goes into the mirror now - as the fetch by id the feed's  *
+ * row would lead to - and the follow-up poll brings that row as an ordinary, usually unchanged, upsert. An answer without an id changes nothing.   *
+ ***************************************************************************************************************************************************/
+export function applyLocalCreate(note){
+    if (!started || !available) return
+    if (note && note.id) model.applyFetched(note, note.id)
+    armFollowUp()
+}
+
+/** applyLocalRemoval *******************************************************************************************************************************
+ * Cockpit moved this note to the trash (a DELETE from the panel). The trash IS a write of deleted_time, and the model already treats a write that  *
+ * trashes a note as its removal, from a build's staging map too.                                                                                   *
+ *                                                                                                                                                  *
+ * A removal while a build is in flight also makes that build untrusted, for the reason drainFeed gives: the listing is paged by offset, so a note  *
+ * leaving it after its page was read shifts every later page left by one, and the walk may step over the note at the next page boundary. The       *
+ * replay would normally see it - it would remove a note the walk had read - but the removal applied here has taken that note out already, so the   *
+ * replay finds nothing to remove and would trust the walk. So the build is marked here instead. Any removal in the window counts, including one    *
+ * that lands during the replay: the DELETE may have reached the database while the walk ran even though its answer came back after it, and a       *
+ * needless walk on the next trigger is the cheap side to be wrong on.                                                                              *
+ ***************************************************************************************************************************************************/
+export function applyLocalRemoval(id){
+    if (!started || !available) return
+    if (building) buildLostNote = true
+    model.applyLocalWrite(id, { deleted_time: Date.now() })
+    armFollowUp()
+}
+
+/** catchUp *****************************************************************************************************************************************
+ * The drain run before a render that must show what outside writers did: each of the reconcile lane's renders, and panel.ts's truth renders (the   *
+ * profile switch's truth refresh, a notebook-filter change), through catchUpNoteStore in timer.ts. A store-served view has no index to wait for,   *
+ * but it does have to learn about a change nothing else announces - an app command such as moveToFolder, whose dialog lands its write seconds      *
+ * after the command returned, or a write from outside (REST, another plugin) that Joplin's onNoteChange stays silent about (it fires for the       *
+ * SELECTED note only).                                                                                                                             *
+ *                                                                                                                                                  *
+ * ONE drain and no follow-up. It never STARTS a build: a store that is not ready stays with the 2.6.3 paths until a real trigger walks. A ready    *
+ * store whose drain passes the rebuild threshold does rebuild inside it, though, like any poll, and the render that awaits it then waits for that  *
+ * walk.                                                                                                                                            *
+ *                                                                                                                                                  *
+ * Only a drain that starts now is awaited, so the render after it reads what it brought. A run already in progress - a build of 200 pages, say -   *
+ * is not waited for: the drain is queued behind it, and the store's notification at the end of that burst renders whatever it brings. Never        *
+ * rejects.                                                                                                                                         *
+ ***************************************************************************************************************************************************/
+export function catchUp(){
+    if (!started || !available) return Promise.resolve()
+    var inProgress = !!running
+    var run = requestRun(false)
+    return inProgress ? Promise.resolve() : run
+}
+
+/** The readers' surface ***************************************************************************************************************************/
 // Not known to be missing: true until the guard or the failed builds say otherwise.
 export function isAvailable(){
     return available
@@ -155,7 +219,8 @@ export function getModel(){
     return model
 }
 
-// Called after every run that changed the mirror's revision (phase 3 schedules a render from it). Returns the unsubscribe function.
+// Called once a burst of runs (one run and the reruns asked for while it lasted) has changed the mirror's revision; timer.ts schedules a render from
+// it. A burst that changed nothing calls nobody. Returns the unsubscribe function.
 export function subscribe(listener){
     listeners.push(listener)
     return () => { listeners = listeners.filter(entry => entry !== listener) }
@@ -190,6 +255,9 @@ function requestRun(mayBuild){
 }
 
 async function pump(mayBuild){
+    // The listeners hear about the burst, not about each run in it: a poll asked for while one runs is folded into this pump, and so is its news,
+    // so a burst of drains is one notification and, in timer.ts, one render.
+    var revisionBefore = model.revision
     try {
         await runOnce(mayBuild)
         while (rerunRequested && available){
@@ -200,20 +268,19 @@ async function pump(mayBuild){
         }
     } catch (error) {
         // Every call is guarded where it is made; this only catches a bug, and a bug must not leave the mirror trusted.
-        ready = false
+        setReady(false)
         console.warn("Cockpit: the note store stopped on an unexpected error", error)
     } finally {
         running = null
         rerunRequested = false
         rerunMayBuild = false
     }
+    if (model.revision !== revisionBefore) notifyListeners()
 }
 
 async function runOnce(mayBuild){
-    var revisionBefore = model.revision
     if (ready) await poll()
     else if (mayBuild) await build()
-    if (model.revision !== revisionBefore) notifyListeners()
 }
 
 function notifyListeners(){
@@ -236,6 +303,16 @@ function feedCursor(answer){
  * The full build: the cursor, the walk, the replay. The first call of the session is the availability guard.                                       *
  ***************************************************************************************************************************************************/
 async function build(){
+    building = true
+    buildLostNote = false
+    try {
+        await walk()
+    } finally {
+        building = false
+    }
+}
+
+async function walk(){
     var head
     try {
         countData('events')
@@ -256,6 +333,7 @@ async function build(){
         var pageNum = 1
         var response
         do {
+            if (pageNum > 1 && walkPagePauseMs > 0) await new Promise(resolve => setTimeout(resolve, walkPagePauseMs))
             countData('listing')
             response = await joplin.data.get(['notes'], { fields: storeFields(), order_by: 'id', limit: 100, page: pageNum++ })
             model.addListingPage(response.items)
@@ -264,22 +342,33 @@ async function build(){
         cursor = walkCursor
         var complete = await drainFeed(false)
         failedBuilds = 0
-        ready = complete
+        // A trash Cockpit applied while this build ran may have hidden a note the walk stepped over (see applyLocalRemoval).
+        setReady(complete && !buildLostNote)
     } catch (error) {
         model.abandonBuild()
         buildFailed(error)
     }
 }
 
+/** setReady ****************************************************************************************************************************************
+ * Every change of readiness goes through here. When it DROPS - a failed poll, a failed or untrusted build, the store switched off - the views go   *
+ * back to their 2.6.3 paths, whose result-cache entries are as old as the moment the store took over. An optimistic or fill render would serve     *
+ * them again as if nothing had happened since, so every cached result is dropped with the readiness (invalidateResultCaches in joplin.ts).         *
+ ***************************************************************************************************************************************************/
+function setReady(value){
+    if (ready && !value) invalidateResultCaches()
+    ready = value
+}
+
 function buildFailed(error){
-    ready = false
+    setReady(false)
     failedBuilds++
     if (failedBuilds >= maxFailedBuilds) markUnavailable("Cockpit: the note store could not be built three times in a row, so it is off for this session", error)
 }
 
 function markUnavailable(message, error){
+    setReady(false)
     available = false
-    ready = false
     console.warn(message, error)
 }
 
@@ -290,7 +379,7 @@ async function poll(){
     try {
         await drainFeed(true)
     } catch (error) {
-        ready = false
+        setReady(false)
     }
 }
 

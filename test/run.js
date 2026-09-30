@@ -10943,6 +10943,740 @@ async function main() {
         assert.ok(chains.every(chain => chain.replace(/\s+/g, '') === 'joplin.data.get('), `every one is joplin.data.get( - found ${chains.join(', ')}`)
     })
 
+    // ============================================================ note store reads (2.7 phase 3): the unfiltered views read the mirror
+    // Once the store is ready, a view with no profile criteria, nothing typed and no any:1 is computed from the mirror (readStoreTodos / readStoreNotes
+    // in src/core/joplin.ts) with no search, no listing and no per-id read; a view that needs the search engine keeps it, byte for byte. A change the
+    // store hears of renders through timer.ts's note store lane (one fast render per burst, a captured timeout of STORE_RENDER_DELAY), the reconcile
+    // lane drains the store before its render, and the panel's own writes (panel.ts) tell the store at once. Each fixture set serves the search
+    // (todos / searchNotes) and the store (the note map, listingFromNotes) from the same notes, so the two paths can be held against each other.
+    const STORE_RENDER_DELAY = 0
+    const readSub = 'e'.repeat(31) + '2'
+    const readArchive = 'e'.repeat(31) + '3'
+    const readQuoted = 'e'.repeat(31) + '4'
+    const readFolders = [
+        { id: storeFolder, title: 'Store', parent_id: '' },
+        { id: readSub, title: 'Sub', parent_id: storeFolder },
+        { id: readArchive, title: 'Archive', parent_id: '' },
+        { id: readQuoted, title: 'Say "hi"', parent_id: '' },
+    ]
+    const HOUR = 3600000
+    const DAY = 24 * HOUR
+    const readTodo = (n, extra) => storeNote(n, Object.assign({ is_todo: 1, title: `Read todo ${n}`, todo_due: Date.now() + 2 * DAY + n * HOUR }, extra || {}))
+    const readNote = (n, extra) => storeNote(n, Object.assign({ title: `Read note ${n}` }, extra || {}))
+    const readProfileData = (profiles) => JSON.stringify({ nextID: profiles.length + 1, profiles: profiles.map((profile, index) =>
+        ({ ...baseProfile, showNotes: true, id: index + 1, sortOrder: index, noteID: '', ...profile })) })
+    // The search's fixtures are COPIES taken at the start: they are the index, and a check that changes a note afterwards is changing what only the
+    // mirror (and the listing) can see, exactly as the index lags a real change.
+    const readRun = async (items, extra) => await storeRun(items, Object.assign({
+        todos: items.filter(item => item.is_todo).map(item => ({ ...item })),
+        searchNotes: items.filter(item => !item.is_todo).map(item => ({ ...item })),
+        folders: readFolders,
+    }, extra || {}))
+    // Every data call a refresh could make of the notes themselves: the search, the listing, a read by id, the change feed. The ring fill's
+    // body-only reads and the notebook map's folder pages are left out - neither is what the store replaces.
+    const isBodyRead = (g) => g.path[0] === 'notes' && g.path.length === 2 && g.query && Array.isArray(g.query.fields) && g.query.fields.length === 1 && g.query.fields[0] === 'body'
+    const noteCallsSince = (state, mark) => state.gets.slice(mark).filter(g => g.path[0] === 'search' || g.path[0] === 'events' || (g.path[0] === 'notes' && !isBodyRead(g)))
+    const searchesSince = (state, mark) => state.gets.slice(mark).filter(g => g.path[0] === 'search')
+    // A truth render (the profile switch's truth refresh, a notebook-filter change) drains the store once first: one events call, which finds
+    // nothing on a quiet store, so what such a render costs is exactly that many events calls and nothing else.
+    const drainsOnly = (count) => Array.from({ length: count }, () => 'events')
+    const countedSince = (state, before) => {
+        const now = state.instrument.snapshot()
+        return Object.fromEntries(Object.keys(now).map(key => [key, now[key] - before[key]]))
+    }
+    // The panel as a list of tokens, in order: "# heading" for every section heading, "todo <id>" / "note <id>" for every row.
+    const readSections = (state) => {
+        const html = String(state.panelHtml['panel-panel'] || '')
+        const tokens = []
+        const pattern = /<h2[^>]*>([^<]*)<\/h2>|data-(todo|note)-id="([^"]+)"/g
+        let match
+        while ((match = pattern.exec(html))) tokens.push(match[1] !== undefined ? `# ${match[1]}` : `${match[2]} ${match[3]}`)
+        return tokens
+    }
+    const pendingStoreRenders = (state) => state.pendingTimeouts(STORE_RENDER_DELAY)
+    const fireStoreRender = async (state) => {
+        const pending = pendingStoreRenders(state)
+        assert.strictEqual(pending.length, 1, `one store render is armed (found ${pending.length})`)
+        await state.fireTimeout(pending[0])
+    }
+    const buildAndRender = async (state) => {
+        await buildStore(state)
+        await fireStoreRender(state)
+    }
+    // Counts the reads of the mirror itself, so a check can tell a result served from the cache from one computed afresh.
+    const spyStoreReads = (state) => {
+        const model = storeModel(state)
+        const reads = { todos: 0, notes: 0 }
+        const todosOf = model.todos, notesOf = model.notes
+        model.todos = () => { reads.todos++; return todosOf() }
+        model.notes = () => { reads.notes++; return notesOf() }
+        return reads
+    }
+    const readMix = () => { const sameDue = Date.now() + 5 * DAY; return [
+        readTodo(1, { todo_due: Date.now() - 2 * DAY }),                                   // overdue
+        readTodo(2),
+        readTodo(3, { todo_due: Date.now() + 9 * DAY }),
+        readTodo(4, { todo_due: 0, title: 'Undated beta' }),
+        readTodo(5, { todo_due: 0, title: 'Undated alpha' }),
+        readTodo(6, { todo_completed: Date.now() - DAY, todo_due: Date.now() - DAY }),       // completed, past
+        readTodo(7, { todo_due: sameDue, title: 'Same day beta' }),
+        readTodo(8, { todo_due: sameDue, title: 'Same day alpha' }),                        // the same due as 7: title decides
+        readTodo(9, { parent_id: readSub }),
+        readNote(20, { user_updated_time: 9000 }), readNote(21, { user_updated_time: 9500 }), readNote(22, { user_updated_time: 8000, parent_id: readSub }),
+        readNote(23, { user_updated_time: 7000, title: 'Zulu' }), readNote(24, { user_updated_time: 7100, title: 'alpha' }),
+    ] }
+
+    await test('note store reads: with the store ready an unfiltered refresh makes no search, no listing and no read by id, and draws exactly what the search path drew', async () => {
+        const state = await readRun(readMix())
+        const searchPath = readSections(state)
+        let mark = state.gets.length
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.ok(searchesSince(state, mark).length > 0, 'precondition: before the store is ready the to-dos come from the search')
+        const searchPathDesc = readSections(state)
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.deepStrictEqual(readSections(state), searchPath, 'precondition: back where it started')
+        await buildAndRender(state)
+        mark = state.gets.length
+        const counted = state.instrument.snapshot()
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        const storeDesc = readSections(state)
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        const storePath = readSections(state)
+        assert.deepStrictEqual(noteCallsSince(state, mark), [], 'two full refreshes read nothing but the mirror')
+        const delta = countedSince(state, counted)
+        assert.deepStrictEqual([delta.search, delta.listing, delta.get, delta.events], [0, 0, 0, 0], 'and the instrument counters agree')
+        assert.deepStrictEqual(storePath, searchPath, 'the same sections, rows and order as the search path, ascending')
+        assert.deepStrictEqual(storeDesc, searchPathDesc, 'and descending')
+        assert.ok(searchPath.includes('# Notes') && searchPath.includes(`todo ${storeId(6)}`) && searchPath.includes(`note ${storeId(22)}`),
+            'the comparison covers both sections, a completed to-do and a sub-notebook note')
+        assert.ok(searchPath.indexOf(`todo ${storeId(8)}`) < searchPath.indexOf(`todo ${storeId(7)}`), 'a shared due date is ordered by title')
+    })
+
+    await test('note store reads: the Notes cap - 1,001 notes draw 1,000 with the footer, "show more" draws the rest from the mirror and drops it; 1,000 and 999 draw no footer', async () => {
+        const capped = await readRun(Array.from({ length: 1001 }, (_, i) => readNote(i + 1)))
+        await buildAndRender(capped)
+        let mark = capped.gets.length
+        await capped.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(noteRows(capped), 1000, 'the cap holds on the store path')
+        assert.ok(capped.panelHtml['panel-panel'].includes('Showing the 1000 most recently updated notes'), 'with the footer')
+        assert.ok(!capped.panelHtml['panel-panel'].includes('>Read note 1<'), 'the oldest note is the one left out')
+        await capped.panelMessageHandler(['showMoreNotes'])
+        assert.strictEqual(noteRows(capped), 1001, '"show more" brings the last one')
+        assert.ok(!capped.panelHtml['panel-panel'].includes('notes-more-message'), 'and the footer goes')
+        assert.deepStrictEqual(noteCallsSince(capped, mark), [], 'neither the capped read nor the next batch made a data call')
+        for (const count of [1000, 999]){
+            const under = await readRun(Array.from({ length: count }, (_, i) => readNote(i + 1)))
+            await buildAndRender(under)
+            mark = under.gets.length
+            await under.panelMessageHandler(['sortDirectionClicked'])
+            assert.deepStrictEqual(noteCallsSince(under, mark), [], 'precondition: store-served')
+            assert.strictEqual(noteRows(under), count)
+            assert.ok(!under.panelHtml['panel-panel'].includes('notes-more-message'), `${count} notes draw no footer: nothing was left out`)
+        }
+    })
+
+    await test('note store reads: the cap counts only what the view shows - excluded notes and other notebooks\' notes are narrowed out before it', async () => {
+        // 150 excluded notes are the newest of all, and 1,050 notes in Store are all newer than the five in the quoted notebook: a cap counted before
+        // either narrowing would spend itself on notes that are never drawn.
+        const items = Array.from({ length: 1050 }, (_, i) => readNote(i + 1, { user_updated_time: 2000 + i }))
+            .concat(Array.from({ length: 150 }, (_, i) => readNote(2001 + i, { user_updated_time: 9000 + i, parent_id: readArchive })))
+            .concat(Array.from({ length: 5 }, (_, i) => readNote(3001 + i, { user_updated_time: 100 + i, parent_id: readQuoted })))
+        const state = await readRun(items, {
+            initialSettings: { profileData: readProfileData([{ name: 'All' }]), currentProfileID: 1, excludedNotebookIds: readArchive },
+        })
+        await buildAndRender(state)
+        const mark = state.gets.length
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(noteRows(state), 1000, 'a full cap of drawn notes: the 150 excluded ones did not use any of it')
+        assert.ok(!state.panelHtml['panel-panel'].includes(storeId(2001)), 'and none of them is drawn')
+        await state.panelMessageHandler(['notebookFilterChanged', readQuoted])
+        assert.strictEqual(noteRows(state), 5, 'the quoted notebook\'s five notes, though 1,050 newer ones live elsewhere')
+        assert.ok(!state.panelHtml['panel-panel'].includes('notes-more-message'), 'and nothing of it was left out')
+        assert.deepStrictEqual(noteCallsSince(state, mark).map(g => g.path[0]), drainsOnly(1), 'all of it from the mirror: the filter change\'s one drain is the only call')
+    })
+
+    await test('note store reads: the Notes cap keeps what the listing keeps - newest first, and on a tie of user_updated_time the larger id', async () => {
+        const tieLow = 'e'.repeat(24) + 'a0000001'
+        const tieHigh = 'e'.repeat(24) + 'a0000002'
+        const recent = Array.from({ length: 999 }, (_, i) => readNote(i + 1, { user_updated_time: 5000 + i }))
+        // Listed in the fixtures with the smaller id LAST, so neither the fixture order nor the search stub can be what decides.
+        const state = await readRun(recent.concat([
+            storeNote(0, { id: tieHigh, title: 'Tie high', user_updated_time: 1000 }),
+            storeNote(0, { id: tieLow, title: 'Tie low', user_updated_time: 1000 }),
+        ]))
+        await buildAndRender(state)
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        const html = state.panelHtml['panel-panel']
+        assert.strictEqual(noteRows(state), 1000)
+        assert.ok(html.includes(`data-note-id="${tieHigh}"`) && !html.includes(`data-note-id="${tieLow}"`), 'ORDER BY user_updated_time DESC, id DESC keeps the larger id')
+        assert.ok(html.includes('notes-more-message'), 'and the smaller one is the "more"')
+    })
+
+    await test('note store reads: to-dos sharing a due date AND a title are ordered by id on the store path', async () => {
+        const due = Date.now() + 3 * DAY
+        const first = 'e'.repeat(24) + 'b0000001'
+        const second = 'e'.repeat(24) + 'b0000002'
+        const state = await readRun([storeNote(0, { id: second, is_todo: 1, title: 'Twin', todo_due: due })])
+        await buildAndRender(state)
+        // The smaller id arrives through the feed AFTER the build, so the mirror holds it second: neither the walk's id order nor the order the
+        // records went in can be what puts it first.
+        state.notes[first] = storeNote(0, { id: first, is_todo: 1, title: 'Twin', todo_due: due })
+        state.pushChange({ item_id: first, type: 1 })
+        await state.withTimers(() => state.noteStore.pollNow())
+        assert.deepStrictEqual(storeModel(state).todos().map(record => record.id), [second, first], 'precondition: the mirror holds them larger id first')
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        const rows = readSections(state).filter(token => token.startsWith('todo '))
+        assert.deepStrictEqual(rows, [`todo ${first}`, `todo ${second}`], 'todo_due, then title, then id - whatever order the fixtures came in')
+    })
+
+    await test('note store reads: excluded notebooks and the notebook filter apply on the store path - a sub-notebook, and a title the query cannot name', async () => {
+        const items = [
+            readTodo(1), readNote(2),                                                     // Store
+            readTodo(3, { parent_id: readSub }), readNote(4, { parent_id: readSub }),     // Store / Sub
+            readTodo(5, { parent_id: readArchive }), readNote(6, { parent_id: readArchive }),   // Archive, excluded
+            readTodo(7, { parent_id: readQuoted }), readNote(8, { parent_id: readQuoted }),     // Say "hi"
+        ]
+        const state = await readRun(items, {
+            initialSettings: { profileData: readProfileData([{ name: 'All' }]), currentProfileID: 1, excludedNotebookIds: readArchive },
+        })
+        const views = {}
+        const look = async (label, filter) => {
+            await state.panelMessageHandler(['notebookFilterChanged', filter])
+            views[label] = readSections(state)
+        }
+        await look('all, search', '')
+        await look('Store, search', storeFolder)
+        await look('quoted, search', readQuoted)
+        await state.panelMessageHandler(['notebookFilterChanged', ''])
+        await buildAndRender(state)
+        // A to-do outside Store changes, so its ring is stale: a Store view that narrowed only AFTER the ring fill would read its body for nothing.
+        state.notes[storeId(7)].user_updated_time = 99999
+        state.pushChange({ item_id: storeId(7), type: 2 })
+        await state.withTimers(() => state.noteStore.pollNow())
+        const mark = state.gets.length
+        await look('Store, store', storeFolder)
+        assert.ok(!state.gets.slice(mark).some(g => isBodyRead(g) && g.path[1] === storeId(7)), 'the notebook narrows the to-dos before their rings are filled')
+        await look('quoted, store', readQuoted)
+        await look('all, store', '')
+        assert.deepStrictEqual(noteCallsSince(state, mark).map(g => g.path[0]), drainsOnly(3), 'every view here is read from the mirror: three filter changes, three drains, nothing else')
+        const ids = (tokens) => tokens.filter(token => !token.startsWith('#')).map(token => token.split(' ')[1]).sort()
+        assert.deepStrictEqual(ids(views['all, store']), [1, 2, 3, 4, 7, 8].map(storeId).sort(), 'the excluded notebook is left out')
+        assert.deepStrictEqual(ids(views['Store, store']), [1, 2, 3, 4].map(storeId).sort(), 'a notebook brings its sub-notebook with it')
+        assert.deepStrictEqual(ids(views['quoted, store']), [7, 8].map(storeId).sort(), 'a quoted title narrows by id like any other')
+        for (const view of ['all', 'Store', 'quoted']) assert.deepStrictEqual(views[`${view}, store`], views[`${view}, search`], `${view}: exactly what the 2.6.3 path drew`)
+    })
+
+    await test('note store reads: the completed and undated switches apply on the store path', async () => {
+        const items = [
+            readTodo(1),                                                                      // open, dated
+            readTodo(2, { todo_due: 0 }),                                                      // open, undated
+            readTodo(3, { todo_completed: Date.now() - DAY, todo_due: Date.now() - 2 * DAY }),  // completed, past
+            readTodo(4, { todo_completed: Date.now() - DAY, todo_due: Date.now() + 3 * DAY }),  // completed, future
+            readTodo(5, { todo_completed: Date.now() - DAY, todo_due: 0 }),                     // completed, undated
+        ]
+        const hidden = { showCompletedPast: false, showCompletedToday: false, showCompletedFuture: false, showCompletedNoDue: false }
+        const state = await readRun(items, { initialSettings: { profileData: readProfileData([
+            { name: 'Open and dated', ...hidden, showNoDue: false, showNotes: false },
+            { name: 'Past completed', ...hidden, showCompletedPast: true, showNoDue: true, showNotes: false },
+        ]), currentProfileID: 1 } })
+        await buildAndRender(state)
+        const mark = state.gets.length
+        const shown = () => readSections(state).filter(token => token.startsWith('todo ')).map(token => token.split(' ')[1]).sort()
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.deepStrictEqual(shown(), [storeId(1)], 'no completed and no undated to-do')
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.deepStrictEqual(shown(), [1, 2, 3].map(storeId).sort(), 'undated shown, and of the completed ones only the past one')
+        assert.deepStrictEqual(noteCallsSince(state, mark).map(g => g.path[0]), drainsOnly(1), 'both views and the switch between them read only the mirror: the switch\'s one drain is the only call')
+    })
+
+    await test('note store reads: a to-do whose is_todo flips in the store moves section on the next render, with no search', async () => {
+        const flipTodo = readTodo(1)
+        const flipNote = readNote(2)
+        const state = await readRun([flipTodo, flipNote])
+        await buildAndRender(state)
+        assert.ok(readSections(state).includes(`todo ${flipTodo.id}`) && readSections(state).includes(`note ${flipNote.id}`), 'precondition')
+        Object.assign(state.notes[flipTodo.id], { is_todo: 0 })
+        Object.assign(state.notes[flipNote.id], { is_todo: 1, todo_due: Date.now() + 3 * DAY })
+        state.pushChange({ item_id: flipTodo.id, type: 2 })
+        state.pushChange({ item_id: flipNote.id, type: 2 })
+        const mark = state.gets.length
+        await storeTick(state)
+        await fireStoreRender(state)
+        const tokens = readSections(state)
+        assert.ok(tokens.includes(`note ${flipTodo.id}`) && !tokens.includes(`todo ${flipTodo.id}`), 'the ex-to-do is a note now, once')
+        assert.ok(tokens.includes(`todo ${flipNote.id}`) && !tokens.includes(`note ${flipNote.id}`), 'the ex-note a to-do, once')
+        assert.strictEqual(searchesSince(state, mark).length, 0, 'and no search ran, while the stale index still files both under their old type')
+    })
+
+    await test('note store reads: readiness flips mid-session - the 2.6.3 paths until the build, the mirror after it, back to 2.6.3 while stale, the mirror again once rebuilt', async () => {
+        const state = await readRun(readMix())
+        const refresh = async () => {
+            const mark = state.gets.length
+            await state.panelMessageHandler(['sortDirectionClicked'])
+            const calls = noteCallsSince(state, mark)
+            return { search: calls.filter(g => g.path[0] === 'search').length, listing: calls.filter(g => g.path[0] === 'notes' && g.path.length === 1).length }
+        }
+        const before = await refresh()
+        assert.ok(before.search > 0 && before.listing > 0, 'not ready: the to-dos come from the search and the notes from the listing')
+        const mark = state.gets.length
+        await buildAndRender(state)
+        assert.strictEqual(searchesSince(state, mark).length, 0, 'the render the finished build arms is itself store-served')
+        assert.deepStrictEqual(await refresh(), { search: 0, listing: 0 }, 'ready: neither')
+        state.eventsFailNext = 1
+        await state.withTimers(() => state.noteStore.pollNow())
+        assert.strictEqual(state.noteStore.isReady(), false, 'precondition: a failed poll leaves the store stale')
+        const stale = await refresh()
+        assert.ok(stale.search > 0 && stale.listing > 0, 'stale: back on the 2.6.3 paths at once')
+        await storeTick(state)
+        assert.ok(state.noteStore.isReady(), 'precondition: the next trigger rebuilt it')
+        assert.deepStrictEqual(await refresh(), { search: 0, listing: 0 }, 'rebuilt: the mirror again')
+    })
+
+    await test('note store reads: with the change feed missing, the 2.6.3 paths run for the whole session', async () => {
+        const state = await readRun(readMix(), { eventsUnavailable: true })
+        await state.fireTimeout(buildTimeout(state))
+        assert.strictEqual(state.noteStore.isAvailable(), false, 'precondition: the store is off')
+        assert.strictEqual(pendingStoreRenders(state).length, 0, 'and nothing was rendered for it')
+        const mark = state.gets.length
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        await storeTick(state)
+        await state.syncCompleteHandler({ withErrors: false })
+        const calls = noteCallsSince(state, mark)
+        assert.ok(calls.some(g => g.path[0] === 'search') && calls.some(g => g.path[0] === 'notes' && g.path.length === 1), 'the search and the listing, as in 2.6.3')
+        assert.ok(!calls.some(g => g.path[0] === 'events'), 'and the feed is never asked again')
+    })
+
+    await test('note store reads: filtered, typed and any:1 views send the very same searches with the store ready as without it', async () => {
+        const state = await readRun(readMix(), { initialSettings: { profileData: readProfileData([{ name: 'Work', searchCriteria: 'tag:work' }]), currentProfileID: 1 } })
+        const searchesOf = async (message) => {
+            const mark = state.gets.length
+            await state.panelMessageHandler(message)
+            return searchesSince(state, mark).map(g => JSON.stringify([g.path, g.query]))
+        }
+        const script = [['sortDirectionClicked'], ['searchFilterChanged', 'milk'], ['searchFilterChanged', 'tag:one tag:two any:1'], ['searchFilterChanged', '']]
+        const without = []
+        for (const message of script) without.push(await searchesOf(message))
+        await buildStore(state)
+        const reads = spyStoreReads(state)
+        const withStore = []
+        for (const message of script) withStore.push(await searchesOf(message))
+        assert.ok(without.every(queries => queries.length > 0), 'precondition: every step searches')
+        assert.deepStrictEqual(withStore, without, 'byte for byte, page for page')
+        assert.deepStrictEqual(reads, { todos: 0, notes: 0 }, 'and the mirror is not read for any of them')
+    })
+
+    await test('note store reads: the overview notes and the calendar formats read the mirror when unfiltered - no search while regenerating', async () => {
+        const todo = readTodo(1, { todo_due: Date.now() })
+        const overview = storeNote(90, { id: 'ov'.padEnd(32, '0'), title: 'Overview', body: 'stale' })
+        const state = await readRun([todo, overview], { initialSettings: { profileData: readProfileData([
+            { name: 'Overview', noteID: overview.id, showNotes: false },
+            { name: 'Month', displayFormat: 'month', showNotes: false },
+            { name: 'Week', displayFormat: 'week', showNotes: false },
+        ]), currentProfileID: 1 } })
+        await buildAndRender(state)
+        // A rename only the mirror knows of: the stub's search still answers the old title, so a note that shows the new one read the mirror.
+        state.notes[todo.id].title = 'Renamed in the mirror'
+        state.pushChange({ item_id: todo.id, type: 2 })
+        await state.withTimers(() => state.noteStore.pollNow())
+        const mark = state.gets.length
+        await storeTick(state)
+        const written = state.notePuts.filter(put => put.id === overview.id).pop()
+        assert.ok(written && written.body.includes('Renamed in the mirror'), 'the overview note was regenerated from the mirror')
+        assert.strictEqual(searchesSince(state, mark).length, 0, 'with no search')
+        for (const [profile, label] of [[2, 'month'], [3, 'week']]){
+            const switchMark = state.gets.length
+            await state.panelMessageHandler(['profilesDropdownChanged', profile])
+            await state.panelMessageHandler(['calendarNavigate', 1])
+            await state.panelMessageHandler(['calendarNavigate', -1])
+            assert.strictEqual(searchesSince(state, switchMark).length, 0, `the ${label} view makes no search either`)
+        }
+        assert.ok(state.panelHtml['panel-panel'].includes('Renamed in the mirror'), 'and draws what the mirror holds')
+    })
+
+    await test('note store reads: a drain that changes the mirror arms ONE fast render, which reads nothing; a drain that changes nothing arms none; the ring follows the mirror\'s stamp', async () => {
+        const state = await readRun([readTodo(1), readNote(2)])
+        await buildAndRender(state)
+        state.notes[storeId(1)].title = 'Renamed by another device'
+        state.notes[storeId(1)].user_updated_time = 77777
+        state.pushChange({ item_id: storeId(1), type: 2 })
+        let mark = state.gets.length
+        await state.withTimers(() => state.noteStore.pollNow())
+        const drain = noteCallsSince(state, mark)
+        assert.deepStrictEqual(drain.map(g => g.path[0]), ['events', 'notes'], 'precondition: the drain is its own two calls')
+        assert.strictEqual(pendingStoreRenders(state).length, 1, 'one render is armed')
+        mark = state.gets.length
+        const paints = state.setHtmlCalls
+        const bodies = countBodyFetches(state)
+        await fireStoreRender(state)
+        assert.strictEqual(state.setHtmlCalls, paints + 1, 'it paints once')
+        assert.ok(state.panelHtml['panel-panel'].includes('Renamed by another device'), 'with the change')
+        assert.deepStrictEqual(noteCallsSince(state, mark), [], 'reading nothing but the mirror')
+        assert.strictEqual(countBodyFetches(state), bodies, 'and no note body: it is a fast render')
+        // The follow-up pollNow armed finds nothing new, and nothing new is nothing to render.
+        await state.fireTimeout(state.pendingTimeouts(STORE_FOLLOW_UP)[0])
+        const tickMark = state.gets.length
+        await storeTick(state)
+        assert.strictEqual(pendingStoreRenders(state).length, 0, 'an empty drain, and an idle tick, arm no render')
+        // The ring's body cache is stamped with the mirror's user_updated_time: the tick's fill re-reads exactly the note whose stamp moved.
+        assert.deepStrictEqual(state.gets.slice(tickMark).filter(isBodyRead).map(g => g.path[1]), [storeId(1)], 'the fill reads one body: the changed note\'s')
+    })
+
+    await test('note store reads: a burst - a drain and the rerun asked for while it ran, both changing the mirror - is one notification and one render', async () => {
+        const state = await readRun([readTodo(1), readTodo(2), readNote(3)])
+        await buildAndRender(state)
+        let heard = 0
+        state.noteStore.subscribe(() => heard++)
+        state.notes[storeId(1)].title = 'First change'
+        state.pushChange({ item_id: storeId(1), type: 2 })
+        await state.withTimers(async () => {
+            let release
+            const held = new Promise(resolve => { release = resolve })
+            let holding = false
+            state.onNoteGet = async (id) => { if (id === storeId(1) && !holding){ holding = true; await held } }
+            const first = state.noteStore.pollNow()
+            for (let turn = 0; turn < 1000 && !holding; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(holding, 'precondition: the first drain is held on its fetch')
+            state.notes[storeId(2)].title = 'Second change'
+            state.pushChange({ item_id: storeId(2), type: 2 })
+            const second = state.noteStore.pollNow()
+            release()
+            await Promise.all([first, second])
+            state.onNoteGet = null
+        })
+        assert.strictEqual(storeModel(state).get(storeId(2)).title, 'Second change', 'precondition: the rerun ran and changed the mirror too')
+        assert.strictEqual(heard, 1, 'the store tells its listeners once for the burst')
+        assert.strictEqual(pendingStoreRenders(state).length, 1, 'and one render is armed for it')
+    })
+
+    await test('note store reads: the reconcile lane drains the store before its render, so an app command\'s late write shows without a search - and it never builds', async () => {
+        const moved = readTodo(1)
+        const state = await readRun([moved, readNote(2)])
+        await buildAndRender(state)
+        const timerMark = state.timeouts.length
+        // moveToFolder is not registered in the harness, as on a desktop whose dialog has not closed yet: the command returns and nothing is written.
+        await state.panelMessageHandler(['moveToNotebookClicked', [moved.id]])
+        const firstPoll = state.timeouts.slice(timerMark).find(t => t.ms === RECONCILE_OFFSETS[0])
+        assert.ok(firstPoll, 'precondition: the command armed the reconcile lane')
+        // The dialog closes: Joplin moves the note, and its row lands in the feed.
+        state.notes[moved.id].parent_id = readSub
+        state.pushChange({ item_id: moved.id, type: 2 })
+        const mark = state.gets.length
+        await state.fireTimeout(firstPoll)
+        assert.deepStrictEqual(noteCallsSince(state, mark).map(g => g.path[0]), ['events', 'notes'], 'the poll drains the feed (one events call, one fetch) and searches nothing')
+        assert.ok(/data-todo-id="e+00000001"[\s\S]*?data-notebook-id="e+2"/.test(state.panelHtml['panel-panel']), 'the row shows its new notebook')
+        // A store that is not ready is not built by the lane: the poll leaves it to the real triggers, and to the 2.6.3 paths meanwhile.
+        state.eventsFailNext = 1
+        await state.withTimers(() => state.noteStore.pollNow())
+        assert.strictEqual(state.noteStore.isReady(), false, 'precondition: stale')
+        const staleMark = state.gets.length
+        const secondPoll = state.timeouts.slice(timerMark).find(t => t.ms === RECONCILE_OFFSETS[1])
+        assert.ok(secondPoll && !secondPoll.cleared && !secondPoll.fired, 'precondition: the lane is still running')
+        await state.fireTimeout(secondPoll)
+        assert.strictEqual(state.gets.slice(staleMark).filter(g => g.path[0] === 'events').length, 0, 'a reconcile poll never walks or polls a stale store')
+        // Nor does it wait for a build in flight: its render goes ahead on the 2.6.3 paths, and the drain it queued behind the build comes after.
+        await state.withTimers(async () => {
+            let release
+            const held = new Promise(resolve => { release = resolve })
+            let holding = false
+            state.onListingPage = async (query, items) => {
+                if (query.order_by === 'id' && !holding){ holding = true; await held }
+                return items
+            }
+            const rebuilding = storeTick(state)
+            for (let turn = 0; turn < 1000 && !holding; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(holding, 'precondition: the next trigger\'s rebuild is held on its walk')
+            const thirdPoll = state.timeouts.slice(timerMark).find(t => t.ms === RECONCILE_OFFSETS[2])
+            assert.ok(thirdPoll && !thirdPoll.cleared && !thirdPoll.fired, 'precondition: the lane is still running')
+            let finished = false
+            const polled = state.fireTimeout(thirdPoll).then(() => { finished = true })
+            for (let turn = 0; turn < 1000 && !finished; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(finished, 'the reconcile poll rendered while the build was still held')
+            const drainsBefore = state.gets.filter(g => g.path[0] === 'events' && g.query && 'cursor' in g.query).length
+            release()
+            await Promise.all([rebuilding, polled])
+            state.onListingPage = null
+            const drainsAfter = state.gets.filter(g => g.path[0] === 'events' && g.query && 'cursor' in g.query).length
+            assert.strictEqual(drainsAfter - drainsBefore, 2, 'the build\'s replay, then the drain the poll queued')
+        })
+        assert.ok(state.noteStore.isReady())
+    })
+
+    await test('note store reads: the panel\'s own move, flip, create and trash each change the mirror at once and arm one follow-up', async () => {
+        const moveMe = readTodo(1), flipMe = readTodo(2), trashMe = readNote(3)
+        const state = await readRun([moveMe, flipMe, trashMe], { livePostedNotes: true })
+        await buildAndRender(state)
+        const step = async (label, message, check) => {
+            const mark = state.gets.length
+            await state.panelMessageHandler(message)
+            check()
+            assert.strictEqual(noteCallsSince(state, mark).filter(g => g.path[0] === 'events').length, 0, `${label}: the mirror changed without asking the feed`)
+            const followUps = state.pendingTimeouts(STORE_FOLLOW_UP)
+            assert.strictEqual(followUps.length, 1, `${label}: exactly one follow-up is armed`)
+            await state.fireTimeout(followUps[0])
+        }
+        state.dialogResult = { id: 'ok', formData: { picker: { folderId: readSub } } }
+        await step('move', ['noteMenuActionMulti', 'moveToFolder', [moveMe.id]], () =>
+            assert.strictEqual(storeModel(state).get(moveMe.id).parent_id, readSub, 'move: the record has the new notebook'))
+        state.dialogResult = null
+        await step('flip', ['noteMenuAction', 'toggleType', flipMe.id], () =>
+            assert.strictEqual(storeModel(state).get(flipMe.id).is_todo, 0, 'flip: the record is a note'))
+        const sizeBefore = storeModel(state).size()
+        await state.panelMessageHandler(['notebookFilterChanged', storeFolder])
+        await step('create', ['newTodoClicked'], () => {
+            const post = state.dataPosts[state.dataPosts.length - 1]
+            assert.ok(post && post.path[0] === 'notes', 'precondition: the panel posted a note')
+            assert.strictEqual(storeModel(state).size(), sizeBefore + 1, 'create: the mirror holds one more note')
+            const created = storeModel(state).snapshot().find(record => record.parent_id === storeFolder && record.is_todo === 1 && record.title === '')
+            assert.ok(created, 'create: the posted to-do, from the answer')
+            assert.strictEqual(rowCount(state, created.id, 'todo'), 1, 'create: and it is drawn once')
+        })
+        await state.panelMessageHandler(['notebookFilterChanged', ''])
+        await step('trash', ['noteMenuActionMulti', 'delete', [trashMe.id]], () => {
+            assert.deepStrictEqual(state.dataDeletes[state.dataDeletes.length - 1], ['notes', trashMe.id], 'precondition: the panel deleted the note')
+            assert.strictEqual(storeModel(state).get(trashMe.id), undefined, 'trash: the record is gone')
+        })
+        assert.ok(!state.panelHtml['panel-panel'].includes(trashMe.id), 'and the trashed note is not drawn')
+    })
+
+    await test('note store reads: the panel trashing a note the walk has already read, while the build runs, leaves the build untrusted', async () => {
+        // The build is held on page 2; the note trashed meanwhile sat on page 1. Its trash shifts the later pages, but the replay cannot see that:
+        // the removal the panel applied has taken the note out already, so the replay's fetch finds nothing to remove. applyLocalRemoval marks it.
+        const state = await readRun(storeNoteRange(1, 150))
+        const victim = storeId(5)
+        await state.withTimers(async () => {
+            let release
+            const held = new Promise(resolve => { release = resolve })
+            let holding = false
+            state.onListingPage = async (query, items) => {
+                if (query.order_by === 'id' && query.page === 2 && !holding){ holding = true; await held }
+                return items
+            }
+            const building = state.fireTimeout(buildTimeout(state))
+            for (let turn = 0; turn < 1000 && !holding; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(holding, 'precondition: the walk is held on page 2')
+            await state.panelMessageHandler(['noteMenuActionMulti', 'delete', [victim]])
+            // What Joplin's trash does to the note and the feed.
+            state.notes[victim].deleted_time = Date.now()
+            state.pushChange({ item_id: victim, type: 2 })
+            release()
+            await building
+            state.onListingPage = null
+        })
+        assert.strictEqual(storeModel(state).get(victim), undefined, 'the trashed note is not in the mirror')
+        assert.ok(!state.noteStore.isReady() && state.noteStore.isAvailable(), 'but the build is not trusted, and it is not a failure either')
+        const mark = state.gets.length
+        await storeTick(state)
+        assert.strictEqual(storeGetsSince(state, mark).filter(g => isEvents(g) && !hasCursor(g)).length, 1, 'the next trigger walks again')
+        assert.ok(state.noteStore.isReady(), 'and that walk is trusted')
+        assert.strictEqual(storeModel(state).size(), 149)
+    })
+
+    await test('note store reads: the result caches - a store answer is reused by the fill and the optimistic repaints, and is not served once the revision moves', async () => {
+        const tick = readTodo(1)
+        const state = await readRun([tick, readTodo(2), readNote(3)])
+        await buildAndRender(state)
+        const reads = spyStoreReads(state)
+        let mark = state.gets.length
+        await storeTick(state)
+        assert.deepStrictEqual(reads, { todos: 1, notes: 1 }, 'the tick\'s fast paint reads the mirror once, and its fill reuses that answer')
+        await state.panelMessageHandler(['profilesDropdownChanged', 1])
+        assert.deepStrictEqual(reads, { todos: 2, notes: 2 }, 'a switch paints fast and fills from the cache; only its truth refresh reads the mirror')
+        assert.deepStrictEqual(noteCallsSince(state, mark).map(g => g.path[0]), drainsOnly(2), 'and the whole of it cost two events calls: the tick\'s, and the switch\'s drain')
+        assert.strictEqual(state.gets.slice(mark).filter(isBodyRead).length, 0, 'and no body: the fill and the optimistic paints reuse the rings the startup fill read')
+        // A tick of the checkbox moves the revision (the store has the write at once), so the optimistic repaint must not take the old answer.
+        const revision = storeModel(state).revision
+        mark = state.gets.length
+        await state.panelMessageHandler(['todoChecked', tick.id, true])
+        assert.ok(storeModel(state).revision > revision, 'precondition: the write moved the revision')
+        assert.deepStrictEqual(reads, { todos: 3, notes: 3 }, 'so the optimistic repaint reads the mirror afresh')
+        assert.deepStrictEqual(noteCallsSince(state, mark), [], 'which is still no data call')
+        assert.strictEqual(state.gets.slice(mark).filter(isBodyRead).length, 0, 'and not one body either: an optimistic repaint paints before any body read')
+        assert.ok(/data-todo-id="e+00000001"[^>]*>\s*<input type="checkbox"[^>]*\schecked\s*>/.test(state.panelHtml['panel-panel']), 'and it draws the tick')
+        const joplinSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'joplin.ts'), 'utf8')
+        assert.strictEqual((joplinSource.match(/^\s+dropStaleStoreEntries\(revision\)$/gm) || []).length, 2,
+            'both readers drop the older revision\'s entries before they look in the cache')
+    })
+
+    await test('note store reads: a checkbox tick\'s optimistic repaint reads no body on the store path, though the startup fill left rings unread', async () => {
+        // 350 to-dos and 350 notes: the startup fill reads at most 300 bodies per list, so rings of both kinds are still unread when the tick comes,
+        // and the tick's write moves the revision, so its repaint cannot be served from the cache.
+        const ticked = readTodo(1)
+        const state = await readRun([ticked].concat(Array.from({ length: 349 }, (_, i) => readTodo(i + 10)), Array.from({ length: 350 }, (_, i) => readNote(i + 1000))))
+        await buildAndRender(state)
+        assert.strictEqual(state.gets.filter(isBodyRead).length, 600, 'precondition: the startup fill read 300 rings of each list, and left 50 of each')
+        const revision = storeModel(state).revision
+        const mark = state.gets.length
+        await state.panelMessageHandler(['todoChecked', ticked.id, true])
+        assert.ok(storeModel(state).revision > revision, 'precondition: the write moved the revision')
+        assert.strictEqual(state.gets.slice(mark).filter(isBodyRead).length, 0, 'the optimistic repaint paints before any body read, as on the search path')
+        assert.ok(/data-todo-id="e+00000001"[^>]*>\s*<input type="checkbox"[^>]*\schecked\s*>/.test(state.panelHtml['panel-panel']), 'and it draws the tick')
+    })
+
+    await test('note store reads: the desktop Delete (Joplin\'s deleteNote command) takes the note out of the mirror once a read says it is gone - and never unverified', async () => {
+        const trashed = readNote(1), purged = readNote(2), cancelled = readNote(3)
+        const state = await readRun([trashed, purged, cancelled, readTodo(4)])
+        await buildAndRender(state)
+        // Joplin's own command, as the desktop runs it; `outcome` says what it does this time.
+        let outcome = 'trash'
+        state.commands.push({ name: 'deleteNote', execute: async (ids) => {
+            for (const id of ids){
+                if (outcome === 'trash'){ state.notes[id].deleted_time = Date.now(); state.pushChange({ item_id: id, type: 2 }) }
+                if (outcome === 'purge'){ delete state.notes[id]; state.pushChange({ item_id: id, type: 3 }) }
+            }
+        } })
+        let mark = state.gets.length
+        await state.panelMessageHandler(['noteMenuAction', 'delete', trashed.id])
+        const reads = state.gets.slice(mark)
+        assert.deepStrictEqual(reads.filter(g => g.path[0] === 'notes' && g.path[1] === trashed.id).map(g => g.query), [{ fields: ['id', 'deleted_time'] }],
+            'the note is read back once, for its deleted_time')
+        assert.ok(!reads.some(isEvents), 'no drain: the read is what took it out')
+        assert.strictEqual(storeModel(state).get(trashed.id), undefined, 'trashed: the mirror no longer holds it')
+        assert.ok(!state.panelHtml['panel-panel'].includes(trashed.id), 'and the action\'s own repaint no longer draws it')
+        assert.ok(!state.dataDeletes.some(path => path[1] === trashed.id), 'precondition: the command deleted it, not the data API fallback')
+        outcome = 'purge'
+        await state.panelMessageHandler(['noteMenuAction', 'delete', purged.id])
+        assert.strictEqual(storeModel(state).get(purged.id), undefined, 'deleted for good: Not Found is as good as trashed')
+        assert.ok(!state.panelHtml['panel-panel'].includes(purged.id))
+        outcome = 'nothing'
+        await state.panelMessageHandler(['noteMenuAction', 'delete', cancelled.id])
+        assert.ok(storeModel(state).get(cancelled.id), 'a command that deleted nothing leaves the note in the mirror')
+        assert.ok(state.panelHtml['panel-panel'].includes(cancelled.id), 'and on screen')
+    })
+
+    await test('note store reads: trashing a notebook polls the mirror before the repaint, so its notes vanish in the action\'s own render', async () => {
+        const inArchive = [readTodo(1, { parent_id: readArchive }), readNote(2, { parent_id: readArchive })]
+        const state = await readRun(inArchive.concat([readTodo(3), readNote(4)]))
+        await buildAndRender(state)
+        assert.ok(inArchive.every(note => state.panelHtml['panel-panel'].includes(note.id)), 'precondition: both are drawn')
+        // What Joplin does when a notebook goes to the trash: its notes go with it, each with a feed row.
+        state.onDataDelete = async (target) => {
+            if (target[0] !== 'folders' || target[1] !== readArchive) return
+            for (const note of inArchive){ state.notes[note.id].deleted_time = Date.now(); state.pushChange({ item_id: note.id, type: 2 }) }
+        }
+        const mark = state.gets.length
+        await state.panelMessageHandler(['deleteNotebookClicked', readArchive])
+        state.onDataDelete = null
+        assert.deepStrictEqual(state.dataDeletes[state.dataDeletes.length - 1], ['folders', readArchive], 'precondition: the notebook went to the trash')
+        assert.strictEqual(state.gets.slice(mark).filter(isEvents).length, 1, 'the mirror was polled once')
+        for (const note of inArchive){
+            assert.strictEqual(storeModel(state).get(note.id), undefined, 'the notebook\'s notes left the mirror')
+            assert.ok(!state.panelHtml['panel-panel'].includes(note.id), 'and the action\'s own repaint draws neither')
+        }
+        assert.strictEqual(state.pendingTimeouts(STORE_FOLLOW_UP).length, 1, 'with the follow-up armed, for a row that lands late')
+    })
+
+    await test('note store reads: a duplicate made by Joplin\'s command, single or several, polls the mirror before the repaint; a row that lands late is repainted by the follow-up', async () => {
+        const original = readTodo(1), other = readTodo(2)
+        const state = await readRun([original, other, readNote(3)])
+        await buildAndRender(state)
+        const copyId = (n) => 'c'.repeat(24) + String(n).padStart(8, '0')
+        let copies = 0
+        let rowLandsNow = true
+        const lateRows = []
+        state.commands.push({ name: 'duplicateNote', execute: async (ids) => {
+            for (const id of ids){
+                const copy = Object.assign({}, state.notes[id], { id: copyId(++copies), title: state.notes[id].title + ' - Copy' })
+                state.notes[copy.id] = copy
+                if (rowLandsNow) state.pushChange({ item_id: copy.id, type: 1 })
+                else lateRows.push(copy.id)
+            }
+        } })
+        await state.panelMessageHandler(['noteMenuAction', 'duplicate', original.id])
+        assert.ok(storeModel(state).get(copyId(1)), 'single: the copy is in the mirror')
+        assert.strictEqual(rowCount(state, copyId(1), 'todo'), 1, 'single: and the action\'s own repaint draws it')
+        await state.fireTimeout(state.pendingTimeouts(STORE_FOLLOW_UP)[0])
+        await state.panelMessageHandler(['noteMenuActionMulti', 'duplicate', [original.id, other.id]])
+        for (const n of [2, 3]){
+            assert.ok(storeModel(state).get(copyId(n)), 'several: each copy is in the mirror')
+            assert.strictEqual(rowCount(state, copyId(n), 'todo'), 1, 'several: and drawn')
+        }
+        await state.fireTimeout(state.pendingTimeouts(STORE_FOLLOW_UP)[0])
+        // The feed's row is written after the save returns; here it misses the immediate drain.
+        rowLandsNow = false
+        await state.panelMessageHandler(['noteMenuAction', 'duplicate', other.id])
+        assert.strictEqual(rowCount(state, copyId(4), 'todo'), 0, 'precondition: the immediate drain missed the late row')
+        for (const id of lateRows) state.pushChange({ item_id: id, type: 1 })
+        await state.fireTimeout(state.pendingTimeouts(STORE_FOLLOW_UP)[0])
+        await fireStoreRender(state)
+        assert.strictEqual(rowCount(state, copyId(4), 'todo'), 1, 'the follow-up brings it, and its notification repaints')
+    })
+
+    await test('note store reads: when readiness drops, every cached result goes with it - the 2.6.3 entry from before the store took over is never served again', async () => {
+        const renamed = readTodo(1), ticked = readTodo(2)
+        const items = [renamed, ticked, readNote(3)]
+        // A LIVE index for this one: the search answers what the notes hold now, so a stale cached answer can be told apart from a fresh one.
+        let state = null
+        state = await readRun(items, { todos: () => (state ? Object.values(state.notes) : items).filter(note => note.is_todo).map(note => ({ ...note })) })
+        await buildAndRender(state)
+        state.notes[renamed.id].title = 'Renamed outside'
+        state.pushChange({ item_id: renamed.id, type: 2 })
+        await state.withTimers(() => state.noteStore.pollNow())
+        await fireStoreRender(state)
+        assert.ok(state.panelHtml['panel-panel'].includes('Renamed outside'), 'precondition: the store-served view shows the rename')
+        state.eventsFailNext = 1
+        await state.withTimers(() => state.noteStore.pollNow())
+        assert.strictEqual(state.noteStore.isReady(), false, 'precondition: a failed poll dropped the readiness')
+        const mark = state.gets.length
+        await state.panelMessageHandler(['todoChecked', ticked.id, true])
+        assert.ok(searchesSince(state, mark).length > 0, 'the optimistic repaint finds no cached answer and searches')
+        assert.ok(state.panelHtml['panel-panel'].includes('Renamed outside'), 'so it draws the rename, not the title the pre-store entry held')
+    })
+
+    await test('note store reads: a profile switch\'s truth refresh drains the mirror first, so an outside write shows with one events call and no search or listing', async () => {
+        const state = await readRun([readTodo(1), readNote(2)], { initialSettings: { profileData: readProfileData([{ name: 'One' }, { name: 'Two' }]), currentProfileID: 1 } })
+        await buildAndRender(state)
+        // A write from outside - REST, MCP, another plugin: no onNoteChange, no trigger of any kind. Only the switch's own drain can bring it.
+        state.notes[storeId(1)].title = 'Renamed over REST'
+        state.pushChange({ item_id: storeId(1), type: 2 })
+        const mark = state.gets.length
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        const calls = noteCallsSince(state, mark)
+        assert.deepStrictEqual(calls.map(g => g.path[0]), ['events', 'notes'], 'one drain: its events call and the fetch of the note it names')
+        assert.ok(calls.every(g => g.path[0] !== 'search' && !(g.path[0] === 'notes' && g.path.length === 1)), 'no search, no listing')
+        assert.ok(state.panelHtml['panel-panel'].includes('Renamed over REST'), 'and the switch shows the rename')
+        assert.strictEqual(pendingStoreRenders(state).length, 0, 'the drain\'s own render is dropped: the truth refresh has drawn what it brought')
+    })
+
+    await test('note store reads: a reconcile poll whose drain changes the mirror paints once - the store render the drain armed is dropped', async () => {
+        const state = await readRun([readTodo(1), readNote(2)])
+        await buildAndRender(state)
+        const timerMark = state.timeouts.length
+        await state.panelMessageHandler(['moveToNotebookClicked', [storeId(1)]])
+        const firstPoll = state.timeouts.slice(timerMark).find(t => t.ms === RECONCILE_OFFSETS[0])
+        assert.ok(firstPoll, 'precondition: the lane is armed')
+        state.notes[storeId(1)].title = 'Changed while the lane waited'
+        state.pushChange({ item_id: storeId(1), type: 2 })
+        const paints = state.setHtmlCalls
+        await state.fireTimeout(firstPoll)
+        assert.strictEqual(state.setHtmlCalls, paints + 1, 'the reconcile render paints the change')
+        assert.ok(state.panelHtml['panel-panel'].includes('Changed while the lane waited'))
+        assert.strictEqual(pendingStoreRenders(state).length, 0, 'and no fast store render is left to paint cached rings over it')
+    })
+
+    await test('note store reads: an idle tick with the store ready reads no note - one events call, plus the notebook map\'s own refresh once its 20 s cache has lapsed - as the per-tick record the perf run reads says', async () => {
+        const state = await readRun(readMix())
+        await buildAndRender(state)
+        await storeTick(state)                        // warms whatever ring the startup fill left
+        const mark = state.gets.length
+        // The measured tick comes a whole interval later, as in the app: the notebook map's 20 s cache has lapsed by then (2.6.3 behaviour, kept).
+        const realNow = Date.now
+        Date.now = () => realNow() + 60000
+        try {
+            await storeTick(state)
+        } finally {
+            Date.now = realNow
+        }
+        assert.deepStrictEqual(noteCallsSince(state, mark).map(g => g.path[0]), ['events'], 'one events call, and no note read')
+        assert.strictEqual(state.gets.slice(mark).filter(g => g.path[0] === 'folders').length, 1, 'and one page of the notebook map')
+        const ticks = state.instrument.ticks()
+        const last = ticks[ticks.length - 1]
+        assert.deepStrictEqual([last.search, last.listing, last.get, last.bodies, last.put, last.post, last.del, last.events, last.folders], [0, 0, 0, 0, 0, 0, 0, 1, 1],
+            'CockpitInstrument.ticks() records it the same way')
+        const storeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'noteStore.ts'), 'utf8')
+        assert.ok(/const walkPagePauseMs = 0\n/.test(storeSource), 'the walk\'s page pause is prepared, and off')
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

@@ -117,6 +117,9 @@ function makeJoplin(options) {
         // An async hook run on every single-note GET with (id, query) before it is answered: it can throw, as a read that fails with something
         // other than Not Found does.
         onNoteGet: null,
+        // An async hook run on every data.delete with its path, after it is recorded: what the delete does to the notes (a notebook trashed with
+        // its notes) is the test's to model, since the stub itself changes nothing.
+        onDataDelete: null,
     }
 
     const notes = options.notes || {}
@@ -485,7 +488,10 @@ function makeJoplin(options) {
                 }
                 return Object.assign({ id: `created-${state.dataPosts.length}` }, body)
             },
-            delete: async (pathParts) => { state.dataDeletes.push(pathParts) },
+            delete: async (pathParts) => {
+                state.dataDeletes.push(pathParts)
+                if (state.onDataDelete) await state.onDataDelete(pathParts)
+            },
         },
     }
 
@@ -502,10 +508,13 @@ async function run(options) {
     global.joplin = joplin
     delete require.cache[require.resolve(bundlePath)]
     delete global.CockpitNoteStore
+    delete global.CockpitInstrument
     require(bundlePath)
     // The note store's inspection handle (src/core/noteStore.ts publishes it on the global when the bundle loads). Taken now, because the next
     // run's bundle replaces the global with its own store.
     state.noteStore = global.CockpitNoteStore || null
+    // The data-call counters and the per-tick record (src/core/instrument.ts), published the same way and taken for the same reason.
+    state.instrument = global.CockpitInstrument || null
     if (!state.onStart) throw new Error('Plugin did not register an onStart handler')
     // Capture the intervals the plugin arms at startup (the periodic refresh timer and the folder poll)
     // instead of scheduling them on a real clock: the suite invokes them by hand, and leaving many run()s'

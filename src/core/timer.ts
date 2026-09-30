@@ -12,8 +12,10 @@
  *                          rewritten at most once per burst instead of on every follow-up.                                                            *
  *   - the sync events    : flip the Synchronize button via the cheapest possible paint (a fast render, never a dataset rebuild), and arm ONE           *
  *                          reconcile job after a sync completes.                                                                                       *
- *   - the note store     : (2.7) the tick, a completed sync and a note change each also poll the change feed once (see noteStore.ts). Additive: it     *
- *                          reads nothing the panel draws yet, and costs nothing at all until the store's startup build has been kicked off.            *
+ *   - the note store     : (2.7) the tick, a completed sync and a note change each also poll the change feed once (see noteStore.ts), and each of the  *
+ *                          reconcile lane's polls drains it before its render. Since phase 3 the unfiltered views are drawn from the store once it is  *
+ *                          ready, so a burst of polls that changed it schedules ONE fast render of its own (the note store lane below). It costs       *
+ *                          nothing at all until the store's startup build has been kicked off.                                                         *
  *                                                                                                                                                    *
  *  A profile switch is deliberately none of these: it changes no note data, so it paints (from cache / one search) and stops - see panel.ts.          *
  ***************************************************************************************************************************************************/
@@ -27,7 +29,8 @@ import { getSyncStatus, markSyncComplete, markSyncStart } from "./syncStatus";
 import { hasPendingOptimistic } from "./optimistic";
 import { isMobile } from "./platform";
 import { drainDeferredSettingsNoteWrite, isSettingsNote, pollSettingsNote, scheduleSettingsNoteRead, syncSettingsNote } from "./settingsSync";
-import { pollNow, pollOnTick, scheduleNoteStorePoll } from "./noteStore";
+import { catchUp, pollNow, pollOnTick, scheduleNoteStorePoll, subscribe as subscribeToNoteStore } from "./noteStore";
+import { logTick, snapshot } from "./instrument";
 
 /** Variable Initialization ************************************************************************************************************************/
 const defaultUpdateFrequency = 60
@@ -128,6 +131,11 @@ function cancelReconcile(){
 }
 
 async function reconcilePoll(generation, isLast){
+    // A store-served view (2.7) has no index to wait for, but its store may not have heard of the change this burst is about: an app command
+    // such as moveToFolder writes when its dialog closes, seconds after it returned, and Joplin's onNoteChange fires for the selected note only.
+    // So the store drains once first (catchUpNoteStore: one events call, no follow-up; it starts no build, though a ready store's drain past the
+    // rebuild threshold rebuilds inside it and this render then waits for the walk), and the render below reads what it brought.
+    await catchUpNoteStore()
     // A real, search-based refresh (not the cache/fast path): it lets the index catch up, retires any
     // optimistic entry the search now agrees with, fetches only the bodies of genuinely-changed notes, and
     // repaints only when the result actually changed (refreshPanelData's equality guard). A poll that finds
@@ -179,6 +187,40 @@ async function runOverviewLane(){
     }
 }
 
+/** Note store lane (2.7) ***************************************************************************************************************************
+ * The note store (noteStore.ts) tells its subscribers when a burst of its runs has changed the mirror: a drain that brought an edit, a sync or a   *
+ * trash, or the build that has just made it ready. A view drawn from the store is then out of date, and nothing else would repaint it until the    *
+ * next trigger, so ONE fast render is scheduled - the kind the sync events use: no note bodies, rings from the cache. A notification that arrives  *
+ * while that render is still pending folds into it, and the store itself folds a burst of drains into one notification.                            *
+ *                                                                                                                                                  *
+ * The listener only schedules. It never polls - that would loop through the store's own notification - and never waits, since the store calls it   *
+ * as a burst ends. The equality guard in refreshPanelData still stops a repaint when nothing visible changed, and a drain that changed nothing     *
+ * notifies nobody, so an idle tick renders nothing here.                                                                                           *
+ ***************************************************************************************************************************************************/
+const storeRenderDelayMs = 0
+var storeRenderTimer = null
+
+function scheduleStoreRender(){
+    if (storeRenderTimer) return
+    // The callback returns the render's promise so the harness can await it; setTimeout ignores it.
+    storeRenderTimer = setTimeout(() => {
+        storeRenderTimer = null
+        return refreshPanelData({ fast: true }).catch(error => console.warn("Cockpit: could not repaint after a note store change", error))
+    }, storeRenderDelayMs)
+}
+
+/** catchUpNoteStore ********************************************************************************************************************************
+ * The note store's catch-up (catchUp in noteStore.ts) for a render that must show what outside writers did: the reconcile lane's renders, and      *
+ * panel.ts's truth renders. When the drain changes the mirror, its own notification arms the store render above; that render is dropped here,      *
+ * because the render the caller runs next reads the same mirror - and the fast one, starting after it, would win refreshPanelData's generation     *
+ * guard and paint cached rings over the fresh ones the full render has just read.                                                                  *
+ ***************************************************************************************************************************************************/
+export async function catchUpNoteStore(){
+    await catchUp()
+    clearTimeout(storeRenderTimer)
+    storeRenderTimer = null
+}
+
 /** setupTimer ***************************************************************************************************************************************
  * Starts, or restarts, the periodic backstop refresh. It is the date-boundary safety net (a to-do rolling from Today to Overdue as time passes, and    *
  * the same in the overview notes), so it runs the full refreshInterfaces - but that already takes the fast paint path, so it never stalls on bodies.    *
@@ -191,18 +233,26 @@ export async function setupTimer(){
     // Only when the user has left the interval at its default is it raised on mobile; an explicitly set
     // value is always honoured. Desktop keeps the 60s default untouched.
     if (mobile && updateFrequency === defaultUpdateFrequency) updateFrequency = defaultMobileUpdateFrequency
-    // The callback returns the promise so the tick is awaitable (harnessable); setInterval ignores it.
-    timer = setInterval(() => Promise.all([
-        // The settings note's backstop, and its ONE cheap call: a single updated_time field read tells whether the note moved at all,
-        // and only then is the body fetched (see pollSettingsNote). It also drains any write the editor gate deferred. With the feature
-        // off it returns before touching anything, so this tick costs exactly what it cost before the feature existed. Guarded on its
-        // own, so nothing about the settings note can stop the panel from being repainted.
-        pollSettingsNote("tick").catch(error => console.warn("Cockpit: could not poll the settings note", error)),
-        refreshInterfaces(),
-        // The note store's poll (2.7): one events call when nothing changed, and no follow-up - that is for saves, and every save fires
-        // onNoteChange, which arms its own. Not while a sync runs: onSyncComplete catches up once. It guards itself and never rejects.
-        getSyncStatus().syncing ? null : pollOnTick(),
-    ]), updateFrequency * 1000);
+    // The callback returns the promise so the tick is awaitable (harnessable); setInterval ignores it. What the tick cost in data calls is
+    // recorded once all three jobs have settled (logTick in instrument.ts): the number the 2.7 perf run reads as "calls per tick".
+    timer = setInterval(() => {
+        var tickStartedAt = Date.now()
+        var tickBefore = snapshot()
+        return Promise.all([
+            // The settings note's backstop, and its ONE cheap call: a single updated_time field read tells whether the note moved at all,
+            // and only then is the body fetched (see pollSettingsNote). It also drains any write the editor gate deferred. With the feature
+            // off it returns before touching anything, so this tick costs exactly what it cost before the feature existed. Guarded on its
+            // own, so nothing about the settings note can stop the panel from being repainted.
+            pollSettingsNote("tick").catch(error => console.warn("Cockpit: could not poll the settings note", error)),
+            refreshInterfaces(),
+            // The note store's poll (2.7): one events call when nothing changed, and no follow-up - that is for saves, and every save fires
+            // onNoteChange, which arms its own. Not while a sync runs: onSyncComplete catches up once. It guards itself and never rejects.
+            getSyncStatus().syncing ? null : pollOnTick(),
+        ]).then(results => {
+            logTick(tickBefore, tickStartedAt)
+            return results
+        })
+    }, updateFrequency * 1000);
 }
 
 /** setupWorkspaceEvents *****************************************************************************************************************************
@@ -210,6 +260,9 @@ export async function setupTimer(){
  * unavailable on the current platform does not prevent the others from being registered.                                                            *
  ***************************************************************************************************************************************************/
 export async function setupWorkspaceEvents(){
+    // Not a workspace event, but the same kind of news: the note store (2.7) changed, so a view drawn from it needs a render (see the note store
+    // lane above). Subscribed once, here, with the events that feed it.
+    subscribeToNoteStore(scheduleStoreRender)
     await registerEvent("onNoteChange", async (event) => {
         // The note store (2.7) takes EVERY note change as a hint - the settings note and the overview notes are notes too, and the change feed,
         // not this event, says what actually changed - and polls once per burst. Not while a sync runs, for the reason the external-change path

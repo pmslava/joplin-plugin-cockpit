@@ -7,7 +7,7 @@ import joplin from 'api';
 import { applyTodoCompletionOverrides, mergeOptimisticNotes, mergeOptimisticTodos } from './optimistic';
 import { EXCLUDED_NOTEBOOK_IDS_KEY, buildExclusionClauses, excludedDescendantIdSet, parseExcludedIds } from './exclusion';
 import { countData } from './instrument';
-import { applyLocalWrite } from './noteStore';
+import { applyLocalWrite, getModel as getStoreModel, isAvailable as isStoreAvailable, isReady as isStoreReady } from './noteStore';
 
 /** Excluded notebooks *****************************************************************************************************************************
  * The "Excluded notebooks" feature evaluates exclusion by notebook ID (the hidden excludedNotebookIds setting is the single source of truth). Two      *
@@ -169,6 +169,62 @@ function isUnfilteredQuery(criteria){
     return !usesAnyMode(criteria) && !String(criteria || "").trim()
 }
 
+/** The note store (2.7): the unfiltered views read the local mirror ********************************************************************************
+ * Once the note store (noteStore.ts) is built and exact, a view with nothing for the search engine to do is computed from it with no data call at  *
+ * all, and with no index lag: the mirror's is_todo, dates and notebooks are the live ones. "Nothing to do" is isUnfilteredQuery on the view's OWN  *
+ * criteria - the profile's and the typed text - without the notebook: clause formats.ts appends for the search's sake (opts.storeView carries both *
+ * halves). The notebook filter is an id set here, the notebook and its sub-notebooks: exactly the set the search path ends up with once formats.ts *
+ * has filtered its answer, and the set the listing path narrows by for a title the query cannot name.                                              *
+ *                                                                                                                                                  *
+ * Everything the search and the listing did is done here, in the same order: the narrowing terms (applyTodoNarrowing / applyNoteNarrowing), the    *
+ * excluded notebooks, the notebook filter, then the order the answer came in and, for the notes, the cap:                                          *
+ *  - to-dos by todo_due, then by id. The search's own order_by: 'todo_due' is no order to copy - its comparator (collectionToPaginatedResults in   *
+ *    the 3.6.14 bundle) never answers "greater", so its rows come back in no reliable order - and getTodos re-sorts every answer by todo_due and   *
+ *    title anyway. The id only decides between rows whose due date AND title tie, where the search left the engine's own order.                    *
+ *  - notes newest first by user_updated_time, then by id DESCENDING: the listing's ORDER BY user_updated_time DESC, id DESC (paginatedFeed appends *
+ *    the id in the same direction), so the cap keeps exactly the notes the listing would, ties included. `more` is listRecentNotes' "one more note *
+ *    past the cap", so the footer and "show more" behave as they do today - and the next batch costs no data call either.                          *
+ *                                                                                                                                                  *
+ * Both answers go into the same result caches the search fills, so useCache, fillCounts and the optimistic repaints downstream cannot tell them    *
+ * apart. The key names the store's revision (storeCacheKey), so an entry is never served once the mirror has moved on, and the entries of an older *
+ * revision are dropped (dropStaleStoreEntries) rather than left to crowd the search's entries out of the bounded caches.                           *
+ *                                                                                                                                                  *
+ * Before the store is ready, and for the whole session when it is off, every read takes its 2.6.3 path unchanged. That is deliberate: the first    *
+ * paint at 20,000 notes keeps 2.6.3's timing, and the store takes over after its build.                                                            *
+ ***************************************************************************************************************************************************/
+function storeServes(criteria){
+    return isUnfilteredQuery(criteria) && isStoreAvailable() && isStoreReady()
+}
+
+function storeCacheKey(revision, view){
+    return `store|r${revision}|${view}`
+}
+
+function dropStaleStoreEntries(revision){
+    var current = storeCacheKey(revision, "")
+    for (var cache of [todosResultCache, notesResultCache, notesMoreByKey]){
+        for (var key of Array.from(cache.keys())) if (key.startsWith("store|") && !key.startsWith(current)) cache.delete(key)
+    }
+}
+
+function compareIds(first, second){
+    return first < second ? -1 : first > second ? 1 : 0
+}
+
+function readStoreTodos(showCompleted, showNoDue, excludedSet, notebooks){
+    var items = filterExcluded(applyTodoNarrowing(getStoreModel().todos(), showCompleted, showNoDue), excludedSet)
+    if (notebooks) items = items.filter(item => notebooks.ids.has(item.parent_id))
+    return items.sort((first, second) => (first.todo_due - second.todo_due) || compareIds(first.id, second.id))
+}
+
+function readStoreNotes(limit, excludedSet, notebooks){
+    var items = filterExcluded(applyNoteNarrowing(getStoreModel().notes()), excludedSet)
+    if (notebooks) items = items.filter(item => notebooks.ids.has(item.parent_id))
+    items.sort((first, second) => (second.user_updated_time - first.user_updated_time) || compareIds(second.id, first.id))
+    var more = limit > 0 && items.length > limit
+    return { items: more ? items.slice(0, limit) : items, more: more }
+}
+
 /** listAllNotes ***********************************************************************************************************************************
  * Every note and to-do (not trashed), from the live listing, deduplicated by id: a note updated while the walk runs can shift between two pages.    *
  ***************************************************************************************************************************************************/
@@ -218,7 +274,7 @@ async function listRecentNotes(limit, keep){
 
 /** getTodos ****************************************************************************************************************************************
  * Returns the list of todos, sorted by due date. If show completed is true, it will include completed todos. If show no due is true, it will       *
- * include todos without due dates.                                                                                                                 *
+ * include todos without due dates. Once the note store (2.7) is ready, an unfiltered view is read from it instead (see readStoreTodos).            *
  ***************************************************************************************************************************************************/
  export async function getTodos(showCompleted, showNoDue, searchCritera, fast?, useCache?, opts?){
     const completed = showCompleted ? "" : "iscompleted:0"
@@ -253,6 +309,16 @@ async function listRecentNotes(limit, keep){
     // the flag belongs in the key - the same reason the any-mode key carries the narrowing it applied.
     var keepMistypedRows = !!(opts && opts.keepMistypedRows)
     if (keepMistypedRows) cacheKey += "|keepmistyped"
+    // The note store answers an unfiltered view once it is ready (see storeServes), under a key of its own. keepMistypedRows plays no part in it:
+    // the mirror's is_todo is live, so there are no mistyped rows to keep or drop.
+    var storeView = opts && opts.storeView ? opts.storeView : null
+    var fromStore = storeServes(storeView ? storeView.criteria : searchCritera)
+    var storeNotebooks = fromStore && storeView ? storeView.notebooks : null
+    if (fromStore){
+        var revision = getStoreModel().revision
+        dropStaleStoreEntries(revision)
+        cacheKey = storeCacheKey(revision, `c${showCompleted ? 1 : 0}|d${showNoDue ? 1 : 0}|x${excluded.clauses}|nb${storeNotebooks ? storeNotebooks.key : ""}`)
+    }
     var allTodos;
     if ((useCache || fillCounts) && todosResultCache.has(cacheKey)){
         // Optimistic / fill re-render: reuse the last search for this query instead of searching again.
@@ -265,6 +331,13 @@ async function listRecentNotes(limit, keep){
             await attachCheckboxCounts(allTodos, false, priorityStart)
             cacheResult(todosResultCache, cacheKey, allTodos)
         }
+    } else if (fromStore){
+        // No search, no listing, no preferTodoListing walk: the mirror already holds every to-do, narrowed here exactly as the query would be.
+        allTodos = readStoreTodos(showCompleted, showNoDue, excluded.set, storeNotebooks)
+        // An optimistic repaint lands here whenever the revision moved (every own write moves it), and it must paint before any body is read, as it
+        // does on the search path, where it is served from the cache: its rings come from the cache, and the fill or the next full render reads them.
+        await attachCheckboxCounts(allTodos, fast || !!useCache, priorityStart)
+        cacheResult(todosResultCache, cacheKey, allTodos)
     } else {
         // An unfiltered view (see isUnfilteredQuery) is answered by the search while the to-do set is small, and by the live
         // listing once it has proved large: past todoSearchPageBudget pages every further page costs more than the whole
@@ -409,7 +482,8 @@ export async function searchTitleSuggestions(partial){
  *                                                                                                                                                  *
  * opts.limit caps how many notes are read (absent or 0: all of them). Under a cap the most recently updated notes are the ones kept, read newest    *
  * first so a large collection is never walked to the end: an unfiltered view reads the live listing (see isUnfilteredQuery), anything else pages   *
- * the search. Returns { notes, more }, where more says whether the cap left a matching note out.                                                   *
+ * the search - and once the note store (2.7) is ready, an unfiltered view reads the mirror instead (see readStoreNotes), capped the same way.      *
+ * Returns { notes, more }, where more says whether the cap left a matching note out.                                                               *
  ***************************************************************************************************************************************************/
 export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var excluded = await excludedContext()
@@ -432,6 +506,15 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     // Keyed by the flag for the reason given in getTodos.
     var keepMistypedRows = !!(opts && opts.keepMistypedRows)
     if (keepMistypedRows) cacheKey += "|keepmistyped"
+    // The note store's own key, for the reasons given in getTodos; the cap and the notebook filter are part of it, as they are of the listing's.
+    var storeView = opts && opts.storeView ? opts.storeView : null
+    var fromStore = storeServes(storeView ? storeView.criteria : searchCriteria)
+    var storeNotebooks = fromStore && storeView ? storeView.notebooks : null
+    if (fromStore){
+        var revision = getStoreModel().revision
+        dropStaleStoreEntries(revision)
+        cacheKey = storeCacheKey(revision, `x${excluded.clauses}|nb${storeNotebooks ? storeNotebooks.key : ""}|n${limit}`)
+    }
     var allNotes;
     var more = false
     if ((useCache || fillCounts) && notesResultCache.has(cacheKey)){
@@ -442,7 +525,12 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
             cacheResult(notesResultCache, cacheKey, allNotes)
         }
     } else {
-        if (unfiltered){
+        if (fromStore){
+            // The mirror, newest first and capped exactly as the listing would be (see readStoreNotes): no data call, "show more" included.
+            var stored = readStoreNotes(limit, excluded.set, storeNotebooks)
+            allNotes = stored.items
+            more = stored.more
+        } else if (unfiltered){
             // The listing carries every note's current is_todo, so there is no index lag to keep mistyped rows for.
             var recent = await listRecentNotes(limit || Infinity, item =>
                 !(excluded.set && excluded.set.has(item.parent_id)) && (!listingNotebooks || listingNotebooks.ids.has(item.parent_id)))
@@ -478,7 +566,8 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
                 }
             } while (response.has_more)
         }
-        await attachCheckboxCounts(allNotes, fast, priorityStart)
+        // The store's optimistic repaints fetch no body, for the reason given in getTodos; the other two paths are unchanged.
+        await attachCheckboxCounts(allNotes, fast || (fromStore && !!useCache), priorityStart)
         cacheResult(notesResultCache, cacheKey, allNotes)
         notesMoreByKey.set(cacheKey, more)
         for (var key of Array.from(notesMoreByKey.keys())) if (!notesResultCache.has(key)) notesMoreByKey.delete(key)
@@ -697,6 +786,7 @@ export async function getNotebookMap(){
     var folders = new Map()
     let pageNum = 1;
     do {
+        countData('folders')
         var response = await joplin.data.get(['folders'], {
             fields: ['id', 'title', 'parent_id'],
             page: pageNum++,

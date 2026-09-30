@@ -223,6 +223,9 @@ abstract class BaseFormat {
         // thrown away below. The precise filtering still happens client side, because notebook
         // titles are not necessarily unique.
         var filterNotebook = notebookFilter ? notebooks.get(notebookFilter) : null
+        // The note store (2.7) answers this view once it is ready and the view needs no search syntax. It is judged on the criteria WITHOUT the
+        // notebook clause, which exists only for the search's sake, and it narrows by the notebook's id set itself (see storeServes in joplin.ts).
+        var storeView = { criteria: searchCriteria, notebooks: notebookFilter ? { key: notebookFilter, ids: notebookWithDescendants(notebooks, notebookFilter) } : null }
         if (filterNotebook && filterNotebook.title && !filterNotebook.title.includes('"')){
             searchCriteria = `${searchCriteria} notebook:"${filterNotebook.title}"`
         }
@@ -248,7 +251,7 @@ abstract class BaseFormat {
         // cover (see refreshPanelData), where dropping it would leave the item in neither section. The overview
         // markdown carries no such view state, so it keeps the ordinary drop.
         var keepMistypedRows = this.viewState ? !!(this.viewState as any).keepMistypedRows : false
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows })
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows, storeView: storeView })
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -758,6 +761,8 @@ export async function renderNotesSection(profile, viewState){
     var searchCriteria = searchFilter ? `${profile.searchCriteria} ${searchFilter}` : profile.searchCriteria
     // Same server side notebook narrowing as fetchTodos, so showing notes does not pull the vault
     var sectionFilterNotebook = viewState && viewState.notebookFilter ? notebooks.get(viewState.notebookFilter) : null
+    // What the note store (2.7) reads this section by, as in fetchTodos: the criteria before the notebook clause, and the notebook as an id set.
+    var storeView = { criteria: searchCriteria, notebooks: viewState && viewState.notebookFilter ? { key: viewState.notebookFilter, ids: notebookWithDescendants(notebooks, viewState.notebookFilter) } : null }
     if (sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"')){
         searchCriteria = `${searchCriteria} notebook:"${sectionFilterNotebook.title}"`
     }
@@ -777,7 +782,7 @@ export async function renderNotesSection(profile, viewState){
     var listingNotebooks = viewState && viewState.notebookFilter && !(sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"'))
         ? { key: viewState.notebookFilter, ids: notebookWithDescendants(notebooks, viewState.notebookFilter) }
         : null
-    var fetched = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks })
+    var fetched = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks, storeView: storeView })
     var notes = fetched.notes
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
