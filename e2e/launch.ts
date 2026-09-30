@@ -196,6 +196,20 @@ async function startInstance(profileDir: string, envDev = false): Promise<Joplin
         LD_LIBRARY_PATH: `${EXTRACT_DIR}:${path.join(EXTRACT_DIR, 'usr', 'lib')}:${
           process.env.LD_LIBRARY_PATH ?? ''
         }`,
+        // Keep the throwaway Joplin out of the developer's OS keyring. On its first launch a fresh profile
+        // probes the keychain by writing a test password through Electron's safeStorage, and Chromium routes
+        // that to gnome-keyring (or kwallet) over the D-Bus session bus whenever the desktop-environment
+        // variables name such a desktop. A locked keyring then raises a password prompt on the developer's
+        // real screen, and every launch of the run hangs behind it (2026-09-30: seven specs, zero tests
+        // run). Joplin's flag parser rejects `--password-store=basic`, so the isolation is environmental:
+        // with no desktop named and no reachable session bus, Chromium falls back to its plain-text store,
+        // which is all a throwaway profile deserves. Notifications and other session-bus features are lost
+        // to that Joplin too; no spec relies on them.
+        XDG_CURRENT_DESKTOP: '',
+        DESKTOP_SESSION: '',
+        GNOME_DESKTOP_SESSION_ID: '',
+        KDE_FULL_SESSION: '',
+        DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent/e2e-has-no-session-bus',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       // Own process group, so a crash/interrupt handler can SIGKILL the whole Electron tree with a
