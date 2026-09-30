@@ -7,6 +7,7 @@ import joplin from 'api';
 import { applyTodoCompletionOverrides, mergeOptimisticNotes, mergeOptimisticTodos } from './optimistic';
 import { EXCLUDED_NOTEBOOK_IDS_KEY, buildExclusionClauses, excludedDescendantIdSet, parseExcludedIds } from './exclusion';
 import { countData } from './instrument';
+import { applyLocalWrite } from './noteStore';
 
 /** Excluded notebooks *****************************************************************************************************************************
  * The "Excluded notebooks" feature evaluates exclusion by notebook ID (the hidden excludedNotebookIds setting is the single source of truth). Two      *
@@ -155,7 +156,8 @@ export function applyNoteNarrowing(items){
  * it reads (see getNotes), and a to-do search that turns out to be huge moves to the listing for the rest of the session (see getTodos).               *
  ***************************************************************************************************************************************************/
 // deleted_time rides along so a trashed note is dropped here whatever the listing itself does with the trash (the search always excludes it).
-const listingFields = ['id', 'title', 'is_todo', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time', 'deleted_time']
+// Exported for the note store (2.7), which walks the same listing with the same fields plus is_conflict.
+export const listingFields = ['id', 'title', 'is_todo', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time', 'deleted_time']
 // How many pages an UNFILTERED to-do search may take before the collection counts as large. Ten pages is 1,000 to-dos, where a page still costs
 // tens of milliseconds; past it the per-page cost grows with the whole set and the listing is the cheaper walk.
 const todoSearchPageBudget = 10
@@ -780,6 +782,14 @@ export async function getTodoDues(todoIDs){
     return result
 }
 
+/** Cockpit's own writes and the note store *********************************************************************************************************
+ * Every helper below that PUTs a note tells the note store (2.7) what it wrote, straight after the PUT: the store updates its record in the same   *
+ * code path instead of waiting for the change feed, whose row lands after the save returns and which an immediate poll missed 8 times in 20 in     *
+ * phase 1. The call also arms the store's follow-up poll, which brings the row - and whatever else the write moved - half a second later. A no-op  *
+ * until the store has started. A write of a field the store does not hold (a body) leaves the record untouched but still arms the follow-up, which *
+ * brings the write's new user_updated_time.                                                                                                        *
+ ***************************************************************************************************************************************************/
+
 /** setTodoDuesPerId ********************************************************************************************************************************
  * Writes a computed per-to-do due timestamp: applies [{ id, due }] entries, one PUT each (due 0 clears the alarm). This is how the multi-select     *
  * alarm plan lands its result, where different to-dos receive different due times.                                                                 *
@@ -788,6 +798,7 @@ export async function setTodoDuesPerId(entries){
     for (var entry of entries){
         countData('put')
         await joplin.data.put(['notes', entry.id], null, { todo_due: entry.due })
+        applyLocalWrite(entry.id, { todo_due: entry.due })
     }
 }
 
@@ -813,6 +824,7 @@ export async function setTodoDueDates(todoIDs, dateISO, dayStart){
         }
         countData('put')
         await joplin.data.put(['notes', todoID], null, { todo_due: dueTimestamp })
+        applyLocalWrite(todoID, { todo_due: dueTimestamp })
     }
 }
 
@@ -868,6 +880,7 @@ export async function getNoteContent(noteID){
 export async function setNoteContent(noteID, noteBody){
     countData('put')
     await joplin.data.put(['notes', noteID], null, { body: noteBody})
+    applyLocalWrite(noteID, { body: noteBody })
 }
 
 /** setTodoCompleted ********************************************************************************************************************************
@@ -878,4 +891,5 @@ export async function setNoteContent(noteID, noteBody){
 export async function setTodoCompleted(todoID, completed){
     countData('put')
     await joplin.data.put(['notes', todoID], null, { todo_completed: completed });
+    applyLocalWrite(todoID, { todo_completed: completed })
 }

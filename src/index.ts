@@ -20,6 +20,7 @@ import { setupToolbar } from './ui/toolbar/toolbar'
 import { setupChromeCss } from './ui/chrome/chrome'
 import { setupTitleBar } from './ui/titlebar/titleBar'
 import { setupStyler } from './ui/styler/styler'
+import { scheduleNoteStoreBuild } from './core/noteStore'
 
 /** Plugin Registration *****************************************************************************************************************************
  * Registers the plugin with joplin.                                                                                                                *
@@ -72,5 +73,9 @@ joplin.plugins.register({ onStart: setupPlugin })
         console.warn("Cockpit: could not refresh the excluded notebooks at startup", error)
     }
     await refreshInterfaces()
+    // THE NOTE STORE (2.7), ONLY NOW AND NEVER AWAITED. Its build walks the whole notes listing - 201 pages on a 20,000-note collection - so it is
+    // armed as a timeout after the first paint has happened, and onStart does not wait for it. Nothing reads the store yet; until the timeout
+    // fires, its triggers (the tick, a sync, a note change) do nothing at all. Before the database report, which can hold onStart on a message box.
+    scheduleNoteStoreBuild()
     await reportDatabaseProblems()
 }

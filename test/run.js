@@ -10217,6 +10217,732 @@ async function main() {
         assert.ok(state.panelHtml['panel-panel'].includes('Big tagged todo'))
     })
 
+    // ============================================================ note store (2.7 phase 2): the local mirror and the change feed
+    // Cockpit 2.7 keeps a mirror of every note's metadata, built once from the ['notes'] listing and kept exact by Joplin's change feed,
+    // joplin.data.get(['events'], { cursor }) (docs/BRIEF-2.7-local-mirror.md). Nothing reads it yet - phase 3 switches the unfiltered views over -
+    // so these checks prove the store on its own: the pure model (src/core/noteStoreModel.js, required directly), then the driver
+    // (src/core/noteStore.ts) through the bundle, observed by the calls it makes and by the inspection handle it publishes (state.noteStore).
+    // The harness serves the feed from a change log each test writes itself (state.pushChange), and with `listingFromNotes` the listing and the
+    // fetch by id both read the one note map the test changes.
+    const NoteStoreModel = require('../src/core/noteStoreModel.js')
+    // listingFields in src/core/joplin.ts, plus the one field a fetch by id needs to drop a conflict copy.
+    const STORE_FIELDS = ['id', 'title', 'is_todo', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time', 'deleted_time', 'is_conflict']
+    // The three timers in src/core/noteStore.ts: the startup build, the follow-up poll, the note-change debounce.
+    const STORE_BUILD_DELAY = 2000
+    const STORE_FOLLOW_UP = 500
+    const STORE_NOTE_CHANGE_DELAY = 250
+    const storeFolder = 'e'.repeat(31) + '1'
+    const storeId = (n) => 'e'.repeat(24) + String(n).padStart(8, '0')
+    const storeNote = (n, extra) => Object.assign({
+        id: storeId(n), title: `Stored ${n}`, is_todo: 0, todo_completed: 0, todo_due: 0, parent_id: storeFolder,
+        user_updated_time: 1000 + n, user_created_time: 500 + n, deleted_time: 0, is_conflict: 0,
+    }, extra || {})
+    const storeNoteRange = (from, count) => Array.from({ length: count }, (_, i) => storeNote(from + i))
+    const storeRun = async (notes, extra) => await run(Object.assign({
+        dataDir: path.join(tmp, 'store-data-' + Math.random().toString(36).slice(2)),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [],
+        listingFromNotes: true,
+        notes: Object.fromEntries(notes.map(note => [note.id, note])),
+        folders: [{ id: storeFolder, title: 'Store', parent_id: '' }],
+    }, extra || {}))
+    const isStoreGet = (g) => g.path[0] === 'events' || (g.path[0] === 'notes' && g.query && (g.query.fields || []).includes('is_conflict'))
+    const storeGetsSince = (state, mark) => state.gets.slice(mark).filter(isStoreGet)
+    const isEvents = (g) => g.path[0] === 'events'
+    const isWalkPage = (g) => g.path[0] === 'notes' && g.path.length === 1 && isStoreGet(g)
+    const isStoreFetch = (g) => g.path[0] === 'notes' && g.path.length === 2 && isStoreGet(g)
+    const hasCursor = (g) => !!g.query && 'cursor' in g.query
+    const storeModel = (state) => state.noteStore.getModel()
+    const storeIds = (state) => storeModel(state).snapshot().map(record => record.id).sort()
+    const buildTimeout = (state) => state.timeouts.find(t => t.ms === STORE_BUILD_DELAY)
+    const buildStore = async (state) => {
+        await state.fireTimeout(buildTimeout(state))
+        assert.ok(state.noteStore.isReady(), 'precondition: the store built')
+    }
+    const storeTick = (state) => state.withTimers(() => state.intervals.find(interval => interval.ms === 60000).fn())
+    // The store's own warnings, captured while fn runs: the one per session it may give, and none on a recovery.
+    const storeWarnings = async (fn) => {
+        const warnings = []
+        const realWarn = console.warn
+        console.warn = (...args) => { warnings.push(args.map(String).join(' ')) }
+        try {
+            await fn()
+        } finally {
+            console.warn = realWarn
+        }
+        return warnings.filter(warning => /note store|change feed/.test(warning))
+    }
+    const newStoreNote = (state, n, extra) => {
+        const note = storeNote(n, extra)
+        state.notes[note.id] = note
+        return note
+    }
+
+    // ---- the model, directly -----------------------------------------------------------------------------------------------------------------
+    const builtModel = (notes) => {
+        const model = NoteStoreModel.createNoteStoreModel()
+        model.beginBuild()
+        model.addListingPage(notes)
+        model.endBuild()
+        return model
+    }
+    const modelIds = (model) => model.snapshot().map(record => record.id).sort()
+
+    await test('note store model: a build stores each id once across pages and drops trashed and conflict rows', () => {
+        const model = NoteStoreModel.createNoteStoreModel()
+        model.beginBuild()
+        model.addListingPage([storeNote(1), storeNote(2), storeNote(3, { deleted_time: 77 })])
+        model.addListingPage([storeNote(2, { title: 'Stored 2, read again' }), storeNote(4, { is_conflict: 1 }), storeNote(5)])
+        assert.strictEqual(model.size(), 0, 'nothing is visible until the build is swapped in')
+        assert.strictEqual(model.endBuild(), true, 'the swap reports a change')
+        assert.deepStrictEqual(modelIds(model), [storeId(1), storeId(2), storeId(5)], 'one record per id; the trashed and the conflict row are dropped')
+        assert.strictEqual(model.get(storeId(2)).title, 'Stored 2, read again', 'a note read on two pages keeps the later read')
+        assert.deepStrictEqual(Object.keys(model.get(storeId(1))), NoteStoreModel.RECORD_FIELDS, 'a record holds exactly the eight fields')
+        assert.deepStrictEqual(NoteStoreModel.RECORD_FIELDS,
+            ['id', 'title', 'is_todo', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time'])
+        // A failed walk leaves what was there: a staging map is swapped in whole, or not at all.
+        model.beginBuild()
+        model.addListingPage([storeNote(9)])
+        model.abandonBuild()
+        assert.strictEqual(model.endBuild(), false, 'an abandoned build has nothing to swap in')
+        assert.deepStrictEqual(modelIds(model), [storeId(1), storeId(2), storeId(5)], 'and the previous contents stand')
+    })
+
+    await test('note store model: applyFetched upserts, and removes on deleted_time, on is_conflict and on a null (Not Found) answer', () => {
+        const model = builtModel([storeNote(1), storeNote(2), storeNote(3)])
+        assert.strictEqual(model.applyFetched(storeNote(9), storeId(9)), 'added', 'a note the store did not have is added')
+        assert.strictEqual(model.applyFetched(storeNote(1, { title: 'Renamed' }), storeId(1)), 'updated')
+        assert.strictEqual(model.get(storeId(1)).title, 'Renamed')
+        assert.strictEqual(model.applyFetched(storeNote(1, { title: 'Renamed' }), storeId(1)), 'unchanged', 'the same note again changes nothing')
+        assert.strictEqual(model.applyFetched(storeNote(2, { deleted_time: 5 }), storeId(2)), 'removed', 'a trashed note is removed')
+        assert.strictEqual(model.applyFetched(storeNote(3, { is_conflict: 1 }), storeId(3)), 'removed', 'a conflict copy is removed')
+        assert.strictEqual(model.applyFetched(null, storeId(9)), 'removed', 'a Not Found answer removes the note')
+        assert.strictEqual(model.applyFetched(null, storeId(9)), 'unchanged', 'and a Not Found for a note the store lacks is nothing')
+        assert.strictEqual(model.applyFetched(storeNote(8, { deleted_time: 5 }), storeId(8)), 'unchanged', 'a trashed note is never added')
+        assert.deepStrictEqual(modelIds(model), [storeId(1)])
+    })
+
+    await test('note store model: removing an unknown id is a no-op, and a local write merges known fields into known ids only', () => {
+        const model = builtModel([storeNote(1, { is_todo: 1 }), storeNote(2)])
+        const revision = model.revision
+        assert.strictEqual(model.remove(storeId(7)), false, 'an unknown id')
+        assert.strictEqual(model.revision, revision, 'changes nothing')
+        assert.strictEqual(model.applyLocalWrite(storeId(7), { todo_completed: 5 }), false, 'a write to a note the store lacks is ignored')
+        assert.strictEqual(model.get(storeId(7)), undefined, 'and does not create it: the feed will bring it')
+        assert.strictEqual(model.applyLocalWrite(storeId(1), { todo_completed: 1234, body: 'text', id: 'something else' }), true)
+        assert.deepStrictEqual(model.get(storeId(1)),
+            { id: storeId(1), title: 'Stored 1', is_todo: 1, todo_completed: 1234, todo_due: 0, parent_id: storeFolder, user_updated_time: 1001, user_created_time: 501 },
+            'only the record fields are merged, and never the id')
+        assert.strictEqual(model.applyLocalWrite(storeId(1), { body: 'a body only' }), false, 'a write of fields the store does not hold changes nothing')
+        assert.strictEqual(model.applyLocalWrite(storeId(2), { deleted_time: 9 }), true, 'a write that trashes the note')
+        assert.deepStrictEqual(modelIds(model), [storeId(1)], 'removes it')
+        assert.strictEqual(model.remove(storeId(1)), true, 'removing a known id')
+        assert.strictEqual(model.size(), 0)
+    })
+
+    await test('note store model: planDrain folds create and update into one fetch, lets the later row win, ignores unknown deletes, and counts fetches for the threshold', () => {
+        const K1 = storeId(1), K2 = storeId(2), N = storeId(10), Z = storeId(11), G = storeId(12), F = storeId(13)
+        const model = builtModel([storeNote(1), storeNote(2)])
+        const row = (id, item_id, type, item_type = 1) => ({ id, item_type, item_id, type, created_time: 1 })
+        const plan = model.planDrain([
+            row(1, N, 1),        // a create
+            row(2, K1, 2),       // an update
+            row(3, N, 2),        // an update of the note created above: still ONE fetch
+            row(4, Z, 3),        // a delete of an id the store never had: nothing
+            row(5, K2, 2),       // an update...
+            row(6, K2, 3),       // ...and a later delete of the same note: the delete wins
+            row(7, G, 3),        // a delete...
+            row(8, G, 1),        // ...and a later create of the same id: the create wins
+            row(9, F, 1, 2),     // not a note: skipped
+        ], 200)
+        assert.deepStrictEqual(plan, { fetch: [K1, N, G], remove: [K2], rebuild: false })
+        const creates = (count) => Array.from({ length: count }, (_, i) => row(100 + i, storeId(1000 + i), 1))
+        assert.strictEqual(model.planDrain(creates(200), 200).rebuild, false, '200 fetches stay per id')
+        assert.strictEqual(model.planDrain(creates(201), 200).rebuild, true, 'more than 200 is a rebuild')
+        assert.strictEqual(model.planDrain(creates(201).concat(creates(201)), 200).fetch.length, 201, 'the count is of distinct ids')
+        const knownDeletes = builtModel(storeNoteRange(1, 300)).planDrain(storeNoteRange(1, 300).map((note, i) => row(i + 1, note.id, 3)), 200)
+        assert.deepStrictEqual([knownDeletes.remove.length, knownDeletes.fetch.length, knownDeletes.rebuild], [300, 0, false],
+            'removals are local and free, so they never count towards a rebuild')
+    })
+
+    await test('note store model: todos() and notes() split every record by is_todo, numbers are numbers, and every read hands out a copy', () => {
+        const model = builtModel([
+            storeNote(1), storeNote(2, { is_todo: 1 }), storeNote(3, { is_todo: '1', todo_due: '1700000000000', title: null, parent_id: null }), storeNote(4),
+        ])
+        assert.deepStrictEqual(model.todos().map(record => record.id).sort(), [storeId(2), storeId(3)])
+        assert.deepStrictEqual(model.notes().map(record => record.id).sort(), [storeId(1), storeId(4)])
+        const normalised = model.get(storeId(3))
+        assert.deepStrictEqual([normalised.is_todo, normalised.todo_due, normalised.title, normalised.parent_id], [1, 1700000000000, '', ''])
+        model.get(storeId(1)).title = 'changed by a caller'
+        model.snapshot()[0].title = 'changed by a caller'
+        model.todos()[0].title = 'changed by a caller'
+        model.notes()[0].title = 'changed by a caller'
+        assert.ok(model.snapshot().every(record => record.title !== 'changed by a caller'), 'no read lets a caller change the mirror')
+    })
+
+    await test('note store model: the revision rises on every change and on nothing else', () => {
+        const model = NoteStoreModel.createNoteStoreModel()
+        const steps = []
+        const step = (label, fn) => { fn(); steps.push(`${label}:${model.revision}`) }
+        step('new', () => {})
+        step('staging', () => { model.beginBuild(); model.addListingPage([storeNote(1), storeNote(2)]) })
+        step('swap', () => model.endBuild())
+        step('same rebuild', () => { model.beginBuild(); model.addListingPage([storeNote(1), storeNote(2)]); model.endBuild() })
+        step('changed rebuild', () => { model.beginBuild(); model.addListingPage([storeNote(1), storeNote(2, { title: 'x' })]); model.endBuild() })
+        step('same fetch', () => model.applyFetched(storeNote(1), storeId(1)))
+        step('new fetch', () => model.applyFetched(storeNote(3), storeId(3)))
+        step('unknown not found', () => model.applyFetched(null, storeId(9)))
+        step('unknown remove', () => model.remove(storeId(9)))
+        step('remove', () => model.remove(storeId(3)))
+        step('unknown write', () => model.applyLocalWrite(storeId(9), { title: 'y' }))
+        step('same write', () => model.applyLocalWrite(storeId(1), { title: 'Stored 1' }))
+        step('body write', () => model.applyLocalWrite(storeId(1), { body: 'z' }))
+        step('write', () => model.applyLocalWrite(storeId(1), { title: 'Renamed' }))
+        step('reads', () => { model.planDrain([{ id: 1, item_type: 1, item_id: storeId(1), type: 2 }], 200); model.get(storeId(1)); model.snapshot(); model.size(); model.todos(); model.notes() })
+        step('abandoned build', () => { model.beginBuild(); model.addListingPage([]); model.abandonBuild() })
+        assert.deepStrictEqual(steps, ['new:0', 'staging:0', 'swap:1', 'same rebuild:1', 'changed rebuild:2', 'same fetch:2', 'new fetch:3',
+            'unknown not found:3', 'unknown remove:3', 'remove:4', 'unknown write:4', 'same write:4', 'body write:4', 'write:5', 'reads:5', 'abandoned build:5'])
+        try { model.revision = 99 } catch (error) { /* strict mode refuses the write outright; either way it must not land */ }
+        assert.strictEqual(model.revision, 5, 'and it cannot be written from outside')
+    })
+
+    // ---- the driver, through the bundle ------------------------------------------------------------------------------------------------------
+    await test('note store startup: the panel paints first, the build is armed as a timeout, and nothing of the store runs before it fires', async () => {
+        const state = await storeRun([storeNote(1), storeNote(2)])
+        assert.ok(state.setHtmlCalls > 0, 'the panel has painted')
+        assert.strictEqual(storeGetsSince(state, 0).length, 0, 'and the store has made no call at all: the first paint never waits for it')
+        assert.ok(!state.callLog.includes('events'), 'not one events call before the paint, or after it')
+        const kick = buildTimeout(state)
+        assert.ok(kick && !kick.fired && !kick.cleared, 'the build is a timeout armed during startup')
+        assert.strictEqual(state.noteStore.isReady(), false, 'and until it runs the store is not ready')
+        // A trigger that comes first costs nothing and arms nothing: the build about to run reads everything anyway.
+        const mark = state.timeouts.length
+        await storeTick(state)
+        await state.syncCompleteHandler({ withErrors: false })
+        await state.noteChangeHandler({ id: storeId(1) })
+        await state.panelMessageHandler(['todoChecked', storeId(1), true])
+        assert.strictEqual(storeGetsSince(state, 0).length, 0, 'no trigger and no write reaches the feed before the build')
+        assert.deepStrictEqual(state.timeouts.slice(mark).filter(t => t.ms === STORE_FOLLOW_UP || t.ms === STORE_NOTE_CHANGE_DELAY), [],
+            'and none arms a store timer')
+        const lastPaint = state.callLog.lastIndexOf('setHtml')
+        await state.fireTimeout(kick)
+        assert.ok(state.gets.some(isWalkPage), 'the build runs when its timeout fires')
+        assert.ok(state.callLog.indexOf('events') > lastPaint, 'after every paint so far')
+        assert.ok(state.noteStore.isReady(), 'and the store is ready')
+        assert.deepStrictEqual(storeIds(state), [storeId(1), storeId(2)])
+    })
+
+    await test('note store build: the cursor first, the id-ordered walk, then one replay from that string cursor; ready only after it, a duplicate stored once', async () => {
+        const state = await storeRun(storeNoteRange(1, 150).concat([storeNote(900, { deleted_time: 12 }), storeNote(901, { is_conflict: 1 })]), {
+            changeLog: [{ item_id: storeId(3), type: 2 }, { item_id: storeId(4), type: 1 }],
+        })
+        let firstPageLast = null
+        const readyWhile = []
+        state.onListingPage = (query, items) => {
+            if (query.order_by !== 'id') return items
+            readyWhile.push(state.noteStore.isReady())
+            if (query.page === 1){
+                firstPageLast = items[items.length - 1]
+                // A change while the walk runs, which only the replay can bring in.
+                state.notes[storeId(5)].title = 'Renamed during the walk'
+                state.pushChange({ item_id: storeId(5), type: 2 })
+                return items
+            }
+            // Page 2 repeats page 1's last note, as a create shifting the listing between the two reads would.
+            return [firstPageLast].concat(items)
+        }
+        state.onEventsCall = (query) => { if (query && 'cursor' in query) readyWhile.push(state.noteStore.isReady()) }
+        await state.fireTimeout(buildTimeout(state))
+        state.onListingPage = null
+        state.onEventsCall = null
+        const seq = storeGetsSince(state, 0)
+        assert.strictEqual(seq.length, 5, `the no-cursor call, two pages, the replay, one fetch - got ${seq.length}`)
+        assert.ok(isEvents(seq[0]) && !hasCursor(seq[0]), 'the cursor is taken first, with no cursor key at all')
+        assert.deepStrictEqual(seq.slice(1, 3).map(g => g.query), [1, 2].map(page => ({ fields: STORE_FIELDS, order_by: 'id', limit: 100, page })),
+            'then the listing by id, 100 a page, with the listing fields plus is_conflict')
+        assert.strictEqual(state.eventsAnswers[0].cursor, '2', 'the route answers the cursor as a string')
+        assert.deepStrictEqual(seq[3].query, { cursor: '2' }, 'after the last page, one replay from exactly that string')
+        assert.deepStrictEqual(seq[4].path, ['notes', storeId(5)], 'which fetches the note changed during the walk')
+        assert.deepStrictEqual(seq[4].query, { fields: STORE_FIELDS })
+        assert.deepStrictEqual(readyWhile, [false, false, false], 'not ready during the walk, nor when the replay is asked for')
+        assert.ok(state.noteStore.isReady(), 'ready once the replay is applied')
+        assert.strictEqual(storeModel(state).size(), 150, 'the duplicate is stored once; the trashed and the conflict note not at all')
+        assert.strictEqual(storeModel(state).get(storeId(5)).title, 'Renamed during the walk', 'and the replay brought the change in')
+    })
+
+    await test('note store idle tick: exactly one events call with the cursor as the last answer gave it, no follow-up, nothing else', async () => {
+        const state = await storeRun([storeNote(1)], { changeLog: [{ item_id: storeId(1), type: 1 }] })
+        await buildStore(state)
+        const lastCursor = state.eventsAnswers[state.eventsAnswers.length - 1].cursor
+        const revision = storeModel(state).revision
+        let notified = 0
+        state.noteStore.subscribe(() => notified++)
+        const mark = state.gets.length
+        await storeTick(state)
+        assert.deepStrictEqual(storeGetsSince(state, mark).map(g => g.query), [{ cursor: lastCursor }],
+            'one events call, carrying the string the route last answered - and no walk, no fetch')
+        assert.strictEqual(typeof lastCursor, 'string')
+        // The follow-up is for saves, whose feed row lands after the save returns; a tick is tied to none, so an idle tick is ONE data call.
+        assert.strictEqual(state.pendingTimeouts(STORE_FOLLOW_UP).length, 0, 'the tick arms no follow-up poll')
+        assert.strictEqual(storeModel(state).revision, revision, 'an empty drain changes nothing')
+        assert.strictEqual(notified, 0, 'so no listener hears about it')
+    })
+
+    await test('note store replay: create, update, unknown update, trash, restore, conflict, delete, unknown delete, Not Found', async () => {
+        const [A, B, C, D, E, T] = [1, 2, 3, 4, 5, 6].map(storeId)
+        const state = await storeRun([storeNote(1, { is_todo: 1 }), storeNote(2), storeNote(3), storeNote(4), storeNote(5), storeNote(6, { deleted_time: 30 })])
+        await buildStore(state)
+        assert.deepStrictEqual(storeIds(state), [A, B, C, D, E], 'precondition: the trashed note is not stored')
+        let notified = 0
+        state.noteStore.subscribe(() => notified++)
+        const N = newStoreNote(state, 20, { title: 'Created' }).id
+        state.pushChange({ item_id: N, type: 1 })                                              // a create
+        state.notes[A].title = 'Updated'
+        state.pushChange({ item_id: A, type: 2 })                                              // an update
+        const U = newStoreNote(state, 21, { title: 'Created and edited' }).id
+        state.pushChange({ item_id: U, type: 2 })                                              // an update of an id the store never had
+        state.notes[B].deleted_time = 99
+        state.pushChange({ item_id: B, type: 2 })                                              // a trash: an update, fetched with deleted_time
+        state.notes[T].deleted_time = 0
+        state.pushChange({ item_id: T, type: 2 })                                              // a restore
+        const X = newStoreNote(state, 22, { is_conflict: 1 }).id
+        state.pushChange({ item_id: X, type: 1 })                                              // a conflict copy arriving
+        delete state.notes[D]
+        state.pushChange({ item_id: D, type: 3 })                                              // a permanent delete
+        state.pushChange({ item_id: storeId(23), type: 3 })                                    // a delete of an id the store never had
+        state.pushChange({ item_id: E, type: 2 })
+        delete state.notes[E]                                                                  // gone by the time it is fetched: Not Found
+        const mark = state.gets.length
+        await storeTick(state)
+        const fetched = storeGetsSince(state, mark).filter(isStoreFetch)
+        assert.deepStrictEqual(fetched.map(g => g.path[1]), [N, A, U, B, T, X, E], 'one fetch per created or updated note, in feed order, none for a delete')
+        assert.ok(fetched.every(g => JSON.stringify(g.query) === JSON.stringify({ fields: STORE_FIELDS })), 'each asking for the store fields')
+        assert.deepStrictEqual(storeIds(state), [A, C, T, N, U].sort(), 'created, restored and unknown-updated in; trashed, conflict, deleted and Not Found out')
+        assert.strictEqual(storeModel(state).get(A).title, 'Updated')
+        assert.strictEqual(storeModel(state).get(A).is_todo, 1)
+        assert.ok(state.noteStore.isReady(), 'a Not Found is an answer, not a failure')
+        assert.strictEqual(notified, 1, 'one drain that changed the mirror is one notification')
+    })
+
+    await test('note store paging: 150 changes drain as two events pages inside one poll', async () => {
+        const state = await storeRun([storeNote(1)])
+        await buildStore(state)
+        const from = state.lastChangeId
+        for (let i = 0; i < 150; i++) state.pushChange({ item_id: newStoreNote(state, 1000 + i).id, type: 1 })
+        const mark = state.gets.length
+        await storeTick(state)
+        const seq = storeGetsSince(state, mark)
+        assert.deepStrictEqual(seq.filter(isEvents).map(g => g.query), [{ cursor: String(from) }, { cursor: String(from + 100) }],
+            'a full page of 100, then the rest from the cursor that page answered')
+        assert.strictEqual(seq.filter(isStoreFetch).length, 150, 'under the threshold, so each note is fetched')
+        assert.strictEqual(storeModel(state).size(), 151)
+    })
+
+    await test('note store large drain: more than 200 notes to fetch rebuilds instead - the cursor retaken first, then the walk, no per-id fetch', async () => {
+        const state = await storeRun([storeNote(1), storeNote(2)])
+        await buildStore(state)
+        for (let i = 0; i < 201; i++) state.pushChange({ item_id: newStoreNote(state, 1000 + i).id, type: 1 })
+        const mark = state.gets.length
+        await storeTick(state)
+        const seq = storeGetsSince(state, mark)
+        const shape = seq.map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
+        assert.deepStrictEqual(shape, ['events', 'events', 'events', 'head', 'page', 'page', 'page', 'events'],
+            'three drain pages, then a fresh cursor, then the walk, then its replay')
+        assert.strictEqual(seq.filter(isStoreFetch).length, 0, 'and not one per-id fetch')
+        const retaken = state.eventsAnswers[state.eventsAnswers.length - 2].cursor
+        assert.deepStrictEqual(seq[seq.length - 1].query, { cursor: retaken }, 'the replay starts from the retaken cursor')
+        assert.strictEqual(storeModel(state).size(), 203)
+        assert.ok(state.noteStore.isReady())
+    })
+
+    await test('note store failure: a route that throws at the guard leaves the store off for good - one warning, no walk, the panel unaffected', async () => {
+        const todo = { id: storeId(1), title: 'Guarded to-do', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: storeFolder }
+        const state = await storeRun([storeNote(1, todo)], { eventsUnavailable: true, todos: [todo] })
+        assert.ok(state.panelHtml['panel-panel'].includes('Guarded to-do'), 'precondition: the panel shows the to-do')
+        const warnings = await storeWarnings(() => state.fireTimeout(buildTimeout(state)))
+        assert.strictEqual(warnings.length, 1, 'one warning')
+        assert.deepStrictEqual(storeGetsSince(state, 0).map(g => g.path[0]), ['events'], 'the guard is the only call: no walk')
+        assert.strictEqual(state.noteStore.isAvailable(), false)
+        assert.strictEqual(state.noteStore.isReady(), false)
+        const paints = state.setHtmlCalls
+        const later = await storeWarnings(async () => {
+            await storeTick(state)
+            await state.syncCompleteHandler({ withErrors: false })
+            await state.noteChangeHandler({ id: storeId(1) })
+            await state.panelMessageHandler(['todoChecked', storeId(1), true])
+        })
+        assert.strictEqual(storeGetsSince(state, 0).length, 1, 'no trigger and no write calls the route again')
+        assert.strictEqual(state.pendingTimeouts(STORE_FOLLOW_UP).length + state.pendingTimeouts(STORE_NOTE_CHANGE_DELAY).length, 0, 'or arms a store timer')
+        assert.deepStrictEqual(later, [], 'and it warns only once')
+        assert.ok(state.setHtmlCalls > paints, 'the panel goes on painting')
+        assert.ok(state.panelHtml['panel-panel'].includes('Guarded to-do'), 'what it always painted')
+    })
+
+    await test('note store failure: a build whose page throws is retried by the next trigger, at most once per trigger, never by a follow-up', async () => {
+        const state = await storeRun(storeNoteRange(1, 150))
+        let failuresLeft = 2
+        state.onListingPage = (query, items) => {
+            if (query.order_by === 'id' && query.page === 2 && failuresLeft > 0){
+                failuresLeft--
+                throw new Error('the page failed')
+            }
+            return items
+        }
+        const heads = () => state.gets.filter(g => isEvents(g) && !hasCursor(g)).length
+        const warnings = await storeWarnings(async () => {
+            await state.fireTimeout(buildTimeout(state))
+            assert.ok(!state.noteStore.isReady() && state.noteStore.isAvailable(), 'a failed build leaves the store not ready, but on')
+            assert.strictEqual(storeModel(state).size(), 0, 'and the half-read walk is not swapped in')
+            await state.syncCompleteHandler({ withErrors: false })
+            assert.strictEqual(heads(), 2, 'the next trigger builds once')
+            assert.ok(!state.noteStore.isReady(), 'and that build fails too')
+            const before = storeGetsSince(state, 0).length
+            await state.fireTimeout(state.pendingTimeouts(STORE_FOLLOW_UP)[0])
+            assert.strictEqual(storeGetsSince(state, 0).length, before, 'the follow-up never builds')
+            await storeTick(state)
+            assert.strictEqual(heads(), 3, 'the trigger after that builds once more')
+        })
+        state.onListingPage = null
+        assert.ok(state.noteStore.isReady(), 'and succeeds')
+        assert.strictEqual(storeModel(state).size(), 150)
+        assert.deepStrictEqual(warnings, [], 'two failures and a recovery are not worth a warning')
+    })
+
+    await test('note store failure: an events call that throws mid-session makes the store stale, and the next trigger rebuilds it', async () => {
+        const state = await storeRun([storeNote(1), storeNote(2)])
+        await buildStore(state)
+        state.eventsFailNext = 1
+        const warnings = await storeWarnings(async () => {
+            await state.syncCompleteHandler({ withErrors: false })
+            assert.strictEqual(state.noteStore.isReady(), false, 'a failed poll leaves the store stale')
+            const before = storeGetsSince(state, 0).length
+            await state.fireTimeout(state.pendingTimeouts(STORE_FOLLOW_UP)[0])
+            assert.strictEqual(storeGetsSince(state, 0).length, before, 'the follow-up does not rebuild it')
+            state.pushChange({ item_id: newStoreNote(state, 3).id, type: 1 })
+            const mark = state.gets.length
+            await storeTick(state)
+            const shape = storeGetsSince(state, mark).map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
+            assert.deepStrictEqual(shape, ['head', 'page', 'events'], 'the next trigger retakes the cursor, walks, and replays')
+        })
+        assert.ok(state.noteStore.isReady(), 'and the store is exact again')
+        assert.deepStrictEqual(storeIds(state), [storeId(1), storeId(2), storeId(3)], 'including what changed while it was stale')
+        assert.deepStrictEqual(warnings, [], 'without a warning')
+    })
+
+    await test('note store failure: three failed rebuilds in a row switch the store off for the session, with one warning', async () => {
+        const state = await storeRun([storeNote(1)])
+        await buildStore(state)
+        state.eventsFailNext = 1
+        await storeTick(state)
+        assert.strictEqual(state.noteStore.isReady(), false, 'precondition: stale')
+        state.eventsFailNext = 99
+        const events = () => state.gets.filter(isEvents).length
+        const counts = []
+        const warnings = await storeWarnings(async () => {
+            for (let attempt = 1; attempt <= 3; attempt++){
+                const before = events()
+                await storeTick(state)
+                counts.push(`${events() - before}:${state.noteStore.isAvailable()}`)
+            }
+        })
+        assert.deepStrictEqual(counts, ['1:true', '1:true', '1:false'], 'each trigger makes one attempt; the third failure ends it')
+        assert.strictEqual(warnings.length, 1, 'with one warning')
+        state.eventsFailNext = 0
+        const before = events()
+        await storeTick(state)
+        assert.strictEqual(events() - before, 0, 'and the route is not called again')
+    })
+
+    await test('note store own writes: a tick of the checkbox updates the record at once, arms exactly one follow-up, and the late row changes nothing', async () => {
+        const todo = storeNote(1, { is_todo: 1, title: 'Stored to-do', todo_due: Date.now() + 3600000 })
+        const state = await storeRun([todo, storeNote(2)], { todos: [todo] })
+        await buildStore(state)
+        const mark = state.gets.length
+        await state.panelMessageHandler(['todoChecked', todo.id, true])
+        const put = state.notePuts[state.notePuts.length - 1]
+        assert.ok(put.id === todo.id && put.fields.todo_completed > 0, 'precondition: setTodoCompleted wrote a completion time')
+        assert.strictEqual(storeModel(state).get(todo.id).todo_completed, put.fields.todo_completed, 'the store has the write at once')
+        assert.strictEqual(storeGetsSince(state, mark).length, 0, 'without asking the feed or fetching the note')
+        const followUps = state.pendingTimeouts(STORE_FOLLOW_UP)
+        assert.strictEqual(followUps.length, 1, 'exactly one follow-up poll is armed')
+        // The feed's row lands after the save returned; the follow-up brings it as an ordinary upsert.
+        state.pushChange({ item_id: todo.id, type: 2 })
+        const revision = storeModel(state).revision
+        const followMark = state.gets.length
+        await state.fireTimeout(followUps[0])
+        const seq = storeGetsSince(state, followMark)
+        assert.strictEqual(seq.filter(isEvents).length, 1, 'firing it is one events call')
+        assert.deepStrictEqual(seq.filter(isStoreFetch).map(g => g.path[1]), [todo.id], 'and the fetch of the note its row names')
+        assert.strictEqual(storeModel(state).revision, revision, 'which changes nothing: the store already had the write')
+        assert.strictEqual(state.pendingTimeouts(STORE_FOLLOW_UP).length, 0, 'and the follow-up arms no other')
+    })
+
+    await test('note store own writes: two to-dos dropped on a day update their dues in the store at once, with ONE follow-up after the last write', async () => {
+        const todos = [1, 2].map(n => storeNote(n, { is_todo: 1, title: `Dropped to-do ${n}`, todo_due: Date.now() + 3600000 }))
+        const state = await storeRun(todos, { todos })
+        await buildStore(state)
+        const mark = state.gets.length
+        const timerMark = state.timeouts.length
+        await state.panelMessageHandler(['todosDropped', todos.map(todo => todo.id), '2026-10-05'])
+        for (const todo of todos){
+            const put = state.notePuts.filter(entry => entry.id === todo.id).pop()
+            assert.ok(put && put.fields.todo_due > 0, 'precondition: setTodoDueDates wrote a due time')
+            assert.strictEqual(storeModel(state).get(todo.id).todo_due, put.fields.todo_due, 'the store has the new due at once')
+        }
+        assert.strictEqual(storeGetsSince(state, mark).length, 0, 'without a store call')
+        // Each write arms the follow-up; the second arm MOVES it rather than adding one, so it still comes half a second after the LAST write.
+        const armed = state.timeouts.slice(timerMark).filter(t => t.ms === STORE_FOLLOW_UP)
+        assert.deepStrictEqual(armed.map(t => t.cleared), [true, false], 'the first write\'s follow-up is replaced by the second\'s')
+        assert.strictEqual(state.pendingTimeouts(STORE_FOLLOW_UP).length, 1, 'so one follow-up is armed')
+    })
+
+    await test('note store triggers: a completed sync polls once and arms one follow-up', async () => {
+        const state = await storeRun([storeNote(1)])
+        await buildStore(state)
+        const mark = state.gets.length
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.strictEqual(storeGetsSince(state, mark).filter(isEvents).length, 1, 'one poll')
+        const followUps = state.pendingTimeouts(STORE_FOLLOW_UP)
+        assert.strictEqual(followUps.length, 1, 'one follow-up')
+        await state.fireTimeout(followUps[0])
+        assert.strictEqual(storeGetsSince(state, mark).filter(isEvents).length, 2, 'which polls once more')
+        assert.strictEqual(state.pendingTimeouts(STORE_FOLLOW_UP).length, 0)
+    })
+
+    await test('note store triggers: a burst of three note changes is one debounced poll with one follow-up, and a change during a sync waits for its end', async () => {
+        const state = await storeRun([storeNote(1), storeNote(2)])
+        await buildStore(state)
+        const mark = state.gets.length
+        for (const id of [storeId(1), storeId(2), storeId(1)]) await state.noteChangeHandler({ id })
+        assert.strictEqual(storeGetsSince(state, mark).length, 0, 'nothing yet: the burst is debounced')
+        const debounce = state.pendingTimeouts(STORE_NOTE_CHANGE_DELAY)
+        assert.strictEqual(debounce.length, 1, 'one debounce for the whole burst')
+        await state.fireTimeout(debounce[0])
+        assert.strictEqual(storeGetsSince(state, mark).filter(isEvents).length, 1, 'one poll')
+        const followUps = state.pendingTimeouts(STORE_FOLLOW_UP)
+        assert.strictEqual(followUps.length, 1, 'one follow-up')
+        await state.fireTimeout(followUps[0])
+        assert.strictEqual(storeGetsSince(state, mark).filter(isEvents).length, 2)
+        await state.syncStartHandler()
+        const syncMark = state.gets.length
+        const timerMark = state.timeouts.length
+        await state.noteChangeHandler({ id: storeId(2) })
+        assert.strictEqual(state.timeouts.slice(timerMark).filter(t => t.ms === STORE_NOTE_CHANGE_DELAY).length, 0, 'a change during a sync arms no poll')
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.strictEqual(storeGetsSince(state, syncMark).filter(isEvents).length, 1, 'the sync\'s completion polls once for all of it')
+    })
+
+    await test('note store single flight: a poll asked for while one runs is ONE more run after it, and a poll asked for during a build waits for it', async () => {
+        const state = await storeRun(storeNoteRange(1, 150))
+        const shapeOf = (seq) => seq.map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
+        // Bounded, so a regression fails here instead of hanging the suite.
+        const waitUntil = async (condition, what) => {
+            for (let turn = 0; turn < 1000 && !condition(); turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(condition(), `never reached: ${what}`)
+        }
+        await state.withTimers(async () => {
+            let release
+            const held = new Promise(resolve => { release = resolve })
+            let holding = false
+            state.onListingPage = async (query, items) => {
+                if (query.order_by === 'id' && query.page === 1){ holding = true; await held }
+                return items
+            }
+            const building = state.fireTimeout(buildTimeout(state))
+            await waitUntil(() => holding, 'the build holding on its first page')
+            const polled = state.noteStore.pollNow()
+            assert.deepStrictEqual(shapeOf(storeGetsSince(state, 0)), ['head', 'page'], 'a poll asked for during the walk does not start alongside it')
+            release()
+            await Promise.all([building, polled])
+            state.onListingPage = null
+            assert.deepStrictEqual(shapeOf(storeGetsSince(state, 0)), ['head', 'page', 'page', 'events', 'events'],
+                'it runs after the build and its replay')
+        })
+        assert.ok(state.noteStore.isReady())
+        const mark = state.gets.length
+        await state.withTimers(async () => {
+            let release
+            const held = new Promise(resolve => { release = resolve })
+            let holding = false
+            state.onEventsCall = async () => {
+                if (holding) return
+                holding = true
+                await held
+            }
+            const first = state.noteStore.pollNow()
+            await waitUntil(() => holding, 'the poll holding on its events call')
+            const second = state.noteStore.pollNow()
+            const third = state.noteStore.pollNow()
+            assert.strictEqual(storeGetsSince(state, mark).length, 1, 'while one poll runs, no other starts')
+            release()
+            await Promise.all([first, second, third])
+            state.onEventsCall = null
+        })
+        assert.strictEqual(storeGetsSince(state, mark).filter(isEvents).length, 2, 'the two asked for meanwhile run as ONE more poll, after it')
+    })
+
+    await test('note store build: a note the walk read and then lost during it leaves the store not ready, and the next trigger walks again', async () => {
+        // The listing is paged by offset, so a note leaving it after its page was read shifts every later page left by one and the walk can step
+        // over the note at the next boundary - one with no feed row of its own to bring it back. (This harness keeps trashed notes in its listing,
+        // so nothing shifts here; what is checked is the rule that such a build is not trusted.)
+        const state = await storeRun(storeNoteRange(1, 150))
+        state.onListingPage = (query, items) => {
+            if (query.order_by === 'id' && query.page === 2){
+                state.notes[storeId(5)].deleted_time = 42
+                state.pushChange({ item_id: storeId(5), type: 2 })
+            }
+            return items
+        }
+        const warnings = await storeWarnings(() => state.fireTimeout(buildTimeout(state)))
+        state.onListingPage = null
+        assert.strictEqual(storeModel(state).get(storeId(5)), undefined, 'the replay removed the trashed note')
+        assert.ok(!state.noteStore.isReady() && state.noteStore.isAvailable(), 'but the build is not trusted, and it is not a failure either')
+        assert.deepStrictEqual(warnings, [])
+        const mark = state.gets.length
+        await storeTick(state)
+        assert.strictEqual(storeGetsSince(state, mark).filter(g => isEvents(g) && !hasCursor(g)).length, 1, 'the next trigger walks again')
+        assert.ok(state.noteStore.isReady(), 'and that walk, undisturbed, is trusted')
+        assert.strictEqual(storeModel(state).size(), 149)
+    })
+
+    await test('note store failure: only CONSECUTIVE failed builds count - two, a success, then two more leave the store on', async () => {
+        const state = await storeRun(storeNoteRange(1, 150))
+        let failuresLeft = 2
+        state.onListingPage = (query, items) => {
+            if (query.order_by === 'id' && query.page === 2 && failuresLeft > 0){
+                failuresLeft--
+                throw new Error('the page failed')
+            }
+            return items
+        }
+        const warnings = await storeWarnings(async () => {
+            await state.fireTimeout(buildTimeout(state))                 // failure 1
+            await storeTick(state)                                        // failure 2
+            await storeTick(state)                                        // a success resets the count
+            assert.ok(state.noteStore.isReady(), 'precondition: the third build succeeded')
+            state.eventsFailNext = 1
+            await storeTick(state)                                        // a failed poll: stale, which is not a failed build
+            failuresLeft = 2
+            await storeTick(state)                                        // failure 3 in all, 1 in a row
+            await storeTick(state)                                        // failure 4 in all, 2 in a row
+        })
+        state.onListingPage = null
+        assert.strictEqual(failuresLeft, 0, 'precondition: both later builds failed')
+        assert.strictEqual(state.noteStore.isAvailable(), true, 'four failures, but never three in a row: the store stays on')
+        assert.deepStrictEqual(warnings, [])
+        await storeTick(state)
+        assert.ok(state.noteStore.isReady(), 'and the next build succeeds')
+    })
+
+    await test('note store build: more than 200 notes changing during the walk leave it not ready - one walk, no fetch, no build inside the build', async () => {
+        const state = await storeRun(storeNoteRange(1, 150))
+        // Once only, so a build that did recurse would show as a second walk rather than recurse for ever.
+        let changed = false
+        state.onListingPage = (query, items) => {
+            if (query.order_by === 'id' && query.page === 1 && !changed){
+                changed = true
+                for (let i = 0; i < 201; i++) state.pushChange({ item_id: newStoreNote(state, 1000 + i).id, type: 1 })
+            }
+            return items
+        }
+        const warnings = await storeWarnings(() => state.fireTimeout(buildTimeout(state)))
+        state.onListingPage = null
+        const seq = storeGetsSince(state, 0)
+        assert.strictEqual(seq.filter(g => isEvents(g) && !hasCursor(g)).length, 1, 'one cursor taken: the replay never calls build() from inside build()')
+        assert.deepStrictEqual(seq.filter(isWalkPage).map(g => g.query.page), [1, 2, 3, 4], 'one walk')
+        assert.strictEqual(seq.filter(isStoreFetch).length, 0, 'and not one per-id fetch for the replay it cannot finish')
+        assert.ok(!state.noteStore.isReady() && state.noteStore.isAvailable(), 'the build ends not ready, which is not a failure')
+        assert.deepStrictEqual(warnings, [])
+        const mark = state.gets.length
+        await storeTick(state)
+        assert.strictEqual(storeGetsSince(state, mark).filter(g => isEvents(g) && !hasCursor(g)).length, 1, 'the next trigger walks again')
+        assert.ok(state.noteStore.isReady())
+        assert.strictEqual(storeModel(state).size(), 351)
+    })
+
+    await test('note store failure: a fetch by id that fails with anything but Not Found makes the store stale, silently, and the next trigger rebuilds it', async () => {
+        const state = await storeRun([storeNote(1), storeNote(2)])
+        await buildStore(state)
+        state.notes[storeId(1)].title = 'Renamed'
+        state.pushChange({ item_id: storeId(1), type: 2 })
+        let failed = false
+        state.onNoteGet = (id, query) => {
+            if (failed || !(query && (query.fields || []).includes('is_conflict'))) return
+            failed = true
+            throw new Error('SQLITE_BUSY: database is locked')
+        }
+        const warnings = await storeWarnings(async () => {
+            await storeTick(state)
+            assert.ok(failed, 'precondition: the fetch failed')
+            assert.strictEqual(state.noteStore.isReady(), false, 'the store is stale')
+            const mark = state.gets.length
+            await storeTick(state)
+            const shape = storeGetsSince(state, mark).map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
+            assert.deepStrictEqual(shape, ['head', 'page', 'events'], 'the next trigger retakes the cursor, walks, and replays')
+        })
+        state.onNoteGet = null
+        assert.ok(state.noteStore.isReady())
+        assert.strictEqual(storeModel(state).get(storeId(1)).title, 'Renamed', 'and the change the failed fetch was after is in')
+        assert.deepStrictEqual(warnings, [], 'without a warning')
+    })
+
+    await test('note store triggers: a tick during a sync makes no store call, and the completed sync catches up once', async () => {
+        const state = await storeRun([storeNote(1)])
+        await buildStore(state)
+        await state.syncStartHandler()
+        const mark = state.gets.length
+        await storeTick(state)
+        assert.strictEqual(storeGetsSince(state, mark).length, 0, 'the tick leaves the store alone while a sync runs')
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.strictEqual(storeGetsSince(state, mark).filter(isEvents).length, 1, 'the completion polls once')
+    })
+
+    await test('note store large drain: a drain that passes the threshold on page 3 of 5 reads exactly 3 events pages before the walk', async () => {
+        // 100 rows a page and "more than 200" fetches: page 3 is the earliest a drain can pass the threshold.
+        const state = await storeRun([storeNote(1)])
+        await buildStore(state)
+        for (let i = 0; i < 450; i++) state.pushChange({ item_id: newStoreNote(state, 1000 + i).id, type: 1 })
+        const mark = state.gets.length
+        await storeTick(state)
+        const shape = storeGetsSince(state, mark).map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
+        assert.deepStrictEqual(shape, ['events', 'events', 'events', 'head', 'page', 'page', 'page', 'page', 'page', 'events'],
+            'three of the five feed pages, then the cursor retaken, the walk and its replay - the last two feed pages are never read')
+        assert.strictEqual(storeModel(state).size(), 451)
+        assert.ok(state.noteStore.isReady())
+    })
+
+    await test('note store build: over three pages of a real listing, a note trashed after page 1 read it makes the walk miss the page-2/3 boundary note, and the next walk brings it back', async () => {
+        // listingExcludesGone serves the listing as the route does, without trashed notes, so the trash really shifts page 3 left by one.
+        const state = await storeRun(storeNoteRange(1, 250), { listingExcludesGone: true })
+        state.onListingPage = (query, items) => {
+            if (query.order_by === 'id' && query.page === 2){
+                state.notes[storeId(5)].deleted_time = 42
+                state.pushChange({ item_id: storeId(5), type: 2 })
+            }
+            return items
+        }
+        await state.fireTimeout(buildTimeout(state))
+        state.onListingPage = null
+        assert.strictEqual(storeGetsSince(state, 0).filter(isWalkPage).length, 3, 'precondition: a three-page walk')
+        assert.strictEqual(storeModel(state).get(storeId(201)), undefined, 'the note at the page-2/3 boundary was stepped over')
+        assert.strictEqual(storeModel(state).get(storeId(5)), undefined, 'and the trashed note is gone')
+        assert.ok(!state.noteStore.isReady(), 'so the build is not trusted')
+        await storeTick(state)
+        assert.ok(storeModel(state).get(storeId(201)), 'the next trigger\'s walk brings the missed note back')
+        assert.ok(state.noteStore.isReady())
+        assert.strictEqual(storeModel(state).size(), 249)
+    })
+
+    await test('note store audit: every joplin chain in noteStore.ts is a data.get, called in the same expression', () => {
+        const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'noteStore.ts'), 'utf8')
+        const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+        const chains = code.match(/\bjoplin\s*[.[][\w.\s[\]'"]*\(?/g) || []
+        assert.strictEqual(chains.length, 4, 'the guard or cursor call, the walk, the drain and the fetch by id')
+        assert.ok(chains.every(chain => chain.replace(/\s+/g, '') === 'joplin.data.get('), `every one is joplin.data.get( - found ${chains.join(', ')}`)
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

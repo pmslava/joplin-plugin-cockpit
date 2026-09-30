@@ -55,9 +55,10 @@ function makeJoplin(options) {
         onStart: null,
         panelMessageHandler: null,
         setHtmlCalls: 0,
-        // An ordered log of the two events the fast-first-paint checks care about: a panel paint ('setHtml')
-        // and a checkbox-count note-body fetch ('bodyFetch', a ['notes', id] GET asking only for the body).
-        // Recording them in one sequence lets a test assert a paint happened BEFORE any body was fetched.
+        // An ordered log of the events the fast-first-paint checks care about: a panel paint ('setHtml'), a
+        // checkbox-count note-body fetch ('bodyFetch', a ['notes', id] GET asking only for the body) and a call of
+        // the change feed ('events', the note store's route). Recording them in one sequence lets a test assert a
+        // paint happened BEFORE any body was fetched, and before the note store did anything at all.
         callLog: [],
         // Optional one-shot gate for the out-of-order-paint (generation token) check: when set to
         // { promise, todos, searchNotes, onEnter }, the FIRST search awaits promise before returning the
@@ -96,9 +97,37 @@ function makeJoplin(options) {
         // treatment views.panels.onMessage gets: the alarm write these handlers can reach arms the reconcile and
         // overview lanes, and an uncaptured setTimeout would leak across scenarios on a real clock.
         contentScriptHandlers: {},
+        // THE CHANGE FEED (2.7): Joplin's item_changes table as the ['events'] route serves it. One row per note, the LATEST: pushChange
+        // removes a note's earlier row before appending its new one, as ItemChange.addMulti does, and ids are never reused (the column is
+        // AUTOINCREMENT), so lastChangeId only rises. Rows are { id, item_type, item_id, type, created_time }.
+        changeLog: [],
+        lastChangeId: 0,
+        // Every answer the route gave, in order, so a test can hold the cursor the plugin sent against the one it was handed.
+        eventsAnswers: [],
+        // The route is missing (a mobile app, an older desktop): every events call throws. Settable mid-run too.
+        eventsUnavailable: !!options.eventsUnavailable,
+        // How many of the next events calls throw, whatever they ask - the mid-session failure a poll has to survive.
+        eventsFailNext: 0,
+        // An async hook run at the start of every events call with its query: a test can hold a call there (single flight) or look at the
+        // plugin's state at that exact moment.
+        onEventsCall: null,
+        // An async hook run on every page of the full listing (the one asking for todo_due) with (query, items); what it returns replaces
+        // the page. It can put a note on two pages - a create shifting the listing between two reads - or throw, as a failing page does.
+        onListingPage: null,
+        // An async hook run on every single-note GET with (id, query) before it is answered: it can throw, as a read that fails with something
+        // other than Not Found does.
+        onNoteGet: null,
     }
 
     const notes = options.notes || {}
+
+    state.pushChange = ({ item_id, type, item_type = 1 }) => {
+        state.changeLog = state.changeLog.filter(row => row.item_id !== item_id)
+        const row = { id: ++state.lastChangeId, item_type, item_id, type, created_time: Date.now() }
+        state.changeLog.push(row)
+        return row
+    }
+    for (const change of options.changeLog || []) state.pushChange(change)
 
     // Wraps a plugin-supplied handler so that any setTimeout it arms (the reconcile and overview lanes) is
     // captured into state.timeouts rather than scheduled on a real clock, for the duration of the awaited
@@ -245,6 +274,35 @@ function makeJoplin(options) {
                 if (pathParts[0] === 'notes' && pathParts.length === 2 && query && Array.isArray(query.fields) && query.fields.length === 1 && query.fields[0] === 'body') {
                     state.callLog.push('bodyFetch')
                 }
+                // The change feed, as routes/events answers it in 3.6.14 (read in phase 0, run in phase 1): no cursor key at all -> the
+                // current position and no rows; a cursor -> the rows after it, 100 at most whatever `limit` says, `has_more` when the page
+                // is full, and the cursor of the last row returned (the input echoed when there was none), ALWAYS as a string. A cursor
+                // that is not a number is refused; a stale one never is. `fields` narrows the rows.
+                if (pathParts[0] === 'events') {
+                    state.callLog.push('events')
+                    if (state.onEventsCall) await state.onEventsCall(query)
+                    if (state.eventsUnavailable) throw new Error('Unknown route: events')
+                    if (state.eventsFailNext > 0) {
+                        state.eventsFailNext--
+                        throw new Error('events: the call failed')
+                    }
+                    const eventsQuery = query || {}
+                    let answer
+                    if (!('cursor' in eventsQuery)) {
+                        answer = { items: [], has_more: false, cursor: String(state.lastChangeId) }
+                    } else {
+                        const after = Number(eventsQuery.cursor)
+                        if (Number.isNaN(after)) throw new Error('Invalid cursor: ' + eventsQuery.cursor)
+                        const rows = state.changeLog.filter(row => row.id > after).slice(0, 100)
+                        answer = {
+                            items: rows.map(row => ({ ...projectFields(row, eventsQuery.fields) })),
+                            has_more: rows.length >= 100,
+                            cursor: rows.length ? String(rows[rows.length - 1].id) : String(eventsQuery.cursor),
+                        }
+                    }
+                    state.eventsAnswers.push(answer)
+                    return answer
+                }
                 if (pathParts[0] === 'search') {
                     // getTodos queries "type:todo ...", getNotes queries "type:note ...". Serve the
                     // regular-note list only to the type:note query so a showNotes profile does not
@@ -334,6 +392,8 @@ function makeJoplin(options) {
                     return { items: options.tags || [], has_more: false }
                 }
                 if (pathParts[0] === 'notes') {
+                    // The real route pages in SQL and refuses a page bigger than 100 with this very message.
+                    if (pathParts.length === 1 && query && Number(query.limit) > 100) throw new Error(`Limit out of bond: ${query.limit}`)
                     // Bare ['notes'] is a LISTING ordered by updated_time, and two callers use it: the search field's "recent notes"
                     // suggestion fetch and the settings note's index-independent title scan (findNotesTitled, which cannot rely on the
                     // FTS index being current). `options.recentNotes` still answers it wholesale for the suggestion checks that pin an
@@ -343,18 +403,36 @@ function makeJoplin(options) {
                     // isUnfilteredQuery in core/joplin.ts), told apart from the two callers below by asking for todo_due. It lists every
                     // note and to-do, so it serves both search fixture sets - to-dos typed 1, notes typed 0 - with a query function
                     // called on an empty query, since there is none. Newest first when asked, and paged like the real SQL route.
+                    // `listingFromNotes` serves it from the note fixtures instead - the same map a GET by id reads, so a note store test has
+                    // ONE set of notes, which it changes and then describes in the change feed. Like the other source it carries trashed and
+                    // conflict notes when the fixtures do (the real listing leaves them out), so the plugin's own drop is what gets tested.
+                    // `listingExcludesGone` (off by default) leaves out trashed and conflict notes the way the real route does (deleted_time = 0
+                    // AND is_conflict = 0), and is read afresh for every page, so a note trashed mid-walk shifts the later pages as it would there.
+                    // `order_by: 'id'` is ascending by id, as the store's walk and the large to-do walk ask for. has_more is the route's own
+                    // `items.length >= limit`: a listing that is an exact multiple of the page answers one more, empty page.
                     if (pathParts.length === 1 && query && Array.isArray(query.fields) && query.fields.includes('todo_due')) {
-                        const listedTodos = typeof options.todos === 'function' ? (options.todos('') || []) : (options.todos || [])
-                        const listedNotes = typeof options.searchNotes === 'function' ? (options.searchNotes('') || []) : (options.searchNotes || [])
-                        let listed = typedItems(listedTodos, true).concat(typedItems(listedNotes, false))
+                        let listed
+                        if (options.listingFromNotes) {
+                            listed = Object.keys(notes).map(id => Object.assign({ id }, notes[id]))
+                        } else {
+                            const listedTodos = typeof options.todos === 'function' ? (options.todos('') || []) : (options.todos || [])
+                            const listedNotes = typeof options.searchNotes === 'function' ? (options.searchNotes('') || []) : (options.searchNotes || [])
+                            listed = typedItems(listedTodos, true).concat(typedItems(listedNotes, false))
+                        }
+                        if (options.listingExcludesGone) listed = listed.filter(item => !(Number(item.deleted_time) > 0) && !Number(item.is_conflict))
                         if (query.order_by === 'user_updated_time') {
                             listed = listed.slice().sort((first, second) => (Number(second.user_updated_time) || 0) - (Number(first.user_updated_time) || 0))
+                        } else if (query.order_by === 'id') {
+                            listed = listed.slice().sort((first, second) => (String(first.id) < String(second.id) ? -1 : String(first.id) > String(second.id) ? 1 : 0))
                         }
                         const size = Number(query.limit) || 100
                         const page = Math.max(1, Number(query.page) || 1)
+                        const sliced = listed.slice((page - 1) * size, page * size)
+                        let pageItems = sliced
+                        if (state.onListingPage) pageItems = (await state.onListingPage(query, pageItems)) || pageItems
                         return {
-                            items: listed.slice((page - 1) * size, page * size).map(item => projectFields(item, query.fields)),
-                            has_more: page * size < listed.length,
+                            items: pageItems.map(item => projectFields(item, query.fields)),
+                            has_more: sliced.length >= size,
                         }
                     }
                     if (pathParts.length === 1) {
@@ -368,6 +446,7 @@ function makeJoplin(options) {
                             has_more: listed.length > limit,
                         }
                     }
+                    if (state.onNoteGet) await state.onNoteGet(pathParts[1], query)
                     const note = notes[pathParts[1]]
                     if (!note) throw new Error('Not Found')
                     // ['notes', id, 'tags'] lists the tags currently on a note (tag picker).
@@ -422,7 +501,11 @@ async function run(options) {
     const { joplin, state } = makeJoplin(options)
     global.joplin = joplin
     delete require.cache[require.resolve(bundlePath)]
+    delete global.CockpitNoteStore
     require(bundlePath)
+    // The note store's inspection handle (src/core/noteStore.ts publishes it on the global when the bundle loads). Taken now, because the next
+    // run's bundle replaces the global with its own store.
+    state.noteStore = global.CockpitNoteStore || null
     if (!state.onStart) throw new Error('Plugin did not register an onStart handler')
     // Capture the intervals the plugin arms at startup (the periodic refresh timer and the folder poll)
     // instead of scheduling them on a real clock: the suite invokes them by hand, and leaving many run()s'

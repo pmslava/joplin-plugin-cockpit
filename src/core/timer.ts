@@ -12,6 +12,8 @@
  *                          rewritten at most once per burst instead of on every follow-up.                                                            *
  *   - the sync events    : flip the Synchronize button via the cheapest possible paint (a fast render, never a dataset rebuild), and arm ONE           *
  *                          reconcile job after a sync completes.                                                                                       *
+ *   - the note store     : (2.7) the tick, a completed sync and a note change each also poll the change feed once (see noteStore.ts). Additive: it     *
+ *                          reads nothing the panel draws yet, and costs nothing at all until the store's startup build has been kicked off.            *
  *                                                                                                                                                    *
  *  A profile switch is deliberately none of these: it changes no note data, so it paints (from cache / one search) and stops - see panel.ts.          *
  ***************************************************************************************************************************************************/
@@ -25,6 +27,7 @@ import { getSyncStatus, markSyncComplete, markSyncStart } from "./syncStatus";
 import { hasPendingOptimistic } from "./optimistic";
 import { isMobile } from "./platform";
 import { drainDeferredSettingsNoteWrite, isSettingsNote, pollSettingsNote, scheduleSettingsNoteRead, syncSettingsNote } from "./settingsSync";
+import { pollNow, pollOnTick, scheduleNoteStorePoll } from "./noteStore";
 
 /** Variable Initialization ************************************************************************************************************************/
 const defaultUpdateFrequency = 60
@@ -196,6 +199,9 @@ export async function setupTimer(){
         // own, so nothing about the settings note can stop the panel from being repainted.
         pollSettingsNote("tick").catch(error => console.warn("Cockpit: could not poll the settings note", error)),
         refreshInterfaces(),
+        // The note store's poll (2.7): one events call when nothing changed, and no follow-up - that is for saves, and every save fires
+        // onNoteChange, which arms its own. Not while a sync runs: onSyncComplete catches up once. It guards itself and never rejects.
+        getSyncStatus().syncing ? null : pollOnTick(),
     ]), updateFrequency * 1000);
 }
 
@@ -205,6 +211,10 @@ export async function setupTimer(){
  ***************************************************************************************************************************************************/
 export async function setupWorkspaceEvents(){
     await registerEvent("onNoteChange", async (event) => {
+        // The note store (2.7) takes EVERY note change as a hint - the settings note and the overview notes are notes too, and the change feed,
+        // not this event, says what actually changed - and polls once per burst. Not while a sync runs, for the reason the external-change path
+        // below gives: a sync changes hundreds of notes, and onSyncComplete polls once for the whole of it.
+        if (!getSyncStatus().syncing) scheduleNoteStorePoll()
         // The settings note is not content: it carries no to-dos, so it belongs in neither the reconcile lane nor the external-change
         // path (which would fetch it as an ordinary note and hand it to the optimistic layer). It gets its own short-debounced read
         // instead, which is also a drain point for a write this device still owes. Checked first, and from a mirrored id, so the
@@ -255,6 +265,9 @@ export async function setupWorkspaceEvents(){
         // would stay stale until the periodic backstop. A single scheduleOverview here collapses with any still
         // -pending per-change debounce (it does not stack) and rewrites the notes once the index has settled.
         scheduleOverview()
+        // The note store (2.7) catches up with everything the sync brought in, in one drain. Last, so the button and the lanes above are not
+        // held up by it.
+        await pollNow()
     })
     await registerEvent("onNoteAlarmTrigger", () => { scheduleReconcile(); scheduleOverview() })
     // The only subscription here that is NOT a refresh trigger: which note the editor is showing decides
