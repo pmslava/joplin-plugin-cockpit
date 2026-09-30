@@ -48,7 +48,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { invalidateResultCaches, listingFields } from "./joplin";
-import { countData } from "./instrument";
+import { countData, markStoreBuildEnd, markStoreBuildStart } from "./instrument";
 const { createNoteStoreModel } = require("./noteStoreModel");
 
 /** Timing and limits ******************************************************************************************************************************/
@@ -340,6 +340,7 @@ function feedCursor(answer){
 async function build(){
     building = true
     buildLostNote = false
+    markStoreBuildStart()                         // the renderer's heap before the store is built (instrument.ts)
     try {
         await walk()
     } finally {
@@ -376,6 +377,7 @@ async function walk(){
         model.endBuild()
         cursor = walkCursor
         var complete = await drainFeed(false)
+        markStoreBuildEnd(model.size())               // and after its replay, with the mirror's size
         failedBuilds = 0
         // A trash Cockpit applied while this build ran may have hidden a note the walk stepped over (see applyLocalRemoval).
         setReady(complete && !buildLostNote)

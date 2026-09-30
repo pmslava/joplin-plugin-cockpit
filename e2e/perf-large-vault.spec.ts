@@ -269,6 +269,9 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
     // What each periodic tick cost in data calls (2.7): Cockpit keeps the record in its own plugin window, on the global CockpitInstrument
     // (src/core/instrument.ts). Every page is asked, since the plugin window's URL is Joplin's business; the one that answers is Cockpit's.
     let dataCallsPerTick: unknown = null;
+    // What the note store costs the plugin's renderer (2.7): its heap just before the store's build and just after the build's replay, and the
+    // mirror's size then, read by instrument.ts and handed back in the snapshot as storeHeap; the difference is given in MB as well.
+    let storeMemory: unknown = null;
     if (withPlugin) {
       for (const pg of joplin.browser.contexts().flatMap((ctx) => ctx.pages())) {
         const answer = await within(pg.evaluate(() => {
@@ -277,6 +280,10 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
         }), 5_000, null);
         if (answer) {
           dataCallsPerTick = answer;
+          const heap = answer.totals && answer.totals.storeHeap;
+          storeMemory = heap
+            ? { ...heap, deltaMb: heap.beforeBuild != null && heap.afterBuild != null ? Math.round((heap.afterBuild - heap.beforeBuild) / 104857.6) / 10 : null }
+            : null;
           break;
         }
       }
@@ -307,6 +314,7 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
       maxDomNodes: Math.max(0, ...samples.map((s) => s.domNodes)),
       mainHeapMb,
       dataCallsPerTick,
+      storeMemory,
       processes,
       pages,
       samples,

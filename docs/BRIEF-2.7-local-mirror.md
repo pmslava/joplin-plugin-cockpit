@@ -252,6 +252,14 @@ Each phase ends with: harness green, a reviewer pass (plain-text report; a verdi
    - perf spec at 20k;
    - a Pixel round if mobile paths changed.
 
+   **In progress 2026-09-30.** Prepared in the worktree, not committed: version 2.7.0 in the four fields and the harness pin; the store's memory read in the app for the first time (`storeHeap` in `CockpitInstrument.snapshot()` - the plugin renderer's `performance.memory.usedJSHeapSize` just before the first build and just after its replay, with the mirror's size then, null where the engine has no `performance.memory` - and `storeMemory` beside `dataCallsPerTick` in the perf report); the DEVLOG entry "v2.7.0: the local note mirror"; a release-notes draft kept outside the repo; `README.md` checked, no sentence in it made wrong by 2.7. Harness 607 checks. What remains:
+   - the full harness on main;
+   - the full local e2e on main;
+   - the perf spec at 20,000 notes with `PERF_WINDOW_MS=150000` for a like-for-like lag figure, now reporting the store's memory from the app; the DEVLOG entry's measurements paragraph is then brought up to that run;
+   - after Slava approves the push: CI Tests green on the pushed SHA;
+   - the Pixel round: the store's availability guard is the mobile fallback, proven only on desktop so far;
+   - `npm run dist`, install the `.jpl` into `~/.config/joplin-desktop/plugins/`, and stop: the release itself waits for Slava's approval.
+
 **Acceptance targets at 20k notes + 1k to-dos** (perf spec, 150 s window):
 - first paint no worse than 2.6.3 (8.5 s after the UI is up);
 - main-window lag ≤ 2.6.3 (1.8 s);

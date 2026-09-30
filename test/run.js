@@ -4414,13 +4414,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 2.6.3', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 2.7.0', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '2.6.3'
+        const expected = '2.7.0'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
@@ -11678,6 +11678,32 @@ async function main() {
             'CockpitInstrument.ticks() records it the same way')
         const storeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'noteStore.ts'), 'utf8')
         assert.ok(/const walkPagePauseMs = 0\n/.test(storeSource), 'the walk\'s page pause is prepared, and off')
+    })
+
+    await test('note store reads: the instrument snapshot carries the store\'s memory - the renderer\'s heap before the first build and after its replay, with the mirror\'s size - null where the engine has no performance.memory', async () => {
+        const items = [readTodo(1), readTodo(2), readNote(3)]
+        const plain = await readRun(items)
+        const counters = ['search', 'listing', 'get', 'put', 'post', 'del', 'bodies', 'events', 'folders', 'tags', 'renders', 'paints']
+        assert.deepStrictEqual(Object.keys(plain.instrument.snapshot()), counters.concat(['storeHeap']), 'the counters as before, and storeHeap beside them')
+        assert.deepStrictEqual(plain.instrument.snapshot().storeHeap, { beforeBuild: null, afterBuild: null, notes: null }, 'nothing measured before the build')
+        await buildStore(plain)
+        assert.deepStrictEqual(plain.instrument.snapshot().storeHeap, { beforeBuild: null, afterBuild: null, notes: 3 }, 'Node has no performance.memory: the readings are null, the size is not')
+        // An engine that has it (Chromium, in the plugin's window): one reading as the build starts, one after its replay.
+        const measured = await readRun(items)
+        let readings = 0
+        Object.defineProperty(globalThis.performance, 'memory', { configurable: true, get: () => ({ usedJSHeapSize: ++readings * 1000 }) })
+        try {
+            await buildStore(measured)
+        } finally {
+            delete globalThis.performance.memory
+        }
+        assert.deepStrictEqual(measured.instrument.snapshot().storeHeap, { beforeBuild: 1000, afterBuild: 2000, notes: 3 }, 'before the build and after its replay')
+        // A later rebuild starts from a heap that already holds a store, so the first build's figures stand.
+        measured.eventsFailNext = 1
+        await measured.withTimers(() => measured.noteStore.pollNow())
+        await storeTick(measured)
+        assert.ok(measured.noteStore.isReady(), 'precondition: the store was rebuilt')
+        assert.deepStrictEqual(measured.instrument.snapshot().storeHeap, { beforeBuild: 1000, afterBuild: 2000, notes: 3 }, 'and a rebuild leaves them')
     })
 
     // ============================================================ note store triggers (2.7 phase 4): drain the feed, render once

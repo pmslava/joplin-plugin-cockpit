@@ -95,8 +95,40 @@ export function logTick(before, startedAt){
     console.info(`Cockpit tick ${entry.ms}ms — search:${entry.search} listing:${entry.listing} get:${entry.get} put:${entry.put} post:${entry.post} del:${entry.del} bodies:${entry.bodies} events:${entry.events} folders:${entry.folders} tags:${entry.tags} renders:${entry.renders} paints:${entry.paints}`)
 }
 
+/** The note store's memory (2.7) *******************************************************************************************************************
+ * The one figure the 2.7 acceptance list wants from the app itself: what the note store costs the plugin's renderer. noteStore.ts marks the start  *
+ * of its build and the end of the build's replay; each mark reads performance.memory.usedJSHeapSize - Chromium's, in the plugin's own window - and *
+ * the end also records how many notes the mirror then holds. Where the engine offers no performance.memory (Node, the harness) a reading is null.  *
+ * Only the first build that reaches its replay is kept: a later rebuild starts from a heap that already holds a store, so its difference would say *
+ * nothing about the store's size. Published through CockpitInstrument.snapshot() as storeHeap: { beforeBuild, afterBuild, notes }, all null until  *
+ * measured.                                                                                                                                        *
+ ***************************************************************************************************************************************************/
+var storeHeap = { beforeBuild: null, afterBuild: null, notes: null }
+var storeHeapTaken = false
+
+function usedHeap(){
+    try {
+        var memory = (globalThis as any).performance && (globalThis as any).performance.memory
+        return memory && typeof memory.usedJSHeapSize === 'number' ? memory.usedJSHeapSize : null
+    } catch (error) {
+        return null
+    }
+}
+
+export function markStoreBuildStart(){
+    if (storeHeapTaken) return
+    storeHeap = { beforeBuild: usedHeap(), afterBuild: null, notes: null }
+}
+
+export function markStoreBuildEnd(notes){
+    if (storeHeapTaken) return
+    storeHeapTaken = true
+    storeHeap = { beforeBuild: storeHeap.beforeBuild, afterBuild: usedHeap(), notes: notes }
+}
+
 /** The inspection handle **************************************************************************************************************************/
+// snapshot() is the counters as they always were, with storeHeap beside them (2.7); ticks() is unchanged.
 ;(globalThis as any).CockpitInstrument = Object.freeze({
-    snapshot,
+    snapshot: () => ({ ...snapshot(), storeHeap: { ...storeHeap } }),
     ticks: () => tickHistory.map(entry => ({ ...entry })),
 })
