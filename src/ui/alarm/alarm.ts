@@ -8,7 +8,7 @@
 import joplin from "api";
 import { getTodoDues, setTodoDuesPerId } from "../../core/joplin";
 import { getDayStartTime } from "../../core/settings";
-import { refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
+import { afterOwnWrite, refreshInterfaces, startOwnWrite } from "../../core/timer";
 import { openPluginDialog } from "../../core/dialog";
 import { isMobile } from "../../core/platform";
 // The multi-select engine and its explanation text live in the shared, unit-tested quick-button module (the same
@@ -425,8 +425,9 @@ export async function openAlarmDialog(todoIDs){
     }
 
     // 'clear': remove every selected to-do's alarm.
+    var clearStorePath = await startOwnWrite(todoIDs)
     await setTodoDuesPerId(todoIDs.map(id => ({ id, due: 0 })))
-    await afterAlarmWrite()
+    await afterOwnWrite(clearStorePath)
 }
 
 /** applyAlarmPlanResult ****************************************************************************************************************************
@@ -435,19 +436,11 @@ export async function openAlarmDialog(todoIDs){
  * setTodoDuesPerId lands it. Shared by the desktop dialog OK and the mobile overlay's alarmSet.                                                       *
  ***************************************************************************************************************************************************/
 async function applyAlarmPlanResult(todoIDs, plan, anchor, mode){
+    var storePath = await startOwnWrite(todoIDs)
     var todos = await getTodoDues(todoIDs)
     var results = applyAlarmPlan(todos, plan, anchor, mode, new Date())
     await setTodoDuesPerId(results)
-    await afterAlarmWrite()
-}
-
-/** afterAlarmWrite *********************************************************************************************************************************
- * The refresh sequence every alarm write ends with: repaint now, then let the reconcile and overview lanes catch up once the search index settles.   *
- ***************************************************************************************************************************************************/
-async function afterAlarmWrite(){
-    await refreshInterfaces()
-    scheduleReconcile()
-    scheduleOverview()
+    await afterOwnWrite(storePath)
 }
 
 /** computeInitialAlarm *****************************************************************************************************************************
@@ -511,8 +504,9 @@ export async function applyAlarmSet(todoIDs, dateString, timeString, mode?, plan
  ***************************************************************************************************************************************************/
 export async function applyAlarmCleared(todoIDs){
     if (!Array.isArray(todoIDs) || !todoIDs.length) return
+    var storePath = await startOwnWrite(todoIDs)
     await setTodoDuesPerId(todoIDs.map(id => ({ id, due: 0 })))
-    await afterAlarmWrite()
+    await afterOwnWrite(storePath)
 }
 
 /** parseAlarmFields ********************************************************************************************************************************

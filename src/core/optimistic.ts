@@ -164,6 +164,16 @@ export function clearOptimisticItem(noteID){
     itemOverlay.delete(noteID)
 }
 
+/** clearAllOptimistic ******************************************************************************************************************************
+ * Drops every completion override and every overlay entry at once. For the moment the whole layer is known to be moot (2.7 phase 5, settleDrained  *
+ * in timer.ts): every view reads the note store, and the store has just re-read the entire collection - its startup build, or the rebuild of a     *
+ * drain too large to fetch note by note - so it holds Joplin's truth for every id and nothing held here can be more current than it.               *
+ ***************************************************************************************************************************************************/
+export function clearAllOptimistic(){
+    completionOverrides.clear()
+    itemOverlay.clear()
+}
+
 /** revalidateOptimisticInserts *********************************************************************************************************************
  * Drops any INSERT overlay entry for the given view whose stored record no longer belongs to it, judged by the caller's predicate (noteMatchesView   *
  * bound to the CURRENT profile). An entry is scoped by viewKey (profileID + notebookFilter) - which does NOT capture the profile's visibility        *

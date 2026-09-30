@@ -727,9 +727,9 @@ var checkboxCounts = new Map()
 const bodyFetchChunk = 20
 const maxBodyFetchesPerRefresh = 300
 // How many stale rings a refresh has left for a later one, over the session: rows past the per-refresh cap, and never-read rings of notes the note
-// store's changed-only fill was not told to read. A render that saw this move left rows with rings it did not read, so the panel is not finished with that view yet: the periodic
-// tick (timer.ts) takes that as a reason to render again, which is how the rest fill in "on following refreshes" once a tick no longer repaints an
-// unchanged panel.
+// store's changed-only fill was not told to read. A render that saw this move left rows with rings it did not read, so the panel is not finished
+// with that view yet: the periodic tick (timer.ts) takes that as a reason to render again, which is how the rest fill in "on following refreshes"
+// once a tick no longer repaints an unchanged panel.
 var deferredRingBodies = 0
 
 export function ringBodiesDeferred(){

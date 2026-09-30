@@ -11952,9 +11952,13 @@ async function main() {
         assert.ok(state.panelHtml['panel-panel'].includes('fresh tag'))
         assert.deepStrictEqual(await idleTick(), { renders: 0, paints: 0 }, 'then idle')
         // A completion override the view cannot retire: the ticked to-do leaves a profile that hides completed ones, so no row agrees with it, and
-        // it is held until its 60 s timeout. These ticks keep the real clock, so it is still held when they come.
+        // it is held until its 60 s timeout. These ticks keep the real clock, so it is still held when they come. Since phase 5 a tick on the store
+        // path holds nothing (storeServesAction in timer.ts), so this one is made while a sync runs, which sends it down today's path.
         await state.panelMessageHandler(['profilesDropdownChanged', 3])
+        await state.syncStartHandler()
         await state.panelMessageHandler(['todoChecked', storeId(2), true])
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.strictEqual(state.triggers.optimisticHeld().anything, true, 'precondition: the tick made during the sync holds its override')
         await storeTick(state)
         assert.ok(tickCost(lastTick(state), ['renders']).renders > 0, 'precondition: the tick after the write draws it')
         await storeTick(state)
@@ -12113,13 +12117,18 @@ async function main() {
         await buildAndRender(state)
         await storeTick(state)
         const isChecked = () => /data-todo-id="e+00000001"[^>]*>\s*<input type="checkbox"[^>]*\schecked\s*>/.test(state.panelHtml['panel-panel'])
-        // Ticked in Cockpit, then un-ticked by another device: the store has it open again, the override (60 s) still says done, and wins.
+        // Ticked in Cockpit, then un-ticked by another device: the store has it open again, the override (60 s) still says done, and wins. Since
+        // phase 5 only a tick off the store path holds an override, and only a drain off it leaves one standing (settleDrained in timer.ts): both
+        // happen here while a sync runs, which the gate counts as off the store path.
+        await state.syncStartHandler()
         await state.panelMessageHandler(['todoChecked', ticked.id, true])
         state.notes[ticked.id].todo_completed = 0
         state.pushChange({ item_id: ticked.id, type: 2 })
         await state.withTimers(() => state.noteStore.pollNow())
         await fireStoreRender(state)
         assert.ok(isChecked(), 'precondition: the held override draws the to-do ticked')
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.ok(isChecked(), 'precondition: and still does once the sync is over - nothing has drained that note since')
         const realNow = Date.now
         try {
             // A full render that merges the override, and during which it runs out: the clock passes its 60 s after the to-dos are read.
@@ -12193,6 +12202,980 @@ async function main() {
         assert.ok(state.gets.slice(mark).some(isWalkPage), 'precondition: the drain passed the threshold and rebuilt')
         await fireStoreRender(state)
         assert.ok(ringOf().includes('title="1/2 checkboxes done'), 'the rebuild\'s render fills the changed ring: one of two done')
+    })
+
+    // ============================================================ note store actions (2.7 phase 5): the panel's own writes on the store path
+    // While every view is store-served and no sync runs (storeServesAction in src/core/timer.ts, published on CockpitTriggers), the panel's own actions
+    // stop feeding the optimistic layer (src/core/optimistic.ts) and arming the reconcile ladder: the store has each write in the write's own code path,
+    // so the action renders from it (showOwnWrite in panel.ts, afterOwnWrite in timer.ts), and the store's follow-up poll brings Joplin's own row.
+    // Each action below runs three times on the same notes, and all three must draw the same rows, in the same order, under the same headings:
+    //   S - the store built, every view store-served: the phase 5 path;
+    //   O - the store built, a sync running: today's path (overlay, override, ladder) laid over the very same store reads - the phase 4 behaviour;
+    //   Q - before the build: the 2.6.3 search path, with a LIVE index (it answers what the notes hold now, narrowed by the query's own terms), so a
+    //       full render there is Joplin's truth and an optimistic one is the cached answer with the overlay laid over it.
+    // CockpitTriggers.optimisticHeld() says whether the layer holds an overlay entry, and whether it holds anything at all (an entry or an override).
+    const held = (state) => state.triggers.optimisticHeld()
+    const NOTHING_HELD = { itemOverlay: false, anything: false }
+    // The ladder's first rung is armed once per arm, and nothing else in the plugin arms a 1 s timer, so this counts the arms.
+    const laddersArmedSince = (state, timerMark) => state.timeouts.slice(timerMark).filter(t => t.ms === RECONCILE_OFFSETS[0]).length
+    const liveRun = async (items, extra) => {
+        let state = null
+        const index = (isTodo) => (query) => {
+            const q = String(query || '')
+            return (state ? Object.values(state.notes) : items)
+                .filter(note => !!Number(note.is_todo) === isTodo && !(Number(note.deleted_time) > 0))
+                .filter(note => !isTodo || !q.includes('iscompleted:0') || !Number(note.todo_completed))
+                .filter(note => !isTodo || !q.includes('due:19700201') || Number(note.todo_due) > 0)
+                .map(note => ({ ...note }))
+        }
+        state = await readRun(items, Object.assign({ todos: index(true), searchNotes: index(false) }, extra || {}))
+        return state
+    }
+    // Watches the layer on S from the moment the action's first write is out until the action ends: every settings read the action makes after the
+    // write records what the layer holds, so an entry written and retired within the action itself (over the store, the action's own repaint would
+    // retire it at once) is still seen.
+    const watchLayer = (state) => {
+        const seen = []
+        const written = async () => {
+            seen.push(held(state))
+            state.onSettingRead = async () => { seen.push(held(state)) }
+        }
+        state.onDataPut = written
+        state.onDataPost = written
+        return () => {
+            state.onDataPut = null
+            state.onDataPost = null
+            state.onSettingRead = null
+            return seen
+        }
+    }
+    // Runs `act` on S, O and Q (above). `setup` prepares each run first (a notebook filter, a dialog's answer, a command); the marks are taken after it.
+    // With `watch`, S's layer is watched through the action (watchLayer) and what was seen is kept as S.layerSeen.
+    const actionRuns = async (items, act, options) => {
+        const opts = options || {}
+        const runs = {}
+        for (const kind of ['S', 'O', 'Q']){
+            const state = await liveRun(items.map(item => ({ ...item })), opts.extra)
+            if (kind !== 'Q') await buildAndRender(state)
+            if (opts.setup) await opts.setup(state, kind)
+            if (kind === 'O') await state.syncStartHandler()
+            const marks = { gets: state.gets.length, timers: state.timeouts.length, puts: state.notePuts.length, paints: state.setHtmlCalls }
+            const stopWatching = opts.watch && kind === 'S' ? watchLayer(state) : null
+            await act(state, kind)
+            runs[kind] = { state, marks, sections: readSections(state), drawn: drawnRows(state), layerSeen: stopWatching ? stopWatching() : null }
+        }
+        assert.strictEqual(await runs.S.state.triggers.storeServesAction(), true, 'precondition: S is on the store path')
+        assert.strictEqual(await runs.O.state.triggers.storeServesAction(), false, 'precondition: O is not (a sync runs)')
+        assert.strictEqual(await runs.Q.state.triggers.storeServesAction(), false, 'precondition: Q is not (the store is not built)')
+        return runs
+    }
+    // What every store-path action leaves behind, against today's path: S holds nothing, arms no rung and searches nothing; O and Q arm the ladder,
+    // which is what proves they took today's path, and Q, for an action that feeds the layer, still holds its entry or override (over the store, O's
+    // own repaint has retired it already: the store agrees with it at once); all three draw alike.
+    const assertStoreAction = (runs, label, feedsLayer, insertedOnSearch) => {
+        const { S, O, Q } = runs
+        assert.deepStrictEqual(held(S.state), NOTHING_HELD, `${label}: the store path holds nothing in the optimistic layer`)
+        assert.strictEqual(laddersArmedSince(S.state, S.marks.timers), 0, `${label}: and arms no reconcile ladder`)
+        assert.strictEqual(searchesSince(S.state, S.marks.gets).length, 0, `${label}: and makes no search`)
+        for (const [name, other] of [['O', O], ['Q', Q]]){
+            assert.ok(laddersArmedSince(other.state, other.marks.timers) > 0, `${label}: today's path (${name}) arms the ladder`)
+        }
+        if (feedsLayer) assert.strictEqual(held(Q.state).anything, true, `${label}: and the search path holds its optimistic entry`)
+        if (S.layerSeen){
+            assert.ok(S.layerSeen.length > 0, `${label}: precondition - the layer was watched through the action`)
+            assert.ok(S.layerSeen.every(seen => seen.itemOverlay === false && seen.anything === false), `${label}: and held nothing at any point of it`)
+        }
+        assert.ok(S.drawn.some(token => /\d+\/\d+ checkboxes done/.test(token)), `${label}: precondition - some ring shows checkboxes`)
+        assert.deepStrictEqual(S.drawn, O.drawn, `${label}: the store path draws exactly what today's path draws over the same store - rows, order, headings, ticks, rings`)
+        const ringless = insertedOnSearch || []
+        assert.deepStrictEqual(ringlessFor(S.drawn, ringless), ringlessFor(Q.drawn, ringless),
+            `${label}: and what the search path draws${ringless.length ? ' - but the rings of the rows its overlay inserts, which the store draws at once' : ''}`)
+    }
+    // The panel as the three runs are held against each other: every heading, and every row with what it draws - a to-do's tick and each row's ring
+    // text - so "the same rows" means the same drawing, not only the same ids.
+    const drawnRows = (state) => {
+        const html = String(state.panelHtml['panel-panel'] || '')
+        const tokens = []
+        const pattern = /<h2[^>]*>([^<]*)<\/h2>|<div class="todo( -completed)?( -note)?" data-(todo|note)-id="([^"]+)"/g
+        let match
+        while ((match = pattern.exec(html))){
+            if (match[1] !== undefined){ tokens.push(`# ${match[1]}`); continue }
+            const ring = (html.slice(match.index).match(/title="(\d+\/\d+ checkboxes done|No checkboxes inside)/) || [])[1] || 'no ring'
+            tokens.push(match[4] === 'todo' ? `todo ${match[5]} ${match[2] ? 'done' : 'open'} ${ring}` : `note ${match[5]} ${ring}`)
+        }
+        return tokens
+    }
+    // The search path's optimistic repaint draws a row its overlay inserts (a flip, an external change) from the inserted record, whose ring is empty
+    // until that path's next full render; the store draws the real ring at once. For those rows only, the ring is left out of the comparison with Q.
+    const ringlessFor = (tokens, ids) => tokens.map(token => ids.includes(token.split(' ')[1]) ? token.replace(/ (\d+\/\d+ checkboxes done|No checkboxes inside|no ring)$/, '') : token)
+    // readMix with checkboxes inside some of its notes, so a ring has something to show.
+    const ringMix = () => readMix().map(item => {
+        const bodies = { 2: '- [x] a\n- [ ] b', 3: '- [ ] a', 20: '- [x] a\n- [x] b\n- [ ] c', 21: '- [ ] x' }
+        const n = Number(item.id.slice(-8))
+        return bodies[n] ? Object.assign(item, { body: bodies[n] }) : item
+    })
+    const rowHtml = (state, id) => (String(state.panelHtml['panel-panel'] || '').match(new RegExp(`data-todo-id="${id}"[^>]*>\\s*<input type="checkbox"[^>]*>`)) || [''])[0]
+    const isTicked = (state, id) => /\schecked\s*>$/.test(rowHtml(state, id))
+    // The notebook a row is drawn in: its own pill is the first data-notebook-id after its id.
+    const pillOf = (state, id) => ((String(state.panelHtml['panel-panel'] || '').match(new RegExp(`data-(?:todo|note)-id="${id}"[\\s\\S]*?data-notebook-id="([^"]+)"`)) || [])[1] || null)
+    const putsSince = (state, mark) => state.notePuts.slice(mark).map(put => ({ id: put.id, fields: put.fields }))
+    const isoInDays = (days) => toISODateLocal(new Date(Date.now() + days * DAY))
+    const toISODateLocal = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    const hideCompletedSwitches = { showCompletedPast: false, showCompletedToday: false, showCompletedFuture: false, showCompletedNoDue: false }
+
+    await test('note store actions: the gate - store-served and no sync takes the store path; a view on the search, a sync, or a store not ready takes today\'s, with its override and its ladder', async () => {
+        const probe = async (label, state, expectStorePath) => {
+            const id = storeId(2)
+            const timerMark = state.timeouts.length
+            const putMark = state.notePuts.length
+            assert.strictEqual(await state.triggers.storeServesAction(), expectStorePath, `${label}: the gate answers ${expectStorePath}`)
+            await state.panelMessageHandler(['todoChecked', id, true])
+            assert.deepStrictEqual(putsSince(state, putMark).map(put => put.id), [id], `${label}: one PUT either way`)
+            if (expectStorePath){
+                assert.deepStrictEqual(held(state), NOTHING_HELD, `${label}: no override is held`)
+                assert.strictEqual(state.timeouts.slice(timerMark).filter(t => RECONCILE_OFFSETS.includes(t.ms)).length, 0, `${label}: no rung is armed`)
+            } else {
+                assert.deepStrictEqual(held(state), { itemOverlay: false, anything: true }, `${label}: the override is held, and no overlay entry`)
+                assert.deepStrictEqual(state.timeouts.slice(timerMark).filter(t => RECONCILE_OFFSETS.includes(t.ms)).map(t => t.ms), RECONCILE_OFFSETS,
+                    `${label}: the whole ladder is armed`)
+            }
+        }
+        // A view that hides completed to-dos, so the ticked one leaves it and no row can retire an override: whatever today's path holds stays held.
+        const items = () => [readTodo(1), readTodo(2), readNote(3)]
+        const openOnly = { initialSettings: { profileData: readProfileData([{ name: 'Open only', ...hideCompletedSwitches }]), currentProfileID: 1 } }
+        const served = await readRun(items(), openOnly)
+        await buildAndRender(served)
+        await probe('store-served, no sync', served, true)
+
+        const typed = await readRun(items(), openOnly)
+        await buildAndRender(typed)
+        await typed.panelMessageHandler(['searchFilterChanged', 'Read'])
+        await probe('a word typed in the panel', typed, false)
+
+        const overview = triggerOverview(6)
+        const mixed = await readRun(items().concat([overview]), { initialSettings: { profileData: readProfileData([
+            { name: 'Open only', ...hideCompletedSwitches }, { name: 'Work', searchCriteria: 'tag:work', noteID: overview.id, showNotes: false },
+        ]), currentProfileID: 1 } })
+        await buildAndRender(mixed)
+        await probe('an overview note on a filtered profile', mixed, false)
+
+        const syncing = await readRun(items(), openOnly)
+        await buildAndRender(syncing)
+        await syncing.syncStartHandler()
+        await probe('a sync running', syncing, false)
+
+        const unbuilt = await readRun(items(), openOnly)
+        await probe('the store not built yet', unbuilt, false)
+
+        const stale = await readRun(items(), openOnly)
+        await buildAndRender(stale)
+        stale.eventsFailNext = 1
+        await stale.withTimers(() => stale.noteStore.pollNow())
+        await probe('the store stale after a failed poll', stale, false)
+
+        const off = await readRun(items(), Object.assign({ eventsUnavailable: true }, openOnly))
+        await off.fireTimeout(buildTimeout(off))
+        await probe('the store off (no change feed)', off, false)
+        const timerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'timer.ts'), 'utf8')
+        assert.ok(/export async function storeServesAction\(\)\{\n    return !getSyncStatus\(\)\.syncing && await allConsumersStoreServed\(\)\n\}/.test(timerSource),
+            'one gate, built on the phase 4 predicate')
+        assert.strictEqual((timerSource.match(/await storeServesAction\(\)/g) || []).length, 4, 'and asked by the note-change trigger, the drain\'s settle and the own-write ends - no second copy of it')
+    })
+
+    await test('note store actions: the checkbox tick, store-served - one numeric PUT and nothing else read, the record at once, no override, no ladder, and the same rows as today\'s paths draw', async () => {
+        const tick = readTodo(2)
+        const runs = await actionRuns(ringMix(), (state) => state.panelMessageHandler(['todoChecked', tick.id, true]), { watch: true })
+        assertStoreAction(runs, 'tick', true)
+        const S = runs.S.state
+        const puts = putsSince(S, runs.S.marks.puts)
+        assert.strictEqual(puts.length, 1, 'one PUT')
+        assert.ok(typeof puts[0].fields.todo_completed === 'number' && puts[0].fields.todo_completed > 0, 'of a numeric ms timestamp, not a boolean')
+        assert.deepStrictEqual(putsSince(runs.Q.state, runs.Q.marks.puts).map(put => Object.keys(put.fields)), [['todo_completed']], 'exactly the shape today\'s path writes')
+        assert.deepStrictEqual(noteCallsSince(S, runs.S.marks.gets), [], 'no read of the note before the PUT, no search, no feed call')
+        assert.strictEqual(storeModel(S).get(tick.id).todo_completed, puts[0].fields.todo_completed, 'the store has the tick')
+        assert.strictEqual(S.setHtmlCalls - runs.S.marks.paints, 1, 'one paint, as the optimistic repaint made')
+        assert.ok(isTicked(S, tick.id), 'drawn ticked in the action\'s own render')
+        await S.panelMessageHandler(['sortDirectionClicked'])
+        await S.panelMessageHandler(['sortDirectionClicked'])
+        assert.ok(isTicked(S, tick.id), 'and a full render after it still draws it ticked - from the store, with no override behind it')
+        const untickPuts = S.notePuts.length
+        const timerMark = S.timeouts.length
+        await S.panelMessageHandler(['todoChecked', tick.id, false])
+        assert.deepStrictEqual(putsSince(S, untickPuts).map(put => put.fields), [{ todo_completed: 0 }], 'unticking writes 0')
+        assert.ok(!isTicked(S, tick.id), 'and draws it open')
+        assert.deepStrictEqual(held(S), NOTHING_HELD, 'still holding nothing')
+        assert.strictEqual(laddersArmedSince(S, timerMark), 0, 'and arming nothing')
+    })
+
+    await test('note store actions: a tick on a hide-completed profile leaves the view at once and shows on a show-completed one - with no override for either view to leak', async () => {
+        const tick = readTodo(2)
+        const profiles = readProfileData([{ name: 'Active', ...hideCompletedSwitches }, { name: 'Done' }])
+        const runs = await actionRuns(ringMix(), async (state) => {
+            await state.panelMessageHandler(['todoChecked', tick.id, true])
+            state.afterTick = readSections(state)
+            state.afterTickDrawn = drawnRows(state)
+            await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        }, { extra: { initialSettings: { profileData: profiles, currentProfileID: 1 } } })
+        assert.deepStrictEqual(held(runs.S.state), NOTHING_HELD, 'nothing held')
+        assert.ok(!runs.S.state.afterTick.includes(`todo ${tick.id}`), 'the ticked to-do leaves the hide-completed view in the action\'s own render')
+        assert.deepStrictEqual(runs.S.state.afterTickDrawn, runs.O.state.afterTickDrawn, 'as the optimistic path over the same store drew it')
+        // The search path keeps the row, ticked, until the index agrees: its cached answer still lists the to-do, and the override only re-ticks it.
+        assert.ok(runs.Q.state.afterTick.includes(`todo ${tick.id}`), 'the search path lags the store here, as it always has')
+        assert.ok(runs.S.sections.includes(`todo ${tick.id}`) && isTicked(runs.S.state, tick.id), 'the show-completed profile shows it, ticked')
+        assert.deepStrictEqual(runs.S.drawn, runs.O.drawn, 'the same rows as today\'s path over the store')
+        assert.deepStrictEqual(runs.S.drawn, runs.Q.drawn, 'and as the search path, once the switch has searched')
+    })
+
+    await test('note store actions: a type flip - the same wide read and one PUT, the row changes section on the spot with no overlay entry and no ladder', async () => {
+        const flipMe = readTodo(3)
+        const runs = await actionRuns(ringMix(), (state) => state.panelMessageHandler(['noteMenuAction', 'toggleType', flipMe.id]), { watch: true })
+        assertStoreAction(runs, 'flip', true, [flipMe.id])
+        const S = runs.S.state
+        assert.deepStrictEqual(putsSince(S, runs.S.marks.puts), [{ id: flipMe.id, fields: { is_todo: 0 } }], 'one PUT of the flipped is_todo alone')
+        const reads = noteCallsSince(S, runs.S.marks.gets)
+        assert.strictEqual(reads.length, 1, 'one read of the note, and no other note call')
+        assert.deepStrictEqual(reads[0].query.fields.slice().sort(), FLIP_GET_FIELDS.slice().sort(), 'with the wide field list today\'s path reads')
+        assert.strictEqual(storeModel(S).get(flipMe.id).is_todo, 0, 'the store has the flip')
+        assert.ok(S.setHtmlCalls > runs.S.marks.paints, 'the flip repaints at once')
+        assert.strictEqual(rowCount(S, flipMe.id, 'note'), 1, 'under Notes on that very paint')
+        assert.strictEqual(rowCount(S, flipMe.id, 'todo'), 0, 'and out of the to-dos - never both')
+    })
+
+    await test('note store actions: a batch type flip lands both rows in their new sections on ONE paint, with no overlay entry and no ladder', async () => {
+        const toNote = readTodo(3), toTodo = readNote(20)
+        const runs = await actionRuns(ringMix(), (state) => state.panelMessageHandler(['noteMenuActionMulti', 'toggleType', [toNote.id, toTodo.id]]), { watch: true })
+        assertStoreAction(runs, 'batch flip', true, [toNote.id, toTodo.id])
+        const S = runs.S.state
+        assert.strictEqual(S.setHtmlCalls - runs.S.marks.paints, 1, 'the batch paints once')
+        assert.strictEqual(rowCount(S, toNote.id, 'note') + rowCount(S, toTodo.id, 'todo'), 2, 'each in its new section')
+        assert.strictEqual(rowCount(S, toNote.id, 'todo') + rowCount(S, toTodo.id, 'note'), 0, 'and neither in its old one')
+    })
+
+    await test('note store actions: a flip into a type the view hides hides it from both lists, and turning the switch back on brings it back once - no suppress to take back', async () => {
+        const flipMe = readNote(21)
+        const hideUndated = { name: 'Dated only', showNoDue: false }
+        const runs = await actionRuns(ringMix(), async (state) => {
+            await state.panelMessageHandler(['noteMenuAction', 'toggleType', flipMe.id])     // a note becomes an undated to-do
+            state.afterFlip = readSections(state)
+            state.afterFlipDrawn = drawnRows(state)
+            const profile = JSON.parse(state.settings.profileData).profiles[0]
+            await state.panelMessageHandler(['profileSaved', profile.id, { ...profile, showNoDue: true }])
+        }, { extra: { initialSettings: { profileData: readProfileData([hideUndated]), currentProfileID: 1 } } })
+        assert.ok(!runs.S.state.afterFlip.includes(`note ${flipMe.id}`) && !runs.S.state.afterFlip.includes(`todo ${flipMe.id}`), 'hidden from both lists at once')
+        assert.deepStrictEqual(runs.S.state.afterFlipDrawn, runs.O.state.afterFlipDrawn, 'as today\'s path draws it over the store')
+        assert.deepStrictEqual(runs.S.state.afterFlipDrawn, runs.Q.state.afterFlipDrawn, 'and over the search')
+        assert.strictEqual(runs.S.sections.filter(token => token === `todo ${flipMe.id}`).length, 1, 'back in the to-dos, once, with the switch on')
+        assert.ok(!runs.S.sections.includes(`note ${flipMe.id}`), 'and not under Notes')
+        assert.deepStrictEqual(held(runs.S.state), NOTHING_HELD, 'nothing held')
+        assert.deepStrictEqual(runs.S.drawn, runs.O.drawn)
+        assert.deepStrictEqual(runs.S.drawn, runs.Q.drawn)
+    })
+
+    await test('note store actions: flipping the stale row of a note trashed where nothing drained takes it out of the store - it never comes back under its new type', async () => {
+        const trashed = readTodo(3)
+        const runs = await actionRuns(ringMix(), async (state) => {
+            // Trashed over REST: no onNoteChange, and no drain has run since, so the store (and the search's cached answer) still has the row.
+            state.notes[trashed.id].deleted_time = Date.now()
+            await state.panelMessageHandler(['noteMenuAction', 'toggleType', trashed.id])
+        })
+        const S = runs.S.state
+        assert.strictEqual(S.notePuts.filter(put => put.id === trashed.id).length, 1, 'the flip itself is still written')
+        assert.strictEqual(storeModel(S).get(trashed.id), undefined, 'the flip\'s own read saw the trash, and the store let the note go')
+        assert.strictEqual(rowCount(S, trashed.id, 'note') + rowCount(S, trashed.id, 'todo'), 0, 'drawn nowhere')
+        assert.deepStrictEqual(held(S), NOTHING_HELD, 'with no suppress behind it')
+        assert.strictEqual(laddersArmedSince(S, runs.S.marks.timers), 0, 'and no ladder')
+        assert.deepStrictEqual(runs.S.drawn, runs.O.drawn, 'as today\'s path draws it over the store')
+        assert.deepStrictEqual(runs.S.drawn, runs.Q.drawn, 'and over the search')
+    })
+
+    await test('note store actions: after a flip, the follow-up\'s fetched row replaces the local write whole - the due and completion Joplin reset are what is drawn', async () => {
+        const done = readTodo(1, { todo_completed: Date.now() - DAY, todo_due: Date.now() + 3 * DAY, title: 'Done and dated' })
+        const state = await readRun([done, readTodo(2), readNote(3)])
+        await buildAndRender(state)
+        await state.panelMessageHandler(['noteMenuAction', 'toggleType', done.id])
+        const local = storeModel(state).get(done.id)
+        assert.ok(local.is_todo === 0 && local.todo_due > 0 && local.todo_completed > 0, 'precondition: the local write moved is_todo alone')
+        assert.strictEqual(rowCount(state, done.id, 'note'), 1, 'precondition: drawn as a note at once')
+        // What Joplin holds after the flip: the type changed, its due and completion reset, and the row lands in the feed.
+        Object.assign(state.notes[done.id], { todo_due: 0, todo_completed: 0, user_updated_time: 88888 })
+        state.pushChange({ item_id: done.id, type: 2 })
+        await firePending(state, STORE_FOLLOW_UP)
+        const fetched = storeModel(state).get(done.id)
+        assert.deepStrictEqual([fetched.is_todo, fetched.todo_due, fetched.todo_completed, fetched.user_updated_time], [0, 0, 0, 88888], 'the fetched record won, every field')
+        await fireStoreRender(state)
+        assert.strictEqual(rowCount(state, done.id, 'note'), 1, 'and it is drawn as the note it became')
+        assert.strictEqual(rowCount(state, done.id, 'todo'), 0)
+        await state.panelMessageHandler(['noteMenuAction', 'toggleType', done.id])
+        assert.strictEqual(sectionOf(state)[`todo ${done.id}`], 'No Due Date', 'flipped back, it is an undated to-do: the reset due is the one the store kept')
+        assert.ok(!isTicked(state, done.id), 'and an open one')
+    })
+
+    await test('note store actions: a create draws the new row from the store at once - one POST, no search, no overlay entry, no ladder - and a note splices nothing out of the to-dos', async () => {
+        const runs = await actionRuns(ringMix(), async (state) => {
+            await state.panelMessageHandler(['newTodoClicked'])
+            await state.panelMessageHandler(['newNoteClicked'])
+        }, { extra: { livePostedNotes: true }, setup: (state) => state.panelMessageHandler(['notebookFilterChanged', storeFolder]), watch: true })
+        assertStoreAction(runs, 'create', true)
+        const S = runs.S.state
+        const posted = S.dataPosts.filter(post => post.path[0] === 'notes')
+        assert.strictEqual(posted.length, 2, 'one POST each')
+        const createdTodo = storeModel(S).snapshot().find(record => record.parent_id === storeFolder && record.is_todo === 1 && record.title === '')
+        const createdNote = storeModel(S).snapshot().find(record => record.parent_id === storeFolder && record.is_todo === 0 && record.title === '')
+        assert.ok(createdTodo && createdNote, 'the store has both, from the POST answers')
+        assert.strictEqual(rowCount(S, createdTodo.id, 'todo'), 1, 'the to-do is drawn once')
+        assert.strictEqual(rowCount(S, createdNote.id, 'note'), 1, 'the note under Notes')
+        assert.strictEqual(rowCount(S, createdNote.id, 'todo'), 0, 'and nowhere in the to-dos')
+        for (const n of [1, 2, 3, 7, 8]) assert.strictEqual(rowCount(S, storeId(n), 'todo'), 1, 'the to-dos already there are untouched')
+    })
+
+    await test('note store actions: a create on a show-undated profile stays out of a hide-undated one, panel and overview alike, and out of its own view once edited to hide undated', async () => {
+        const undatedNote = storeNote(91, { id: 'ovU'.padEnd(32, '0'), title: 'Overview U', body: 'stale' })
+        const datedNote = storeNote(92, { id: 'ovD'.padEnd(32, '0'), title: 'Overview D', body: 'stale' })
+        const profiles = readProfileData([
+            { name: 'Undated', showNoDue: true, notebook: storeFolder, noteID: undatedNote.id, showNotes: false },
+            { name: 'Dated', showNoDue: false, notebook: storeFolder, noteID: datedNote.id, showNotes: false },
+        ])
+        const state = await readRun([readTodo(1), readTodo(2), undatedNote, datedNote], { livePostedNotes: true, initialSettings: { profileData: profiles, currentProfileID: 1 } })
+        await buildAndRender(state)
+        assert.strictEqual(await state.triggers.storeServesAction(), true, 'precondition: both views and both overview notes are store-served')
+        const timerMark = state.timeouts.length
+        await state.panelMessageHandler(['newTodoClicked'])
+        const created = state.dataPosts.filter(post => post.path[0] === 'notes').length ? storeModel(state).snapshot().find(record => record.title === '' && record.is_todo === 1) : null
+        assert.ok(created && rowCount(state, created.id, 'todo') === 1, 'the creating profile draws it')
+        assert.deepStrictEqual(held(state), NOTHING_HELD, 'with nothing held')
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.strictEqual(rowCount(state, created.id, 'todo'), 0, 'the hide-undated profile\'s panel does not')
+        await firePending(state, OVERVIEW_DEBOUNCE)
+        const bodyOf = (id) => (state.notePuts.filter(put => put.id === id).pop() || { body: '' }).body
+        assert.ok(bodyOf(undatedNote.id).includes(`:/${created.id}`), 'the creating profile\'s overview note lists it')
+        assert.ok(!bodyOf(datedNote.id).includes(`:/${created.id}`), 'the other\'s does not')
+        await state.panelMessageHandler(['profilesDropdownChanged', 1])
+        const profile = JSON.parse(state.settings.profileData).profiles.find(entry => entry.id === 1)
+        await state.panelMessageHandler(['profileSaved', 1, { ...profile, showNoDue: false }])
+        assert.strictEqual(rowCount(state, created.id, 'todo'), 0, 'and its own view, edited to hide undated, drops it')
+        assert.strictEqual(laddersArmedSince(state, timerMark), 0, 'no ladder at any point')
+    })
+
+    await test('note store actions: moves - the notebook picker\'s batch and the mobile overlay\'s - show at once from the store, with no ladder', async () => {
+        const batch = [readTodo(1).id, readNote(21).id]
+        const single = readTodo(2).id
+        const runs = await actionRuns(ringMix(), async (state) => {
+            state.dialogResult = { id: 'ok', formData: { picker: { folderId: readArchive } } }
+            await state.panelMessageHandler(['noteMenuActionMulti', 'moveToFolder', batch])
+            state.dialogResult = null
+            await state.panelMessageHandler(['notebookPicked', 'moveNotes', readArchive, [single]])
+        }, { setup: (state) => state.panelMessageHandler(['notebookFilterChanged', storeFolder]) })
+        assertStoreAction(runs, 'moves', false)
+        const S = runs.S.state
+        for (const id of batch.concat([single])){
+            assert.strictEqual(storeModel(S).get(id).parent_id, readArchive, 'the store has the move')
+            assert.ok(!runs.S.sections.some(token => token.endsWith(id)), 'and the note left the Store view in the action\'s own render')
+        }
+    })
+
+    await test('note store actions: Joplin\'s own moveToFolder keeps the ladder on the store path - its write is Joplin\'s - and a drain shows the move in the action\'s own render', async () => {
+        // The 3.6.14 command: it awaits its folder prompt and the move, so the notes have moved when execute answers; the feed's row follows.
+        const moved = readTodo(1)
+        let rowLandsNow = true
+        const late = []
+        const state = await readRun([moved, readTodo(2), readNote(3)])
+        await buildAndRender(state)
+        state.commands.push({ name: 'moveToFolder', execute: async (ids) => {
+            for (const id of ids){
+                state.notes[id].parent_id = readSub
+                if (rowLandsNow) state.pushChange({ item_id: id, type: 2 })
+                else late.push(id)
+            }
+        } })
+        let timerMark = state.timeouts.length
+        let mark = state.gets.length
+        await state.panelMessageHandler(['moveToNotebookClicked', [moved.id]])
+        assert.deepStrictEqual(noteCallsSince(state, mark).map(g => g.path[0]), ['events', 'notes'], 'one drain after the command: its events call and the fetch of the moved note')
+        assert.strictEqual(storeModel(state).get(moved.id).parent_id, readSub, 'the store has the move')
+        assert.strictEqual(pillOf(state, moved.id), readSub, 'the action\'s own render shows it')
+        assert.deepStrictEqual(state.timeouts.slice(timerMark).filter(t => RECONCILE_OFFSETS.includes(t.ms)).map(t => t.ms), RECONCILE_OFFSETS,
+            'and the ladder is armed, blind, for an app that lands the write after the command has returned')
+        assert.deepStrictEqual(held(state), NOTHING_HELD, 'nothing held')
+        // The row lands a beat late: the drain after the command misses it, the follow-up it armed brings it, and its render draws it.
+        await firePending(state, STORE_FOLLOW_UP)
+        rowLandsNow = false
+        await state.panelMessageHandler(['moveToNotebookClicked', [storeId(2)]])
+        assert.strictEqual(pillOf(state, storeId(2)), storeFolder, 'precondition: the drain missed the late row, so the row still shows its old notebook')
+        for (const id of late) state.pushChange({ item_id: id, type: 2 })
+        await firePending(state, STORE_FOLLOW_UP)
+        await firePending(state, STORE_RENDER_DELAY)
+        assert.strictEqual(pillOf(state, storeId(2)), readSub, 'the follow-up brings it half a second on, and its render draws it')
+        // Before the build the same command is today's: no drain, the full repaint and the ladder.
+        const unbuilt = await readRun([readTodo(1), readTodo(2)])
+        unbuilt.commands.push({ name: 'moveToFolder', execute: async () => {} })
+        timerMark = unbuilt.timeouts.length
+        mark = unbuilt.gets.length
+        await unbuilt.panelMessageHandler(['moveToNotebookClicked', [storeId(1)]])
+        assert.strictEqual(unbuilt.gets.slice(mark).filter(isEvents).length, 0, 'off the store path nothing drains')
+        assert.strictEqual(laddersArmedSince(unbuilt, timerMark), 1, 'and the ladder is armed, as it always was')
+    })
+
+    await test('note store actions: trashes - the batch, the mobile data API\'s and the desktop Delete\'s - leave the view at once from the store, with no ladder', async () => {
+        const batch = [readNote(22).id, readTodo(6).id]
+        const viaCommand = readTodo(5).id
+        const trash = (state) => {
+            state.onDataDelete = async (target) => { if (target[0] === 'notes' && state.notes[target[1]]) state.notes[target[1]].deleted_time = Date.now() }
+            state.commands.push({ name: 'deleteNote', execute: async (ids) => {
+                for (const id of ids){ state.notes[id].deleted_time = Date.now(); state.pushChange({ item_id: id, type: 2 }) }
+            } })
+        }
+        const runs = await actionRuns(ringMix(), async (state) => {
+            await state.panelMessageHandler(['noteMenuActionMulti', 'delete', batch])
+            await state.panelMessageHandler(['noteMenuAction', 'delete', viaCommand])
+        }, { setup: trash })
+        assertStoreAction(runs, 'trash', false)
+        for (const id of batch.concat([viaCommand])){
+            assert.strictEqual(storeModel(runs.S.state).get(id), undefined, 'the store let it go')
+            assert.ok(!runs.S.sections.some(token => token.endsWith(id)), 'and it is drawn nowhere')
+        }
+    })
+
+    await test('note store actions: a duplicate made by Joplin\'s command shows from the store with no ladder', async () => {
+        const original = readTodo(2)
+        const copyId = 'c'.repeat(32)
+        const runs = await actionRuns(ringMix(), (state) => state.panelMessageHandler(['noteMenuAction', 'duplicate', original.id]), { setup: (state) => {
+            state.commands.push({ name: 'duplicateNote', execute: async (ids) => {
+                for (const id of ids){
+                    state.notes[copyId] = Object.assign({}, state.notes[id], { id: copyId, title: state.notes[id].title + ' - Copy' })
+                    state.pushChange({ item_id: copyId, type: 1 })
+                }
+            } })
+        } })
+        assertStoreAction(runs, 'duplicate', false)
+        assert.ok(storeModel(runs.S.state).get(copyId), 'the copy is in the store')
+        assert.strictEqual(rowCount(runs.S.state, copyId, 'todo'), 1, 'and drawn once')
+    })
+
+    await test('note store actions: due dates - a drag to a day, between rows, onto a period heading, the alarm set and cleared, and a tick in the same burst - with no ladder at all', async () => {
+        const runs = await actionRuns(ringMix(), async (state) => {
+            await state.panelMessageHandler(['todoChecked', storeId(2), true])
+            await state.panelMessageHandler(['todosDropped', [storeId(2)], isoInDays(20)])
+            await state.panelMessageHandler(['todosDroppedBetween', [storeId(9)], storeId(7), storeId(3), null, null])
+            await state.panelMessageHandler(['todosDropped', [storeId(3)], 'clear'])
+            await state.panelMessageHandler(['alarmSet', [storeId(4)], isoInDays(1), '09:30'])
+            await state.panelMessageHandler(['alarmCleared', [storeId(8)]])
+        })
+        assertStoreAction(runs, 'due dates', false)
+        const S = runs.S.state
+        assert.ok(storeModel(S).get(storeId(2)).todo_due > Date.now() + 19 * DAY, 'the drag to a day is in the store')
+        assert.strictEqual(storeModel(S).get(storeId(3)).todo_due, 0, 'the drop on the undated heading too')
+        assert.strictEqual(storeModel(S).get(storeId(8)).todo_due, 0, 'and the cleared alarm')
+        assert.strictEqual(sectionOf(S)[`todo ${storeId(3)}`], 'No Due Date', 'each drawn where it now belongs in the action\'s own render')
+        assert.ok(isTicked(S, storeId(2)), 'with the tick of the same burst still drawn')
+    })
+
+    await test('note store actions: a poll that fails while the write is out leaves the action on today\'s path - the override or the entry, the ladder - and its result still drawn', async () => {
+        for (const kind of ['tick', 'flip']){
+            const target = readTodo(1)
+            const state = await readRun([target, readTodo(2), readNote(3)])      // a lagging index: the search still has the pre-action state
+            await buildAndRender(state)
+            state.onDataPut = async () => {
+                state.onDataPut = null
+                state.eventsFailNext = 1
+                await state.noteStore.pollNow()
+            }
+            const timerMark = state.timeouts.length
+            const paints = state.setHtmlCalls
+            await state.panelMessageHandler(kind === 'tick' ? ['todoChecked', target.id, true] : ['noteMenuAction', 'toggleType', target.id])
+            assert.strictEqual(state.noteStore.isReady(), false, `${kind}: precondition - the store went stale while the PUT was out`)
+            if (kind === 'tick'){
+                assert.deepStrictEqual(held(state), { itemOverlay: false, anything: true }, 'tick: the override holds it over the search')
+                assert.ok(isTicked(state, target.id), 'tick: drawn ticked')
+            } else {
+                // The overlay entry takes the row out of the to-dos, where the lagging search still files it; the live listing already has it as
+                // a note, so the entry retires against the Notes list on that very repaint, as today's path does.
+                assert.strictEqual(rowCount(state, target.id, 'note'), 1, 'flip: drawn under Notes')
+                assert.strictEqual(rowCount(state, target.id, 'todo'), 0, 'flip: and out of the to-dos, where the search still has it')
+            }
+            assert.deepStrictEqual(state.timeouts.slice(timerMark).filter(t => RECONCILE_OFFSETS.includes(t.ms)).map(t => t.ms), RECONCILE_OFFSETS, `${kind}: the ladder is armed`)
+            assert.strictEqual(state.setHtmlCalls - paints, 1, `${kind}: one paint - the gate, asked again before the render, sent it to today's repaint at once`)
+        }
+        // The store going stale in the middle of the render: that render reads the search, and the gate asked after it takes today's path.
+        const target = readTodo(1)
+        const state = await readRun([target, readTodo(2), readNote(3)])
+        await buildAndRender(state)
+        state.onSettingRead = async (key) => {
+            if (key !== 'themeMode') return
+            state.onSettingRead = null
+            state.eventsFailNext = 1
+            await state.noteStore.pollNow()
+        }
+        const timerMark = state.timeouts.length
+        const paints = state.setHtmlCalls
+        await state.panelMessageHandler(['todoChecked', target.id, true])
+        assert.strictEqual(state.onSettingRead, null, 'precondition: the poll failed inside the render')
+        assert.strictEqual(state.noteStore.isReady(), false, 'precondition: and left the store stale')
+        assert.deepStrictEqual(held(state), { itemOverlay: false, anything: true }, 'the override holds the tick over the search')
+        assert.strictEqual(laddersArmedSince(state, timerMark), 1, 'the ladder is armed')
+        assert.ok(isTicked(state, target.id), 'and the tick is drawn')
+        assert.strictEqual(state.setHtmlCalls - paints, 1, 'in one paint: the gate asked between the two passes kept the fill from drawing the search with nothing held over it')
+        // And inside the fill: the gate asked after the render takes today's path.
+        const late = await readRun([readTodo(1), readTodo(2), readNote(3)])
+        await buildAndRender(late)
+        let themeReads = 0
+        late.onSettingRead = async (key) => {
+            if (key !== 'themeMode' || ++themeReads < 2) return          // the fast pass's read, then the fill's
+            late.onSettingRead = null
+            late.eventsFailNext = 1
+            await late.noteStore.pollNow()
+        }
+        const lateTimers = late.timeouts.length
+        await late.panelMessageHandler(['todoChecked', storeId(1), true])
+        assert.strictEqual(late.onSettingRead, null, 'precondition: the poll failed inside the fill')
+        assert.deepStrictEqual(held(late), { itemOverlay: false, anything: true }, 'the override holds the tick over the search')
+        assert.strictEqual(laddersArmedSince(late, lateTimers), 1, 'the ladder is armed')
+        assert.ok(isTicked(late, storeId(1)), 'and the tick is drawn')
+    })
+
+    await test('note store actions: an override from a tick made off the store path is let go by the drain that brings the to-do\'s conversion to a note - converted back, it is drawn open', async () => {
+        const ticked = readTodo(1)
+        const state = await readRun([ticked, readTodo(2), readNote(3)], { initialSettings: { profileData: readProfileData([{ name: 'Open only', ...hideCompletedSwitches }]), currentProfileID: 1 } })
+        await buildAndRender(state)
+        // Ticked while the gate did not hold - a sync ran - so it holds an override, and the view hides the ticked to-do, so no row can retire it.
+        await state.syncStartHandler()
+        await state.panelMessageHandler(['todoChecked', ticked.id, true])
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.deepStrictEqual(held(state), { itemOverlay: false, anything: true }, 'precondition: the override is held')
+        assert.strictEqual(rowCount(state, ticked.id, 'todo'), 0, 'precondition: and the view hides the ticked to-do')
+        const timerMark = state.timeouts.length
+        // Converted to a note in the editor: Joplin's changeNoteType resets todo_completed and todo_due.
+        Object.assign(state.notes[ticked.id], { is_todo: 0, todo_completed: 0, todo_due: 0, user_updated_time: 5000 })
+        state.pushChange({ item_id: ticked.id, type: 2 })
+        await state.noteChangeHandler({ id: ticked.id })
+        await firePending(state, STORE_NOTE_CHANGE_DELAY)
+        await fireStoreRender(state)
+        assert.deepStrictEqual(held(state), NOTHING_HELD, 'the drain that fetched the note let go of its override')
+        await firePending(state, STORE_FOLLOW_UP)
+        // ...and converted back, un-ticked, as Joplin has it.
+        Object.assign(state.notes[ticked.id], { is_todo: 1, user_updated_time: 6000 })
+        state.pushChange({ item_id: ticked.id, type: 2 })
+        await state.noteChangeHandler({ id: ticked.id })
+        await firePending(state, STORE_NOTE_CHANGE_DELAY)
+        await fireStoreRender(state)
+        assert.strictEqual(rowCount(state, ticked.id, 'todo'), 1, 'a to-do again, and shown: it is open')
+        assert.ok(!isTicked(state, ticked.id), 'drawn un-ticked - no stale override re-applied')
+        assert.strictEqual(laddersArmedSince(state, timerMark), 0, 'and no ladder at any point')
+    })
+
+    await test('note store actions: an override from a tick made off the store path is let go by the drain that brings the to-do\'s trash - restored, it is drawn open', async () => {
+        const ticked = readTodo(1)
+        const state = await readRun([ticked, readTodo(2), readNote(3)], { initialSettings: { profileData: readProfileData([{ name: 'Open only', ...hideCompletedSwitches }]), currentProfileID: 1 } })
+        await buildAndRender(state)
+        await state.syncStartHandler()
+        await state.panelMessageHandler(['todoChecked', ticked.id, true])
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.deepStrictEqual(held(state), { itemOverlay: false, anything: true }, 'precondition: the override is held')
+        const timerMark = state.timeouts.length
+        state.notes[ticked.id].deleted_time = Date.now()                            // trashed in the Joplin app
+        state.pushChange({ item_id: ticked.id, type: 2 })
+        await state.noteChangeHandler({ id: ticked.id })
+        await firePending(state, STORE_NOTE_CHANGE_DELAY)
+        await fireStoreRender(state)
+        assert.strictEqual(storeModel(state).get(ticked.id), undefined, 'precondition: the drain took it out of the store')
+        assert.deepStrictEqual(held(state), NOTHING_HELD, 'and let go of its override')
+        await firePending(state, STORE_FOLLOW_UP)
+        Object.assign(state.notes[ticked.id], { deleted_time: 0, todo_completed: 0, user_updated_time: 6000 })     // restored, un-ticked
+        state.pushChange({ item_id: ticked.id, type: 2 })
+        await state.noteChangeHandler({ id: ticked.id })
+        await firePending(state, STORE_NOTE_CHANGE_DELAY)
+        await fireStoreRender(state)
+        assert.strictEqual(rowCount(state, ticked.id, 'todo'), 1, 'back from the trash, and shown')
+        assert.ok(!isTicked(state, ticked.id), 'drawn un-ticked - no stale override re-applied')
+        assert.strictEqual(laddersArmedSince(state, timerMark), 0, 'and no ladder at any point')
+    })
+
+    await test('note store actions: a drain lets go of the overrides and overlay entries of the notes it fetched or deleted, only while every view is store-served and no sync runs', async () => {
+        const holdOverride = async (state, id) => {
+            await state.syncStartHandler()
+            await state.panelMessageHandler(['todoChecked', id, true])
+            await state.syncCompleteHandler({ withErrors: false })
+            assert.strictEqual(held(state).anything, true, 'precondition: an override is held')
+        }
+        // The settle is queued as the drain ends; the render the drain armed waits for it, so the check comes after that render.
+        const drain = async (state) => {
+            await state.withTimers(() => state.noteStore.pollNow())
+            await fireStoreRender(state)
+        }
+        // A view that hides completed to-dos, so no row retires the override on its own.
+        const items = () => [readTodo(1), readTodo(2), readNote(3)]
+        const openOnly = { initialSettings: { profileData: readProfileData([{ name: 'Open only', ...hideCompletedSwitches }]), currentProfileID: 1 } }
+        // Any change elsewhere to the note: its fetch settles it.
+        const renamed = await readRun(items(), openOnly)
+        await buildAndRender(renamed)
+        await holdOverride(renamed, storeId(1))
+        renamed.notes[storeId(2)].title = 'Another note changed'
+        renamed.pushChange({ item_id: storeId(2), type: 2 })
+        await drain(renamed)
+        assert.strictEqual(held(renamed).anything, true, 'a drain that fetched another note leaves it')
+        renamed.notes[storeId(1)].title = 'Renamed elsewhere'
+        renamed.pushChange({ item_id: storeId(1), type: 2 })
+        await drain(renamed)
+        assert.deepStrictEqual(held(renamed), NOTHING_HELD, 'the drain that fetched this one lets it go')
+        // A permanent delete: the feed's delete row removes it, which settles it too.
+        const purged = await readRun(items(), openOnly)
+        await buildAndRender(purged)
+        await holdOverride(purged, storeId(1))
+        delete purged.notes[storeId(1)]
+        purged.pushChange({ item_id: storeId(1), type: 3 })
+        await drain(purged)
+        assert.strictEqual(storeModel(purged).get(storeId(1)), undefined, 'precondition: the delete row removed it')
+        assert.deepStrictEqual(held(purged), NOTHING_HELD, 'and its override went with it')
+        // A view on the search still needs the override: the same drain leaves it.
+        const typed = await readRun(items(), openOnly)
+        await buildAndRender(typed)
+        await typed.panelMessageHandler(['searchFilterChanged', 'Read'])
+        await typed.panelMessageHandler(['todoChecked', storeId(1), true])
+        assert.strictEqual(held(typed).anything, true, 'precondition: a tick on a searched view holds its override')
+        typed.notes[storeId(1)].title = 'Read todo 1, renamed'
+        typed.pushChange({ item_id: storeId(1), type: 2 })
+        await drain(typed)
+        assert.strictEqual(held(typed).anything, true, 'a view on the search keeps it through the drain')
+        // An overlay entry goes the same way. Over a ready store an entry retires on the very next render (the store agrees with it at once), so the
+        // one that can outlive its moment is an insert made on the search path before the build: a to-do created elsewhere, shown through its insert
+        // while the index lags - and then completed elsewhere while the build walks. The build's replay fetches it, and only the settle can take
+        // the insert back; left in place it would put the open record back into a view that hides completed to-dos.
+        const late = readTodo(9, { title: 'Created elsewhere' })
+        const inserted = await readRun(items(), openOnly)
+        inserted.notes[late.id] = late
+        await inserted.noteChangeHandler({ id: late.id })
+        assert.strictEqual(held(inserted).itemOverlay, true, 'precondition: the external create is held as an insert')
+        assert.strictEqual(rowCount(inserted, late.id, 'todo'), 1, 'precondition: and drawn through it')
+        inserted.onListingPage = async (query, pageItems) => {
+            if (query.order_by !== 'id' || query.page !== 1) return pageItems
+            inserted.onListingPage = null
+            inserted.notes[late.id].todo_completed = Date.now()
+            inserted.pushChange({ item_id: late.id, type: 2 })
+            return pageItems
+        }
+        await buildAndRender(inserted)
+        assert.deepStrictEqual(held(inserted), NOTHING_HELD, 'the build\'s replay fetched it, and its settle let go of the insert')
+        assert.strictEqual(rowCount(inserted, late.id, 'todo'), 0, 'so the view that hides completed to-dos does not draw it')
+        // And an entry a plain drain settles. While an overview note still needs the search, an external trash of the open note is held as a suppress
+        // (the store has not drained it yet); restored over REST, the note is back in the store once a drain brings it - and once every view reads the
+        // store, only that drain's settle can take the suppress back before its timeout.
+        const overview = triggerOverview(7)
+        const trashed = await readRun(items().concat([overview]), { initialSettings: { profileData: readProfileData([
+            { name: 'All' }, { name: 'Work', searchCriteria: 'tag:work', noteID: overview.id, showNotes: false },
+        ]), currentProfileID: 1 } })
+        await buildAndRender(trashed)
+        trashed.notes[storeId(2)].deleted_time = Date.now()
+        await trashed.noteChangeHandler({ id: storeId(2) })
+        assert.strictEqual(held(trashed).itemOverlay, true, 'precondition: the trash is held as a suppress')
+        assert.strictEqual(rowCount(trashed, storeId(2), 'todo'), 0, 'precondition: and hides the to-do')
+        Object.assign(trashed.notes[storeId(2)], { deleted_time: 0, title: 'Restored elsewhere', user_updated_time: 6000 })
+        trashed.pushChange({ item_id: storeId(2), type: 2 })
+        const work = JSON.parse(trashed.settings.profileData).profiles.find(profile => profile.name === 'Work')
+        await trashed.panelMessageHandler(['profileSaved', work.id, { ...work, searchCriteria: '' }])
+        assert.strictEqual(await trashed.triggers.storeServesAction(), true, 'precondition: every view reads the store now')
+        assert.strictEqual(rowCount(trashed, storeId(2), 'todo'), 0, 'precondition: the suppress still hides the to-do the store lists')
+        await drain(trashed)
+        assert.deepStrictEqual(held(trashed), NOTHING_HELD, 'the drain that fetched it let go of the suppress')
+        assert.strictEqual(rowCount(trashed, storeId(2), 'todo'), 1, 'and the restored to-do is drawn')
+        // So does a sync, until it is over.
+        const syncing = await readRun(items(), openOnly)
+        await buildAndRender(syncing)
+        await syncing.syncStartHandler()
+        await syncing.panelMessageHandler(['todoChecked', storeId(1), true])
+        syncing.notes[storeId(1)].title = 'Renamed during the sync'
+        syncing.pushChange({ item_id: storeId(1), type: 2 })
+        await drain(syncing)
+        assert.strictEqual(held(syncing).anything, true, 'a drain during a sync keeps it')
+    })
+
+    await test('note store actions: a store-path action lets go of a stale override of the note it writes - the user\'s untick is drawn, not the tick a searched view left behind', async () => {
+        const ticked = readTodo(1)
+        const state = await readRun([ticked, readTodo(2), readNote(3)])
+        await buildAndRender(state)
+        // Ticked on a searched view, and un-ticked by another device while that view still needed the search: the drain brings the untick to the
+        // store, but a view on the search keeps the override (settleDrained), so it is still held when the search is cleared.
+        await state.panelMessageHandler(['searchFilterChanged', 'Read'])
+        await state.panelMessageHandler(['todoChecked', ticked.id, true])
+        state.notes[ticked.id].todo_completed = 0
+        state.pushChange({ item_id: ticked.id, type: 2 })
+        await state.withTimers(() => state.noteStore.pollNow())
+        await fireStoreRender(state)
+        await state.panelMessageHandler(['searchFilterChanged', ''])
+        assert.strictEqual(storeModel(state).get(ticked.id).todo_completed, 0, 'precondition: the store has it open')
+        assert.strictEqual(held(state).anything, true, 'precondition: the override from the searched view is still held')
+        assert.ok(isTicked(state, ticked.id), 'precondition: and draws it ticked')
+        // The user unticks the row they see ticked: a store-path write of that very note.
+        await state.panelMessageHandler(['todoChecked', ticked.id, false])
+        assert.deepStrictEqual(held(state), NOTHING_HELD, 'the action let go of the override before it wrote')
+        assert.ok(!isTicked(state, ticked.id), 'and its own render draws the to-do open, as the user asked and the store has it')
+    })
+
+    await test('note store actions: every render a drain leads to - the store render, a truth render\'s catch-up, the tick, an own write\'s repaint after its drain - waits for that drain\'s settle, so none merges an override the drain has let go of', async () => {
+        const triggers = {
+            'the store render': async (state) => {
+                await state.noteStore.pollNow()
+                return fireStoreRender(state)
+            },
+            'a truth render (a notebook filter change)': (state) => state.panelMessageHandler(['notebookFilterChanged', storeFolder]),
+            'the tick': (state) => state.intervals.find(interval => interval.ms === 60000).fn(),
+            // Joplin's own move of ANOTHER note drains the store before its repaint (afterOwnWrite), as a duplicate and a trashed notebook do, and
+            // that drain brings the un-ticked to-do too; the moved note's own override the action settles at its start, the other only the drain.
+            'an own write\'s repaint after its drain (Joplin\'s own move of another note)': (state) => {
+                state.commands.push({ name: 'moveToFolder', execute: async (ids) => {
+                    for (const id of ids){ state.notes[id].parent_id = readSub; state.pushChange({ item_id: id, type: 2 }) }
+                } })
+                return state.panelMessageHandler(['moveToNotebookClicked', [storeId(2)]])
+            },
+        }
+        for (const [label, trigger] of Object.entries(triggers)){
+            const ticked = readTodo(1)
+            const state = await readRun([ticked, readTodo(2), readNote(3)], { initialSettings: { profileData: readProfileData([{ name: 'Open only', ...hideCompletedSwitches }]), currentProfileID: 1 } })
+            await buildAndRender(state)
+            await state.syncStartHandler()
+            await state.panelMessageHandler(['todoChecked', ticked.id, true])
+            await state.syncCompleteHandler({ withErrors: false })
+            assert.strictEqual(held(state).anything, true, `${label}: precondition - an override from a tick made during a sync is held`)
+            // Un-ticked elsewhere. The drain brings it; the settle it queues is held on its one setting read, the first after the drain's events call.
+            Object.assign(state.notes[ticked.id], { todo_completed: 0, user_updated_time: 5000 })
+            state.pushChange({ item_id: ticked.id, type: 2 })
+            let release
+            const gate = new Promise(resolve => { release = resolve })
+            let holding = false
+            state.onEventsCall = async () => {
+                state.onEventsCall = null
+                state.onSettingRead = async (key) => {
+                    if (key !== 'currentProfileID') return
+                    state.onSettingRead = null
+                    holding = true
+                    await gate
+                }
+            }
+            await state.withTimers(async () => {
+                const paints = state.setHtmlCalls
+                let finished = false
+                const running = Promise.resolve(trigger(state)).then(() => { finished = true })
+                for (let turn = 0; turn < 1000 && !holding; turn++) await new Promise(resolve => setImmediate(resolve))
+                assert.ok(holding, `${label}: precondition - the drain's settle is held`)
+                for (let turn = 0; turn < 50; turn++) await new Promise(resolve => setImmediate(resolve))
+                assert.strictEqual(finished, false, `${label}: waits for the settle`)
+                assert.strictEqual(state.setHtmlCalls, paints, `${label}: and has painted nothing meanwhile`)
+                release()
+                await running
+            })
+            assert.deepStrictEqual(held(state), NOTHING_HELD, `${label}: the settle let go of the override`)
+            assert.strictEqual(rowCount(state, ticked.id, 'todo'), 1, `${label}: and the render drew the to-do, open again`)
+            assert.ok(!isTicked(state, ticked.id), `${label}: un-ticked, as the store has it`)
+        }
+    })
+
+    await test('note store actions: an override from a tick made during a sync is let go when the sync\'s drain rebuilds the store - un-ticked on the other device, the to-do is drawn open once the rebuild\'s render runs', async () => {
+        const ticked = readTodo(1)
+        const state = await readRun([ticked].concat(Array.from({ length: 209 }, (_, i) => readTodo(i + 2))), {
+            initialSettings: { profileData: readProfileData([{ name: 'Open only', ...hideCompletedSwitches }]), currentProfileID: 1 },
+        })
+        await buildAndRender(state)
+        await state.syncStartHandler()
+        await state.panelMessageHandler(['todoChecked', ticked.id, true])
+        assert.deepStrictEqual(held(state), { itemOverlay: false, anything: true }, 'precondition: the tick made during the sync holds its override')
+        // The sync brings 210 changes, the tick undone on the other device among them: more than one drain fetches note by note.
+        Object.assign(state.notes[ticked.id], { todo_completed: 0, user_updated_time: 5000 })
+        for (let n = 1; n <= 210; n++) state.pushChange({ item_id: storeId(n), type: 2 })
+        const mark = state.gets.length
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.ok(state.gets.slice(mark).some(isWalkPage), 'precondition: the sync\'s drain passed the threshold and rebuilt the store')
+        await fireStoreRender(state)
+        assert.deepStrictEqual(held(state), NOTHING_HELD, 'the rebuild re-read every note, and the whole layer was let go of')
+        assert.strictEqual(rowCount(state, ticked.id, 'todo'), 1, 'the to-do is drawn again: it is open')
+        assert.ok(!isTicked(state, ticked.id), 'un-ticked, as the store has it')
+    })
+
+    await test('note store actions: a drain\'s fetch answered before the panel\'s own write and arriving after it is dropped - a trashed note does not come back - and the next drain fetches that note again', async () => {
+        // A trash: the drain's fetch is held, and answers with the note as Joplin read it before the panel's DELETE trashed it.
+        const victim = readNote(3)
+        const state = await readRun([readTodo(1), readTodo(2), victim])
+        await buildAndRender(state)
+        state.notes[victim.id].title = 'Renamed elsewhere'
+        state.pushChange({ item_id: victim.id, type: 2 })
+        let release
+        const gate = new Promise(resolve => { release = resolve })
+        let holding = false
+        state.onNoteGet = async (id, query) => {
+            if (id !== victim.id || holding || !(query && (query.fields || []).includes('is_conflict'))) return undefined
+            holding = true
+            const readBeforeTheTrash = { ...state.notes[id] }
+            await gate
+            return readBeforeTheTrash
+        }
+        // Joplin's side of the DELETE: the note goes to the trash and its row lands in the feed.
+        state.onDataDelete = async (target) => {
+            if (target[0] !== 'notes' || !state.notes[target[1]]) return
+            state.notes[target[1]].deleted_time = Date.now()
+            state.pushChange({ item_id: target[1], type: 2 })
+        }
+        await state.withTimers(async () => {
+            const draining = state.noteStore.pollNow()
+            for (let turn = 0; turn < 1000 && !holding; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(holding, 'precondition: the drain\'s fetch of the note is out')
+            await state.panelMessageHandler(['noteMenuActionMulti', 'delete', [victim.id]])
+            assert.strictEqual(storeModel(state).get(victim.id), undefined, 'precondition: the trash took it out of the store')
+            release()
+            await draining
+        })
+        state.onNoteGet = null
+        assert.strictEqual(storeModel(state).get(victim.id), undefined, 'the answer read before the trash is dropped: the note does not come back')
+        if (pendingStoreRenders(state).length) await fireStoreRender(state)
+        assert.strictEqual(rowCount(state, victim.id, 'note'), 0, 'and it is drawn nowhere')
+        await firePending(state, STORE_FOLLOW_UP)
+        assert.strictEqual(storeModel(state).get(victim.id), undefined, 'the follow-up reads it trashed')
+
+        // A flip whose own feed row the drain's page already held: no newer row will name the note, yet the next drain must fetch it, or the store
+        // would keep the local write without what Joplin changed beside it (a flip resets the due date).
+        const flipped = readTodo(1)
+        const again = await readRun([flipped, readTodo(2), readNote(3)])
+        await buildAndRender(again)
+        again.pushChange({ item_id: flipped.id, type: 2 })
+        let releaseFlip
+        const flipGate = new Promise(resolve => { releaseFlip = resolve })
+        let flipHolding = false
+        again.onNoteGet = async (id, query) => {
+            if (id !== flipped.id || flipHolding || !(query && (query.fields || []).includes('is_conflict'))) return undefined
+            flipHolding = true
+            await flipGate
+            return undefined
+        }
+        // Joplin's side of the PUT: the flip resets the due date; its row is the one the drain's page already carries, so none is added.
+        again.onDataPut = async (target, body) => { if (target[1] === flipped.id && 'is_todo' in body) again.notes[flipped.id].todo_due = 0 }
+        await again.withTimers(async () => {
+            const draining = again.noteStore.pollNow()
+            for (let turn = 0; turn < 1000 && !flipHolding; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(flipHolding, 'precondition: the drain\'s fetch of the to-do is out')
+            await again.panelMessageHandler(['noteMenuAction', 'toggleType', flipped.id])
+            releaseFlip()
+            await draining
+        })
+        again.onNoteGet = null
+        again.onDataPut = null
+        assert.ok(storeModel(again).get(flipped.id).todo_due > 0, 'precondition: the fetch that was out during the flip was dropped, so the store still has the local write alone')
+        const followMark = again.gets.length
+        await firePending(again, STORE_FOLLOW_UP)
+        assert.deepStrictEqual(again.gets.slice(followMark).filter(isStoreFetch).map(g => g.path[1]), [flipped.id], 'the follow-up fetches the note though no row names it')
+        assert.strictEqual(storeModel(again).get(flipped.id).todo_due, 0, 'and the store has what Joplin holds')
+    })
+
+    await test('note store actions: external changes on the store path - a flip either way, a flip into a hidden type, a trash - draw once where they belong, with no per-note read, no overlay entry and no ladder', async () => {
+        const changes = (state) => {
+            Object.assign(state.notes[storeId(21)], { is_todo: 1, todo_due: Date.now() + 4 * DAY, user_updated_time: 7001 })   // a note becomes a to-do
+            Object.assign(state.notes[storeId(3)], { is_todo: 0, todo_due: 0, user_updated_time: 7002 })                          // a to-do becomes a note
+            Object.assign(state.notes[storeId(20)], { is_todo: 1, todo_due: 0, user_updated_time: 7003 })                         // into the undated type
+            state.notes[storeId(1)].deleted_time = Date.now()                                                                        // a to-do trashed
+            return [21, 3, 20, 1].map(storeId)
+        }
+        for (const hideUndated of [false, true]){
+            const label = hideUndated ? 'hide-undated profile' : 'default profile'
+            const extra = hideUndated ? { initialSettings: { profileData: readProfileData([{ name: 'Dated only', showNoDue: false }]), currentProfileID: 1 } } : {}
+            const runs = await actionRuns(ringMix(), async (state, kind) => {
+                const ids = changes(state)
+                for (const id of ids){
+                    if (kind !== 'Q') state.pushChange({ item_id: id, type: 2 })
+                    await state.noteChangeHandler({ id })
+                }
+                if (kind === 'S'){
+                    await firePending(state, STORE_NOTE_CHANGE_DELAY)
+                    await fireStoreRender(state)
+                }
+            }, { extra })
+            const S = runs.S.state
+            assert.ok(noteCallsSince(S, runs.S.marks.gets).every(g => isEvents(g) || isStoreGet(g)), `${label}: S read nothing but the store's own drain`)
+            assert.deepStrictEqual(held(S), NOTHING_HELD, `${label}: S holds nothing`)
+            assert.strictEqual(laddersArmedSince(S, runs.S.marks.timers), 0, `${label}: S arms no ladder`)
+            const inserted = [21, 3, 20].map(storeId)
+            assert.deepStrictEqual(ringlessFor(runs.S.drawn, inserted), ringlessFor(runs.Q.drawn, inserted), `${label}: S draws what the search path's overlay draws - rings aside for the rows it inserts`)
+            assert.strictEqual(runs.S.sections.filter(token => token.endsWith(storeId(21))).length, 1, `${label}: the ex-note once`)
+            assert.ok(runs.S.sections.includes(`todo ${storeId(21)}`), `${label}: as a to-do`)
+            assert.ok(runs.S.sections.includes(`note ${storeId(3)}`) && !runs.S.sections.includes(`todo ${storeId(3)}`), `${label}: the ex-to-do as a note, once`)
+            assert.ok(!runs.S.sections.some(token => token.endsWith(storeId(1))), `${label}: the trashed to-do nowhere`)
+            assert.strictEqual(runs.S.sections.includes(`todo ${storeId(20)}`), !hideUndated, `${label}: the note turned undated to-do only where undated to-dos show`)
+            assert.ok(!runs.S.sections.includes(`note ${storeId(20)}`), `${label}: and never still under Notes`)
+        }
+    })
+
+    await test('note store actions: the notebook and tag actions arm no ladder on the store path - a notebook created, renamed, moved and trashed, a tag set - and arm it off it', async () => {
+        const act = async (state) => {
+            await state.panelMessageHandler(['createNotebookClicked'])
+            await state.panelMessageHandler(['renameNotebookClicked', readQuoted])
+            state.dialogResult = { id: 'ok', formData: { picker: { folderId: '__root' } } }
+            await state.panelMessageHandler(['moveNotebookClicked', readSub])
+            state.dialogResult = null
+            await state.panelMessageHandler(['notebookPicked', 'moveNotebookUnder', storeFolder, readQuoted])
+            await state.panelMessageHandler(['tagsPicked', storeId(1), 'alpha, beta'])
+            await state.panelMessageHandler(['deleteNotebookClicked', readArchive])
+        }
+        const served = await readRun(readMix())
+        await buildAndRender(served)
+        let timerMark = served.timeouts.length
+        await act(served)
+        assert.strictEqual(laddersArmedSince(served, timerMark), 0, 'store-served: not one rung')
+        assert.deepStrictEqual(held(served), NOTHING_HELD)
+        const unbuilt = await readRun(readMix())
+        timerMark = unbuilt.timeouts.length
+        await act(unbuilt)
+        assert.strictEqual(laddersArmedSince(unbuilt, timerMark), 6, 'before the build: one arm per action, as always')
+    })
+
+    await test('note store actions: a whole store-served session of the panel\'s own actions arms no ladder and holds nothing, and reads, beyond its own writes, only what the store\'s follow-up polls fetch', async () => {
+        const state = await readRun(readMix(), { livePostedNotes: true })
+        await buildAndRender(state)
+        // Joplin's side of each write: the note changes (the stub applies a PUT itself) and its row lands in the feed.
+        state.onDataPut = async (target) => { if (target[0] === 'notes' && state.notes[target[1]]) state.pushChange({ item_id: target[1], type: 2 }) }
+        state.onDataDelete = async (target) => {
+            if (target[0] !== 'notes' || !state.notes[target[1]]) return
+            state.notes[target[1]].deleted_time = Date.now()
+            state.pushChange({ item_id: target[1], type: 2 })
+        }
+        // The create below goes into the filtered notebook (no picker); a filter change drains the store itself, so it is made before the session.
+        await state.panelMessageHandler(['notebookFilterChanged', storeFolder])
+        const mark = state.gets.length
+        const timerMark = state.timeouts.length
+        const ownReads = []
+        let followUps = 0
+        const step = async (label, message) => {
+            const stepMark = state.gets.length
+            await state.panelMessageHandler(message)
+            const calls = noteCallsSince(state, stepMark)
+            assert.strictEqual(calls.filter(isEvents).length, 0, `${label}: the action itself asks the feed nothing`)
+            ownReads.push(...calls)
+            assert.deepStrictEqual(held(state), NOTHING_HELD, `${label}: nothing held`)
+            if (state.pendingTimeouts(STORE_FOLLOW_UP).length){
+                followUps++
+                await firePending(state, STORE_FOLLOW_UP)
+                if (pendingStoreRenders(state).length) await fireStoreRender(state)
+            }
+        }
+        await step('tick', ['todoChecked', storeId(2), true])
+        await step('flip', ['noteMenuAction', 'toggleType', storeId(3)])
+        await step('create', ['newTodoClicked'])
+        const created = storeModel(state).snapshot().find(record => record.title === '' && record.is_todo === 1)
+        assert.ok(created && rowCount(state, created.id, 'todo') === 1, 'precondition: the create is drawn')
+        state.dialogResult = { id: 'ok', formData: { picker: { folderId: readSub } } }
+        await step('move', ['noteMenuActionMulti', 'moveToFolder', [storeId(1), storeId(21)]])
+        state.dialogResult = null
+        await step('trash', ['noteMenuActionMulti', 'delete', [storeId(22)]])
+        await step('drag', ['todosDropped', [storeId(4)], isoInDays(6)])
+        await step('between', ['todosDroppedBetween', [storeId(9)], storeId(7), storeId(3), null, null])
+        await step('alarm', ['alarmSet', [storeId(5)], isoInDays(2), '08:15'])
+        const session = state.gets.slice(mark)
+        assert.strictEqual(laddersArmedSince(state, timerMark), 0, 'not one rung of the ladder, all session')
+        assert.deepStrictEqual(session.filter(g => g.path[0] === 'search'), [], 'not one search')
+        assert.ok(!session.some(g => g.path[0] === 'notes' && g.path.length === 1), 'not one listing page')
+        const drains = session.filter(isEvents)
+        assert.strictEqual(drains.length, followUps, 'every events call is a follow-up\'s, one each')
+        assert.strictEqual(followUps, 8, 'and each of the eight steps armed one')
+        const actionReads = ownReads.filter(g => !isEvents(g))
+        assert.ok(actionReads.every(g => g.path[0] === 'notes' && g.path.length === 2 && !isStoreGet(g)), 'the actions\' own reads are reads of single notes')
+        assert.deepStrictEqual([...new Set(actionReads.map(g => JSON.stringify(g.query.fields.slice().sort())))].sort(),
+            [JSON.stringify(FLIP_GET_FIELDS.slice().sort()), JSON.stringify(['todo_due'])].sort(), 'the flip\'s wide read and the due writes\' fresh due: what today\'s path reads')
+        const storeFetches = session.filter(isStoreFetch)
+        assert.ok(storeFetches.length > 0 && storeFetches.every(g => !ownReads.includes(g)), 'every fetch by id is the follow-ups\'')
+        assert.deepStrictEqual(held(state), NOTHING_HELD, 'and the session ends holding nothing')
     })
 
     await fs.remove(tmp)

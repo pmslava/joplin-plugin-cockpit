@@ -96,10 +96,25 @@ var buildLostNote = false
 // What the burst of runs in progress did, which its listeners are told (see timer.ts), so a render can tell the news apart:
 //  - built:   it ran the build that makes the store ready (runOnce's) - every note at once, most rings never read;
 //  - rebuilt: a ready store's drain was too large to fetch note by note and walked the listing instead - any note may have changed;
-//  - fetched: the ids its drains fetched by id - the notes that changed, new ones included.
+//  - fetched: the ids its drains fetched by id - the notes that changed, new ones included;
+//  - removed: the ids its drains took out on a delete row (phase 5): with `fetched`, every note the burst has Joplin's own word on, which is
+//             what lets timer.ts retire the optimistic layer's hold on them.
 var burstBuilt = false
 var burstRebuilt = false
 var burstFetched = new Set()
+var burstRemoved = new Set()
+// Cockpit's own writes, counted per note (phase 5). A drain's fetch by id can be answered before one of them and arrive after it - the note read
+// just before the panel trashed it, say - and applying that answer would put the old record back over the write for the half second until the
+// follow-up. So drainFeed notes a note's count before its fetch and drops the answer when the count moved meanwhile; the note then goes on the
+// refetch list, which the next drain (the follow-up the write armed) fetches whatever its rows say: the write's own feed row may already be behind
+// the cursor, in the very page the skipped fetch came from. No clock is involved, only the order of the two events.
+var writeSerials = new Map()
+var refetchIds = new Set()
+
+function countWrite(id){
+    var key = String(id)
+    writeSerials.set(key, (writeSerials.get(key) || 0) + 1)
+}
 
 // The listing's own fields plus is_conflict, which a fetch by id needs (GET /notes/:id returns conflict copies; the listing does not). Read at
 // call time rather than at load: joplin.ts imports this module for its write helpers and its store reads, so its exports are not filled in yet
@@ -157,6 +172,7 @@ export function scheduleNoteStorePoll(){
  ***************************************************************************************************************************************************/
 export function applyLocalWrite(id, fields){
     if (!started || !available) return
+    countWrite(id)
     model.applyLocalWrite(id, fields)
     armFollowUp()
 }
@@ -167,7 +183,10 @@ export function applyLocalWrite(id, fields){
  ***************************************************************************************************************************************************/
 export function applyLocalCreate(note){
     if (!started || !available) return
-    if (note && note.id) model.applyFetched(note, note.id)
+    if (note && note.id){
+        countWrite(note.id)
+        model.applyFetched(note, note.id)
+    }
     armFollowUp()
 }
 
@@ -184,6 +203,7 @@ export function applyLocalCreate(note){
  ***************************************************************************************************************************************************/
 export function applyLocalRemoval(id){
     if (!started || !available) return
+    countWrite(id)
     if (building) buildLostNote = true
     model.applyLocalWrite(id, { deleted_time: Date.now() })
     armFollowUp()
@@ -227,8 +247,8 @@ export function getModel(){
 }
 
 // Called once a burst of runs (one run and the reruns asked for while it lasted) has changed the mirror's revision; timer.ts schedules a render from
-// it. A burst that changed nothing calls nobody. The listener is handed { built, rebuilt, fetched } (see burstBuilt above). Returns the unsubscribe
-// function.
+// it. A burst that changed nothing calls nobody. The listener is handed { built, rebuilt, fetched, removed } (see burstBuilt above). Returns the
+// unsubscribe function.
 export function subscribe(listener){
     listeners.push(listener)
     return () => { listeners = listeners.filter(entry => entry !== listener) }
@@ -269,6 +289,7 @@ async function pump(mayBuild){
     burstBuilt = false
     burstRebuilt = false
     burstFetched = new Set()
+    burstRemoved = new Set()
     try {
         await runOnce(mayBuild)
         while (rerunRequested && available){
@@ -286,7 +307,7 @@ async function pump(mayBuild){
         rerunRequested = false
         rerunMayBuild = false
     }
-    if (model.revision !== revisionBefore) notifyListeners({ built: burstBuilt, rebuilt: burstRebuilt, fetched: burstFetched })
+    if (model.revision !== revisionBefore) notifyListeners({ built: burstBuilt, rebuilt: burstRebuilt, fetched: burstFetched, removed: burstRemoved })
 }
 
 async function runOnce(mayBuild){
@@ -432,20 +453,32 @@ async function drainFeed(mayRebuild){
         await build()
         return true
     }
+    // The notes an earlier drain dropped a fetch of (see writeSerials) are fetched now, whatever the rows say.
+    for (var refetchId of refetchIds) if (plan.fetch.indexOf(refetchId) < 0) plan.fetch.push(refetchId)
+    refetchIds.clear()
     for (var fetchId of plan.fetch) burstFetched.add(fetchId)
     var removedKnown = false
     for (var id of plan.fetch){
         var note = null
+        var writesBefore = writeSerials.get(id)
         try {
             countData('get')
             note = await joplin.data.get(['notes', id], { fields: storeFields() })
         } catch (error) {
             if (String((error && error.message) || error).indexOf("Not Found") < 0) throw error
         }
+        // Cockpit wrote the note while the fetch was out: the answer may be older than the write, so it is dropped and the note refetched.
+        if (writeSerials.get(id) !== writesBefore){
+            refetchIds.add(id)
+            continue
+        }
         if (model.applyFetched(note, id) === 'removed') removedKnown = true
     }
     for (var removeId of plan.remove){
-        if (model.remove(removeId)) removedKnown = true
+        if (model.remove(removeId)){
+            removedKnown = true
+            burstRemoved.add(removeId)
+        }
     }
     cursor = nextCursor
     return !removedKnown

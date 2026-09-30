@@ -20,6 +20,9 @@
  *                          the machinery that exists to chase the search index stands down: a note change (outside a sync) and a completed sync drain  *
  *                          the feed and render once (no per-note read, no reconcile ladder), and the tick redraws only when something the panel or the *
  *                          notes are drawn from has moved (the redraw stamps below). One view that still needs the search puts every trigger back.     *
+ *   - own writes         : (2.7 phase 5) while every view is store-served and no sync runs (storeServesAction below), the panel's own actions stop     *
+ *                          feeding the optimistic layer and arming the reconcile ladder: the store has each write at once, and a drain retires the     *
+ *                          layer's hold on the notes it brought (settleDrained).                                                                       *
  *                                                                                                                                                    *
  *  A profile switch is deliberately none of these: it changes no note data, so it paints (from cache / one search) and stops - see panel.ts.          *
  ***************************************************************************************************************************************************/
@@ -31,7 +34,7 @@ import { getOverviewNoteIDs, refreshNoteData } from "./markdown";
 import { getCurrentProfileID, updateFrequencySettingKey } from "./settings";
 import { getAllProfiles, getProfile } from "./database";
 import { getSyncStatus, markSyncComplete, markSyncStart } from "./syncStatus";
-import { hasPendingOptimistic } from "./optimistic";
+import { clearAllOptimistic, clearOptimisticItem, clearTodoCompletionOverride, hasPendingItemOverlay, hasPendingOptimistic } from "./optimistic";
 import { isMobile } from "./platform";
 import { drainDeferredSettingsNoteWrite, isSettingsNote, pollSettingsNote, scheduleSettingsNoteRead, syncSettingsNote } from "./settingsSync";
 import { catchUp, getModel as getStoreModel, pollNow, pollOnTick, scheduleNoteStorePoll, subscribe as subscribeToNoteStore } from "./noteStore";
@@ -94,6 +97,10 @@ export async function refreshInterfaces(){
  * (there is nothing more to confirm). A change that left nothing optimistic - a due-date move, a tag edit - has no such signal, so it simply runs the   *
  * bounded schedule to its end. Either way it is a SINGLE job: a fresh mutation clears the pending offsets and restarts, so bursts never stack parallel  *
  * jobs (which is also what retires claim C8's queued-second-full-pass).                                                                                 *
+ *                                                                                                                                                       *
+ * Since 2.7 phase 5 the panel's own actions arm it only when storeServesAction does not hold (a view needs the search, a sync runs, the store is not    *
+ * ready), or when the store went stale while the action ran. Two callers arm it whatever the gate says: onNoteAlarmTrigger, and Joplin's own            *
+ * moveToFolder command run from the panel, whose write an older desktop app lands after the command has returned (see runMoveCommand in panel.ts).      *
  ***************************************************************************************************************************************************/
 const reconcileOffsetsMs = [1000, 3000, 7000, 15000, 30000]
 var reconcileTimers = []
@@ -139,7 +146,8 @@ function cancelReconcile(){
 
 async function reconcilePoll(generation, isLast){
     // A store-served view (2.7) has no index to wait for, but its store may not have heard of the change this burst is about: an app command
-    // such as moveToFolder writes when its dialog closes, seconds after it returned, and Joplin's onNoteChange fires for the selected note only.
+    // such as moveToFolder writes when its dialog closes, which an older desktop app does after the command has returned (3.6.14 awaits the
+    // dialog and the move), and Joplin's onNoteChange fires for the selected note only.
     // So the store drains once first (catchUpNoteStore: one events call, no follow-up; it starts no build, though a ready store's drain past the
     // rebuild threshold rebuilds inside it and this render then waits for the walk), and the render below reads what it brought.
     await catchUpNoteStore()
@@ -261,6 +269,8 @@ function scheduleStoreRender(news?){
  * build was the one spike the perf run found.                                                                                                      *
  ***************************************************************************************************************************************************/
 async function renderStoreChange(fill){
+    // The drain this render draws may have settled some of the optimistic layer (settleDrained below): merge nothing it let go of.
+    await settling
     var complete = !!fill && await allConsumersStoreServed()
     await refreshPanelData({ fast: true })
     if (complete) await refreshPanelData({ fillCounts: true, ringsChangedOnly: fill.plain ? null : fill.fetched })
@@ -287,6 +297,8 @@ function dropStoreRender(){
 export async function catchUpNoteStore(){
     await catchUp()
     dropStoreRender()
+    // Taken back first, while the store render is certainly still pending; then the render the caller runs waits for what the drain settled.
+    await settling
 }
 
 /** allConsumersStoreServed (2.7 phase 4) ***********************************************************************************************************
@@ -325,6 +337,93 @@ async function storeServedConsumers(){
     } catch (error) {
         return null
     }
+}
+
+/** storeServesAction (2.7 phase 5) *****************************************************************************************************************
+ * The one gate a panel action asks before it decides how to show its own write: every view store-served (allConsumersStoreServed above) and no     *
+ * sync running - the phase 4 mid-sync rule, which the note-change trigger follows too. While it holds, the note store has the write the moment     *
+ * Cockpit makes it (the write helpers update the record in the same code path), and nothing Cockpit draws reads the search, so the optimistic      *
+ * layer and the reconcile ladder - which exist to show a write before Joplin's search index catches up - have nothing to do: the action renders    *
+ * from the store, and the store's follow-up poll brings Joplin's own row. While it does not hold, every action takes the path it has always taken: *
+ * the overlay, the completion override, the ladder.                                                                                                *
+ *                                                                                                                                                  *
+ * An action asks it at its start, before it feeds or writes anything (startOwnWrite below), and again around its own render (showOwnWrite in       *
+ * panel.ts, afterOwnWrite below). Those later answers are the fallback: an action that started on the store path and finds the gate gone - a poll  *
+ * that failed while it ran, a sync that started - takes today's path from there, so its result still shows. Published on CockpitTriggers for the   *
+ * harness.                                                                                                                                         *
+ ***************************************************************************************************************************************************/
+export async function storeServesAction(){
+    return !getSyncStatus().syncing && await allConsumersStoreServed()
+}
+
+/** startOwnWrite / afterOwnWrite (2.7 phase 5) *****************************************************************************************************
+ * The two ends of a panel action that writes notes, around the gate above. startOwnWrite asks the gate at the action's start, before anything is   *
+ * fed or written, and when it holds lets the optimistic layer go of the notes the action is about to write (settleOptimistic below): an override   *
+ * or an entry left from a time a view needed the search would otherwise be merged over the store's truth - a note moved out of a filtered notebook *
+ * drawn back in it by a stale insert, a to-do's completion by a stale tick. Answers whether the action is on the store path.                       *
+ *                                                                                                                                                  *
+ * afterOwnWrite is the tail of an action that feeds no overlay - a move, a due date, a trash, a duplicate, a tag or notebook edit, the alarm: its  *
+ * full repaint as always (refreshInterfaces), then the reconcile ladder, unless the action started on the store path and the gate still holds once *
+ * the repaint is done. The repaint then read the store, which had the write at once, and no index is left to chase. The overview lane is armed     *
+ * either way. The repaint first waits for the settle queue, since a duplicate, a trashed notebook and Joplin's own move drain the store before it. *
+ * The actions that do feed the overlay (the tick, the type flip, a create) render through showOwnWrite in panel.ts instead.                        *
+ ***************************************************************************************************************************************************/
+export async function startOwnWrite(ids){
+    if (!(await storeServesAction())) return false
+    settleOptimistic(ids)
+    return true
+}
+
+export async function afterOwnWrite(storePath){
+    // A drain the action made (a duplicate, a trashed notebook, Joplin's own move) queued its settle; the repaint must not merge what it lets go of.
+    await settling
+    await refreshInterfaces()
+    if (!(storePath && await storeServesAction())) scheduleReconcile()
+    scheduleOverview()
+}
+
+/** The optimistic layer lets go of what a drain settled (2.7 phase 5) ******************************************************************************
+ * A completion override or an overlay entry holds the user's intent over a search index that has not caught up. Once every view reads the store,   *
+ * the store is the truth for every note a drain has Joplin's own word on - each one it fetched by id or removed on a delete row - so the layer's   *
+ * hold on those ids is at best a repeat and at worst a lie. The case that forced this: a to-do ticked while a view still needed the search, hidden *
+ * by its view, then converted to a note and back in the editor (Joplin's changeNoteType resets todo_completed), or trashed and restored elsewhere, *
+ * drew ticked again until the override's own 60 s timeout. So while storeServesAction holds, each drain's ids lose their override and their        *
+ * overlay entry (settleOptimistic, which the panel's own store-path writes use for the ids they write), and a build or a rebuild - which re-read   *
+ * every note, fetching none by id - clears the whole layer (clearAllOptimistic). While it does not hold, a view still reads the search, which is   *
+ * exactly what the layer covers, and nothing is dropped. Nothing held at all - the usual case - costs no setting read.                             *
+ *                                                                                                                                                  *
+ * The store calls its listener synchronously as a burst ends, so the listener only queues the work; every render a drain leads to - the store      *
+ * render, the catch-up before a truth render or a ladder rung, the tick's own, an own write's repaint after its drain (afterOwnWrite) - waits for  *
+ * the queue first, so none of them merges an entry the drain has settled.                                                                          *
+ ***************************************************************************************************************************************************/
+var settling = Promise.resolve()
+
+export function settleOptimistic(ids){
+    for (var id of ids){
+        clearTodoCompletionOverride(id)
+        clearOptimisticItem(id)
+    }
+}
+
+function settleDrained(news){
+    // A build or a rebuild re-read every note, so everything held is settled, not only what a drain fetched by id.
+    var everything = !!(news && (news.built || news.rebuilt))
+    var ids = []
+    if (news && news.fetched) for (var fetchedId of news.fetched) ids.push(fetchedId)
+    if (news && news.removed) for (var removedId of news.removed) ids.push(removedId)
+    if (!everything && !ids.length) return
+    settling = settling.then(async () => {
+        if (getSyncStatus().syncing || !hasPendingOptimistic()) return
+        if (!(await storeServesAction())) return
+        if (everything) clearAllOptimistic()
+        else settleOptimistic(ids)
+    }).catch(error => console.warn("Cockpit: could not settle the optimistic layer after a note store drain", error))
+}
+
+// The note store's listener: the settle first, so the render it schedules finds the queue already holding this drain's work.
+function onStoreNews(news){
+    settleDrained(news)
+    scheduleStoreRender(news)
 }
 
 /** The redraw stamps (2.7 phase 4) *****************************************************************************************************************
@@ -491,6 +590,8 @@ async function refreshOnStoreTick(syncing){
     if (!(await allConsumersStoreServed())) return Promise.all([refreshInterfaces(), syncing ? null : pollOnTick()])
     if (!syncing) await pollOnTick()
     var drainOwed = dropStoreRender()
+    // After the drop, for the reason given above; the render below must not merge what the drain settled.
+    await settling
     if (!drainOwed && await nothingToRedraw()) return
     await refreshInterfaces()
 }
@@ -502,7 +603,7 @@ async function refreshOnStoreTick(syncing){
 export async function setupWorkspaceEvents(){
     // Not a workspace event, but the same kind of news: the note store (2.7) changed, so a view drawn from it needs a render (see the note store
     // lane above). Subscribed once, here, with the events that feed it.
-    subscribeToNoteStore(scheduleStoreRender)
+    subscribeToNoteStore(onStoreNews)
     await registerEvent("onNoteChange", async (event) => {
         // The note store (2.7) takes EVERY note change as a hint - the settings note and the overview notes are notes too, and the change feed,
         // not this event, says what actually changed - and polls once per burst. Not while a sync runs, for the reason the external-change path
@@ -523,7 +624,7 @@ export async function setupWorkspaceEvents(){
         // the reconcile ladder, exist to beat the search index, and no view is waiting on one. The overview notes are rewritten on their debounce,
         // from the store as well. NOT while a sync runs: no poll was armed above then, the tick does not poll either, and the reconcile ladder's
         // rungs are what drain the store until the sync completes (catchUpNoteStore) - so a change to the open note mid-sync takes that path.
-        if (!getSyncStatus().syncing && await allConsumersStoreServed()){
+        if (await storeServesAction()){
             scheduleOverview()
             return
         }
@@ -605,4 +706,9 @@ async function registerEvent(eventName, handler){
 }
 
 /** The inspection handle **************************************************************************************************************************/
-;(globalThis as any).CockpitTriggers = Object.freeze({ allConsumersStoreServed })
+// storeServesAction is the phase 5 gate; optimisticHeld tells the harness whether the optimistic layer holds an overlay entry, and whether it holds
+// anything at all (an entry or a completion override), without giving it a way to change either.
+function optimisticHeld(){
+    return { itemOverlay: hasPendingItemOverlay(), anything: hasPendingOptimistic() }
+}
+;(globalThis as any).CockpitTriggers = Object.freeze({ allConsumersStoreServed, storeServesAction, optimisticHeld })

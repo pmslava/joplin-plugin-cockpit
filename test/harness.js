@@ -115,11 +115,17 @@ function makeJoplin(options) {
         // the page. It can put a note on two pages - a create shifting the listing between two reads - or throw, as a failing page does.
         onListingPage: null,
         // An async hook run on every single-note GET with (id, query) before it is answered: it can throw, as a read that fails with something
-        // other than Not Found does.
+        // other than Not Found does, and what it returns, when it returns anything, is the answer - a note as Joplin read it before a write that
+        // landed while the answer was on its way (2.7 phase 5).
         onNoteGet: null,
         // An async hook run on every data.delete with its path, after it is recorded: what the delete does to the notes (a notebook trashed with
         // its notes) is the test's to model, since the stub itself changes nothing.
         onDataDelete: null,
+        // An async hook run on every data.put with its path and body, after the write is recorded and applied to the notes and before the put
+        // answers: what else happens while a write is out (a poll of the change feed failing, 2.7 phase 5) is the test's to stage there.
+        onDataPut: null,
+        // The same for every data.post, after it is recorded (and, with livePostedNotes, after the note has joined the fixtures).
+        onDataPost: null,
     }
 
     const notes = options.notes || {}
@@ -449,7 +455,8 @@ function makeJoplin(options) {
                             has_more: listed.length > limit,
                         }
                     }
-                    if (state.onNoteGet) await state.onNoteGet(pathParts[1], query)
+                    const answered = state.onNoteGet ? await state.onNoteGet(pathParts[1], query) : undefined
+                    if (answered !== undefined) return projectFields(answered, query && query.fields)
                     const note = notes[pathParts[1]]
                     if (!note) throw new Error('Not Found')
                     // ['notes', id, 'tags'] lists the tags currently on a note (tag picker).
@@ -474,6 +481,7 @@ function makeJoplin(options) {
                         notes[pathParts[1]].updated_time = (Number(notes[pathParts[1]].updated_time) || 0) + 1
                     }
                 }
+                if (state.onDataPut) await state.onDataPut(pathParts, body)
             },
             post: async (pathParts, _q, body) => {
                 state.dataPosts.push({ path: pathParts, body })
@@ -484,8 +492,10 @@ function makeJoplin(options) {
                 if (options.livePostedNotes && pathParts[0] === 'notes') {
                     const id = String(state.dataPosts.length).padStart(32, '0')
                     notes[id] = Object.assign({ id, updated_time: 1 }, body)
+                    if (state.onDataPost) await state.onDataPost(pathParts, body)
                     return Object.assign({}, notes[id])
                 }
+                if (state.onDataPost) await state.onDataPost(pathParts, body)
                 return Object.assign({ id: `created-${state.dataPosts.length}` }, body)
             },
             delete: async (pathParts) => {

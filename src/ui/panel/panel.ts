@@ -10,7 +10,7 @@ import { clearOptimisticItem, clearTodoCompletionOverride, finalizeOverlay, hasP
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
 import { countPaint, countRender, logRefresh, snapshot } from "../../core/instrument";
 import { applyAlarmCleared, applyAlarmSet, getAlarmInitialFields, openAlarmDialog } from "../alarm/alarm";
-import { beginPanelRedraw, catchUpNoteStore, recordPanelRedraw, redrawStamp, refreshInterfaces, scheduleOverview, scheduleReconcile } from "../../core/timer";
+import { afterOwnWrite, beginPanelRedraw, catchUpNoteStore, recordPanelRedraw, redrawStamp, refreshInterfaces, scheduleOverview, scheduleReconcile, startOwnWrite, storeServesAction } from "../../core/timer";
 import { applyLocalCreate, applyLocalRemoval, applyLocalWrite, isReady as isStoreReady, pollNow } from "../../core/noteStore";
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
@@ -519,20 +519,17 @@ async function eventHandler(message){
     } else if (message[0] == 'deleteNotebookClicked'){
         await runNotebookAction('delete', String(message[1] || ""))
     } else if (message[0] == 'createNotebookClicked'){
+        // A notebook writes no note, so the store path (2.7 phase 5) has nothing to settle; the folder poll brings the new notebook.
+        var newFolderStorePath = await startOwnWrite([])
         await runAppCommand('newFolder')
         invalidateNotebookMap()
         lastRenderedHtml = null
-        await refreshInterfaces()
-        scheduleReconcile()
-        scheduleOverview()
+        await afterOwnWrite(newFolderStorePath)
     } else if (message[0] == 'moveToNotebookClicked'){
         var moveIDs = Array.isArray(message[1]) ? message[1] : [message[1]]
         // Desktop runs the native moveToFolder command; mobile (where it is absent) falls back to the
-        // notebook picker + a parent_id PUT per note.
-        await tryAppCommandWithFallback('moveToFolder', moveIDs, () => moveNotesFallback(moveIDs))
-        await refreshInterfaces()
-        scheduleReconcile()
-        scheduleOverview()
+        // notebook picker + a parent_id PUT per note. See runMoveCommand for the refresh that follows.
+        await runMoveCommand(moveIDs)
     } else if (message[0] == 'noteMenuAction'){
         await runNoteMenuAction(String(message[1] || ""), String(message[2] || ""))
     } else if (message[0] == 'noteMenuActionMulti'){
@@ -593,12 +590,12 @@ async function eventHandler(message){
         var todoIDs = Array.isArray(message[1]) ? message[1] : []
         var dropTarget = String(message[2] || "")
         if (todoIDs.length && dropTarget){
+            var dropStorePath = await startOwnWrite(todoIDs)
             await setTodoDueDates(todoIDs, dropTarget === "clear" ? null : dropTarget, await getDayStartTime())
-            await refreshInterfaces()
-            // The moved to-dos only settle into their new groups once the search index has caught up: the
-            // reconcile lane repaints the panel then, the overview lane rewrites the notes on its own debounce.
-            scheduleReconcile()
-            scheduleOverview()
+            // On a search-served view the moved to-dos only settle into their new groups once the search index has caught up: the
+            // reconcile lane repaints the panel then, the overview lane rewrites the notes on its own debounce. On the store path (2.7
+            // phase 5) the repaint already shows them there, and no ladder follows (afterOwnWrite in timer.ts).
+            await afterOwnWrite(dropStorePath)
         }
     } else if (message[0] == 'todosDroppedBetween'){
         // Desktop list-view "drop between rows": the webview posts the dragged ids plus the ids of the to-do rows
@@ -613,11 +610,10 @@ async function eventHandler(message){
         var groupDate = message[4] ? String(message[4]) : null
         var groupEndDate = message[5] ? String(message[5]) : null
         if (betweenIDs.length){
+            var betweenStorePath = await startOwnWrite(betweenIDs)
             await applyBetweenDrop(betweenIDs, prevID, nextID, groupDate, groupEndDate)
-            await refreshInterfaces()
             // Same post-write flow as todosDropped: reconcile repaints once the index catches up, overview rewrites.
-            scheduleReconcile()
-            scheduleOverview()
+            await afterOwnWrite(betweenStorePath)
         }
     } else if (message[0] == 'calendarNavigate'){
         var profile = await getProfile(await getCurrentProfileID())
@@ -735,10 +731,10 @@ async function eventHandler(message){
     } else if (message[0] == 'tagsPicked'){
         // Result of the in-panel tag overlay: the desired comma-separated titles. The diff/attach/detach
         // logic is exactly the desktop fallback's.
+        // Tags change no field the note store holds, so the store path (2.7 phase 5) has nothing to settle.
+        var tagsStorePath = await startOwnWrite([])
         await setNoteTagsFromCsv(String(message[1] || ""), String(message[2] || ""))
-        await refreshInterfaces()
-        scheduleReconcile()
-        scheduleOverview()
+        await afterOwnWrite(tagsStorePath)
     } else if (message[0] == 'getAlarmInitial'){
         // Round-trip: the alarm overlay awaits this to prefill its date/time fields (first to-do's due
         // time, or the day start today). The desktop alarm dialog computes the same starting values.
@@ -819,24 +815,62 @@ async function applyBetweenDrop(todoIDs, prevID, nextID, groupDate, groupEndDate
     await setTodoDuesPerId(todoIDs.map((id, index) => ({ id: id, due: dues[index] })))
 }
 
+/** showOwnWrite (2.7 phase 5) **********************************************************************************************************************
+ * The own render of an action that feeds the optimistic layer on today's path - the checkbox tick, the type flip, a create - when it started on    *
+ * the store path (startOwnWrite in timer.ts). The store already has the write: every helper that writes a note updates its record in the same code *
+ * path, a create takes the POST's answer. So the render needs no overlay entry, no completion override and no reconcile ladder behind it. It       *
+ * paints from the store at once (a fast render, no note body read, as quick as the optimistic repaint it replaces), then fills the rings of the    *
+ * notes the action wrote, as the store's own render does for a drain - which reads a body only for a note whose ring was never read (a new one) or *
+ * whose stamp has moved. The store's follow-up poll, armed by the write, brings Joplin's own row half a second later with whatever else the write  *
+ * moved (its user_updated_time; the todo_due and todo_completed a type flip resets), and a fetched record replaces the local write whole, so       *
+ * Joplin's version is the one drawn from then on.                                                                                                  *
+ *                                                                                                                                                  *
+ * Answers whether the action stayed on the store path. The gate is asked again before the render, between its two passes and after them: a poll    *
+ * that failed while the write was out or while a pass ran leaves the store stale (a pass then reads the lagging search), and a sync may have       *
+ * started. When an answer is no, the caller takes today's path from where it stands - it feeds the overlay, repaints from it and arms the ladder - *
+ * so the action's result still shows before the index catches up. Asked before the render, that costs no render at all; asked between the passes,  *
+ * it keeps the fill from drawing the search with nothing held over it; a store gone stale inside the fill leaves that one pass drawn from the      *
+ * search, which the caller's repaint follows at once.                                                                                              *
+ ***************************************************************************************************************************************************/
+async function showOwnWrite(ids){
+    if (!(await storeServesAction())) return false
+    await refreshPanelData({ fast: true })
+    // Gone during the fast render: the fill would read the lagging search with nothing held over it, so the caller's repaint comes first.
+    if (!(await storeServesAction())) return false
+    await refreshPanelData({ fillCounts: true, ringsChangedOnly: new Set(ids) })
+    return await storeServesAction()
+}
+
 /** applyTodoChecked ********************************************************************************************************************************
  * Applies a checkbox tick: one idempotent PUT of the completion state the user set (a ms timestamp, or 0), held optimistically on the plugin side so  *
  * every render shows it until the search index agrees. There is deliberately NO immediate search-based refresh - that was the old flicker (a search   *
  * run before the index caught up repainted the tick away). Instead an optimistic repaint shows the new state at once from cache; the reconcile lane    *
  * then lets the index catch up (and retires the override the moment it does, stopping early), and the overview lane rewrites the notes on its own       *
  * debounce. A failed write rolls the optimistic state back and repaints the truth.                                                                     *
+ *                                                                                                                                                     *
+ * On the store path (2.7 phase 5, startOwnWrite in timer.ts) nothing is held: the store has the tick the moment it is written, and showOwnWrite       *
+ * draws it from there. Only when the gate is gone by the end of the action is the override set after all, and today's repaint and arm follow.         *
  ***************************************************************************************************************************************************/
 async function applyTodoChecked(todoID, checked){
     if (!todoID) return
     var completed = checked ? Date.now() : 0
-    setTodoCompletionOverride(todoID, completed)
+    var storePath = await startOwnWrite([todoID])
+    if (!storePath) setTodoCompletionOverride(todoID, completed)
     try {
         await setTodoCompleted(todoID, completed)
     } catch (error) {
-        clearTodoCompletionOverride(todoID)
+        if (!storePath) clearTodoCompletionOverride(todoID)
         console.error("Cockpit: could not update the to-do's completion", error)
         await refreshPanelFastThenFill()
         return
+    }
+    if (storePath){
+        if (await showOwnWrite([todoID])){
+            scheduleOverview()
+            return
+        }
+        // The gate went while the action ran (see showOwnWrite): hold the tick over the search from here, as today's path has from its start.
+        setTodoCompletionOverride(todoID, completed)
     }
     await refreshPanelData({ optimistic: true })
     // An optimistic arm: the completion override retires the instant a search agrees, so the reconcile lane
@@ -1694,6 +1728,8 @@ async function createItem(isTodo){
  ***************************************************************************************************************************************************/
 async function createItemInFolder(isTodo, folderID){
     if (!folderID) return
+    // Whether the create can rely on the note store (2.7 phase 5): asked before the POST, as every action asks it at its start.
+    var storePath = await startOwnWrite([])
     var newItem = await joplin.data.post(['notes'], null, { parent_id: folderID, is_todo: isTodo ? 1 : 0, title: "" })
     // The note store (2.7) takes the saved note from the answer at once, like every write the panel makes through joplin.data (see the
     // "Cockpit's own writes" banner in joplin.ts): the feed's row lands after the save returns, and the follow-up poll this arms brings it.
@@ -1704,6 +1740,12 @@ async function createItemInFolder(isTodo, folderID){
     // in effect (the setting and the focus commands are desktop-only, guarded to a no-op on mobile), so this
     // also covers the mobile notebook-overlay create path (applyNotebookPicked -> createItemInFolder) safely.
     await focusNewItemEditor(isTodo)
+    // On the store path the store already holds the note (applyLocalCreate above), so the row is drawn from there, with no overlay entry
+    // and no ladder behind it (showOwnWrite); a view the new note does not belong to simply does not draw it.
+    if (storePath && await showOwnWrite([newItem.id])){
+        scheduleOverview()
+        return
+    }
     // Show the new row at once from the POST response (the record is already in hand) when the active view
     // can be evaluated locally; otherwise the reconcile lane reconciles it via a search once the index has it,
     // and the overview lane rewrites the notes. The insert result tells the lane whether this arm is
@@ -1721,16 +1763,16 @@ async function createItemInFolder(isTodo, folderID){
 async function applyNotebookPicked(purpose, folderId, extra){
     if (purpose === 'moveNotes'){
         var moveIDs = Array.isArray(extra) ? extra : []
+        var moveStorePath = await startOwnWrite(moveIDs)
         for (var id of moveIDs){
             await joplin.data.put(['notes', id], null, { parent_id: folderId })
             applyLocalWrite(id, { parent_id: folderId })
         }
-        await refreshInterfaces()
-        scheduleReconcile()
-        scheduleOverview()
+        await afterOwnWrite(moveStorePath)
     } else if (purpose === 'moveNotebookUnder'){
         var sourceID = String(extra || "")
         if (!sourceID) return
+        var folderStorePath = await startOwnWrite([])
         // A cancelled/absent redraw would leave the tree stale, so force one and drop the notebook cache.
         lastRenderedHtml = null
         invalidateNotebookMap()
@@ -1739,9 +1781,7 @@ async function applyNotebookPicked(purpose, folderId, extra){
         } catch (error) {
             await joplin.views.dialogs.showMessageBox(`Cockpit: the notebook could not be moved (${error.message}).`)
         }
-        await refreshInterfaces()
-        scheduleReconcile()
-        scheduleOverview()
+        await afterOwnWrite(folderStorePath)
     } else if (purpose === 'createNote' || purpose === 'createTodo'){
         await createItemInFolder(purpose === 'createTodo', folderId)
     }
@@ -1753,6 +1793,9 @@ async function applyNotebookPicked(purpose, folderId, extra){
  ***************************************************************************************************************************************************/
 async function runNotebookAction(action, folderID){
     if (!folderID) return
+    // A notebook action writes no note of its own (a trashed notebook's notes reach the store through the drain below), so the store path (2.7
+    // phase 5) has nothing to settle here.
+    var storePath = await startOwnWrite([])
     // A cancelled dialog leaves the markup unchanged, so force a redraw
     lastRenderedHtml = null
     invalidateNotebookMap()
@@ -1777,9 +1820,7 @@ async function runNotebookAction(action, folderID){
             await pollStoreAfterAppWrite()
         }
     }
-    await refreshInterfaces()
-    scheduleReconcile()
-    scheduleOverview()
+    await afterOwnWrite(storePath)
 }
 
 /** pickNotebook ************************************************************************************************************************************
@@ -1922,11 +1963,13 @@ async function runAppCommand(commandName, args?){
  * they throw and hit the "not available here" message box. This runs the native command first: on desktop it exists and succeeds, so the native      *
  * dialog (tag autocomplete, move, duplicate) is preserved exactly. On mobile it throws, and the fallback runs the equivalent through joplin.data.     *
  * If a command is ever added to mobile, the try simply succeeds and the native one is used automatically. Without a fallback (or on desktop) the      *
- * behaviour is identical to runAppCommand.                                                                                                           *
+ * behaviour is identical to runAppCommand. Answers whether Joplin's own command ran, which runMoveCommand needs (2.7 phase 5): a write Joplin made  *
+ * is one the note store has not been told about.                                                                                                    *
  ***************************************************************************************************************************************************/
 async function tryAppCommandWithFallback(commandName, args, fallback){
     try {
         await (args === undefined ? joplin.commands.execute(commandName) : joplin.commands.execute(commandName, args))
+        return true
     } catch (error) {
         if ((await isMobile()) && fallback){
             await fallback()
@@ -1934,7 +1977,31 @@ async function tryAppCommandWithFallback(commandName, args, fallback){
             console.warn(`Cockpit: the command ${commandName} could not be run`, error)
             await joplin.views.dialogs.showMessageBox(`Cockpit: "${commandName}" is not available here.`)
         }
+        return false
     }
+}
+
+/** runMoveCommand (2.7 phase 5) ********************************************************************************************************************
+ * "Move to notebook" for the given notes through Joplin's own moveToFolder command - desktop only; mobile has none and falls back to the notebook  *
+ * picker and a parent_id PUT per note, which tells the note store itself (moveNotesFallback) - followed by the refresh every action ends with      *
+ * (afterOwnWrite in timer.ts). The one panel action that keeps the reconcile ladder on the store path, because the write is Joplin's, not          *
+ * Cockpit's:                                                                                                                                       *
+ *  - Cockpit never learns the target notebook - the command asks for it and makes the move - so there is nothing it could write into the store     *
+ *    itself, and a read-back cannot tell a moved note from one whose dialog is still open.                                                         *
+ *  - In 3.6.14 the command awaits its folder prompt and every Note.moveToFolder before it answers (read in the bundle: showFolderPicker awaits the *
+ *    window's showPrompt, which resolves when the prompt closes), so the notes have moved by the time execute returns. A drain of the store then   *
+ *    (pollStoreAfterAppWrite, as for duplicateNote) shows the move in the action's own render, and the follow-up it arms repaints half a second on *
+ *    when the feed's row lands a beat after the save.                                                                                              *
+ *  - Older desktop apps - 2.9.17 and 3.0.15 were read - ran the moves from the prompt's onClose, after execute had returned, and Cockpit supports  *
+ *    2.9 and later. Nothing announces that write (onNoteChange fires for the selected note only), so the ladder stays armed, blind, as before      *
+ *    phase 5: each rung drains the store and renders from it, with no search, and the move shows at the first rung after the dialog closes. Once   *
+ *    the release that changed this is known, a version gate can drop the ladder for the apps that await.                                           *
+ ***************************************************************************************************************************************************/
+async function runMoveCommand(noteIDs){
+    var storePath = await startOwnWrite(noteIDs)
+    var ranCommand = await tryAppCommandWithFallback('moveToFolder', noteIDs, () => moveNotesFallback(noteIDs))
+    if (storePath && ranCommand) await pollStoreAfterAppWrite()
+    await afterOwnWrite(storePath && !ranCommand)
 }
 
 /** moveNotesFallback *******************************************************************************************************************************
@@ -2117,15 +2184,23 @@ async function removeFromStoreIfTrashed(noteID){
 /** runNoteMenuAction *******************************************************************************************************************************
  * Applies an action from the panel's context menu to the given note. Actions with no matching command on all platforms are done through the data    *
  * API instead.                                                                                                                                     *
+ *                                                                                                                                                   *
+ * Each action that writes asks at its start whether it can rely on the note store (startOwnWrite in timer.ts, 2.7 phase 5). On the store path the   *
+ * type flip writes no overlay entry and renders through showOwnWrite, and every other action keeps its full repaint without the reconcile ladder    *
+ * (afterOwnWrite); the move is runMoveCommand's, the one that keeps the ladder. Off it, everything is as it always was.                             *
  ***************************************************************************************************************************************************/
 async function runNoteMenuAction(action, noteID){
     if (!action || !noteID) return
     // Whether the type flip below was captured optimistically, which decides the post-mutation refresh: see the trio.
     var flipCaptured = false
+    // Whether the action started on the store path, and the flip's post-flip record, kept for the fallback (see showOwnWrite).
+    var storePath = false
+    var flipRecord = null
     if (action == 'open'){
         await openTodo(noteID)
         return
     } else if (action == 'toggleType'){
+        storePath = await startOwnWrite([noteID])
         // The same fields the external reconcile reads - deleted_time included, since the row may be the stale
         // row of a note trashed elsewhere - so the post-flip record can be judged against the view without a
         // second GET; this is the one round-trip the action always made, only wider.
@@ -2135,14 +2210,19 @@ async function runNoteMenuAction(action, noteID){
         // The note store (2.7) moves the item to its new section at once, as createItemInFolder explains: a store-served view shows the flip
         // on the very next render, with no index to wait for.
         applyLocalWrite(noteID, { is_todo: flipped })
-        flipCaptured = await applyTypeFlipOptimistically({ ...note, id: noteID, is_todo: flipped })
+        flipRecord = { ...note, id: noteID, is_todo: flipped }
+        if (storePath) forgetTrashedRow(flipRecord)
+        else flipCaptured = await applyTypeFlipOptimistically(flipRecord)
     } else if (action == 'tags'){
+        storePath = await startOwnWrite([])
         // Desktop opens its native tag-autocomplete dialog; mobile (no such command) falls back to a
         // comma-separated tag input applied through the data API.
         await tryAppCommandWithFallback('setTags', [noteID], () => setTagsFallback(noteID))
     } else if (action == 'moveToFolder'){
-        await tryAppCommandWithFallback('moveToFolder', [noteID], () => moveNotesFallback([noteID]))
+        await runMoveCommand([noteID])
+        return
     } else if (action == 'duplicate'){
+        storePath = await startOwnWrite([])
         await tryAppCommandWithFallback('duplicateNote', [noteID], () => duplicateNoteFallback(noteID))
         await pollStoreAfterAppWrite()
     } else if (action == 'copyMarkdownLink'){
@@ -2153,6 +2233,7 @@ async function runNoteMenuAction(action, noteID){
         await copyToClipboard(noteID)
         return
     } else if (action == 'delete'){
+        storePath = await startOwnWrite([noteID])
         try {
             await joplin.commands.execute('deleteNote', [noteID])
             await removeFromStoreIfTrashed(noteID)
@@ -2163,6 +2244,18 @@ async function runNoteMenuAction(action, noteID){
         }
     } else {
         return
+    }
+    if (!flipRecord){
+        await afterOwnWrite(storePath)
+        return
+    }
+    if (storePath){
+        if (await showOwnWrite([noteID])){
+            scheduleOverview()
+            return
+        }
+        // The gate went while the action ran: the flip is captured now, and today's repaint and arm follow.
+        flipCaptured = await applyTypeFlipOptimistically(flipRecord)
     }
     // A captured type flip repaints from the overlay at once (the index still has the item in its old section,
     // so the full refresh would only repaint that stale placement) and arms the lane as optimistic, so the burst
@@ -2178,6 +2271,16 @@ async function runNoteMenuAction(action, noteID){
     scheduleOverview()
 }
 
+/** forgetTrashedRow ********************************************************************************************************************************
+ * The store path's answer to the flip of a stale row (2.7 phase 5). The row on screen may belong to a note trashed where no trigger has drained yet  *
+ * - over REST, or by another device while a sync ran - and the flip's own read then says deleted_time. Today's path suppresses such a row in the   *
+ * overlay (applyTypeFlipOptimistically); here the store itself lets the note go, as the desktop Delete does after its read-back                  *
+ * (removeFromStoreIfTrashed), so the flip cannot put a trashed note back on screen under its new type.                                             *
+ ***************************************************************************************************************************************************/
+function forgetTrashedRow(record){
+    if (Number(record.deleted_time) > 0) applyLocalRemoval(record.id)
+}
+
 /** runNoteMenuActionMulti **************************************************************************************************************************
  * The batch version of runNoteMenuAction: applies a context-menu action to EVERY selected note in one go, with a SINGLE post-mutation refresh for   *
  * the whole batch (the trio below runs once, after the loop, NOT once per note). Desktop only - the webview only posts this when several rows are    *
@@ -2190,29 +2293,42 @@ async function runNoteMenuAction(action, noteID){
  * setTags and duplicateNote natively accept an id array and carry the desktop's own multi-note behaviour (setTags seeds the picker with the tags     *
  * COMMON to the selection and applies the add/remove delta to every note; duplicateNote appends " - Copy" to each), so those run as one command with  *
  * the whole set. The copy actions build one newline-joined list.                                                                                     *
+ *                                                                                                                                                     *
+ * The store path (2.7 phase 5) is runNoteMenuAction's: asked at the start, one showOwnWrite for a whole batch of flips, afterOwnWrite for the rest.   *
  ***************************************************************************************************************************************************/
 async function runNoteMenuActionMulti(action, ids){
     if (!action || !Array.isArray(ids) || !ids.length) return
     // Whether EVERY flipped id was captured optimistically; only then can the batch repaint from the overlay alone.
     var flipCaptured = false
+    // Whether the batch started on the store path, and the post-flip records, kept for the fallback (see showOwnWrite).
+    var storePath = false
+    var flipRecords = null
     if (action == 'toggleType'){
+        storePath = await startOwnWrite(ids)
+        flipRecords = []
         var flipsCaptured = 0
         for (var toggleID of ids){
             var toggleNote = await joplin.data.get(['notes', toggleID], { fields: ['id', 'title', 'parent_id', 'is_todo', 'todo_completed', 'todo_due', 'deleted_time', 'user_updated_time', 'user_created_time'] })
             var toggleFlipped = toggleNote.is_todo ? 0 : 1
             await joplin.data.put(['notes', toggleID], null, { is_todo: toggleFlipped })
             applyLocalWrite(toggleID, { is_todo: toggleFlipped })   // the note store (2.7), as createItemInFolder explains
+            var toggleRecord = { ...toggleNote, id: toggleID, is_todo: toggleFlipped }
+            flipRecords.push(toggleRecord)
             // Overlay only - the single paint happens after the loop, so a batch still repaints once, not N times.
-            if (await applyTypeFlipOptimistically({ ...toggleNote, id: toggleID, is_todo: toggleFlipped })) flipsCaptured++
+            if (storePath) forgetTrashedRow(toggleRecord)
+            else if (await applyTypeFlipOptimistically(toggleRecord)) flipsCaptured++
         }
-        flipCaptured = flipsCaptured === ids.length
+        if (!storePath) flipCaptured = flipsCaptured === ids.length
     } else if (action == 'tags'){
+        storePath = await startOwnWrite([])
         // Desktop's setTags natively takes an id array (common-tags picker + per-note add/remove delta).
         await runAppCommand('setTags', ids)
     } else if (action == 'moveToFolder'){
+        storePath = await startOwnWrite(ids)
         // One notebook picker, then a parent_id PUT per note (moveNotesFallback loops over the array).
         await moveNotesFallback(ids)
     } else if (action == 'duplicate'){
+        storePath = await startOwnWrite([])
         // duplicateNote natively takes an id array and appends " - Copy" to each title.
         await runAppCommand('duplicateNote', ids)
         await pollStoreAfterAppWrite()
@@ -2228,6 +2344,7 @@ async function runNoteMenuActionMulti(action, ids){
         await copyToClipboard(ids.join("\n"))
         return
     } else if (action == 'delete'){
+        storePath = await startOwnWrite(ids)
         // Batch delete to the trash (reversible), a DELETE per note, each one taken out of the note store (2.7) at once.
         for (var deleteID of ids){
             await joplin.data.delete(['notes', deleteID])
@@ -2235,6 +2352,19 @@ async function runNoteMenuActionMulti(action, ids){
         }
     } else {
         return
+    }
+    if (!flipRecords){
+        await afterOwnWrite(storePath)
+        return
+    }
+    if (storePath){
+        if (await showOwnWrite(ids)){
+            scheduleOverview()
+            return
+        }
+        // The gate went while the batch ran: every flip is captured now, and today's repaint and arm follow.
+        for (var flipRecord of flipRecords) if (await applyTypeFlipOptimistically(flipRecord)) flipsCaptured++
+        flipCaptured = flipsCaptured === ids.length
     }
     // One paint for the whole batch either way; a fully captured type flip takes the overlay repaint and the
     // optimistic arm, for the reasons given in runNoteMenuAction.
