@@ -37,7 +37,7 @@ import { getSyncStatus, markSyncComplete, markSyncStart } from "./syncStatus";
 import { clearAllOptimistic, clearOptimisticItem, clearTodoCompletionOverride, hasPendingItemOverlay, hasPendingOptimistic } from "./optimistic";
 import { isMobile } from "./platform";
 import { drainDeferredSettingsNoteWrite, isSettingsNote, pollSettingsNote, scheduleSettingsNoteRead, syncSettingsNote } from "./settingsSync";
-import { catchUp, getModel as getStoreModel, pollNow, pollOnTick, scheduleNoteStorePoll, subscribe as subscribeToNoteStore } from "./noteStore";
+import { catchUp, getModel as getStoreModel, pollNow, pollOnTick, restoreNoteStore, scheduleNoteStorePoll, subscribe as subscribeToNoteStore } from "./noteStore";
 import { getAllTags, getNotebookMap, notebookMapGeneration, storeServes, tagListGeneration, viewCriteria } from "./joplin";
 import { toISODate } from "./calendar";
 import { logTick, snapshot } from "./instrument";
@@ -299,6 +299,20 @@ export async function catchUpNoteStore(){
     dropStoreRender()
     // Taken back first, while the store render is certainly still pending; then the render the caller runs waits for what the drain settled.
     await settling
+}
+
+/** restoreNoteStoreBeforePaint (2.7.1) *************************************************************************************************************
+ * The note store's restore from the mirror the last launch saved (restoreNoteStore in noteStore.ts), for the startup's first paint, which index.ts *
+ * runs next. The run that restores the mirror - or the build it falls through to - notifies the store's listeners as it ends, which arms the store *
+ * render above; that render is taken back here, because the first paint reads the same mirror, and a fast render starting beside it would only     *
+ * draw it a second time and could win refreshPanelData's generation guard over the paint's ring fill (the reason catchUpNoteStore drops it too).   *
+ * Without a file nothing ran, and nothing is taken back. Answers whether the store was restored.                                                   *
+ ***************************************************************************************************************************************************/
+export async function restoreNoteStoreBeforePaint(){
+    var restored = await restoreNoteStore()
+    dropStoreRender()
+    await settling
+    return restored
 }
 
 /** allConsumersStoreServed (2.7 phase 4) ***********************************************************************************************************

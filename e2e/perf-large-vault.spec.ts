@@ -21,6 +21,11 @@ import { launchJoplin, closeJoplin, createProfile, JoplinInstance, E2E_PATHS, PL
  * The seed makes 5% as many to-dos as notes (1,000 at 20,000). PERF_TODOS=<n> seeds n to-dos instead, for the scenarios
  * where the to-do side is what is large (2.7.1's to-do drawing cap): that template is perf-template-<N>-t<n>, so the
  * default one stays as it is and is reused, and so does its report name.
+ *
+ * PERF_WARM=1 measures a warm start as well (2.7.1, the saved note store): after the measured cold launch with Cockpit, the spec waits for the
+ * store's first save (CockpitInstrument.snapshot().storeSave.count, read in the plugin's window), closes Joplin keeping that profile copy, launches
+ * it again and measures the same window. The warm launch restores the store from the file before its first paint, and the report carries its first
+ * paint and its storeRestore next to the cold one's, under "warm".
  */
 
 const NOTES = Number(process.env.PERF_NOTES || 20000);
@@ -191,14 +196,33 @@ function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([promise.catch(() => fallback), new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
 }
 
-async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
-  const profileDir = path.join(PROFILES_ROOT, `perf-run-${withPlugin ? 'plugin' : 'bare'}-${Date.now()}`);
-  fs.cpSync(TEMPLATE, profileDir, { recursive: true });
-  const settingsPath = path.join(profileDir, 'settings.json');
-  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-  if (withPlugin) settings['plugins.devPluginPaths'] = E2E_PATHS.PLUGIN_DIST;
-  else delete settings['plugins.devPluginPaths'];
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+/** Cockpit's instrument snapshot (src/core/instrument.ts), read in whichever window holds it; null when none answers. */
+async function pluginTotals(joplin: JoplinInstance): Promise<any> {
+  for (const pg of joplin.browser.contexts().flatMap((ctx) => ctx.pages())) {
+    const totals = await within(pg.evaluate(() => {
+      const instrument = (globalThis as any).CockpitInstrument;
+      return instrument ? instrument.snapshot() : null;
+    }), 5_000, null);
+    if (totals) return totals;
+  }
+  return null;
+}
+
+/**
+ * One measured launch. `keepFor` keeps the profile copy after it for a warm launch (PERF_WARM), once the note store's first save is on disk;
+ * `warmFrom` is that copy, launched again as it was left.
+ */
+async function measure(withPlugin: boolean, opts: { keepFor?: 'warm'; warmFrom?: string } = {}): Promise<Record<string, unknown>> {
+  const profileDir = opts.warmFrom ?? path.join(PROFILES_ROOT, `perf-run-${withPlugin ? 'plugin' : 'bare'}-${Date.now()}`);
+  if (!opts.warmFrom) {
+    fs.cpSync(TEMPLATE, profileDir, { recursive: true });
+    const settingsPath = path.join(profileDir, 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    if (withPlugin) settings['plugins.devPluginPaths'] = E2E_PATHS.PLUGIN_DIST;
+    else delete settings['plugins.devPluginPaths'];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  }
+  let keep = false;
 
   const launchedAt = Date.now();
   let joplin: JoplinInstance | null = null;
@@ -333,9 +357,28 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
         }
       }
     }
+    // The saved note store (2.7.1): how this launch's startup used the file the last one left (a cold launch has none), and the saves it made.
+    // A launch kept for a warm one waits here for its first save, which the store makes as its build ends; the window has long covered that.
+    let storeRestore: unknown = null;
+    let storeSave: unknown = null;
+    if (withPlugin) {
+      let totals = await pluginTotals(joplin);
+      if (opts.keepFor === 'warm') {
+        const deadline = Date.now() + 120_000;
+        while (!(totals && totals.storeSave && totals.storeSave.count > 0) && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2000));
+          totals = await pluginTotals(joplin);
+        }
+        keep = !!(totals && totals.storeSave && totals.storeSave.count > 0);
+        if (!keep) console.warn('the note store never saved, so there is no warm launch to measure');
+      }
+      storeRestore = totals ? totals.storeRestore : null;
+      storeSave = totals ? totals.storeSave : null;
+    }
     const probes = samples.map((s) => s.probeMs);
     const report = {
       withPlugin,
+      warm: !!opts.warmFrom,
       notes: NOTES,
       todos: TODOS,
       windowS: WINDOW_MS / 1000,
@@ -364,6 +407,9 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
       mainHeapMb,
       dataCallsPerTick,
       storeMemory,
+      storeRestore,
+      storeSave,
+      keptFor: keep ? profileDir : null,
       processes,
       pages,
       samples,
@@ -371,7 +417,7 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
     console.log(JSON.stringify({ ...report, samples: undefined }, null, 2));
     return report;
   } finally {
-    if (joplin) await closeJoplin(joplin);
+    if (joplin) await closeJoplin(joplin, { keepProfile: keep });
     else fs.rmSync(profileDir, { recursive: true, force: true });
   }
 }
@@ -437,7 +483,12 @@ test('large collection: Joplin without and with Cockpit', async () => {
   if (!fs.existsSync(TEMPLATE)) await seedTemplate();
   // PERF_SKIP_BARE=1 re-measures only the plugin, against a baseline already on record.
   const bare = process.env.PERF_SKIP_BARE ? null : await measure(false);
-  const plugin = await measure(true);
-  fs.writeFileSync(OUT, JSON.stringify({ at: new Date().toISOString(), bare, plugin }, null, 2));
+  const plugin = await measure(true, process.env.PERF_WARM ? { keepFor: 'warm' } : {});
+  // PERF_WARM=1: the same profile copy launched again, the note store restored from the file the cold launch saved (2.7.1).
+  const warm = plugin.keptFor ? await measure(true, { warmFrom: plugin.keptFor as string }) : null;
+  fs.writeFileSync(OUT, JSON.stringify({ at: new Date().toISOString(), bare, plugin, warm }, null, 2));
+  if (warm) {
+    console.log(`first paint: cold ${plugin.firstRowsAtMs} ms, warm ${warm.firstRowsAtMs} ms; the warm launch's restore: ${JSON.stringify(warm.storeRestore)}`);
+  }
   console.log(`report written to ${OUT}`);
 });

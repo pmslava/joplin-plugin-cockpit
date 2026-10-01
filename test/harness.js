@@ -56,6 +56,10 @@ function makeJoplin(options) {
         panelMessageHandler: null,
         setHtmlCalls: 0,
         versionInfoCalls: 0,
+        // Counted, so a check can pin that the mobile app never asks for its data directory (the saved note store is desktop only, 2.7.1).
+        dataDirCalls: 0,
+        // Every settings.globalValue key asked for, in order (the saved note store reads Joplin's clientId on desktop, 2.7.1).
+        globalValueReads: [],
         // Every GET /folders/:id/notes page, as { folder, query } (the note store's per-notebook walk, 2.7.1).
         folderNotePages: [],
         // An ordered log of the events the fast-first-paint checks care about: a panel paint ('setHtml'), a
@@ -104,7 +108,9 @@ function makeJoplin(options) {
         // removes a note's earlier row before appending its new one, as ItemChange.addMulti does, and ids are never reused (the column is
         // AUTOINCREMENT), so lastChangeId only rises. Rows are { id, item_type, item_id, type, created_time }.
         changeLog: [],
-        lastChangeId: 0,
+        // `lastChangeId` starts the ids where an earlier run's feed left them, so a "relaunch" on the same data directory (the saved note store,
+        // 2.7.1) sees its rows continue past the cursor it saved, as the same database would.
+        lastChangeId: Number(options.lastChangeId) || 0,
         // Every answer the route gave, in order, so a test can hold the cursor the plugin sent against the one it was handed.
         eventsAnswers: [],
         // The route is missing (a mobile app, an older desktop): every events call throws. Settable mid-run too.
@@ -116,11 +122,13 @@ function makeJoplin(options) {
         onEventsCall: null,
         // An async hook run on every page of the full listing (the one asking for todo_due) and of GET /folders/:id/notes, with (query, items,
         // path); what it returns replaces the page. It can put a note on two pages - a create shifting the listing between two reads - or throw, as a failing page does.
-        onListingPage: null,
+        // Given as an option, it is in place from the start, for what a run does before the first paint (the saved note store's restore, 2.7.1).
+        onListingPage: options.onListingPage || null,
         // An async hook run on every single-note GET with (id, query) before it is answered: it can throw, as a read that fails with something
         // other than Not Found does, and what it returns, when it returns anything, is the answer - a note as Joplin read it before a write that
         // landed while the answer was on its way (2.7 phase 5).
-        onNoteGet: null,
+        // Given as an option, it is in place from the start, like onListingPage.
+        onNoteGet: options.onNoteGet || null,
         // An async hook run on every data.delete with its path, after it is recorded: what the delete does to the notes (a notebook trashed with
         // its notes) is the test's to model, since the stub itself changes nothing.
         onDataDelete: null,
@@ -222,7 +230,7 @@ function makeJoplin(options) {
     const joplin = {
         plugins: {
             register: (script) => { state.onStart = script.onStart },
-            dataDir: async () => options.dataDir,
+            dataDir: async () => { state.dataDirCalls++; return options.dataDir },
             installationDir: async () => options.installationDir,
         },
         require: (moduleName) => options.require(moduleName),
@@ -261,6 +269,13 @@ function makeJoplin(options) {
                 for (const handler of state.settingHandlers) await handler({ keys: [key] })
             },
             onChange: async (handler) => { state.settingHandlers.push(handler) },
+            // Joplin's own settings, read-only. `clientId` answers `options.clientId`, or one fixed id for every run - a profile's database keeps
+            // its own, which the saved note store records and compares (2.7.1); every other key answers undefined, as a missing one would.
+            globalValue: async (key) => {
+                state.globalValueReads.push(key)
+                if (key === 'clientId') return options.clientId === undefined ? 'harness-client-id' : options.clientId
+                return undefined
+            },
         },
         commands: {
             register: async (command) => { state.commands.push(command) },

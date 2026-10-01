@@ -9,6 +9,8 @@ import joplin from "api";
 
 /** Variable Setup *********************************************************************************************************************************/
 var cachedPlatform = null
+// The app's version as joplin.versionInfo() answered it at startup (detectPlatform), or "" when it did not: appVersionText below.
+var cachedAppVersion = ""
 
 /** getPlatform *************************************************************************************************************************************
  * Returns the name of the platform the plugin is running on. This is usually "desktop" or "mobile". The result is cached as it cannot change while  *
@@ -35,6 +37,7 @@ export async function isMobile(){
 async function detectPlatform(){
     try {
         var versionInfo = await joplin.versionInfo() as any
+        if (versionInfo && versionInfo.version) cachedAppVersion = String(versionInfo.version)
         if (versionInfo && typeof versionInfo.platform == "string"){
             return versionInfo.platform
         }
@@ -42,6 +45,16 @@ async function detectPlatform(){
         console.warn("Cockpit: could not read the app version info", error)
     }
     return requireNodeModule("fs-extra", "readFile") ? "desktop" : "mobile"
+}
+
+/** appVersionText (2.7.1) **************************************************************************************************************************
+ * The app's version as text ("3.6.14"), from the read detectPlatform made at startup - so it costs no call of its own - or "" when that read       *
+ * failed. The saved note store records it and is not restored by another (noteStoreFile.ts): one rebuild per Joplin update, against a migration    *
+ * that rewrites note fields without writing feed rows.                                                                                             *
+ ***************************************************************************************************************************************************/
+export async function appVersionText(){
+    await getPlatform()
+    return cachedAppVersion
 }
 
 // The app version's one read (appVersionAtLeast below): the promise of [major, minor, patch], or of null, taken on the first ask.

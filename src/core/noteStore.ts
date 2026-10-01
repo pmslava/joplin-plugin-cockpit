@@ -41,17 +41,44 @@
  * not trusted either (see drainFeed): it ends not ready, which is not a failure, and the next trigger walks again.                                 *
  * Cockpit's own trash counts as such a note (see applyLocalRemoval): it hides the evidence the replay would otherwise have found.                  *
  *                                                                                                                                                  *
+ * PERSISTENCE (2.7.1, desktop only). The mirror is saved to a file in the plugin's data directory (noteStoreFile.ts: <dataDir>/noteStore.v1.json,  *
+ * one per Joplin profile), and the next launch restores it before the first paint instead of walking: on a large collection, one file read, one    *
+ * events call, a short replay and one listing page, against a walk of hundreds of pages. A wrong mirror is worse than none, so the restore trusts  *
+ * the file only as far as the feed vouches for it, and every doubt ends in the ordinary build, in the same run (restoreRun):                       *
+ * - the file must be format 1, from this plugin version, this app version and this client (Joplin's clientId, kept in the profile's database:      *
+ *   another one is another database), with a cursor and an array of notes, or it is ignored (an unparsable one is removed);                        *
+ * - the guard's no-cursor call gives the feed's head; a head below the saved cursor means another database, or this one restored from a backup:    *
+ *   its ids run lower, and a cursor from elsewhere is silently empty, never refused (or a collection unchanged for 90 days, every row pruned: it   *
+ *   rebuilds once, saving cursor "0", which the next launch restores);                                                                             *
+ * - a file whose cursor the feed confirmed more than 60 days ago (savedAt) is discarded: Joplin prunes a row once it is 90 days old AND its        *
+ *   resource, search and revision services have processed it, so the rows after an old cursor may be gone without a trace. Every row after the     *
+ *   cursor is younger than savedAt, and 60 days leaves a month of margin under the 90;                                                             *
+ * - the records go in through the build's staging (its dedupe, its trashed and conflict drops), and the feed is drained from the saved cursor by   *
+ *   the ordinary replay. A drain past the rebuild threshold discards the file and walks, which is right: a long absence with many changes is a     *
+ *   rebuild. A drain that fails discards the file too;                                                                                             *
+ * - the completeness count (listingHolds), one bare page: a count that differs means the file and Joplin disagree, and the file goes.              *
+ *                                                                                                                                                  *
+ * The lost-note rule does not apply, since nothing is walked; Cockpit's own writes during the replay are handled as during a build's.              *
+ *                                                                                                                                                  *
+ * WHEN THE FILE IS WRITTEN. At once after a build or a rebuild that ends ready, and after a restore; after a drain or an own write that moved the  *
+ * revision, through a 5 s debounce (scheduleSave), so a burst is one write. Never while a build is in flight, and never while a fetch an own write *
+ * crossed is owed (refetchIds: the cursor is already past that note's row). The copy of the records and the JSON are synchronous - 21,000 records  *
+ * take 8 to 15 ms in the harness, a 4.1 MB file, so they are not spread across timeouts - and the write is asynchronous and awaited by no run and  *
+ * no render; a failure is logged once. On mobile nothing is read or written, and nothing is armed.                                                 *
+ *                                                                                                                                                  *
  * THE READERS' SURFACE is isAvailable, isReady, getModel, pollNow, applyLocalWrite and subscribe (pollOnTick is the tick's own); phase 3 added     *
  * applyLocalCreate and applyLocalRemoval for the panel's own creates and trashes, and catchUp for the renders that must show outside writes (see   *
- * catchUpNoteStore in timer.ts), and 2.7.1 ensureBuilt for that early build. The first six functions are also put on the plugin's global, in a     *
- * frozen object called CockpitNoteStore, the way the pure modules publish themselves, so the harness (and a DevTools console in the plugin's       *
- * window) can inspect the mirror without a command or a menu entry.                                                                                *
+ * catchUpNoteStore in timer.ts), and 2.7.1 ensureBuilt for that early build and restoreNoteStore for the startup. The first six functions are also *
+ * put on the plugin's global, in a frozen object called CockpitNoteStore, the way the pure modules publish themselves, so the harness (and a       *
+ * DevTools console in the plugin's window) can inspect the mirror without a command or a menu entry; 2.7.1 adds whenSaved there, the promise of    *
+ * the save in progress, which the harness awaits before it reads the file.                                                                         *
  ***************************************************************************************************************************************************/
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches, listingFields } from "./joplin";
-import { countData, markStoreBuildEnd, markStoreBuildStart } from "./instrument";
+import { countData, markStoreBuildEnd, markStoreBuildStart, markStoreRestore, markStoreSave } from "./instrument";
+import { pluginVersion, readStoreFile, storeFileAccess, storeFileFormat, writeStoreFile } from "./noteStoreFile";
 const { createNoteStoreModel } = require("./noteStoreModel");
 
 /** Timing and limits ******************************************************************************************************************************/
@@ -71,6 +98,11 @@ const maxFailedBuilds = 3
 // them - but whether back-to-back pages still show as lag is for the perf run to say (docs/BRIEF-2.7-local-mirror.md, section 7). If they do, this is
 // the one place to spread the walk out; 0 (the default) adds no pause and no timer at all, so the build is exactly what phase 2 shipped.
 const walkPagePauseMs = 0
+// The save's debounce (2.7.1): a burst of drains and own writes is one write, at most this long after the first of them.
+const saveDelayMs = 5000
+// How long ago the feed may have confirmed a saved cursor for the file to be restored (2.7.1): Joplin prunes a change row once it is 90 days old
+// and processed, and 60 leaves a month of margin (see PERSISTENCE in the README).
+const savedMaxAgeMs = 60 * 24 * 3600 * 1000
 
 /** State ******************************************************************************************************************************************/
 var model = createNoteStoreModel()
@@ -109,7 +141,7 @@ var walkLastPage = null
 // Joplin's conflict folder, which is not a real notebook (Folder.conflictFolderId in 3.6.14). GET /folders does not list it; skipped all the same.
 const conflictFolderId = 'c04f1c7c04f1c7c04f1c7c04f1c7c04f'
 // What the burst of runs in progress did, which its listeners are told (see timer.ts), so a render can tell the news apart:
-//  - built:   it ran the build that makes the store ready (runOnce's) - every note at once, most rings never read;
+//  - built:   it ran the build that makes the store ready (runOnce's), or the startup's restore (2.7.1) - every note at once, most rings never read;
 //  - rebuilt: a ready store's drain was too large to fetch note by note and walked the listing instead - any note may have changed;
 //  - fetched: the ids its drains fetched by id - the notes that changed, new ones included;
 //  - removed: the ids its drains took out on a delete row (phase 5): with `fetched`, every note the burst has Joplin's own word on, which is
@@ -125,6 +157,21 @@ var burstRemoved = new Set()
 // the cursor, in the very page the skipped fetch came from. No clock is involved, only the order of the two events.
 var writeSerials = new Map()
 var refetchIds = new Set()
+// PERSISTENCE (2.7.1; see the README). The store's file (noteStoreFile.ts): null until the startup's restore has asked, and for the whole session
+// where the app has no file system for the plugin (mobile) - then nothing is read, written or armed.
+var persistence = null
+// The model's revision the last save serialised, so a burst that moved nothing writes nothing; the save's debounce timer; the latest write, which
+// whenSaved hands the harness; whether a failed save has been logged this session.
+var savedRevision = null
+var saveTimer = null
+var lastWrite: Promise<any> = Promise.resolve()
+var saveFailureLogged = false
+// The saved store the startup read, which the next run that would otherwise build restores instead (runOnce, restoreRun).
+var pendingRestore = null
+// When the feed last confirmed the cursor - the moment the drain that set it asked for its last page - and the newest feed position the store has
+// seen. A save writes them as savedAt and head: every row after the cursor is younger than savedAt, which is what the restore's 60 days are about.
+var cursorAt = 0
+var headSeen = 0
 
 function countWrite(id){
     var key = String(id)
@@ -145,8 +192,9 @@ export function scheduleNoteStoreBuild(){
     // The callback returns the run's promise so the harness can await the build it fires; setTimeout ignores it.
     setTimeout(() => {
         started = true
-        // A render that would have walked the listing may have built the store already (ensureBuilt, 2.7.1), or be building it now: then this build
-        // has nothing to do, or joins that one. After an early build that failed it is the retry, as any trigger's would be.
+        // A render that would have walked the listing may have built the store already (ensureBuilt, 2.7.1), the startup may have restored it from
+        // its file (restoreNoteStore, 2.7.1), or either may still be running: then this build has nothing to do, or joins that run. After an early
+        // build or a restore that ended not ready it is the retry, as any trigger's would be.
         if (ready) return Promise.resolve()
         if (running) return running
         return requestRun(true)
@@ -180,6 +228,41 @@ export async function ensureBuilt(){
         // The pump that owns the run handles its failure; the answer below says what it left.
     }
     return isReady()
+}
+
+/** restoreNoteStore (2.7.1) ************************************************************************************************************************
+ * The startup's restore, before the first paint (index.ts, through restoreNoteStoreBeforePaint in timer.ts): the mirror saved at the last launch,  *
+ * made exact again by the feed, so the first paint is drawn from the store without a walk. Answers whether the store is ready from the file. Never *
+ * rejects.                                                                                                                                         *
+ *                                                                                                                                                  *
+ * Without a file - or on mobile, where there is none to be had (noteStoreFile.ts) - nothing else happens: no store call, the store not started,    *
+ * the startup exactly as it was, with the build after the first paint. So it is with a file that is not read: another plugin version or another    *
+ * app version (the one every update of Cockpit or of Joplin leaves behind), another client (another database under this profile's directory),      *
+ * another format, a malformed file. With a file that is read the store is started (Cockpit's own writes and the triggers reach it from here on)    *
+ * and ONE run goes on the single-flight pump: the restore (restoreRun), or, where the restore finds a reason not to trust the file, the ordinary   *
+ * build in the same run. The caller waits for that run, the fall-through build included. A discard is the uncommon ending - more than 200 notes    *
+ * changed while Cockpit was closed (the replay past the threshold, the one that is not exotic), another database or a backup, an absence of two    *
+ * months, a count that differs - and on a large collection the first paint would have waited for that build anyway, when its to-do search proves   *
+ * large (ensureBuilt). ensureBuilt and the startup timeout find the run in flight and join it, as they join a build.                               *
+ ***************************************************************************************************************************************************/
+export async function restoreNoteStore(){
+    var startedAt = Date.now()
+    persistence = await storeFileAccess()
+    if (!persistence){
+        markStoreRestore({ attempted: false, restored: false, reason: "no file system" })
+        return false
+    }
+    var read = await readStoreFile(persistence)
+    if (!read.content){
+        markStoreRestore({ attempted: read.reason !== "no saved store", restored: false, reason: read.reason, ms: Date.now() - startedAt })
+        return false
+    }
+    if (!available) return false
+    started = true
+    pendingRestore = { saved: read.content, startedAt: startedAt, restored: false }
+    var pending = pendingRestore
+    await requestRun(true)
+    return pending.restored && isReady()
 }
 
 /** pollNow *****************************************************************************************************************************************
@@ -225,6 +308,7 @@ export function applyLocalWrite(id, fields){
     if (building && walkReads && fields && fields.parent_id !== undefined) buildLostNote = true
     model.applyLocalWrite(id, fields)
     armFollowUp()
+    scheduleSave()
 }
 
 /** applyLocalCreate ********************************************************************************************************************************
@@ -238,6 +322,7 @@ export function applyLocalCreate(note){
         model.applyFetched(note, note.id)
     }
     armFollowUp()
+    scheduleSave()
 }
 
 /** applyLocalRemoval *******************************************************************************************************************************
@@ -257,6 +342,7 @@ export function applyLocalRemoval(id){
     if (building) buildLostNote = true
     model.applyLocalWrite(id, { deleted_time: Date.now() })
     armFollowUp()
+    scheduleSave()
 }
 
 /** catchUp *****************************************************************************************************************************************
@@ -361,9 +447,18 @@ async function pump(mayBuild){
         rerunMayBuild = false
     }
     if (model.revision !== revisionBefore) notifyListeners({ built: burstBuilt, rebuilt: burstRebuilt, fetched: burstFetched, removed: burstRemoved })
+    // A burst that moved the revision past the last save arms the save's debounce (2.7.1); so does one whose save was put off (see saveNow).
+    scheduleSave()
 }
 
 async function runOnce(mayBuild){
+    // The startup's restore (2.7.1) is the first run that would otherwise build: it restores, or falls through to the build itself (restoreRun).
+    if (pendingRestore){
+        var pending = pendingRestore
+        pendingRestore = null
+        if (!ready) return await restoreRun(pending)
+        markStoreRestore({ attempted: true, restored: false, reason: "built before the restore ran", notes: pending.saved.notes.length, ms: Date.now() - pending.startedAt })
+    }
     if (ready) await poll()
     else if (mayBuild){
         burstBuilt = true
@@ -388,20 +483,28 @@ function feedCursor(answer){
 }
 
 /** build *******************************************************************************************************************************************
- * The full build: the cursor, the walk, the replay. The first call of the session is the availability guard.                                       *
+ * The full build: the cursor, the walk, the replay. The first call of the session is the availability guard. A restore that falls through to the   *
+ * build hands it the head its own guard call took, when nothing was read since (knownHead, 2.7.1): any head taken before the walk is a cursor the  *
+ * replay can start from. A build that ends ready saves the mirror at once (2.7.1: the first save, and the save after every rebuild).               *
  ***************************************************************************************************************************************************/
-async function build(){
+async function build(knownHead?){
     building = true
     buildLostNote = false
     markStoreBuildStart()                         // the renderer's heap before the store is built (instrument.ts)
     try {
-        await walk()
+        await walk(knownHead)
     } finally {
         building = false
     }
+    if (ready) saveNow()
 }
 
-async function walk(){
+/** takeHead ****************************************************************************************************************************************
+ * The feed call without a cursor, which answers the feed's head - and, as the session's first call, is the availability guard: a throw there means *
+ * the route is not in this app, and the store is off for the session. A later throw counts as a failed build. Answers the answer, or null after    *
+ * handling the failure. The build's first call, and the restore's (2.7.1).                                                                         *
+ ***************************************************************************************************************************************************/
+async function takeHead(){
     var head
     try {
         countData('events')
@@ -409,12 +512,19 @@ async function walk(){
     } catch (error) {
         if (!probed){
             markUnavailable("Cockpit: Joplin's change feed is not available in this app, so the note store is off for this session", error)
-            return
+            return null
         }
         buildFailed(error)
-        return
+        return null
     }
     probed = true
+    if (head && Number(head.cursor) > headSeen) headSeen = Number(head.cursor)
+    return head
+}
+
+async function walk(knownHead?){
+    var head = knownHead || await takeHead()
+    if (!head) return
     try {
         // Taken BEFORE the walk: anything that changes while the pages are read is in the feed after this cursor, and is replayed below.
         var walkCursor = feedCursor(head)
@@ -568,7 +678,8 @@ function pageShifted(id, note){
  * notebook, and a trash that lands in the window from the replay's last events page, through its fetches by id, to this count, cancel out - the    *
  * mirror lacks the one and still holds the other, whose row the replay never read - so the counts agree and the build ends ready without the note  *
  * in no notebook. Both inside the same few hundred milliseconds, on a collection holding such a note at all; the next rebuild, the next launch at  *
- * the latest, brings it.                                                                                                                           *
+ * the latest, brings it - since 2.7.1 through the restore, whose replay removes the trashed note and whose own count then differs. The restore     *
+ * (replaySaved) asks the same question of a mirror that came from the file, after its replay.                                                      *
  ***************************************************************************************************************************************************/
 async function listingHolds(expected){
     var lastPage = Math.floor(expected / 100) + 1
@@ -634,15 +745,21 @@ async function poll(){
  * left by one, so the walk may have stepped over the note that sat at the next page boundary - a note with no row of its own to bring it back.     *
  * Rare, invisible, and permanent if trusted, so a build that saw it is not trusted. One case gets past this: an already-read note trashed and      *
  * restored inside one walk. The two changes merge into one type-2 row, the fetch finds the note live, and nothing says a page shifted. The next    *
- * launch rebuilds anyway.                                                                                                                          *
+ * launch rebuilds anyway - since 2.7.1 it restores the saved mirror instead, and it is the restore's completeness count that finds the mirror one  *
+ * note short of the listing and walks.                                                                                                             *
+ *                                                                                                                                                  *
+ * tally (2.7.1), when given, is told how many rows the drain read (tally.rows) and whether they passed the rebuild threshold (tally.rebuild). The  *
+ * restore's replay asks with mayRebuild false and a tally: it reports the rows, and on the threshold empties the file's records and builds itself  *
+ * (restoreRun).                                                                                                                                    *
  ***************************************************************************************************************************************************/
-async function drainFeed(mayRebuild){
+async function drainFeed(mayRebuild, tally?){
     var rows = []
     var nextCursor = cursor
     var response
     var plan
     do {
         var sent = nextCursor
+        var askedAt = Date.now()
         countData('events')
         response = await joplin.data.get(['events'], { cursor: sent })
         rows.push(...(response.items || []))
@@ -652,6 +769,10 @@ async function drainFeed(mayRebuild){
         // Once the fetches pass the threshold the drain is decided: the rebuild retakes the cursor, so the pages left would be read for nothing.
         plan = model.planDrain(rows, rebuildThreshold)
     } while (response.has_more && !plan.rebuild)
+    if (tally){
+        tally.rows = rows.length
+        tally.rebuild = !!plan.rebuild
+    }
     if (plan.rebuild){
         if (!mayRebuild) return false
         // build() retakes the cursor itself, and handles its own failure.
@@ -692,8 +813,146 @@ async function drainFeed(mayRebuild){
         }
     }
     cursor = nextCursor
+    // Every page up to the feed's end was read, so every row after this cursor was written after the last page was asked for: the moment a save
+    // records as savedAt (2.7.1).
+    cursorAt = askedAt
+    if (Number(cursor) > headSeen) headSeen = Number(cursor)
     return !removedKnown
 }
 
+/** restoreRun (2.7.1) ******************************************************************************************************************************
+ * The restore itself, one run on the pump (see PERSISTENCE in the README). The guard's call first, which also gives the feed's head; then the two  *
+ * guards the file and the head decide alone; then the records, the replay from the saved cursor and the completeness count. Ready only after all   *
+ * of them, and saved at once. Any doubt discards the file - its records emptied out of the model first, so a walk that then fails leaves none of   *
+ * them behind - and builds, in this same run: with the head the guard took when nothing has been read since it, else from a fresh head - the       *
+ * ordinary build, start to finish. A replay past the rebuild threshold is such a doubt too: the drain answers it rather than rebuilding inside     *
+ * itself. One ending builds nothing more: a guard call that failed, which is the ordinary build's first call failed as it would have failed there  *
+ * - the store is off, or this counts as a failed build, and the startup timeout retries.                                                           *
+ ***************************************************************************************************************************************************/
+async function restoreRun(pending){
+    var saved = pending.saved
+    var outcome = { attempted: true, restored: false, reason: null, notes: saved.notes.length, replayRows: null, ms: null }
+    // Its news is a build's, whichever way it ends: every note at once, and most rings never read (see the burst's news above).
+    burstBuilt = true
+    var head = await takeHead()
+    if (!head){
+        outcome.reason = available ? "change feed failed" : "no change feed"
+        return endRestore(pending, outcome)
+    }
+    var walkFrom = head
+    var reason = refuseSaved(saved, head)
+    if (!reason){
+        walkFrom = null
+        reason = await replaySaved(saved, outcome)
+    }
+    if (!reason){
+        setReady(true)
+        // The mirror's size is the collection's best estimate now, as after a build: what a later rebuild weighs the notebooks against.
+        builtOnce = true
+        outcome.restored = true
+        pending.restored = true
+        endRestore(pending, outcome)
+        saveNow()
+        return
+    }
+    outcome.reason = reason
+    endRestore(pending, outcome)
+    // The file's records go, so nothing of them can outlive a walk that fails before its own swap - the threshold's rebuild included.
+    model.beginBuild()
+    model.endBuild()
+    await build(walkFrom)
+}
+
+// The two guards decided before anything is read: a head below the saved cursor (another database, or this one restored from a backup), and a
+// cursor the feed confirmed more than 60 days ago, or in the future (a clock that moved). Answers the reason, or null.
+function refuseSaved(saved, head){
+    if (!(Number(head.cursor) >= Number(saved.cursor))) return "feed behind the cursor"
+    var age = Date.now() - Number(saved.savedAt)
+    if (!(age >= 0)) return "saved in the future"
+    if (!(age <= savedMaxAgeMs)) return "older than 60 days"
+    return null
+}
+
+// The records through the build's staging (its dedupe, its trashed and conflict drops), the ordinary replay from the saved cursor, and the count.
+// Answers the reason the file is not to be trusted, or null.
+async function replaySaved(saved, outcome){
+    model.beginBuild()
+    model.addListingPage(saved.notes)
+    model.endBuild()
+    cursor = saved.cursor
+    var tally = { rows: null, rebuild: false }
+    try {
+        // A replay past the threshold does not rebuild inside the drain (mayRebuild false): it answers with tally.rebuild, and restoreRun empties the
+        // file's records and builds, as for every other discard. Its other answer is the lost-note rule's, which is about a walk; there is none here,
+        // and a note deleted while Cockpit was closed is news, not doubt.
+        await drainFeed(false, tally)
+    } catch (error) {
+        outcome.replayRows = tally.rows
+        return "replay failed"
+    }
+    outcome.replayRows = tally.rows
+    if (tally.rebuild) return "replay past the threshold"
+    try {
+        if (!(await listingHolds(model.size()))) return "count differs"
+    } catch (error) {
+        return "count failed"
+    }
+    return null
+}
+
+function endRestore(pending, outcome){
+    outcome.ms = Date.now() - pending.startedAt
+    markStoreRestore(outcome)
+}
+
+/** saveNow / scheduleSave (2.7.1) ******************************************************************************************************************
+ * saveNow writes the mirror now, when it may: the store ready, no build in flight, and no fetch owed that an own write crossed (refetchIds - the   *
+ * cursor is already past that note's row, so a file saved now would never see it again). A save that may not is simply not made, and the end of    *
+ * the run in progress (the pump's scheduleSave) arms the next one. The copy of the records and the JSON are taken here, synchronously, so the file *
+ * is the mirror and the cursor of one moment; the write is queued and asynchronous (noteStoreFile.ts), awaited by no run and no render, and a      *
+ * failure is logged once a session, never thrown. Answers whether a save was made. The file's head is diagnostic only: refuseSaved compares the    *
+ * LIVE head, from the restore's own guard call, with the saved cursor. The app version and the clientId are the ones noteStoreFile.ts read for     *
+ * this session, which its next read compares.                                                                                                      *
+ *                                                                                                                                                  *
+ * scheduleSave arms the debounce: once per burst - the first drain or own write that moves the revision past the last save arms it, the rest of    *
+ * the burst finds it armed - so a burst is one write, at most saveDelayMs after it began. The callback returns the write's promise, so the harness *
+ * can await it.                                                                                                                                    *
+ ***************************************************************************************************************************************************/
+function saveNow(){
+    if (!persistence || !ready || building || refetchIds.size) return false
+    var startedAt = Date.now()
+    savedRevision = model.revision
+    var text = JSON.stringify({
+        format: storeFileFormat,
+        pluginVersion: pluginVersion,
+        appVersion: persistence.appVersion,
+        clientId: persistence.clientId,
+        savedAt: cursorAt,
+        head: String(Math.max(headSeen, Number(cursor) || 0)),
+        cursor: String(cursor),
+        notes: model.snapshot(),
+    })
+    var serialisedMs = Date.now() - startedAt
+    lastWrite = writeStoreFile(persistence, text).then(bytes => markStoreSave(serialisedMs, bytes), error => {
+        if (saveFailureLogged) return
+        saveFailureLogged = true
+        console.warn("Cockpit: could not save the note store, so the next launch builds it from the listing", error)
+    })
+    return true
+}
+
+function scheduleSave(){
+    if (!persistence || !ready || saveTimer || model.revision === savedRevision) return
+    saveTimer = setTimeout(() => {
+        saveTimer = null
+        return saveNow() ? lastWrite : Promise.resolve()
+    }, saveDelayMs)
+}
+
+// The latest write's promise, settled when it is on disk or has failed (never rejects): the harness awaits it before it reads the file.
+function whenSaved(){
+    return lastWrite
+}
+
 /** The inspection handle **************************************************************************************************************************/
-;(globalThis as any).CockpitNoteStore = Object.freeze({ isAvailable, isReady, getModel, pollNow, applyLocalWrite, subscribe })
+;(globalThis as any).CockpitNoteStore = Object.freeze({ isAvailable, isReady, getModel, pollNow, applyLocalWrite, subscribe, whenSaved })

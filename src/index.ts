@@ -8,7 +8,7 @@
 /** Imports *****************************************************************************************************************************************/
 import joplin from 'api'
 import { setupCommands } from './core/commands'
-import { refreshInterfaces, setupTimer, setupWorkspaceEvents } from './core/timer'
+import { refreshInterfaces, restoreNoteStoreBeforePaint, setupTimer, setupWorkspaceEvents } from './core/timer'
 import { reportDatabaseProblems, setupDatabase } from './core/database'
 import { refreshFromSettingsNote, setupSettingsSync } from './core/settingsSync'
 import { refreshExcludedNotebookDisplay, setupSettings } from './core/settings'
@@ -72,13 +72,30 @@ joplin.plugins.register({ onStart: setupPlugin })
     } catch (error) {
         console.warn("Cockpit: could not refresh the excluded notebooks at startup", error)
     }
+    // THE SAVED NOTE STORE (2.7.1), RESTORED BEFORE THE FIRST PAINT. What changed: until 2.7.1 the note store was never ready for the first paint
+    // (only a large to-do search built it inside that render). On desktop the last launch now leaves the store's mirror in a file (noteStore.ts,
+    // PERSISTENCE), and bringing it back costs one file read, one events call, a replay of what changed since and one listing page - cheap enough to
+    // wait for here, so the first paint is drawn from the store, with no search and no walk. When there is no file to read - every launch on
+    // mobile, the first on desktop, the first after an update of Cockpit or of Joplin, or a file another client wrote (none of those is read) -
+    // nothing happens here, no store call is made, and the startup order is exactly as it was. A file the restore does not trust is discarded and
+    // the ordinary build runs in its place, in the same run, before the first paint: more than 200 notes changed while Cockpit was closed (the
+    // replay past the threshold, the common one), another database or a backup, an absence of two months, a count that differs. On a large
+    // collection the first paint would have waited for that build anyway when its to-do search proves large (ensureBuilt). After the
+    // excluded-notebook pass, which the first paint needs and which reads no note; and a failure here must no more stop the plugin from starting
+    // than the reads above.
+    try {
+        await restoreNoteStoreBeforePaint()
+    } catch (error) {
+        console.warn("Cockpit: could not restore the note store at startup", error)
+    }
     await refreshInterfaces()
     // THE NOTE STORE (2.7), ARMED NOW AND NEVER AWAITED HERE. Its build walks the whole notes listing - 201 pages on a 20,000-note collection - so
     // it is armed as a timeout after the first paint has happened, and onStart does not wait for it. On an ordinary collection that first paint took
     // the 2.6.3 paths, the unfiltered views read the store once the timeout's build is done, and until the timeout fires the store's triggers (the
     // tick, a sync, a note change) do nothing at all. On a large one (2.7.1) the first paint may have built the store already: a to-do search that
     // proved large would have walked the same listing, so that render built the store instead and read it (ensureBuilt in noteStore.ts), and the
-    // timeout then finds the store ready and does nothing. Before the database report, which can hold onStart on a message box.
+    // timeout then finds the store ready and does nothing - as it does after a restore (2.7.1, above). Before the database report, which can hold
+    // onStart on a message box.
     scheduleNoteStoreBuild()
     await reportDatabaseProblems()
 }

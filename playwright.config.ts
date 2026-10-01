@@ -31,6 +31,11 @@ export default defineConfig({
   // (the suite still gets its full 30 minutes once its turn comes); on CI each repo has its own VM,
   // the lock is never contended, and the cap stays exactly where the job's own limit needs it.
   //
+  // Left at 34 for 2.7.1's twenty-second file (the saved note store), though it launches Joplin THREE times on one small
+  // profile - the relaunches are the case. Each relaunch of a kept profile currently costs a launcher retry of about 95 s
+  // (seen in profiles, store-persist and the perf spec's cold launches alike, so the launcher, not the restore), which
+  // makes this file worth several ordinary ones. The full-suite gate will show whether the 34 minutes still leave margin.
+  //
   // Left at 34 for 2.7's twenty-first file (the note store's freshness): one more Joplin launch, one visit to
   // the Options screen and four short cases, each measured in seconds once the store is ready.
   //

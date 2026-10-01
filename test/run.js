@@ -11840,7 +11840,8 @@ async function main() {
         const fromPerformance = () => ({ usedJSHeapSize: ++performanceReads * 7 })
         // Desktop: the plugin's node integration answers first and exactly, whatever Chromium would say.
         const desktop = await measuredWith(fromProcess, fromPerformance, (state) => {
-            assert.deepStrictEqual(Object.keys(state.instrument.snapshot()), counters.concat(['storeHeap']), 'the counters as before, and storeHeap beside them')
+            assert.deepStrictEqual(Object.keys(state.instrument.snapshot()), counters.concat(['storeHeap', 'storeRestore', 'storeSave']),
+                'the counters as before, and storeHeap beside them - with the saved store\'s two records after it (2.7.1)')
             assert.deepStrictEqual(state.instrument.snapshot().storeHeap, { beforeBuild: null, afterBuild: null, notes: null, source: null }, 'nothing measured before the build')
         })
         assert.deepStrictEqual(desktop.instrument.snapshot().storeHeap, { beforeBuild: 1000, afterBuild: 2000, notes: 3, source: 'process' }, 'process.memoryUsage, before the build and after its replay')
@@ -13917,6 +13918,523 @@ async function main() {
         await storeTick(state)
         assert.deepStrictEqual(storeShape(storeGetsSince(state, again)), ['head', 'page', 'events', 'count'], 'and the rebuild walks notebook by notebook again')
         assert.ok(state.noteStore.isReady())
+    })
+
+    // ============================================================ note store persistence (2.7.1): the mirror saved, and restored at the next launch
+    // On desktop the store saves its mirror to <dataDir>/noteStore.v1.json (src/core/noteStoreFile.ts) and the next launch restores it before the
+    // first paint, through the store's own machinery: the guard's no-cursor call, the guards the file and the head decide, the records through the
+    // build's staging, the replay from the saved cursor, the completeness count - and any doubt ends in the ordinary build, in the same run (restoreRun
+    // in src/core/noteStore.ts). The harness's `dataDir` is a real directory under the suite's temporary root and its `require` hands the desktop run
+    // the real fs-extra, so the file is really written and read; a "relaunch" is a second run() on the same directory, its feed continuing from where
+    // the first run's left off (`lastChangeId`), its notes as Joplin holds them now.
+    const STORE_SAVE_DELAY = 5000
+    const STORE_FILE = 'noteStore.v1.json'
+    // The clientId the harness's settings.globalValue answers when a run gives none (one profile database, launched again and again).
+    const HARNESS_CLIENT = 'harness-client-id'
+    const PLUGIN_VERSION = require('../src/manifest.json').version
+    const persistDir = () => path.join(tmp, 'persist-' + Math.random().toString(36).slice(2))
+    const persistRun = async (dir, notes, extra) => await storeRun(notes, Object.assign({ dataDir: dir }, extra || {}))
+    const storeFilePath = (dir) => path.join(dir, STORE_FILE)
+    const readSaved = (dir) => JSON.parse(fs.readFileSync(storeFilePath(dir), 'utf8'))
+    const writeSaved = (dir, content) => fs.writeFileSync(storeFilePath(dir), typeof content === 'string' ? content : JSON.stringify(content))
+    const saves = (state) => state.instrument.snapshot().storeSave.count
+    const restoreOf = (state) => state.instrument.snapshot().storeRestore
+    const pendingSaves = (state) => state.pendingTimeouts(STORE_SAVE_DELAY)
+    const fireSave = async (state) => {
+        const pending = pendingSaves(state)
+        assert.strictEqual(pending.length, 1, `one save is armed (found ${pending.length})`)
+        await state.fireTimeout(pending[0])
+        await state.noteStore.whenSaved()
+    }
+    const renameStored = (state, n, title) => {
+        state.notes[storeId(n)].title = title
+        state.pushChange({ item_id: storeId(n), type: 2 })
+    }
+    // The store's calls during startup: from the first one to the first paint, as words (storeShape), and the store calls before that paint.
+    const startupStoreCalls = (state) => storeShape(state.gets.filter(isStoreGet))
+    const STORE_TODO = (n, extra) => storeNote(n, Object.assign({ is_todo: 1, title: `Persisted todo ${n}`, todo_due: Date.now() + 3600000 + n }, extra || {}))
+    // A first launch: notes, a feed with two rows already in it (so the saved cursor is not 0), the build, and its save on disk.
+    const firstLaunch = async (dir, notes) => {
+        const state = await persistRun(dir, notes, { changeLog: [{ item_id: notes[0].id, type: 1 }, { item_id: notes[1].id, type: 2 }] })
+        await buildStore(state)
+        await state.noteStore.whenSaved()
+        assert.strictEqual(saves(state), 1, 'precondition: the build saved the mirror')
+        return state
+    }
+    const launchNotes = () => storeNoteRange(1, 40).concat([STORE_TODO(41), STORE_TODO(42)])
+    // A later launch on the same directory, once the previous launch's last save is on disk: its feed goes on from the previous one's last id.
+    const relaunch = async (dir, notes, previous, extra) => {
+        await previous.noteStore.whenSaved()
+        return await persistRun(dir, notes, Object.assign({ lastChangeId: previous.lastChangeId }, extra || {}))
+    }
+    // The ordinary build's calls, as a store with one notebook makes them: the head, the notebook's page, the replay, the count.
+    const ORDINARY_BUILD = ['head', 'page', 'events', 'count']
+
+    await test('note store persistence: a build that ends ready saves the mirror at once - format 1, this plugin version, savedAt, head and cursor, the eight fields of every note - to a temporary name renamed over the file, and arms no debounce', async () => {
+        const dir = persistDir()
+        const log = []
+        // fs-extra as the plugin gets it, each file operation logged by the name it touches.
+        const loggingFs = new Proxy(fs, { get: (target, name) => {
+            const member = target[name]
+            if (typeof member !== 'function' || !['readFile', 'writeFile', 'rename', 'ensureDir', 'stat', 'remove'].includes(name)) return member
+            return (...args) => {
+                log.push([name].concat(args.filter(arg => typeof arg === 'string' && arg.startsWith(tmp)).map(arg => path.relative(dir, arg) || '.')))
+                return member.apply(target, args)
+            }
+        } })
+        const state = await persistRun(dir, storeNoteRange(1, 150).concat([storeNote(900, { deleted_time: 5 })]), {
+            require: (name) => (name === 'fs-extra' ? loggingFs : desktopRequire(name)),
+            changeLog: [{ item_id: storeId(1), type: 1 }, { item_id: storeId(2), type: 2 }],
+        })
+        assert.deepStrictEqual(log, [['readFile', STORE_FILE]], 'at startup the file is looked for, and there is none')
+        assert.deepStrictEqual(restoreOf(state), { attempted: false, restored: false, reason: 'no saved store', notes: null, replayRows: null, ms: restoreOf(state).ms })
+        const before = Date.now()
+        await buildStore(state)
+        await state.noteStore.whenSaved()
+        assert.deepStrictEqual(log.slice(1), [['ensureDir', '.'], ['writeFile', STORE_FILE + '.tmp'], ['rename', STORE_FILE + '.tmp', STORE_FILE], ['stat', STORE_FILE]],
+            'written to a temporary sibling, then renamed over the file')
+        assert.deepStrictEqual(fs.readdirSync(dir), [STORE_FILE], 'the temporary name is gone')
+        const saved = readSaved(dir)
+        assert.deepStrictEqual(Object.keys(saved), ['format', 'pluginVersion', 'appVersion', 'clientId', 'savedAt', 'head', 'cursor', 'notes'])
+        assert.deepStrictEqual([saved.format, saved.pluginVersion, saved.appVersion, saved.clientId], [1, PLUGIN_VERSION, '3.7.0', HARNESS_CLIENT],
+            'who wrote it: the plugin\'s version, the app\'s, and the profile database\'s clientId')
+        assert.ok(saved.savedAt >= before && saved.savedAt <= Date.now(), 'savedAt: when the replay asked for its last page')
+        assert.deepStrictEqual([saved.head, saved.cursor], ['2', '2'], 'the head and the cursor, strings, as the route answers them')
+        assert.strictEqual(saved.cursor, state.eventsAnswers[state.eventsAnswers.length - 1].cursor, 'the cursor the replay ended on')
+        assert.deepStrictEqual(saved.notes.map(note => note.id).sort(), storeIds(state), 'every record of the mirror, the trashed note not among them')
+        assert.ok(saved.notes.every(note => JSON.stringify(Object.keys(note)) === JSON.stringify(NoteStoreModel.RECORD_FIELDS)), 'each with the eight fields')
+        assert.deepStrictEqual(saved.notes.find(note => note.id === storeId(7)), storeModel(state).get(storeId(7)), 'exactly as the mirror holds them')
+        const save = state.instrument.snapshot().storeSave
+        assert.deepStrictEqual([save.count, save.lastBytes], [1, fs.statSync(storeFilePath(dir)).size], 'one save, of the file\'s size')
+        assert.ok(typeof save.lastMs === 'number' && save.lastMs >= 0, 'and the time it held the thread')
+        assert.strictEqual(pendingSaves(state).length, 0, 'the build saved it: no debounce is armed after it')
+    })
+
+    await test('note store persistence: a drain that moves the revision saves once, 5 s on; a burst of three drains is one save; an own write saves through the same debounce; a drain that moves nothing saves nothing; a save that comes due during a build waits for it, and the build saves', async () => {
+        const dir = persistDir()
+        const state = await persistRun(dir, storeNoteRange(1, 5).concat([STORE_TODO(6)]))
+        await buildStore(state)
+        await state.noteStore.whenSaved()
+        await storeTick(state)
+        assert.strictEqual(pendingSaves(state).length, 0, 'an idle tick\'s drain moves nothing and arms nothing')
+        renameStored(state, 1, 'Renamed once')
+        // The plugin's clock jumps ten minutes while the drain fetches the note, after its last events page was asked for: savedAt must stay the
+        // moment of that ask - when the feed confirmed the cursor - and not the end of the drain, or the write.
+        const askedBy = Date.now()
+        const realNow = Date.now
+        state.onNoteGet = () => { Date.now = () => realNow() + 600000; return undefined }
+        try {
+            await storeTick(state)
+            assert.strictEqual(saves(state), 1, 'a drain that moved the revision writes nothing at once')
+            await fireSave(state)
+        } finally {
+            Date.now = realNow
+            state.onNoteGet = null
+        }
+        assert.strictEqual(saves(state), 2, 'it saves when the debounce runs out')
+        assert.strictEqual(readSaved(dir).notes.find(note => note.id === storeId(1)).title, 'Renamed once')
+        assert.strictEqual(readSaved(dir).cursor, state.eventsAnswers[state.eventsAnswers.length - 1].cursor, 'with the drain\'s cursor')
+        const savedAt = readSaved(dir).savedAt
+        assert.ok(savedAt >= askedBy && savedAt < askedBy + 600000, `and, as savedAt, the moment the drain asked for its last page (${savedAt - askedBy} ms after the tick began)`)
+        const firstOfBurst = []
+        for (const n of [2, 3, 4]){
+            renameStored(state, n, `Burst ${n}`)
+            await storeTick(state)
+            firstOfBurst.push(pendingSaves(state)[0])
+        }
+        assert.ok(firstOfBurst.every(entry => entry === firstOfBurst[0]) && !state.timeouts.some(t => t.ms === STORE_SAVE_DELAY && t.cleared),
+            'the first drain of the burst arms the save and the others leave it where it is: at most 5 s after the burst began')
+        assert.strictEqual(pendingSaves(state).length, 1, 'three drains that moved it arm one save')
+        await fireSave(state)
+        assert.strictEqual(saves(state), 3, 'and write once')
+        assert.deepStrictEqual([2, 3, 4].map(n => readSaved(dir).notes.find(note => note.id === storeId(n)).title), ['Burst 2', 'Burst 3', 'Burst 4'])
+        // Cockpit's own write: the checkbox, applied to the record at once.
+        await state.panelMessageHandler(['todoChecked', storeId(6), true])
+        assert.strictEqual(pendingSaves(state).length, 1, 'the panel\'s own tick arms the save too')
+        await fireSave(state)
+        assert.ok(readSaved(dir).notes.find(note => note.id === storeId(6)).todo_completed > 0, 'and the file has it')
+        await firePending(state, STORE_FOLLOW_UP)
+        // A save that comes due during a build: a drain past the threshold rebuilds, held at the walk's first page while the debounce runs out.
+        const count = saves(state)
+        renameStored(state, 5, 'Before the rebuild')
+        await storeTick(state)
+        const due = pendingSaves(state)
+        assert.strictEqual(due.length, 1, 'precondition: a save is armed')
+        for (let i = 0; i < 201; i++) state.pushChange({ item_id: newStoreNote(state, 1000 + i).id, type: 1 })
+        let release
+        const gate = new Promise(resolve => { release = resolve })
+        let holding = false
+        state.onListingPage = async (query, items, pathParts) => {
+            if (!holding && pathParts && pathParts[0] === 'folders'){ holding = true; await gate }
+            return items
+        }
+        await state.withTimers(async () => {
+            const ticking = state.intervals.find(interval => interval.ms === 60000).fn()
+            for (let turn = 0; turn < 1000 && !holding; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(holding, 'precondition: the rebuild\'s walk is held')
+            await state.fireTimeout(due[0])
+            await state.noteStore.whenSaved()
+            assert.strictEqual(saves(state), count, 'the save that came due during the build is not made')
+            release()
+            await ticking
+        })
+        state.onListingPage = null
+        await state.noteStore.whenSaved()
+        assert.ok(state.noteStore.isReady() && storeModel(state).size() === 207, 'precondition: the rebuild ended ready')
+        assert.strictEqual(saves(state), count + 1, 'the rebuild saved the mirror, once')
+        assert.strictEqual(readSaved(dir).notes.length, 207, 'with every note the rebuild read')
+        assert.strictEqual(pendingSaves(state).length, 0, 'and nothing more is armed')
+    })
+
+    await test('note store persistence: a save is never made while a fetch an own write crossed is owed - the cursor is past that note\'s row - and the drain that fetches it saves it', async () => {
+        const dir = persistDir()
+        const flipped = STORE_TODO(1)
+        const state = await persistRun(dir, [flipped, storeNote(2), storeNote(3)])
+        await buildStore(state)
+        await state.noteStore.whenSaved()
+        const count = saves(state)
+        state.pushChange({ item_id: flipped.id, type: 2 })
+        let release
+        const gate = new Promise(resolve => { release = resolve })
+        let holding = false
+        state.onNoteGet = async (id, query) => {
+            if (id !== flipped.id || holding || !(query && (query.fields || []).includes('is_conflict'))) return undefined
+            holding = true
+            await gate
+            return undefined
+        }
+        // Joplin's side of the flip: the due date is reset, under the row the drain's page already carries.
+        state.onDataPut = async (target, body) => { if (target[1] === flipped.id && 'is_todo' in body) state.notes[flipped.id].todo_due = 0 }
+        await state.withTimers(async () => {
+            const draining = state.noteStore.pollNow()
+            for (let turn = 0; turn < 1000 && !holding; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(holding, 'precondition: the drain\'s fetch of the to-do is out')
+            await state.panelMessageHandler(['noteMenuAction', 'toggleType', flipped.id])
+            release()
+            await draining
+        })
+        state.onNoteGet = null
+        state.onDataPut = null
+        assert.ok(storeModel(state).get(flipped.id).todo_due > 0, 'precondition: the crossed fetch was dropped, and its note is owed a fetch')
+        await fireSave(state)
+        assert.strictEqual(saves(state), count, 'the save that comes due is not made: the file would never see that note again')
+        await firePending(state, STORE_FOLLOW_UP)
+        assert.strictEqual(storeModel(state).get(flipped.id).todo_due, 0, 'precondition: the follow-up fetched it')
+        await fireSave(state)
+        assert.strictEqual(saves(state), count + 1, 'the drain that fetched it arms the save again')
+        assert.strictEqual(readSaved(dir).notes.find(note => note.id === flipped.id).todo_due, 0, 'and the file has what Joplin holds')
+    })
+
+    await test('note store persistence: a relaunch restores the mirror before the first paint - the head, the replay of what changed while Cockpit was closed, its fetches and one count page, and nothing else - and the first paint is drawn from it', async () => {
+        const dir = persistDir()
+        const notes = launchNotes()
+        const first = await firstLaunch(dir, notes)
+        const savedCursor = readSaved(dir).cursor
+        // While Cockpit was closed: a rename, a created to-do, a trash and a permanent delete, each a feed row after the saved cursor.
+        const now = notes.filter(note => note.id !== storeId(7)).map(note => ({ ...note }))
+        now.find(note => note.id === storeId(5)).title = 'Renamed while closed'
+        now.find(note => note.id === storeId(6)).deleted_time = Date.now()
+        now.push(STORE_TODO(43, { title: 'Created while closed' }))
+        const second = await relaunch(dir, now, first, { changeLog: [5, 43, 6, 7].map((n, i) => ({ item_id: storeId(n), type: [2, 1, 2, 3][i] })) })
+        const firstPaint = second.callLog.indexOf('setHtml')
+        assert.ok(firstPaint > 0 && second.callLog.slice(0, firstPaint).filter(entry => entry === 'events').length === 2, 'both events calls come before the first paint')
+        assert.strictEqual(pendingStoreRenders(second).length, 0, 'and the store render the restore\'s news armed is taken back: the first paint drew the same mirror')
+        assert.deepStrictEqual(startupStoreCalls(second), ['head', 'events', 'fetch', 'fetch', 'fetch', 'count'],
+            'the guard\'s call, one replay page, a fetch for each note created or changed, one page of the bare listing - no notebook page, no walk')
+        assert.deepStrictEqual([savedCursor, second.gets.filter(isStoreGet)[1].query], ['2', { cursor: '2' }], 'the replay starts from the saved cursor')
+        assert.deepStrictEqual(second.gets.filter(isStoreFetch).map(g => g.path[1]), [storeId(5), storeId(43), storeId(6)], 'in feed order; the permanent delete needs none')
+        assert.ok(second.noteStore.isReady(), 'the store is ready')
+        const restored = restoreOf(second)
+        assert.deepStrictEqual({ ...restored, ms: null }, { attempted: true, restored: true, reason: null, notes: 42, replayRows: 4, ms: null }, 'the instrument says so')
+        assert.ok(typeof restored.ms === 'number' && restored.ms >= 0)
+        assert.strictEqual(storeModel(second).get(storeId(5)).title, 'Renamed while closed')
+        assert.ok(storeModel(second).get(storeId(43)) && !storeModel(second).get(storeId(6)) && !storeModel(second).get(storeId(7)), 'created in; trashed and deleted out')
+        assert.strictEqual(storeModel(second).size(), 41)
+        const html = second.panelHtml['panel-panel']
+        assert.ok(html.includes('Renamed while closed') && html.includes('Created while closed') && html.includes('Persisted todo 41'),
+            'the first paint draws the mirror - the to-dos too, which only the store has (the search fixtures are empty)')
+        assert.ok(!html.includes('Stored 6<') && !html.includes('Stored 7<'))
+        assert.strictEqual(second.gets.filter(g => g.path[0] === 'search').length, 0, 'not one search')
+        assert.strictEqual(second.gets.filter(g => g.path[0] === 'notes' && g.path.length === 1).length, 1, 'and no listing page but the count')
+        assert.strictEqual(second.gets.filter(isNotebookPage).length, 0, 'and no notebook page')
+        const totals = second.instrument.snapshot()
+        assert.deepStrictEqual([totals.search, totals.listing], [0, 1], 'the instrument counts the same')
+        const mark = second.gets.length
+        await second.fireTimeout(buildTimeout(second))
+        assert.deepStrictEqual(second.gets.slice(mark), [], 'the startup build\'s timeout finds the store ready and calls nothing')
+        await second.noteStore.whenSaved()
+        assert.strictEqual(saves(second), 1, 'the restore saved the mirror again')
+        assert.deepStrictEqual([readSaved(dir).cursor, readSaved(dir).notes.length], [second.eventsAnswers[second.eventsAnswers.length - 1].cursor, 41], 'at its new cursor')
+    })
+
+    await test('note store persistence guard: a feed head below the saved cursor - another database, or this one restored from a backup - discards the file; the ordinary build runs in the same run, from that head', async () => {
+        const dir = persistDir()
+        const notes = launchNotes()
+        const first = await firstLaunch(dir, notes)
+        // The feed of a database whose ids run lower: nothing in it at all.
+        const second = await persistRun(dir, notes.map(note => ({ ...note, title: note.title + ' (other database)' })), { lastChangeId: 0 })
+        assert.deepStrictEqual(startupStoreCalls(second), ORDINARY_BUILD, 'the head, then the ordinary build from it - not one call more')
+        assert.ok(first.lastChangeId > 0 && second.eventsAnswers[0].cursor === '0', 'precondition: the head is below the saved cursor')
+        assert.deepStrictEqual({ ...restoreOf(second), ms: null }, { attempted: true, restored: false, reason: 'feed behind the cursor', notes: 42, replayRows: null, ms: null })
+        assert.ok(second.noteStore.isReady() && storeModel(second).get(storeId(1)).title.endsWith('(other database)'), 'the mirror is the walk\'s, not the file\'s')
+        assert.ok(second.panelHtml['panel-panel'].includes('(other database)'), 'and so is the first paint')
+        await second.noteStore.whenSaved()
+        assert.strictEqual(readSaved(dir).cursor, '0', 'the build saved its own mirror over the file')
+    })
+
+    await test('note store persistence guard: a file whose cursor the feed confirmed 61 days ago is discarded - rows after it may have been pruned - and the ordinary build runs from the head', async () => {
+        const dir = persistDir()
+        const first = await firstLaunch(dir, launchNotes())
+        writeSaved(dir, { ...readSaved(dir), savedAt: Date.now() - 61 * DAY })
+        const second = await relaunch(dir, launchNotes(), first)
+        assert.deepStrictEqual(startupStoreCalls(second), ORDINARY_BUILD)
+        assert.strictEqual(restoreOf(second).reason, 'older than 60 days')
+        assert.ok(second.noteStore.isReady())
+        // 59 days is restored.
+        const third = await relaunch(dir, launchNotes(), second)
+        assert.deepStrictEqual(startupStoreCalls(third), ['head', 'events', 'count'])
+        assert.strictEqual(restoreOf(third).restored, true, 'within 60 days the file is restored (its savedAt is the second launch\'s)')
+        await third.noteStore.whenSaved()
+        writeSaved(dir, { ...readSaved(dir), savedAt: Date.now() - 59 * DAY })
+        const fourth = await relaunch(dir, launchNotes(), third)
+        assert.deepStrictEqual([startupStoreCalls(fourth), restoreOf(fourth).restored], [['head', 'events', 'count'], true], 'and so it is at 59 days')
+        // A savedAt in the future is a clock that moved: no age can be told from it.
+        await fourth.noteStore.whenSaved()
+        writeSaved(dir, { ...readSaved(dir), savedAt: Date.now() + DAY })
+        const fifth = await relaunch(dir, launchNotes(), fourth)
+        assert.deepStrictEqual([startupStoreCalls(fifth), restoreOf(fifth).reason], [ORDINARY_BUILD, 'saved in the future'])
+    })
+
+    await test('note store persistence guard: a replay that fails - a fetch answering with anything but Not Found - discards the file, and the ordinary build runs from a fresh head', async () => {
+        const dir = persistDir()
+        const notes = launchNotes()
+        const first = await firstLaunch(dir, notes)
+        let failed = 0
+        const second = await relaunch(dir, notes, first, {
+            changeLog: [{ item_id: storeId(3), type: 2 }],
+            onNoteGet: (id, query) => { if (!failed && query && (query.fields || []).includes('is_conflict')){ failed++; throw new Error('the read failed') } return undefined },
+        })
+        assert.deepStrictEqual(startupStoreCalls(second), ['head', 'events', 'fetch'].concat(ORDINARY_BUILD), 'the replay\'s fetch fails, and the build starts over')
+        assert.deepStrictEqual({ ...restoreOf(second), ms: null }, { attempted: true, restored: false, reason: 'replay failed', notes: 42, replayRows: 1, ms: null })
+        assert.ok(second.noteStore.isReady() && storeModel(second).size() === 42)
+    })
+
+    await test('note store persistence guard: a file of another format is not read - the startup makes no store call, and the build comes after the first paint as before', async () => {
+        const dir = persistDir()
+        const first = await firstLaunch(dir, launchNotes())
+        writeSaved(dir, { ...readSaved(dir), format: 2 })
+        const second = await relaunch(dir, launchNotes(), first)
+        assert.deepStrictEqual(startupStoreCalls(second), [], 'nothing of the store before the first paint')
+        assert.deepStrictEqual(restoreOf(second), { attempted: true, restored: false, reason: 'other format', notes: null, replayRows: null, ms: restoreOf(second).ms })
+        assert.ok(!second.noteStore.isReady())
+        await buildStore(second)
+        assert.deepStrictEqual(startupStoreCalls(second), ORDINARY_BUILD, 'the build, when its timeout fires')
+        await second.noteStore.whenSaved()
+        assert.strictEqual(readSaved(dir).format, 1, 'and its save replaces the file')
+    })
+
+    await test('note store persistence guard: a file another plugin version wrote is not read either', async () => {
+        const dir = persistDir()
+        const first = await firstLaunch(dir, launchNotes())
+        writeSaved(dir, { ...readSaved(dir), pluginVersion: '2.7.0' })
+        const second = await relaunch(dir, launchNotes(), first)
+        assert.deepStrictEqual(startupStoreCalls(second), [])
+        assert.strictEqual(restoreOf(second).reason, 'other plugin version')
+        await buildStore(second)
+        assert.deepStrictEqual(startupStoreCalls(second), ORDINARY_BUILD)
+        await second.noteStore.whenSaved()
+        assert.strictEqual(readSaved(dir).pluginVersion, PLUGIN_VERSION)
+    })
+
+    await test('note store persistence guard: a file another client wrote - Joplin\'s clientId, kept in the profile\'s database, differs: a database copied in from elsewhere - is not read; the build saves the new client\'s file, and the next launch on that database restores it', async () => {
+        const dir = persistDir()
+        const first = await firstLaunch(dir, launchNotes())
+        assert.strictEqual(readSaved(dir).clientId, HARNESS_CLIENT, 'precondition: the file is the first database\'s')
+        const copied = await relaunch(dir, launchNotes(), first, { clientId: 'copied-from-another-machine' })
+        assert.ok(copied.globalValueReads.includes('clientId'), 'the client is read')
+        assert.deepStrictEqual(startupStoreCalls(copied), [], 'nothing of the store before the first paint')
+        assert.deepStrictEqual(restoreOf(copied), { attempted: true, restored: false, reason: 'another client', notes: null, replayRows: null, ms: restoreOf(copied).ms })
+        await buildStore(copied)
+        assert.deepStrictEqual(startupStoreCalls(copied), ORDINARY_BUILD, 'the ordinary build, when its timeout fires')
+        await copied.noteStore.whenSaved()
+        assert.strictEqual(readSaved(dir).clientId, 'copied-from-another-machine', 'and its save is the new client\'s')
+        const again = await relaunch(dir, launchNotes(), copied, { clientId: 'copied-from-another-machine' })
+        assert.deepStrictEqual([startupStoreCalls(again), restoreOf(again).restored], [['head', 'events', 'count'], true], 'which the same client restores')
+    })
+
+    await test('note store persistence guard: a file written under another Joplin version is not read - one rebuild per update - and the next launch on the new version restores', async () => {
+        const dir = persistDir()
+        const first = await firstLaunch(dir, launchNotes())
+        assert.strictEqual(readSaved(dir).appVersion, '3.7.0', 'precondition')
+        const updated = await relaunch(dir, launchNotes(), first, { versionInfo: { version: '3.7.1', platform: 'desktop' } })
+        assert.deepStrictEqual(startupStoreCalls(updated), [])
+        assert.strictEqual(restoreOf(updated).reason, 'another app version')
+        assert.strictEqual(updated.versionInfoCalls, 1, 'the version is the one the startup read for the platform: no read of its own')
+        await buildStore(updated)
+        assert.deepStrictEqual(startupStoreCalls(updated), ORDINARY_BUILD)
+        await updated.noteStore.whenSaved()
+        assert.strictEqual(readSaved(dir).appVersion, '3.7.1')
+        const again = await relaunch(dir, launchNotes(), updated, { versionInfo: { version: '3.7.1', platform: 'desktop' } })
+        assert.deepStrictEqual([startupStoreCalls(again), restoreOf(again).restored], [['head', 'events', 'count'], true], 'the same version restores it')
+    })
+
+    await test('note store persistence guard: a file that does not parse is removed, and not read', async () => {
+        const dir = persistDir()
+        const first = await firstLaunch(dir, launchNotes())
+        writeSaved(dir, fs.readFileSync(storeFilePath(dir), 'utf8').slice(0, 500))
+        const second = await relaunch(dir, launchNotes(), first)
+        assert.deepStrictEqual(startupStoreCalls(second), [])
+        assert.deepStrictEqual(restoreOf(second), { attempted: true, restored: false, reason: 'unparsable file', notes: null, replayRows: null, ms: restoreOf(second).ms })
+        assert.ok(!fs.existsSync(storeFilePath(dir)), 'the file is gone')
+        await buildStore(second)
+        assert.deepStrictEqual(startupStoreCalls(second), ORDINARY_BUILD)
+    })
+
+    await test('note store persistence guard: a count that differs after the replay - the file and Joplin disagree - discards the file and walks, from a fresh head', async () => {
+        const dir = persistDir()
+        const notes = launchNotes()
+        const first = await firstLaunch(dir, notes)
+        // A note the file does not hold, with no row to say so: the replay cannot know, the count can.
+        const saved = readSaved(dir)
+        writeSaved(dir, { ...saved, notes: saved.notes.filter(note => note.id !== storeId(9)) })
+        const second = await relaunch(dir, notes, first, { changeLog: [{ item_id: storeId(3), type: 2 }] })
+        assert.deepStrictEqual(startupStoreCalls(second), ['head', 'events', 'fetch', 'count'].concat(ORDINARY_BUILD),
+            'the restore - head, replay, its fetch, the count that differs - then the ordinary build, from a head of its own')
+        assert.deepStrictEqual({ ...restoreOf(second), ms: null }, { attempted: true, restored: false, reason: 'count differs', notes: 41, replayRows: 1, ms: null })
+        assert.ok(second.noteStore.isReady() && storeModel(second).get(storeId(9)) && storeModel(second).size() === 42, 'the walk brings the note the file lacked')
+        await second.noteStore.whenSaved()
+        assert.strictEqual(readSaved(dir).notes.length, 42)
+        // Discarded is discarded: when the walk after it fails, none of the file's records is left in the mirror, and the next trigger builds.
+        const kept = readSaved(dir)
+        writeSaved(dir, { ...kept, notes: kept.notes.filter(note => note.id !== storeId(9)) })
+        const third = await relaunch(dir, notes, second, {
+            onListingPage: (query, items, pathParts) => { if (pathParts && pathParts[0] === 'folders') throw new Error('the page failed'); return items },
+        })
+        assert.deepStrictEqual(startupStoreCalls(third), ['head', 'events', 'count', 'head', 'page'], 'the restore, the count that differs, and a walk whose page fails')
+        assert.deepStrictEqual([restoreOf(third).reason, third.noteStore.isReady(), storeModel(third).size()], ['count differs', false, 0], 'not ready, and the mirror empty')
+        third.onListingPage = null
+        await buildStore(third)
+        assert.strictEqual(storeModel(third).size(), 42, 'the startup build\'s timeout builds it')
+    })
+
+    await test('note store persistence guard: more than 200 notes changed since the save make the replay rebuild through the walk - a long absence with many changes is a rebuild', async () => {
+        const dir = persistDir()
+        const notes = launchNotes()
+        const first = await firstLaunch(dir, notes)
+        const many = storeNoteRange(1000, 201)
+        const second = await relaunch(dir, notes.concat(many), first, { changeLog: many.map(note => ({ item_id: note.id, type: 1 })) })
+        assert.deepStrictEqual(startupStoreCalls(second), ['head', 'events', 'events', 'events', 'head', 'page', 'page', 'page', 'events', 'count'],
+            'three replay pages, until the fetches pass the threshold; then the rebuild: its own head, the walk, its replay, the count')
+        assert.deepStrictEqual({ ...restoreOf(second), ms: null }, { attempted: true, restored: false, reason: 'replay past the threshold', notes: 42, replayRows: 201, ms: null })
+        assert.ok(second.noteStore.isReady() && storeModel(second).size() === 243)
+        await second.noteStore.whenSaved()
+        assert.deepStrictEqual([saves(second), readSaved(dir).notes.length], [1, 243], 'the rebuild saved once')
+        // The threshold's walk failing: like every discard, the file's records were emptied out before it, so none of them is left behind.
+        const failDir = persistDir()
+        const firstAgain = await firstLaunch(failDir, notes)
+        const failed = await relaunch(failDir, notes.concat(many), firstAgain, {
+            changeLog: many.map(note => ({ item_id: note.id, type: 1 })),
+            onListingPage: (query, items, pathParts) => { if (pathParts && pathParts[0] === 'folders') throw new Error('the page failed'); return items },
+        })
+        assert.deepStrictEqual(startupStoreCalls(failed), ['head', 'events', 'events', 'events', 'head', 'page'])
+        assert.deepStrictEqual([restoreOf(failed).reason, failed.noteStore.isReady(), storeModel(failed).size()], ['replay past the threshold', false, 0],
+            'not ready, and the mirror empty')
+        failed.onListingPage = null
+        await buildStore(failed)
+        assert.strictEqual(storeModel(failed).size(), 243, 'the startup build\'s timeout builds it')
+    })
+
+    await test('note store persistence: on mobile nothing is read or written - the data directory is never asked for, a file left there is not touched, nothing is armed, and every store call is the desktop\'s without a file', async () => {
+        const dir = persistDir()
+        const notes = launchNotes()
+        const first = await firstLaunch(dir, notes)
+        const planted = fs.readFileSync(storeFilePath(dir), 'utf8')
+        const plantedAt = fs.statSync(storeFilePath(dir)).mtimeMs
+        const session = async (state) => {
+            await buildStore(state)
+            renameStored(state, 3, 'Renamed on the phone')
+            // The periodic tick: every 60 s on desktop, 120 s on mobile (setupTimer).
+            await state.withTimers(() => state.intervals.find(interval => interval.ms === 60000 || interval.ms === 120000).fn())
+            await state.panelMessageHandler(['todoChecked', storeId(41), true])
+            await firePending(state, STORE_FOLLOW_UP)
+            return state
+        }
+        const asked = []
+        const recordingMobileRequire = (name) => { asked.push(name); return mobileRequire(name) }
+        const mobile = await session(await relaunch(dir, notes.map(note => ({ ...note })), first, { require: recordingMobileRequire, versionInfo: { version: '3.7.0', platform: 'mobile' } }))
+        assert.strictEqual(mobile.dataDirCalls, 0, 'the data directory is never asked for')
+        assert.ok(!mobile.globalValueReads.includes('clientId'), 'nor the client')
+        assert.deepStrictEqual(asked, ['sqlite3', 'fs-extra', 'fs-extra'],
+            'nor the file system: the only modules asked for are the ones asked before 2.7.1 - the legacy profile import\'s two and the legacy CSS import\'s one')
+        assert.deepStrictEqual([fs.readFileSync(storeFilePath(dir), 'utf8') === planted, fs.statSync(storeFilePath(dir)).mtimeMs, fs.readdirSync(dir)], [true, plantedAt, [STORE_FILE]],
+            'the file a desktop launch left is neither read, rewritten nor joined by another')
+        assert.deepStrictEqual(restoreOf(mobile), { attempted: false, restored: false, reason: 'no file system', notes: null, replayRows: null, ms: null })
+        assert.strictEqual(mobile.timeouts.filter(t => t.ms === STORE_SAVE_DELAY).length, 0, 'no save is ever armed')
+        assert.strictEqual(saves(mobile), 0)
+        const desktop = await session(await relaunch(persistDir(), notes.map(note => ({ ...note })), first))
+        assert.deepStrictEqual(storeShape(mobile.gets.filter(isStoreGet)), storeShape(desktop.gets.filter(isStoreGet)), 'the phone\'s store calls are the desktop\'s with no file')
+        assert.deepStrictEqual(storeShape(mobile.gets.filter(isStoreGet)).slice(0, 4), ORDINARY_BUILD, 'the ordinary build, after the first paint')
+        assert.ok(mobile.noteStore.isReady() && storeModel(mobile).get(storeId(3)).title === 'Renamed on the phone', 'and the store works as before')
+    })
+
+    await test('note store persistence: a save that fails is logged once and never thrown - the store keeps working, and the file a later save could not replace is the last good one', async () => {
+        const dir = persistDir()
+        let failing = false
+        const flakyFs = new Proxy(fs, { get: (target, name) => {
+            const member = target[name]
+            if (name !== 'writeFile' || typeof member !== 'function') return member
+            return (...args) => (failing ? Promise.reject(new Error('ENOSPC: no space left on device')) : member.apply(target, args))
+        } })
+        const state = await persistRun(dir, storeNoteRange(1, 5), { require: (name) => (name === 'fs-extra' ? flakyFs : desktopRequire(name)) })
+        await buildStore(state)
+        await state.noteStore.whenSaved()
+        const good = fs.readFileSync(storeFilePath(dir), 'utf8')
+        failing = true
+        const warnings = await storeWarnings(async () => {
+            renameStored(state, 1, 'Not saved')
+            await storeTick(state)
+            await fireSave(state)
+            renameStored(state, 2, 'Not saved either')
+            await storeTick(state)
+            await fireSave(state)
+        })
+        assert.strictEqual(warnings.length, 1, `one warning for the session (got ${warnings.length})`)
+        assert.ok(/could not save the note store/.test(warnings[0]))
+        assert.strictEqual(saves(state), 1, 'the failed saves are not counted')
+        assert.strictEqual(fs.readFileSync(storeFilePath(dir), 'utf8'), good, 'the last good file stands')
+        assert.ok(state.noteStore.isReady() && storeModel(state).get(storeId(2)).title === 'Not saved either', 'and the store goes on')
+        renameStored(state, 3, 'Drained after the failures')
+        await storeTick(state)
+        assert.strictEqual(storeModel(state).get(storeId(3)).title, 'Drained after the failures')
+    })
+
+    await test('note store persistence: 21,000 records - the restore and the save it makes, measured', async () => {
+        const dir = persistDir()
+        const notes = storeNoteRange(1, 21000)
+        // The file a first launch would have left, written directly: walking 21,000 notes through the harness would only measure the harness.
+        fs.mkdirpSync(dir)
+        const model = NoteStoreModel.createNoteStoreModel()
+        model.beginBuild()
+        model.addListingPage(notes)
+        model.endBuild()
+        writeSaved(dir, { format: 1, pluginVersion: PLUGIN_VERSION, appVersion: '3.7.0', clientId: HARNESS_CLIENT, savedAt: Date.now(), head: '0', cursor: '0', notes: model.snapshot() })
+        const bytes = fs.statSync(storeFilePath(dir)).size
+        const state = await persistRun(dir, notes)
+        await state.noteStore.whenSaved()
+        const restored = restoreOf(state)
+        const save = state.instrument.snapshot().storeSave
+        assert.deepStrictEqual([restored.restored, restored.notes, startupStoreCalls(state)], [true, 21000, ['head', 'events', 'count', 'count']], 'restored, with the two count pages an exact multiple of 100 takes')
+        assert.deepStrictEqual([save.count, save.lastBytes], [1, bytes], 'and saved again, the same size')
+        // The same work the save does, timed on its own with a finer clock: the copy of the records and the JSON.
+        const runs = []
+        for (let i = 0; i < 5; i++){
+            const started = process.hrtime.bigint()
+            JSON.stringify({ format: 1, pluginVersion: PLUGIN_VERSION, appVersion: '3.7.0', clientId: HARNESS_CLIENT, savedAt: Date.now(), head: '0', cursor: '0', notes: storeModel(state).snapshot() })
+            runs.push(Number(process.hrtime.bigint() - started) / 1e6)
+        }
+        console.log(`        measured: 21,000 records, ${(bytes / 1048576).toFixed(1)} MB; the restore took ${restored.ms} ms (file read, JSON, staging, head, replay, count); `
+            + `the save held the thread ${save.lastMs} ms; the copy and the JSON alone, five runs: ${runs.map(ms => ms.toFixed(1)).join(', ')} ms`)
+        assert.ok(save.lastMs < 1000, 'well under a second, whatever the machine')
     })
 
     await test('perf seed: PERF_TODOS is an e2e-only option - the seed takes it, keeps the default template name without it, and nothing in src/ reads it', async () => {

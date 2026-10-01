@@ -162,10 +162,42 @@ export function markStoreBuildEnd(notes){
     storeHeap = { beforeBuild: storeHeap.beforeBuild, afterBuild: heapFrom(storeHeap.source), notes: notes, source: storeHeap.source }
 }
 
+/** The saved store (2.7.1) *************************************************************************************************************************
+ * What the startup made of the mirror saved at the last launch (restoreNoteStore in noteStore.ts), and what this session's saves cost - the        *
+ * numbers a warm start is judged by, readable without a DEBUG build, beside storeHeap:                                                             *
+ * - storeRestore: { attempted, restored, reason, notes, replayRows, ms }                                                                           *
+ *   - attempted: a saved file was there at startup (false: none, or no file system, as on mobile);                                                 *
+ *   - restored: the mirror came from it, and was ready before the first paint;                                                                     *
+ *   - reason: why not, when not ("no saved store", "other plugin version", "feed behind the cursor", "count differs", ...), null when it was;      *
+ *   - notes: the records the file held; replayRows: the feed rows its replay read; ms: from the read of the file to the decision.                  *
+ * - storeSave: { count, lastMs, lastBytes }                                                                                                        *
+ *   - count: the saves written this session;                                                                                                       *
+ *   - lastMs: how long the last one held the plugin's thread - the copy of the records and the JSON; the write itself is asynchronous;             *
+ *   - lastBytes: the size of the file it left.                                                                                                     *
+ ***************************************************************************************************************************************************/
+var storeRestore = { attempted: false, restored: false, reason: null, notes: null, replayRows: null, ms: null }
+var storeSave = { count: 0, lastMs: null, lastBytes: null }
+
+export function markStoreRestore(outcome){
+    storeRestore = {
+        attempted: !!outcome.attempted,
+        restored: !!outcome.restored,
+        reason: outcome.reason === undefined ? null : outcome.reason,
+        notes: outcome.notes === undefined ? null : outcome.notes,
+        replayRows: outcome.replayRows === undefined ? null : outcome.replayRows,
+        ms: outcome.ms === undefined ? null : outcome.ms,
+    }
+}
+
+export function markStoreSave(ms, bytes){
+    storeSave = { count: storeSave.count + 1, lastMs: ms, lastBytes: bytes }
+}
+
 /** The inspection handle **************************************************************************************************************************/
-// snapshot() is the counters as they always were, with storeHeap beside them (2.7); ticks() is unchanged; groupings() is 2.7.1's grouping passes.
+// snapshot() is the counters as they always were, with storeHeap beside them (2.7) and storeRestore and storeSave (2.7.1); ticks() is unchanged;
+// groupings() is 2.7.1's grouping passes.
 ;(globalThis as any).CockpitInstrument = Object.freeze({
-    snapshot: () => ({ ...snapshot(), storeHeap: { ...storeHeap } }),
+    snapshot: () => ({ ...snapshot(), storeHeap: { ...storeHeap }, storeRestore: { ...storeRestore }, storeSave: { ...storeSave } }),
     ticks: () => tickHistory.map(entry => ({ ...entry })),
     groupings: () => groupingPasses,
 })
