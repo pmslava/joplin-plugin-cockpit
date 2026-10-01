@@ -56,6 +56,8 @@ function makeJoplin(options) {
         panelMessageHandler: null,
         setHtmlCalls: 0,
         versionInfoCalls: 0,
+        // Every GET /folders/:id/notes page, as { folder, query } (the note store's per-notebook walk, 2.7.1).
+        folderNotePages: [],
         // An ordered log of the events the fast-first-paint checks care about: a panel paint ('setHtml'), a
         // checkbox-count note-body fetch ('bodyFetch', a ['notes', id] GET asking only for the body) and a call of
         // the change feed ('events', the note store's route). Recording them in one sequence lets a test assert a
@@ -112,8 +114,8 @@ function makeJoplin(options) {
         // An async hook run at the start of every events call with its query: a test can hold a call there (single flight) or look at the
         // plugin's state at that exact moment.
         onEventsCall: null,
-        // An async hook run on every page of the full listing (the one asking for todo_due) with (query, items); what it returns replaces
-        // the page. It can put a note on two pages - a create shifting the listing between two reads - or throw, as a failing page does.
+        // An async hook run on every page of the full listing (the one asking for todo_due) and of GET /folders/:id/notes, with (query, items,
+        // path); what it returns replaces the page. It can put a note on two pages - a create shifting the listing between two reads - or throw, as a failing page does.
         onListingPage: null,
         // An async hook run on every single-note GET with (id, query) before it is answered: it can throw, as a read that fails with something
         // other than Not Found does, and what it returns, when it returns anything, is the answer - a note as Joplin read it before a write that
@@ -183,6 +185,39 @@ function makeJoplin(options) {
     // execution, a setting write - is captured like one armed inside a wrapped handler instead of being left on the real
     // clock, where it would fire plugin code into a later scenario.
     state.withTimers = (fn) => withTimerCapture(fn)()
+
+    // The notes a listing serves - the bare GET /notes listing and GET /folders/:id/notes alike - and how a page of them is cut. `listingFromNotes`
+    // serves them from the note fixtures (the map a GET by id reads, so a note store test has ONE set of notes); otherwise from the two search
+    // fixture sets, to-dos typed 1 and notes typed 0, with a query function called on an empty query, since there is none.
+    // `keep`, when given, is asked of each fixture note (its parent_id and deleted_time) before it is copied, so a page of one notebook does not copy
+    // the whole collection to find it.
+    const listingSource = (keep) => {
+        if (options.listingFromNotes) {
+            return Object.keys(notes).filter(id => !keep || keep(notes[id])).map(id => Object.assign({ id }, notes[id]))
+        }
+        const listedTodos = typeof options.todos === 'function' ? (options.todos('') || []) : (options.todos || [])
+        const listedNotes = typeof options.searchNotes === 'function' ? (options.searchNotes('') || []) : (options.searchNotes || [])
+        const listed = typedItems(listedTodos, true).concat(typedItems(listedNotes, false))
+        return keep ? listed.filter(keep) : listed
+    }
+    // Newest first when asked, ascending by id when asked (the store's walks), paged like the real SQL route: has_more is the route's own
+    // `items.length >= limit`, so a listing that is an exact multiple of the page answers one more, empty page. onListingPage sees every page.
+    const listingPage = async (listed, query, pathParts) => {
+        if (query.order_by === 'user_updated_time') {
+            listed = listed.slice().sort((first, second) => (Number(second.user_updated_time) || 0) - (Number(first.user_updated_time) || 0))
+        } else if (query.order_by === 'id') {
+            listed = listed.slice().sort((first, second) => (String(first.id) < String(second.id) ? -1 : String(first.id) > String(second.id) ? 1 : 0))
+        }
+        const size = Number(query.limit) || 100
+        const page = Math.max(1, Number(query.page) || 1)
+        const sliced = listed.slice((page - 1) * size, page * size)
+        let pageItems = sliced
+        if (state.onListingPage) pageItems = (await state.onListingPage(query, pageItems, pathParts)) || pageItems
+        return {
+            items: pageItems.map(item => projectFields(item, query.fields)),
+            has_more: sliced.length >= size,
+        }
+    }
 
     const joplin = {
         plugins: {
@@ -396,6 +431,15 @@ function makeJoplin(options) {
                     return { items: typedItems(todoItems, true), has_more: false }
                 }
                 // The notebook map and the tag autocomplete page through these endpoints.
+                // GET /folders/:id/notes, as 3.6.14's route answers it (the note store's per-notebook walk, 2.7.1): Not Found for a notebook that
+                // does not exist, else the bare listing's paging over `parent_id = ? AND deleted_time = 0` - trashed notes never, and conflict copies
+                // always, which the bare listing leaves out. Read afresh for every page, so a note leaving the notebook mid-walk shifts its later pages.
+                if (pathParts[0] === 'folders' && pathParts.length === 3 && pathParts[2] === 'notes') {
+                    state.folderNotePages.push({ folder: pathParts[1], query })
+                    if (!(options.folders || []).some(folder => folder.id === pathParts[1])) throw new Error('Not Found')
+                    if (query && Number(query.limit) > 100) throw new Error(`Limit out of bond: ${query.limit}`)
+                    return await listingPage(listingSource(item => item.parent_id === pathParts[1] && !(Number(item.deleted_time) > 0)), query || {}, pathParts)
+                }
                 if (pathParts[0] === 'folders') {
                     return { items: options.folders || [], has_more: false }
                 }
@@ -422,29 +466,14 @@ function makeJoplin(options) {
                     // `order_by: 'id'` is ascending by id, as the store's walk and the large to-do walk ask for. has_more is the route's own
                     // `items.length >= limit`: a listing that is an exact multiple of the page answers one more, empty page.
                     if (pathParts.length === 1 && query && Array.isArray(query.fields) && query.fields.includes('todo_due')) {
-                        let listed
-                        if (options.listingFromNotes) {
-                            listed = Object.keys(notes).map(id => Object.assign({ id }, notes[id]))
-                        } else {
-                            const listedTodos = typeof options.todos === 'function' ? (options.todos('') || []) : (options.todos || [])
-                            const listedNotes = typeof options.searchNotes === 'function' ? (options.searchNotes('') || []) : (options.searchNotes || [])
-                            listed = typedItems(listedTodos, true).concat(typedItems(listedNotes, false))
-                        }
-                        if (options.listingExcludesGone) listed = listed.filter(item => !(Number(item.deleted_time) > 0) && !Number(item.is_conflict))
-                        if (query.order_by === 'user_updated_time') {
-                            listed = listed.slice().sort((first, second) => (Number(second.user_updated_time) || 0) - (Number(first.user_updated_time) || 0))
-                        } else if (query.order_by === 'id') {
-                            listed = listed.slice().sort((first, second) => (String(first.id) < String(second.id) ? -1 : String(first.id) > String(second.id) ? 1 : 0))
-                        }
-                        const size = Number(query.limit) || 100
-                        const page = Math.max(1, Number(query.page) || 1)
-                        const sliced = listed.slice((page - 1) * size, page * size)
-                        let pageItems = sliced
-                        if (state.onListingPage) pageItems = (await state.onListingPage(query, pageItems)) || pageItems
-                        return {
-                            items: pageItems.map(item => projectFields(item, query.fields)),
-                            has_more: sliced.length >= size,
-                        }
+                        let listed = listingSource()
+                        // From the note fixtures (the note store's tests) the listing leaves out trashed notes and conflict copies as the route does, unless
+                        // `listingIncludesGone` asks for the old stub behaviour; from the search fixtures only with `listingExcludesGone`, so the plugin's
+                        // own drop is what those tests exercise. The note store's completeness check (2.7.1) counts this listing against the mirror,
+                        // which holds neither.
+                        const excludesGone = options.listingExcludesGone || (options.listingFromNotes && !options.listingIncludesGone)
+                        if (excludesGone) listed = listed.filter(item => !(Number(item.deleted_time) > 0) && !Number(item.is_conflict))
+                        return await listingPage(listed, query, pathParts)
                     }
                     if (pathParts.length === 1) {
                         if (options.recentNotes) return { items: options.recentNotes, has_more: false }

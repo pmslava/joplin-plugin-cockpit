@@ -10192,7 +10192,7 @@ async function main() {
         assert.ok(state.panelHtml['panel-panel'].includes('notes-more-message'), 'with the same footer')
     })
 
-    await test('large collection: an unfiltered to-do search leaves the search on either trigger - past its page budget, or at a page slower than 200 ms with more to come - for the note store\'s build when the store is available, and for the listing walk, for good, when it is off; a fast search, and a slow last page, run to their end', async () => {
+    await test('large collection: an unfiltered to-do search leaves the search on either trigger of time - a page slower than 200 ms, or pages slower than 2 s in all, with more to come - for the note store\'s build when the store is available, and for the listing walk, for good, when it is off; a fast search of any length, and a slow last page, run to their end', async () => {
         const bigTodo = { id: 'c'.repeat(32), title: 'Big open todo', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: bigFolder, user_updated_time: 5 }
         const todoSearches = (s) => s.gets.filter(g => g.path[0] === 'search' && String(g.query.query).includes('type:todo'))
         // Two walks of the listing by id can follow: the 2.6.3 fallback's (listAllNotes, the listing's own fields) and the note store's build (the
@@ -10203,21 +10203,22 @@ async function main() {
         // The time switch (2.7.1): the search route re-runs the whole search for every page, so a page's cost grows with the matches. The harness makes
         // a page slow by moving the clock the plugin reads (Date.now) forward while the page is answered: each call of the to-do fixtures - one per
         // search page, and one per page of a listing walk - costs 250 ms of that clock.
-        const withSlowPages = async (extra) => {
+        const withPagesOf = async (msPerPage, extra) => {
             const realNow = Date.now
             let skew = 0
             Date.now = () => realNow() + skew
             try {
-                return await bigRun(Object.assign({ todos: () => { skew += 250; return [bigTodo] } }, extra))
+                return await bigRun(Object.assign({ todos: () => { skew += msPerPage; return [bigTodo] } }, extra))
             } finally {
                 Date.now = realNow
             }
         }
-        for (const [label, trigger] of [['the page budget, fifty fast pages', () => bigRun({ todos: [bigTodo], todoSearchPages: 50 })], ['a slow first page of fifty', () => withSlowPages({ todoSearchPages: 50 })]]){
+        const withSlowPages = (extra) => withPagesOf(250, extra)
+        // 150 ms a page is under the page limit; the fourteenth page takes the search to 2.1 s, past the limit for the whole search.
+        for (const [label, trigger, searched] of [['pages of 150 ms, slower than 2 s in all', (extra) => withPagesOf(150, extra), 14], ['a slow first page of fifty', (extra) => withSlowPages(extra), 1]]){
             // The store available and not yet ready - the first paint, before the startup build (2.7.1): the render builds the store, once, and reads it.
-            const built = await trigger()
-            assert.ok(todoSearches(built).length <= 10, `${label}: the search stops at its trigger (took ${todoSearches(built).length} pages)`)
-            if (label.startsWith('a slow')) assert.strictEqual(todoSearches(built).length, 1, `${label}: the first slow page with more to come is the last one searched`)
+            const built = await trigger({ todoSearchPages: 50 })
+            assert.strictEqual(todoSearches(built).length, searched, `${label}: the search stops at its trigger, after ${searched} page(s)`)
             assert.strictEqual(storeBuilds(built), 1, `${label}: the note store is built, once`)
             assert.ok(storeWalks(built).length > 0 && fallbackWalks(built).length === 0, `${label}: its walk is the only one - no fallback walk runs`)
             assert.ok(built.noteStore.isReady() && built.panelHtml['panel-panel'].includes('Big open todo'), `${label}: and the render is drawn from it`)
@@ -10227,18 +10228,25 @@ async function main() {
             await built.panelMessageHandler(['sortDirectionClicked'])
             assert.strictEqual(built.gets.slice(mark).filter(g => g.path[0] === 'search' || (g.path[0] === 'notes' && g.path.length === 1)).length, 0, `${label}: the next refresh is the store's: no search, no walk`)
             // The store off (the route missing, as on an app without it): the fallback walk, as in 2.6.3, and the listing for the rest of the session.
-            const off = label.startsWith('a slow') ? await withSlowPages({ todoSearchPages: 50, eventsUnavailable: true }) : await bigRun({ todos: [bigTodo], todoSearchPages: 50, eventsUnavailable: true })
-            assert.ok(todoSearches(off).length <= 10, `${label}, store off: the search stops at its trigger`)
+            const off = await trigger({ todoSearchPages: 50, eventsUnavailable: true })
+            assert.strictEqual(todoSearches(off).length, searched, `${label}, store off: the search stops at its trigger`)
             assert.ok(off.panelHtml['panel-panel'].includes('Big open todo'), `${label}, store off: the listing answers the to-dos instead`)
             assert.ok(fallbackWalks(off).length > 0 && storeWalks(off).length === 0, `${label}, store off: the to-dos come from a full listing walk`)
             const before = todoSearches(off).length
             await off.panelMessageHandler(['sortDirectionClicked'])
             assert.strictEqual(todoSearches(off).length, before, `${label}, store off: once large, the next refresh goes straight to the listing`)
         }
-        // A search that fits inside the budget runs to its end, and so does one whose only slow page is its last: the search was done.
+        // A fast search runs to its end whatever its length - fifty pages is the old ten-page budget's boundary, which made exactly 1,000 to-dos walk the
+        // listing - and so does one whose only slow page is its last: the search was done. 200 pages is a ceiling no fast search reaches before 2 s.
         const fast = await bigRun({ todos: [bigTodo], todoSearchPages: 5 })
         assert.strictEqual(todoSearches(fast).length, 5, 'five fast pages: all five searched')
         assert.strictEqual(fallbackWalks(fast).length + storeBuilds(fast), 0, 'and neither a listing walk nor a build')
+        const fifty = await bigRun({ todos: [bigTodo], todoSearchPages: 50 })
+        assert.strictEqual(todoSearches(fifty).length, 50, 'fifty fast pages: all fifty searched')
+        assert.strictEqual(fallbackWalks(fifty).length + storeBuilds(fifty), 0, 'and neither a listing walk nor a build')
+        const endless = await bigRun({ todos: [bigTodo], todoSearchPages: 300 })
+        assert.strictEqual(todoSearches(endless).length, 200, 'three hundred fast pages: the ceiling stops the search at 200')
+        assert.strictEqual(storeBuilds(endless), 1, 'and the store is built instead')
         const lastSlow = await withSlowPages({ todoSearchPages: 1 })
         assert.strictEqual(todoSearches(lastSlow).length, 1, 'a slow last page is still the whole search')
         assert.strictEqual(fallbackWalks(lastSlow).length + storeBuilds(lastSlow), 0, 'and switches nothing')
@@ -10251,7 +10259,8 @@ async function main() {
         // A filtered profile first (its search pages to the end and builds nothing), then the switch to an unfiltered one, whose search passes its page
         // budget and so builds the store in the render. While the build walks, a trigger asks for a poll; the poll is held at its events call.
         const bigTodo = { id: 'c'.repeat(32), title: 'Big open todo', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: bigFolder, user_updated_time: 5 }
-        const state = await bigRun({ todos: [bigTodo], todoSearchPages: 14, initialSettings: {
+        let slowSearch = () => {}
+        const state = await bigRun({ todos: (q) => { if (String(q).includes('type:todo')) slowSearch(); return [bigTodo] }, todoSearchPages: 14, initialSettings: {
             profileData: JSON.stringify({ nextID: 3, profiles: [
                 { ...bigProfile, id: 1, sortOrder: 0, noteID: '', name: 'Tagged', searchCriteria: 'tag:big' },
                 { ...bigProfile, id: 2, sortOrder: 1, noteID: '', name: 'All' },
@@ -10270,6 +10279,11 @@ async function main() {
             // The build's own replay is the first drain after the trigger; the queued poll is the second.
             if (++cursorCalls === 2){ holding = true; await gate }
         }
+        // The unfiltered search's first page is slow, so the switch's render leaves the search at once and builds the store.
+        const realNow = Date.now
+        let skew = 0
+        Date.now = () => realNow() + skew
+        slowSearch = () => { skew += 250 }
         let finished = false
         const switching = state.withTimers(() => state.panelMessageHandler(['profilesDropdownChanged', 2])).then(() => { finished = true })
         try {
@@ -10281,6 +10295,7 @@ async function main() {
         } finally {
             release()
             await switching
+            Date.now = realNow
             state.onListingPage = null
             state.onEventsCall = null
         }
@@ -10355,10 +10370,20 @@ async function main() {
         notes: Object.fromEntries(notes.map(note => [note.id, note])),
         folders: [{ id: storeFolder, title: 'Store', parent_id: '' }],
     }, extra || {}))
-    const isStoreGet = (g) => g.path[0] === 'events' || (g.path[0] === 'notes' && g.query && (g.query.fields || []).includes('is_conflict'))
+    // Since 2.7.1 the build walks notebook by notebook - one GET /folders/:id/notes page sequence per notebook, after the notebook map is read afresh -
+    // and then counts the bare listing (one page, two at an exact multiple of 100), walking it whole only when the counts disagree. Every page asks for
+    // the store's fields, is_conflict among them, which is how a store call is told apart from the panel's own.
+    const isNotebookPage = (g) => g.path[0] === 'folders' && g.path.length === 3 && g.path[2] === 'notes'
+    const isStoreGet = (g) => g.path[0] === 'events' || ((g.path[0] === 'notes' || isNotebookPage(g)) && g.query && (g.query.fields || []).includes('is_conflict'))
     const storeGetsSince = (state, mark) => state.gets.slice(mark).filter(isStoreGet)
     const isEvents = (g) => g.path[0] === 'events'
-    const isWalkPage = (g) => g.path[0] === 'notes' && g.path.length === 1 && isStoreGet(g)
+    const isWalkPage = (g) => isNotebookPage(g) && isStoreGet(g)
+    const isListingPage = (g) => g.path[0] === 'notes' && g.path.length === 1 && isStoreGet(g)
+    // A page of either walk: per notebook, or of the bare listing, which a build takes when the notebooks outnumber the notes over 100 (perNotebookPays).
+    const isBuildPage = (g) => isWalkPage(g) || isListingPage(g)
+    // A run's store calls as words: 'head' the no-cursor events call, 'events' a drain page, 'page' a notebook's walk page, 'count' a page of the bare
+    // listing (the completeness count, or the whole walk), 'fetch' a fetch by id.
+    const storeShape = (seq) => seq.map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : isListingPage(g) ? 'count' : 'fetch')
     const isStoreFetch = (g) => g.path[0] === 'notes' && g.path.length === 2 && isStoreGet(g)
     const hasCursor = (g) => !!g.query && 'cursor' in g.query
     const storeModel = (state) => state.noteStore.getModel()
@@ -10547,8 +10572,8 @@ async function main() {
         })
         let firstPageLast = null
         const readyWhile = []
-        state.onListingPage = (query, items) => {
-            if (query.order_by !== 'id') return items
+        state.onListingPage = (query, items, path) => {
+            if (query.order_by !== 'id' || !isNotebookPage({ path: path || [] })) return items
             readyWhile.push(state.noteStore.isReady())
             if (query.page === 1){
                 firstPageLast = items[items.length - 1]
@@ -10565,10 +10590,13 @@ async function main() {
         state.onListingPage = null
         state.onEventsCall = null
         const seq = storeGetsSince(state, 0)
-        assert.strictEqual(seq.length, 5, `the no-cursor call, two pages, the replay, one fetch - got ${seq.length}`)
+        assert.strictEqual(seq.length, 6, `the no-cursor call, two pages of the one notebook, the replay, one fetch, the count - got ${seq.length}`)
         assert.ok(isEvents(seq[0]) && !hasCursor(seq[0]), 'the cursor is taken first, with no cursor key at all')
         assert.deepStrictEqual(seq.slice(1, 3).map(g => g.query), [1, 2].map(page => ({ fields: STORE_FIELDS, order_by: 'id', limit: 100, page })),
-            'then the listing by id, 100 a page, with the listing fields plus is_conflict')
+            'then the notebook\'s notes by id, 100 a page, with the listing fields plus is_conflict')
+        assert.deepStrictEqual(seq.slice(1, 3).map(g => g.path), [1, 2].map(() => ['folders', storeFolder, 'notes']), 'from GET /folders/:id/notes (2.7.1)')
+        assert.deepStrictEqual([seq[5].path, seq[5].query], [['notes'], { fields: STORE_FIELDS, order_by: 'id', limit: 100, page: 2 }],
+            'and, after the replay, one page of the bare listing: page 2 holds the 50 the mirror\'s 150 put there, so nothing is in no notebook')
         assert.strictEqual(state.eventsAnswers[0].cursor, '2', 'the route answers the cursor as a string')
         assert.deepStrictEqual(seq[3].query, { cursor: '2' }, 'after the last page, one replay from exactly that string')
         assert.deepStrictEqual(seq[4].path, ['notes', storeId(5)], 'which fetches the note changed during the walk')
@@ -10654,12 +10682,11 @@ async function main() {
         const mark = state.gets.length
         await storeTick(state)
         const seq = storeGetsSince(state, mark)
-        const shape = seq.map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
-        assert.deepStrictEqual(shape, ['events', 'events', 'events', 'head', 'page', 'page', 'page', 'events'],
-            'three drain pages, then a fresh cursor, then the walk, then its replay')
+        assert.deepStrictEqual(storeShape(seq), ['events', 'events', 'events', 'head', 'page', 'page', 'page', 'events', 'count'],
+            'three drain pages, then a fresh cursor, then the walk, then its replay, then the count')
         assert.strictEqual(seq.filter(isStoreFetch).length, 0, 'and not one per-id fetch')
         const retaken = state.eventsAnswers[state.eventsAnswers.length - 2].cursor
-        assert.deepStrictEqual(seq[seq.length - 1].query, { cursor: retaken }, 'the replay starts from the retaken cursor')
+        assert.deepStrictEqual(seq[seq.length - 2].query, { cursor: retaken }, 'the replay starts from the retaken cursor')
         assert.strictEqual(storeModel(state).size(), 203)
         assert.ok(state.noteStore.isReady())
     })
@@ -10730,8 +10757,7 @@ async function main() {
             state.pushChange({ item_id: newStoreNote(state, 3).id, type: 1 })
             const mark = state.gets.length
             await storeTick(state)
-            const shape = storeGetsSince(state, mark).map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
-            assert.deepStrictEqual(shape, ['head', 'page', 'events'], 'the next trigger retakes the cursor, walks, and replays')
+            assert.deepStrictEqual(storeShape(storeGetsSince(state, mark)), ['head', 'page', 'events', 'count'], 'the next trigger retakes the cursor, walks, replays, and counts')
         })
         assert.ok(state.noteStore.isReady(), 'and the store is exact again')
         assert.deepStrictEqual(storeIds(state), [storeId(1), storeId(2), storeId(3)], 'including what changed while it was stale')
@@ -10843,7 +10869,7 @@ async function main() {
 
     await test('note store single flight: a poll asked for while one runs is ONE more run after it, and a poll asked for during a build waits for it', async () => {
         const state = await storeRun(storeNoteRange(1, 150))
-        const shapeOf = (seq) => seq.map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
+        const shapeOf = storeShape
         // Bounded, so a regression fails here instead of hanging the suite.
         const waitUntil = async (condition, what) => {
             for (let turn = 0; turn < 1000 && !condition(); turn++) await new Promise(resolve => setImmediate(resolve))
@@ -10864,8 +10890,8 @@ async function main() {
             release()
             await Promise.all([building, polled])
             state.onListingPage = null
-            assert.deepStrictEqual(shapeOf(storeGetsSince(state, 0)), ['head', 'page', 'page', 'events', 'events'],
-                'it runs after the build and its replay')
+            assert.deepStrictEqual(shapeOf(storeGetsSince(state, 0)), ['head', 'page', 'page', 'events', 'count', 'events'],
+                'it runs after the build, its replay and its count')
         })
         assert.ok(state.noteStore.isReady())
         const mark = state.gets.length
@@ -10986,8 +11012,7 @@ async function main() {
             assert.strictEqual(state.noteStore.isReady(), false, 'the store is stale')
             const mark = state.gets.length
             await storeTick(state)
-            const shape = storeGetsSince(state, mark).map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
-            assert.deepStrictEqual(shape, ['head', 'page', 'events'], 'the next trigger retakes the cursor, walks, and replays')
+            assert.deepStrictEqual(storeShape(storeGetsSince(state, mark)), ['head', 'page', 'events', 'count'], 'the next trigger retakes the cursor, walks, replays, and counts')
         })
         state.onNoteGet = null
         assert.ok(state.noteStore.isReady())
@@ -11013,9 +11038,8 @@ async function main() {
         for (let i = 0; i < 450; i++) state.pushChange({ item_id: newStoreNote(state, 1000 + i).id, type: 1 })
         const mark = state.gets.length
         await storeTick(state)
-        const shape = storeGetsSince(state, mark).map(g => isEvents(g) ? (hasCursor(g) ? 'events' : 'head') : isWalkPage(g) ? 'page' : 'fetch')
-        assert.deepStrictEqual(shape, ['events', 'events', 'events', 'head', 'page', 'page', 'page', 'page', 'page', 'events'],
-            'three of the five feed pages, then the cursor retaken, the walk and its replay - the last two feed pages are never read')
+        assert.deepStrictEqual(storeShape(storeGetsSince(state, mark)), ['events', 'events', 'events', 'head', 'page', 'page', 'page', 'page', 'page', 'events', 'count'],
+            'three of the five feed pages, then the cursor retaken, the walk, its replay and the count - the last two feed pages are never read')
         assert.strictEqual(storeModel(state).size(), 451)
         assert.ok(state.noteStore.isReady())
     })
@@ -11046,7 +11070,7 @@ async function main() {
         const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'noteStore.ts'), 'utf8')
         const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
         const chains = code.match(/\bjoplin\s*[.[][\w.\s[\]'"]*\(?/g) || []
-        assert.strictEqual(chains.length, 4, 'the guard or cursor call, the walk, the drain and the fetch by id')
+        assert.strictEqual(chains.length, 6, 'the guard or cursor call, the whole-collection walk, the per-notebook walk, the count page, the drain and the fetch by id')
         assert.ok(chains.every(chain => chain.replace(/\s+/g, '') === 'joplin.data.get('), `every one is joplin.data.get( - found ${chains.join(', ')}`)
     })
 
@@ -12188,7 +12212,8 @@ async function main() {
         const session = state.gets.slice(mark)
         assert.deepStrictEqual(session.filter(g => g.path[0] === 'search'), [], 'not one search')
         const pages = session.filter(g => g.path[0] === 'notes' && g.path.length === 1)
-        assert.ok(pages.length > 0 && pages.every(isWalkPage), 'every listing page is the build\'s own walk: neither listAllNotes nor listRecentNotes ran')
+        assert.ok(session.some(isBuildPage), 'precondition: the build walked (the bare listing here: four notebooks for five notes)')
+        assert.ok(pages.length > 0 && pages.every(isListingPage), 'every page of the bare listing is the build\'s own count: neither listAllNotes nor listRecentNotes ran')
         const written = state.notePuts.filter(put => put.id === overview.id).pop()
         assert.ok(written && written.body.includes('Changed during the session'), 'and the overview note followed, from the mirror')
     })
@@ -12367,7 +12392,7 @@ async function main() {
         for (let n = 1; n <= 210; n++) state.pushChange({ item_id: storeId(n), type: 2 })
         const mark = state.gets.length
         await state.withTimers(() => state.noteStore.pollNow())
-        assert.ok(state.gets.slice(mark).some(isWalkPage), 'precondition: the drain passed the threshold and rebuilt')
+        assert.ok(state.gets.slice(mark).some(isBuildPage), 'precondition: the drain passed the threshold and rebuilt')
         await fireStoreRender(state)
         assert.ok(ringOf().includes('title="1/2 checkboxes done'), 'the rebuild\'s render fills the changed ring: one of two done')
     })
@@ -13152,7 +13177,7 @@ async function main() {
         for (let n = 1; n <= 210; n++) state.pushChange({ item_id: storeId(n), type: 2 })
         const mark = state.gets.length
         await state.syncCompleteHandler({ withErrors: false })
-        assert.ok(state.gets.slice(mark).some(isWalkPage), 'precondition: the sync\'s drain passed the threshold and rebuilt the store')
+        assert.ok(state.gets.slice(mark).some(isBuildPage), 'precondition: the sync\'s drain passed the threshold and rebuilt the store')
         await fireStoreRender(state)
         assert.deepStrictEqual(held(state), NOTHING_HELD, 'the rebuild re-read every note, and the whole layer was let go of')
         assert.strictEqual(rowCount(state, ticked.id, 'todo'), 1, 'the to-do is drawn again: it is open')
@@ -13726,6 +13751,172 @@ async function main() {
         }
         const unknown = await moveTwice({ version: 'dev', platform: 'desktop' })
         assert.deepStrictEqual(unknown.rungs, [RECONCILE_OFFSETS, RECONCILE_OFFSETS], 'a version that cannot be read keeps the ladder')
+    })
+
+    // ============================================================ note store walk (2.7.1): one notebook at a time
+    // Joplin orders every listing page with COLLATE NOCASE, which its index cannot serve, so a page of the bare listing is a full scan and sort of the
+    // notes table. The build walks GET /folders/:id/notes instead (walkNotebooks in src/core/noteStore.ts), whose parent_id = ? comes before the sort,
+    // after re-reading the notebook map; then it counts the bare listing (listingHolds) and walks it whole only when the counts disagree. The harness
+    // serves the folder route from the same fixtures as the listing, paged the same way, with the route's own rule: trashed notes never, conflict
+    // copies always.
+    // 405 notes over four notebooks: at least 100 a notebook, so the walk goes per notebook (perNotebookPays).
+    const walkFixture = (extra) => storeNoteRange(1, 370)
+        .concat(Array.from({ length: 30 }, (_, i) => storeNote(1000 + i, { parent_id: readSub })))
+        .concat(Array.from({ length: 5 }, (_, i) => storeNote(2000 + i, { parent_id: readQuoted })))
+        .concat(extra || [])
+    const walkPagesOf = (calls) => calls.filter(isWalkPage).map(g => [g.path[1], g.query.page])
+    // The store's own pages of the bare listing (the choice of walk, the count, or the whole walk), not the panel's Notes section reading it.
+    const bareListingPages = (calls) => calls.filter(isListingPage)
+
+    await test('note store walk: one page sequence per notebook, with the listing\'s fields and order, after a fresh read of the notebook map and one page that says the notes reach 100 a notebook; a conflict copy read and dropped; one page of the bare listing to count; every page counted as listing', async () => {
+        const state = await storeRun(walkFixture([storeNote(400, { is_conflict: 1 })]), { folders: readFolders })
+        const counted = state.instrument.snapshot()
+        const mark = state.gets.length
+        await buildStore(state)
+        const calls = state.gets.slice(mark)
+        const head = calls.findIndex(g => isEvents(g) && !hasCursor(g))
+        const mapRead = calls.findIndex(g => g.path.length === 1 && g.path[0] === 'folders')
+        assert.ok(head >= 0 && mapRead > head, 'the notebook map is read afresh, after the cursor is taken')
+        assert.deepStrictEqual(walkPagesOf(calls), [[storeFolder, 1], [storeFolder, 2], [storeFolder, 3], [storeFolder, 4], [readSub, 1], [readArchive, 1], [readQuoted, 1]],
+            'one page sequence per notebook, in the map\'s order: 371 rows on four pages, 30, none, 5')
+        assert.ok(calls.filter(isWalkPage).every(g => JSON.stringify(g.query) === JSON.stringify({ fields: STORE_FIELDS, order_by: 'id', limit: 100, page: g.query.page })),
+            'each asking for the listing\'s fields plus is_conflict, by id, 100 a page')
+        assert.deepStrictEqual(bareListingPages(calls).map(g => g.query), [4, 5].map(page => ({ fields: STORE_FIELDS, order_by: 'id', limit: 100, page })),
+            'of the bare listing, page 4 before the walk - full, so the notes reach 100 for each of the four notebooks - and page 5 after it, which counts 405')
+        assert.ok(calls.indexOf(bareListingPages(calls)[0]) < calls.findIndex(isWalkPage), 'the first before the walk, the second after')
+        assert.strictEqual(storeModel(state).size(), 405, 'every note, and not the conflict copy')
+        assert.strictEqual(countedSince(state, counted).listing, 9, 'the seven notebook pages and the two bare pages, all counted as listing, as the whole walk\'s pages were')
+    })
+
+    await test('note store walk: notebook by notebook only while the notebooks number at most the notes over 100 - 40 notebooks over 20,000 notes walk per notebook, 500 over 5,000 the bare listing; a rebuild weighs them against the mirror and reads nothing first', async () => {
+        const folderId = (n) => 'd'.repeat(28) + String(n).padStart(4, '0')
+        const spread = (folders, perFolder) => ({
+            notes: Array.from({ length: folders * perFolder }, (_, i) => storeNote(i + 1, { parent_id: folderId(Math.floor(i / perFolder)) })),
+            folders: Array.from({ length: folders }, (_, n) => ({ id: folderId(n), title: `Notebook ${n}`, parent_id: '' })),
+        })
+        const rebuild = async (state) => {
+            state.eventsFailNext = 1
+            await state.syncCompleteHandler({ withErrors: false })
+            assert.strictEqual(state.noteStore.isReady(), false, 'precondition: stale')
+            const mark = state.gets.length
+            await storeTick(state)
+            assert.ok(state.noteStore.isReady())
+            return state.gets.slice(mark)
+        }
+        // 40 notebooks, 500 notes each: page 40 of the bare listing is full, so the notes reach 100 a notebook, and the walk goes per notebook.
+        const many = spread(40, 500)
+        const big = await storeRun(many.notes, { folders: many.folders })
+        let mark = big.gets.length
+        await buildStore(big)
+        let calls = big.gets.slice(mark)
+        assert.strictEqual(calls.filter(isWalkPage).length, 240, 'six pages for each of the 40 notebooks: five full, and the empty one after them')
+        assert.deepStrictEqual(bareListingPages(calls).map(g => g.query.page), [40, 201, 200], 'the one page that decides, and the two that count 20,000')
+        assert.strictEqual(storeModel(big).size(), 20000)
+        calls = await rebuild(big)
+        assert.strictEqual(calls.filter(isWalkPage).length, 240, 'a rebuild walks per notebook too')
+        assert.deepStrictEqual(bareListingPages(calls).map(g => g.query.page), [201, 200], 'without the deciding page: 40 notebooks against the mirror\'s 20,000 notes')
+        // 500 notebooks, 10 notes each: page 500 of the bare listing is empty, and 500 calls and more would cost more than the bare walk's 51.
+        const small = spread(500, 10)
+        const wide = await storeRun(small.notes, { folders: small.folders })
+        mark = wide.gets.length
+        await buildStore(wide)
+        calls = wide.gets.slice(mark)
+        assert.strictEqual(calls.filter(isWalkPage).length, 0, 'not one notebook\'s page')
+        assert.deepStrictEqual(bareListingPages(calls).map(g => g.query.page), [500].concat(Array.from({ length: 51 }, (_, i) => i + 1)),
+            'the page that decides, then the bare walk: 50 full pages and the empty one after them')
+        assert.strictEqual(storeModel(wide).size(), 5000)
+        calls = await rebuild(wide)
+        assert.deepStrictEqual(bareListingPages(calls).map(g => g.query.page), Array.from({ length: 51 }, (_, i) => i + 1), 'a rebuild walks the bare listing at once')
+    })
+
+    await test('note store walk: a note moved between notebooks mid-walk is kept once, where it ended up; one that leaves a notebook with pages still to read makes the build untrusted, and the next trigger walks again', async () => {
+        // On Store's last page: leaving Store after that page shifts nothing in it. Read again in its new notebook, kept once, and the replay agrees.
+        const kept = await storeRun(walkFixture(), { folders: readFolders })
+        const mover = storeId(350)
+        let reads = 0
+        kept.onListingPage = (query, items, path) => {
+            if (path && isNotebookPage({ path })) reads += items.filter(item => item.id === mover).length
+            if (path && path[1] === readSub && query.page === 1 && kept.notes[mover].parent_id === storeFolder){
+                kept.notes[mover].parent_id = readQuoted
+                kept.pushChange({ item_id: mover, type: 2 })
+            }
+            return items
+        }
+        await buildStore(kept)
+        kept.onListingPage = null
+        assert.strictEqual(reads, 2, 'precondition: the walk read it twice, in Store and in Say "hi"')
+        assert.strictEqual(storeModel(kept).snapshot().filter(record => record.id === mover).length, 1, 'kept once')
+        assert.strictEqual(storeModel(kept).get(mover).parent_id, readQuoted, 'in the notebook it ended up in')
+        // On Store's first page: leaving Store before its second page is read shifts that page left by one, and the note at the boundary is stepped over.
+        const lost = await storeRun(walkFixture(), { folders: readFolders })
+        lost.onListingPage = (query, items, path) => {
+            if (path && path[1] === storeFolder && query.page === 1 && lost.notes[storeId(5)].parent_id === storeFolder){
+                lost.notes[storeId(5)].parent_id = readSub
+                lost.pushChange({ item_id: storeId(5), type: 2 })
+            }
+            return items
+        }
+        await lost.fireTimeout(buildTimeout(lost))
+        lost.onListingPage = null
+        assert.ok(!storeModel(lost).get(storeId(101)), 'precondition: the walk stepped over the note at the page boundary')
+        assert.strictEqual(lost.noteStore.isReady(), false, 'so the build is not trusted')
+        await storeTick(lost)
+        assert.ok(lost.noteStore.isReady(), 'the next trigger walks again')
+        assert.ok(storeModel(lost).get(storeId(101)) && storeModel(lost).get(storeId(5)).parent_id === readSub, 'and has every note, each where it is')
+        // A conflict copy on Store's first page, deleted before the second is read: the mirror never held it, and its deletion still shifts the page.
+        const copy = storeNote(0, { is_conflict: 1, title: 'Conflict copy' })
+        const conflicted = await storeRun(walkFixture([copy]), { folders: readFolders })
+        conflicted.onListingPage = (query, items, path) => {
+            if (path && path[1] === storeFolder && query.page === 1 && conflicted.notes[copy.id]){
+                delete conflicted.notes[copy.id]
+                conflicted.pushChange({ item_id: copy.id, type: 3 })
+            }
+            return items
+        }
+        await conflicted.fireTimeout(buildTimeout(conflicted))
+        conflicted.onListingPage = null
+        assert.ok(!storeModel(conflicted).get(storeId(100)), 'precondition: the deleted copy shifted Store\'s second page, and the walk stepped over its first note')
+        assert.strictEqual(conflicted.noteStore.isReady(), false, 'so the build is not trusted, though the mirror never held the copy')
+    })
+
+    await test('note store walk: a note in no notebook Joplin lists makes the count disagree - the whole collection is walked in the same build, and for the rest of the session', async () => {
+        const nowhere = 'f'.repeat(32)
+        const state = await storeRun(storeNoteRange(1, 10).concat([storeNote(50, { parent_id: nowhere, title: 'In no notebook' })]))
+        const mark = state.gets.length
+        await buildStore(state)
+        const calls = state.gets.slice(mark)
+        assert.deepStrictEqual(storeShape(calls.filter(isStoreGet)), ['head', 'page', 'events', 'count', 'count', 'events'],
+            'the notebook walk, its replay, the count that disagrees (11 against 10), then the whole walk and its replay from the same cursor')
+        assert.strictEqual(storeModel(state).get(storeId(50)).title, 'In no notebook', 'the note in no notebook is in the mirror')
+        assert.strictEqual(storeModel(state).size(), 11)
+        // A later build goes straight to the whole collection: the session has learned the collection holds such a note.
+        state.eventsFailNext = 1
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.strictEqual(state.noteStore.isReady(), false, 'precondition: stale')
+        const again = state.gets.length
+        await storeTick(state)
+        assert.deepStrictEqual(storeShape(storeGetsSince(state, again)), ['head', 'count', 'events'], 'the rebuild walks the whole listing at once, and counts nothing')
+        assert.ok(state.noteStore.isReady() && storeModel(state).get(storeId(50)))
+    })
+
+    await test('note store walk: a count that disagrees for a moment, with every note in a notebook, costs one whole walk and nothing more - the next build walks notebook by notebook again', async () => {
+        const state = await storeRun(storeNoteRange(1, 10))
+        let raced = false
+        state.onListingPage = (query, items, path) => {
+            // The count page, answered as if a note had been created the moment after the replay: one row more than the mirror holds.
+            if (!raced && path && path.length === 1 && (query.fields || []).includes('is_conflict')){ raced = true; return items.concat([items[0]]) }
+            return items
+        }
+        const mark = state.gets.length
+        await buildStore(state)
+        state.onListingPage = null
+        assert.deepStrictEqual(storeShape(storeGetsSince(state, mark)), ['head', 'page', 'events', 'count', 'count', 'events'], 'one whole walk after the count')
+        state.eventsFailNext = 1
+        await state.syncCompleteHandler({ withErrors: false })
+        const again = state.gets.length
+        await storeTick(state)
+        assert.deepStrictEqual(storeShape(storeGetsSince(state, again)), ['head', 'page', 'events', 'count'], 'and the rebuild walks notebook by notebook again')
+        assert.ok(state.noteStore.isReady())
     })
 
     await test('perf seed: PERF_TODOS is an e2e-only option - the seed takes it, keeps the default template name without it, and nothing in src/ reads it', async () => {

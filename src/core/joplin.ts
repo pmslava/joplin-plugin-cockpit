@@ -158,20 +158,22 @@ export function applyNoteNarrowing(items){
 // deleted_time rides along so a trashed note is dropped here whatever the listing itself does with the trash (the search always excludes it).
 // Exported for the note store (2.7), which walks the same listing with the same fields plus is_conflict.
 export const listingFields = ['id', 'title', 'is_todo', 'todo_completed', 'todo_due', 'parent_id', 'user_updated_time', 'user_created_time', 'deleted_time']
-// How many pages an UNFILTERED to-do search may take before the collection counts as large. Ten pages is 1,000 to-dos, where a page still costs
-// tens of milliseconds; past it the per-page cost grows with the whole set and the listing is the cheaper walk.
-const todoSearchPageBudget = 10
-// The same question asked of time (2.7.1), which is what the user waits on: a page of an UNFILTERED to-do search slower than this, with more pages to
-// come, moves the view to the listing at once, whatever page it is. The route re-runs the whole search for every page, so a page costs more the more
-// to-dos match: 28 ms at 1,000, about a second at 10,000 (the perf run with 20,000 notes and 10,000 to-dos), where the ten pages of the budget above
-// were ten seconds before the first paint could start; the switch took 8.2 s off that run's first paint. The listing's cost is known, about 25 ms a
-// page whatever matches. The page budget stays as the second guard, for a search that is slow in total without any one page being slow.
-// The trade-off is the page budget's: when Joplin is busy at startup, a small to-do set's page can be slow too, and the view then walks the listing
-// on every unfiltered refresh until the note store serves it. With the store available that walk is the store's own build (ensureStoreBuilt below),
-// made once, which is the better outcome anyway; only with the store off does the walk repeat.
+// When an UNFILTERED to-do search stops paging and leaves the rest to the listing walk (2.7.1): a question of TIME, which is what the user waits on.
+// Joplin's search route re-runs the whole search for every page, so a page costs more the more to-dos match: 28 ms at 1,000, about a second at
+// 10,000 (the perf run with 20,000 notes and 10,000 to-dos). The listing walk costs the same whatever matches. So the search pages on while each
+// page is fast and the whole search is short, and stops at the first page slower than todoSearchPageSlowMs, or once the pages so far have taken
+// longer than todoSearchTotalSlowMs, whichever comes first, provided more pages are to come (a slow LAST page is still the whole search). At 1,000
+// to-dos the search runs to its end in about 0.3 s and no walk is needed; 2.7.0's budget of ten PAGES made exactly that set, ten full pages and one
+// more answered "more", walk the listing - the boundary behind the first paint of about 8.5 s of the perf run at 1,000 to-dos. todoSearchPageCeiling
+// is a safety only: no search whose pages are fast reaches it before the time cap does. The trade-off: when Joplin is busy at startup, a small to-do
+// set's page can be slow too, and the view then walks the listing on every unfiltered refresh until the note store serves it. With the store
+// available that walk is the store's own build (ensureStoreBuilt below), made once, which is the better outcome anyway; only with the store off does
+// the walk repeat.
 const todoSearchPageSlowMs = 200
-// Set once an unfiltered to-do search ran past the budget or was slow: from then on that view reads the listing straight away. Per session - a
-// collection that big does not shrink back under the budget between two refreshes, and a wrong "large" only costs a listing walk.
+const todoSearchTotalSlowMs = 2000
+const todoSearchPageCeiling = 200
+// Set once an unfiltered to-do search was slow, or ran into the ceiling: from then on that view reads the listing straight away. Per session - a
+// collection that big does not shrink back between two refreshes, and a wrong "large" only costs a listing walk.
 var preferTodoListing = false
 
 function isUnfilteredQuery(criteria){
@@ -368,14 +370,15 @@ async function listRecentNotes(limit, keep){
         cacheResult(todosResultCache, cacheKey, allTodos)
     } else {
         // An unfiltered view (see isUnfilteredQuery) is answered by the search while the to-do set is small, and by the live
-        // listing once it has proved large: past todoSearchPageBudget pages every further page costs more than the whole
-        // listing walk. The listing is narrowed with the same terms the query carries, so both paths return the same rows.
+        // listing once it has proved large: a page slower than todoSearchPageSlowMs, or a search slower than todoSearchTotalSlowMs
+        // (see there). The listing is narrowed with the same terms the query carries, so both paths return the same rows.
         var unfiltered = isUnfilteredQuery(searchCritera)
         var useListing = unfiltered && preferTodoListing
         allTodos = [];
         let pageNum = 1;
+        var searchStartedAt = Date.now()
         while (!useListing) {
-            if (unfiltered && pageNum > todoSearchPageBudget){
+            if (unfiltered && pageNum > todoSearchPageCeiling){
                 preferTodoListing = true
                 useListing = true
                 break
@@ -393,9 +396,9 @@ async function listRecentNotes(limit, keep){
             })
             allTodos = allTodos.concat(response.items)
             if (!response.has_more) break
-            // A slow page with more to come is a large set (todoSearchPageSlowMs): the rest is the listing's. A slow LAST page switches nothing, since
-            // the search is already done, and a single page proves no size.
-            if (unfiltered && Date.now() - pageStartedAt > todoSearchPageSlowMs){
+            // A slow page, or a slow search so far, with more to come is a large set: the rest is the listing's. A slow LAST page switches nothing,
+            // since the search is already done.
+            if (unfiltered && (Date.now() - pageStartedAt > todoSearchPageSlowMs || Date.now() - searchStartedAt > todoSearchTotalSlowMs)){
                 preferTodoListing = true
                 useListing = true
                 break

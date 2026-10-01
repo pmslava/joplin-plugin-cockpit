@@ -6,11 +6,12 @@
  * for the whole session when the store is off.                                                                                                     *
  *                                                                                                                                                  *
  * THE BUILD runs AFTER the first paint, from a timeout index.ts arms once refreshInterfaces has painted, and is never awaited: on a 20,000-note    *
- * collection the walk is 201 pages (the route answers has_more whenever a page is full, so an exact multiple of 100 costs one more, empty page),   *
- * and the panel must not wait for any of them. It takes the feed's cursor FIRST (a no-cursor call), then walks the listing by id, 100 at a time,   *
- * then drains the feed from that cursor, so whatever changed while the walk ran is replayed on top of it. One render builds it sooner (2.7.1): a   *
- * first paint whose to-do search proves large would walk the whole listing for its own sake and leave the startup build to walk it again, so it    *
- * awaits the build instead and reads the store (ensureBuilt), and the startup timeout then finds the store ready and does nothing.                 *
+ * collection the walk is about 200 pages, and the panel must not wait for any of them. It takes the feed's cursor FIRST (a no-cursor call), then   *
+ * walks every notebook's notes by id, 100 at a time (walkNotebooks, 2.7.1: one notebook's rows are sorted per page rather than the whole table),   *
+ * then drains the feed from that cursor, so whatever changed while the walk ran is replayed on top of it, and then counts the bare listing to      *
+ * prove nothing was in no notebook (listingHolds). One render builds it sooner (2.7.1): a first paint whose to-do search proves large would walk   *
+ * the whole listing for its own sake and leave the startup build to walk it again, so it awaits the build instead and reads the store              *
+ * (ensureBuilt), and the startup timeout then finds the store ready and does nothing.                                                              *
  *                                                                                                                                                  *
  * THE AVAILABILITY GUARD is that first no-cursor call. The route is proven on desktop and unproven on mobile (the harness cannot reach a phone),   *
  * so a throw there means "not in this app": one warning, the store is off for the session, and the route is never called again. Every read path    *
@@ -49,7 +50,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { invalidateResultCaches, listingFields } from "./joplin";
+import { getNotebookMap, invalidateNotebookMap, invalidateResultCaches, listingFields } from "./joplin";
 import { countData, markStoreBuildEnd, markStoreBuildStart } from "./instrument";
 const { createNoteStoreModel } = require("./noteStoreModel");
 
@@ -98,6 +99,15 @@ var listeners = []
 // that may have missed a note (see applyLocalRemoval), and the build then ends not ready.
 var building = false
 var buildLostNote = false
+// The per-notebook walk (2.7.1, walkNotebooks): on until the route fails or the collection proves to hold notes in no notebook. While a build that
+// walked per notebook is in flight, every read with its notebook and page, and each notebook's last page, for the lost-note rule (pageShifted).
+var perNotebookWalk = true
+// Whether a build has run this session: the mirror's size is then what perNotebookPays weighs the notebooks against.
+var builtOnce = false
+var walkReads = null
+var walkLastPage = null
+// Joplin's conflict folder, which is not a real notebook (Folder.conflictFolderId in 3.6.14). GET /folders does not list it; skipped all the same.
+const conflictFolderId = 'c04f1c7c04f1c7c04f1c7c04f1c7c04f'
 // What the burst of runs in progress did, which its listeners are told (see timer.ts), so a render can tell the news apart:
 //  - built:   it ran the build that makes the store ready (runOnce's) - every note at once, most rings never read;
 //  - rebuilt: a ready store's drain was too large to fetch note by note and walked the listing instead - any note may have changed;
@@ -145,9 +155,10 @@ export function scheduleNoteStoreBuild(){
 
 /** ensureBuilt (2.7.1) *****************************************************************************************************************************
  * The build, now, for a render that is about to walk the whole listing anyway. Before the store is ready an unfiltered view reads the 2.6.3 paths, *
- * and when its to-do search proves large (getTodos in joplin.ts: past its page budget, or a page slower than todoSearchPageSlowMs) that path walks *
- * the listing for the render - which the startup build then walks again two seconds later: two walks of 300 pages at 30,000 items before the panel *
- * is store-served. Building the store in that render instead costs the same walk once, and the render reads the store at the end of it.            *
+ * and when its to-do search proves large (getTodos in joplin.ts: a page slower than todoSearchPageSlowMs, or the pages so far slower than          *
+ * todoSearchTotalSlowMs) that path walks the listing for the render - which the startup build then walks again two seconds later: two walks of 300 *
+ * pages at 30,000 items before the panel is store-served. Building the store in that render instead costs one walk, notebook by notebook, and the  *
+ * render reads the store at the end of it.                                                                                                         *
  *                                                                                                                                                  *
  * It is the ordinary build, through the single-flight gate: the cursor first, the walk, the replay, the lost-note rule, the availability guard (a  *
  * missing route answers false here and switches the store off, as at startup). It marks the store started, so Cockpit's own writes and the         *
@@ -210,6 +221,8 @@ export function scheduleNoteStorePoll(){
 export function applyLocalWrite(id, fields){
     if (!started || !available) return
     countWrite(id)
+    // A move out of a notebook the per-notebook walk is reading shifts its later pages, as a trash shifts the listing's (applyLocalRemoval below).
+    if (building && walkReads && fields && fields.parent_id !== undefined) buildLostNote = true
     model.applyLocalWrite(id, fields)
     armFollowUp()
 }
@@ -405,26 +418,177 @@ async function walk(){
     try {
         // Taken BEFORE the walk: anything that changes while the pages are read is in the feed after this cursor, and is replayed below.
         var walkCursor = feedCursor(head)
-        model.beginBuild()
-        var pageNum = 1
-        var response
-        do {
-            if (pageNum > 1 && walkPagePauseMs > 0) await new Promise(resolve => setTimeout(resolve, walkPagePauseMs))
-            countData('listing')
-            response = await joplin.data.get(['notes'], { fields: storeFields(), order_by: 'id', limit: 100, page: pageNum++ })
-            model.addListingPage(response.items)
-        } while (response.has_more)
-        model.endBuild()
+        var notebooks = null
+        if (perNotebookWalk){
+            // Read afresh, AFTER the cursor was taken (see walkNotebooks).
+            invalidateNotebookMap()
+            var map = await getNotebookMap()
+            if (await perNotebookPays(map.size)) notebooks = await walkNotebooks(map)
+        }
+        if (!notebooks) await walkListing()
+        builtOnce = true
         cursor = walkCursor
         var complete = await drainFeed(false)
+        walkReads = null
+        walkLastPage = null
+        // The per-notebook walk reaches every note in a notebook; the listing also holds any note whose notebook does not exist. The two counts
+        // tell (listingHolds); when they differ the whole collection is walked after all, and replayed from the same cursor.
+        if (notebooks && complete && !(await listingHolds(model.size()))){
+            await walkListing()
+            cursor = walkCursor
+            complete = await drainFeed(false)
+            if (holdsNotesOutside(notebooks)){
+                perNotebookWalk = false
+                console.info("Cockpit: some notes are in no notebook Joplin lists, so the note store walks the whole collection for this session")
+            }
+        }
         markStoreBuildEnd(model.size())               // and after its replay, with the mirror's size
         failedBuilds = 0
         // A trash Cockpit applied while this build ran may have hidden a note the walk stepped over (see applyLocalRemoval).
         setReady(complete && !buildLostNote)
     } catch (error) {
+        walkReads = null
+        walkLastPage = null
         model.abandonBuild()
         buildFailed(error)
     }
+}
+
+/** walkListing *************************************************************************************************************************************
+ * The whole-collection walk: the bare GET /notes listing by id, 100 a page, into a fresh staging map. Each page is a full scan and sort of the     *
+ * notes table (see walkNotebooks), so since 2.7.1 it is the fallback: for a build whose count found notes in no notebook, and for the rest of a    *
+ * session that found them.                                                                                                                         *
+ ***************************************************************************************************************************************************/
+async function walkListing(){
+    model.beginBuild()
+    var pageNum = 1
+    var response
+    do {
+        if (pageNum > 1 && walkPagePauseMs > 0) await new Promise(resolve => setTimeout(resolve, walkPagePauseMs))
+        countData('listing')
+        response = await joplin.data.get(['notes'], { fields: storeFields(), order_by: 'id', limit: 100, page: pageNum++ })
+        model.addListingPage(response.items)
+    } while (response.has_more)
+    model.endBuild()
+}
+
+/** perNotebookPays (2.7.1) *************************************************************************************************************************
+ * Whether this build walks notebook by notebook or the bare listing. Each page of the bare listing sorts the whole notes table, a notebook's page  *
+ * only that notebook's rows, so per notebook is the cheaper walk - but it costs at least one call for every notebook, an empty one included, where *
+ * the bare walk costs one for every 100 notes. A collection of many small notebooks would pay more for it: 500 notebooks holding 5,000 notes are   *
+ * 500 calls and more, against the bare walk's 50. So the walk goes per notebook only while the notebooks number at most the notes over 100.        *
+ *                                                                                                                                                  *
+ * The note count it compares with is the mirror's, once a build has run this session (a rebuild's best guess at the collection); before the first  *
+ * build there is none, and one page of the bare listing answers the question instead: page n, for n notebooks, is full exactly when the notes      *
+ * reach 100 for each notebook. With one notebook, or none, the two walks cost the same calls, and nothing is read.                                 *
+ ***************************************************************************************************************************************************/
+async function perNotebookPays(notebookCount){
+    if (notebookCount <= 1) return true
+    if (builtOnce) return notebookCount <= model.size() / 100
+    return await bareListingRows(notebookCount) === 100
+}
+
+/** walkNotebooks (2.7.1) ***************************************************************************************************************************
+ * The walk, one notebook at a time. Joplin pages every listing with ORDER BY id COLLATE NOCASE (requestPaginationOrder in 3.6.14 marks every order *
+ * case-insensitive), which its index cannot serve, so a page of the bare listing is a full scan and sort of the whole notes table: 25 ms at 20,000 *
+ * notes, 211 times over. GET /folders/:id/notes pages through the same helper - the same fields, order_by, limit and page - but applies parent_id  *
+ * = ? first, so each page sorts one notebook's rows. It leaves out trashed notes like the bare listing and, unlike it, lists conflict copies,      *
+ * which keep their notebook; the mirror drops those as it always has. Pages are counted as `listing`, as the bare walk's are, so a perf run's      *
+ * numbers compare.                                                                                                                                 *
+ *                                                                                                                                                  *
+ * WHICH NOTEBOOKS. The folder map (getNotebookMap in joplin.ts, the one the panel polls), read afresh by walk() AFTER the cursor was taken, so     *
+ * every notebook that existed then is walked. A notebook created after that read can only hold a note that was created in it or moved into it      *
+ * since, and each of those writes a feed row the replay fetches by id. A notebook deleted before its turn answers Not Found and is passed over:    *
+ * its notes were trashed or deleted with it, which writes their rows too. The conflict folder and the trash are not real notebooks (no note has    *
+ * their id as its parent), and GET /folders lists neither. A note whose notebook does not exist is in no notebook's list at all: the build counts  *
+ * the listing afterwards (listingHolds) and walks the whole collection when the two disagree.                                                      *
+ *                                                                                                                                                  *
+ * THE LOST-NOTE RULE, PER NOTEBOOK. A notebook's pages are paged by offset, so a note that LEAVES a notebook after its page was read - moved out,  *
+ * trashed, deleted - shifts that notebook's later pages left by one, and the walk may step over the note at the next page boundary. Each read is   *
+ * kept with its notebook and page (walkReads, walkLastPage), and the replay treats the build as untrusted when a note read on any page but its     *
+ * notebook's last has left that notebook (pageShifted). A note that arrives in a notebook mid-walk shifts later pages the other way, and the       *
+ * double read is deduplicated by id; a note moved between two notebooks mid-walk is kept once, and the replay's fetch puts it where it ended up.   *
+ * Cockpit's own moves mark the build like its own trash does (applyLocalWrite).                                                                    *
+ *                                                                                                                                                  *
+ * Answers the folder map it walked. A page that fails with anything but Not Found fails the build, as a page of the whole walk does: the next      *
+ * trigger builds again, and three failed builds in a row switch the store off.                                                                     *
+ ***************************************************************************************************************************************************/
+async function walkNotebooks(notebooks){
+    walkReads = new Map()
+    walkLastPage = new Map()
+    model.beginBuild()
+    for (var folderId of notebooks.keys()){
+        if (folderId === conflictFolderId) continue
+        var pageNum = 1
+        var response
+        do {
+            if (pageNum > 1 && walkPagePauseMs > 0) await new Promise(resolve => setTimeout(resolve, walkPagePauseMs))
+            countData('listing')
+            try {
+                response = await joplin.data.get(['folders', folderId, 'notes'], { fields: storeFields(), order_by: 'id', limit: 100, page: pageNum })
+            } catch (error) {
+                if (String((error && error.message) || error).indexOf("Not Found") < 0) throw error
+                response = { items: [], has_more: false }
+            }
+            for (var item of response.items || []){
+                if (!item || item.id === undefined) continue
+                var reads = walkReads.get(String(item.id)) || []
+                reads.push({ folder: folderId, page: pageNum })
+                walkReads.set(String(item.id), reads)
+            }
+            model.addListingPage(response.items)
+            walkLastPage.set(folderId, pageNum)
+            pageNum++
+        } while (response.has_more)
+    }
+    model.endBuild()
+    return notebooks
+}
+
+/** pageShifted (2.7.1) *****************************************************************************************************************************
+ * Whether a note the per-notebook walk read has left a notebook whose later pages it could have shifted: it is no longer in that notebook (fetched *
+ * elsewhere, trashed, or gone - null), and it was read on a page before that notebook's last.                                                      *
+ ***************************************************************************************************************************************************/
+function pageShifted(id, note){
+    var reads = walkReads ? walkReads.get(String(id)) : null
+    if (!reads) return false
+    for (var read of reads){
+        var stillThere = !!note && !(Number(note.deleted_time) > 0) && note.parent_id === read.folder
+        if (!stillThere && read.page < (walkLastPage.get(read.folder) || 0)) return true
+    }
+    return false
+}
+
+/** listingHolds (2.7.1) ****************************************************************************************************************************
+ * Whether the bare listing holds exactly `expected` notes - the mirror's count after the per-notebook walk and its replay - read from at most two  *
+ * of its pages rather than walked: page floor(expected / 100) + 1 must hold the remainder, and, when the remainder is 0, the page before it must   *
+ * be full. A non-empty page means every page before it is full, so the two pages pin the count. The listing leaves out trashed notes and conflict  *
+ * copies, as the mirror does, so the counts differ only by notes in no notebook - or by a note that changed in the moment between the replay and   *
+ * these pages, which costs one whole walk and nothing else. ONE KNOWN MISS, like the one the lost-note rule names in drainFeed: a note in no       *
+ * notebook, and a trash that lands in the window from the replay's last events page, through its fetches by id, to this count, cancel out - the    *
+ * mirror lacks the one and still holds the other, whose row the replay never read - so the counts agree and the build ends ready without the note  *
+ * in no notebook. Both inside the same few hundred milliseconds, on a collection holding such a note at all; the next rebuild, the next launch at  *
+ * the latest, brings it.                                                                                                                           *
+ ***************************************************************************************************************************************************/
+async function listingHolds(expected){
+    var lastPage = Math.floor(expected / 100) + 1
+    var onLastPage = expected - (lastPage - 1) * 100
+    if (await bareListingRows(lastPage) !== onLastPage) return false
+    if (onLastPage > 0 || lastPage === 1) return true
+    return await bareListingRows(lastPage - 1) === 100
+}
+
+// How many rows one page of the bare listing holds: the count's question (listingHolds) and the choice of walk's (perNotebookPays).
+async function bareListingRows(page){
+    countData('listing')
+    var answer = await joplin.data.get(['notes'], { fields: storeFields(), order_by: 'id', limit: 100, page: page })
+    return (answer.items || []).length
+}
+
+// Whether the mirror holds a note whose notebook the walk did not know: the case the per-notebook walk cannot reach, and the one that keeps the
+// whole-collection walk for the rest of the session.
+function holdsNotesOutside(notebooks){
+    return model.snapshot().some(record => !notebooks.has(record.parent_id))
 }
 
 /** setReady ****************************************************************************************************************************************
@@ -509,6 +673,8 @@ async function drainFeed(mayRebuild){
         } catch (error) {
             if (String((error && error.message) || error).indexOf("Not Found") < 0) throw error
         }
+        // A build's replay after the per-notebook walk (2.7.1): a read note that has left a notebook may have shifted that notebook's later pages.
+        if (pageShifted(id, note)) removedKnown = true
         // Cockpit wrote the note while the fetch was out: the answer may be older than the write, so it is dropped and the note refetched.
         if (writeSerials.get(id) !== writesBefore){
             refetchIds.add(id)
@@ -516,6 +682,9 @@ async function drainFeed(mayRebuild){
         }
         if (model.applyFetched(note, id) === 'removed') removedKnown = true
     }
+    // A deletion of a note the per-notebook walk read shifts its notebook's pages whether or not the mirror held it: a conflict copy is read and
+    // dropped, and planDrain lists only the deletions of ids the mirror holds, so the rows are asked directly.
+    if (walkReads) for (var row of rows) if (Number(row.type) === 3 && pageShifted(row.item_id, null)) removedKnown = true
     for (var removeId of plan.remove){
         if (model.remove(removeId)){
             removedKnown = true
