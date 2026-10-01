@@ -4414,13 +4414,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 2.7.0', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 2.7.1', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '2.7.0'
+        const expected = '2.7.1'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
@@ -10116,6 +10116,8 @@ async function main() {
         },
     }, extra || {}))
     const noteRows = (state) => (String(state.panelHtml['panel-panel'] || '').match(/data-note-id="/g) || []).length
+    // The note store's startup build timeout (buildDelayMs in src/core/noteStore.ts), as the store section below names it STORE_BUILD_DELAY.
+    const STORE_BUILD_DELAY_EARLY = 2000
     const noteSearches = (state) => state.gets.filter(g => g.path[0] === 'search' && String(g.query.query).includes('type:note'))
     const listingReads = (state) => state.gets.filter(g => g.path[0] === 'notes' && g.path.length === 1 && g.query && (g.query.fields || []).includes('todo_due'))
 
@@ -10135,7 +10137,7 @@ async function main() {
         const html = state.panelHtml['panel-panel']
         assert.ok(html.includes(`Big note ${CAP + 50}<`) && !html.includes('Big note 50<'), 'the kept ones are the most recently updated')
         assert.ok(html.includes('notes-more-message') && html.includes('onShowMoreNotesClicked()'), 'the footer says the list is capped and offers more')
-        assert.ok(html.includes(`Showing the ${CAP} most recently updated notes`), 'and says how many it shows')
+        assert.ok(html.includes('Showing the 1,000 most recently updated notes'), 'and says how many it shows, written as the to-do footer writes it (2.7.1)')
         assert.ok(listingReads(state).every(g => g.query.page <= CAP / 100 + 1), 'the listing is read only as far as the cap needs')
         await state.panelMessageHandler(['showMoreNotes'])
         assert.strictEqual(noteRows(state), CAP + 50, 'the next batch brings the rest')
@@ -10190,17 +10192,122 @@ async function main() {
         assert.ok(state.panelHtml['panel-panel'].includes('notes-more-message'), 'with the same footer')
     })
 
-    await test('large collection: an unfiltered to-do search past its page budget moves to the listing, and stays there', async () => {
+    await test('large collection: an unfiltered to-do search leaves the search on either trigger - past its page budget, or at a page slower than 200 ms with more to come - for the note store\'s build when the store is available, and for the listing walk, for good, when it is off; a fast search, and a slow last page, run to their end', async () => {
         const bigTodo = { id: 'c'.repeat(32), title: 'Big open todo', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: bigFolder, user_updated_time: 5 }
-        const state = await bigRun({ todos: [bigTodo], todoSearchPages: 50 })
         const todoSearches = (s) => s.gets.filter(g => g.path[0] === 'search' && String(g.query.query).includes('type:todo'))
-        assert.ok(todoSearches(state).length <= 10, `the search stops at its budget (took ${todoSearches(state).length} pages)`)
-        assert.ok(state.panelHtml['panel-panel'].includes('Big open todo'), 'the listing answers the to-dos instead')
-        const fullWalk = listingReads(state).filter(g => g.query.order_by === 'id')
-        assert.ok(fullWalk.length > 0, 'the to-dos come from a full listing walk')
-        const before = todoSearches(state).length
-        await state.panelMessageHandler(['sortDirectionClicked'])
-        assert.strictEqual(todoSearches(state).length, before, 'once large, the next refresh goes straight to the listing')
+        // Two walks of the listing by id can follow: the 2.6.3 fallback's (listAllNotes, the listing's own fields) and the note store's build (the
+        // same fields plus is_conflict, which only a store read asks for).
+        const fallbackWalks = (s) => listingReads(s).filter(g => g.query.order_by === 'id' && !(g.query.fields || []).includes('is_conflict'))
+        const storeWalks = (s) => listingReads(s).filter(g => g.query.order_by === 'id' && (g.query.fields || []).includes('is_conflict'))
+        const storeBuilds = (s) => s.gets.filter(g => g.path[0] === 'events' && !(g.query && 'cursor' in g.query)).length
+        // The time switch (2.7.1): the search route re-runs the whole search for every page, so a page's cost grows with the matches. The harness makes
+        // a page slow by moving the clock the plugin reads (Date.now) forward while the page is answered: each call of the to-do fixtures - one per
+        // search page, and one per page of a listing walk - costs 250 ms of that clock.
+        const withSlowPages = async (extra) => {
+            const realNow = Date.now
+            let skew = 0
+            Date.now = () => realNow() + skew
+            try {
+                return await bigRun(Object.assign({ todos: () => { skew += 250; return [bigTodo] } }, extra))
+            } finally {
+                Date.now = realNow
+            }
+        }
+        for (const [label, trigger] of [['the page budget, fifty fast pages', () => bigRun({ todos: [bigTodo], todoSearchPages: 50 })], ['a slow first page of fifty', () => withSlowPages({ todoSearchPages: 50 })]]){
+            // The store available and not yet ready - the first paint, before the startup build (2.7.1): the render builds the store, once, and reads it.
+            const built = await trigger()
+            assert.ok(todoSearches(built).length <= 10, `${label}: the search stops at its trigger (took ${todoSearches(built).length} pages)`)
+            if (label.startsWith('a slow')) assert.strictEqual(todoSearches(built).length, 1, `${label}: the first slow page with more to come is the last one searched`)
+            assert.strictEqual(storeBuilds(built), 1, `${label}: the note store is built, once`)
+            assert.ok(storeWalks(built).length > 0 && fallbackWalks(built).length === 0, `${label}: its walk is the only one - no fallback walk runs`)
+            assert.ok(built.noteStore.isReady() && built.panelHtml['panel-panel'].includes('Big open todo'), `${label}: and the render is drawn from it`)
+            const mark = built.gets.length
+            await built.fireTimeout(built.timeouts.find(t => t.ms === STORE_BUILD_DELAY_EARLY))
+            assert.deepStrictEqual(built.gets.slice(mark).map(g => g.path[0]), [], `${label}: the startup build, two seconds on, finds the store ready and builds nothing`)
+            await built.panelMessageHandler(['sortDirectionClicked'])
+            assert.strictEqual(built.gets.slice(mark).filter(g => g.path[0] === 'search' || (g.path[0] === 'notes' && g.path.length === 1)).length, 0, `${label}: the next refresh is the store's: no search, no walk`)
+            // The store off (the route missing, as on an app without it): the fallback walk, as in 2.6.3, and the listing for the rest of the session.
+            const off = label.startsWith('a slow') ? await withSlowPages({ todoSearchPages: 50, eventsUnavailable: true }) : await bigRun({ todos: [bigTodo], todoSearchPages: 50, eventsUnavailable: true })
+            assert.ok(todoSearches(off).length <= 10, `${label}, store off: the search stops at its trigger`)
+            assert.ok(off.panelHtml['panel-panel'].includes('Big open todo'), `${label}, store off: the listing answers the to-dos instead`)
+            assert.ok(fallbackWalks(off).length > 0 && storeWalks(off).length === 0, `${label}, store off: the to-dos come from a full listing walk`)
+            const before = todoSearches(off).length
+            await off.panelMessageHandler(['sortDirectionClicked'])
+            assert.strictEqual(todoSearches(off).length, before, `${label}, store off: once large, the next refresh goes straight to the listing`)
+        }
+        // A search that fits inside the budget runs to its end, and so does one whose only slow page is its last: the search was done.
+        const fast = await bigRun({ todos: [bigTodo], todoSearchPages: 5 })
+        assert.strictEqual(todoSearches(fast).length, 5, 'five fast pages: all five searched')
+        assert.strictEqual(fallbackWalks(fast).length + storeBuilds(fast), 0, 'and neither a listing walk nor a build')
+        const lastSlow = await withSlowPages({ todoSearchPages: 1 })
+        assert.strictEqual(todoSearches(lastSlow).length, 1, 'a slow last page is still the whole search')
+        assert.strictEqual(fallbackWalks(lastSlow).length + storeBuilds(lastSlow), 0, 'and switches nothing')
+        const fastMark = todoSearches(fast).length
+        await fast.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(todoSearches(fast).length, fastMark + 5, 'the next refresh searches again, to its end')
+    })
+
+    await test('large collection: the render that builds the store waits for that one run - a poll a trigger queues while the build lasts goes on in the background', async () => {
+        // A filtered profile first (its search pages to the end and builds nothing), then the switch to an unfiltered one, whose search passes its page
+        // budget and so builds the store in the render. While the build walks, a trigger asks for a poll; the poll is held at its events call.
+        const bigTodo = { id: 'c'.repeat(32), title: 'Big open todo', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: bigFolder, user_updated_time: 5 }
+        const state = await bigRun({ todos: [bigTodo], todoSearchPages: 14, initialSettings: {
+            profileData: JSON.stringify({ nextID: 3, profiles: [
+                { ...bigProfile, id: 1, sortOrder: 0, noteID: '', name: 'Tagged', searchCriteria: 'tag:big' },
+                { ...bigProfile, id: 2, sortOrder: 1, noteID: '', name: 'All' },
+            ] }),
+            currentProfileID: 1,
+        } })
+        assert.strictEqual(state.gets.filter(g => g.path[0] === 'events').length, 0, 'precondition: the filtered view built nothing')
+        let queued = false, cursorCalls = 0, holding = false, release
+        const gate = new Promise(resolve => { release = resolve })
+        state.onListingPage = async (query, items) => {
+            if (!queued && query.order_by === 'id' && (query.fields || []).includes('is_conflict')){ queued = true; state.noteStore.pollNow() }
+            return items
+        }
+        state.onEventsCall = async (query) => {
+            if (!queued || !(query && 'cursor' in query)) return
+            // The build's own replay is the first drain after the trigger; the queued poll is the second.
+            if (++cursorCalls === 2){ holding = true; await gate }
+        }
+        let finished = false
+        const switching = state.withTimers(() => state.panelMessageHandler(['profilesDropdownChanged', 2])).then(() => { finished = true })
+        try {
+            for (let turn = 0; turn < 2000 && !holding; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(queued && holding, 'precondition: the build walked, a poll was queued during it, and that poll is held')
+            for (let turn = 0; turn < 2000 && !finished; turn++) await new Promise(resolve => setImmediate(resolve))
+            assert.ok(finished, 'the switch rendered and finished while the queued poll was still held')
+            assert.ok(state.noteStore.isReady() && state.panelHtml['panel-panel'].includes('Big open todo'), 'drawn from the store the build made')
+        } finally {
+            release()
+            await switching
+            state.onListingPage = null
+            state.onEventsCall = null
+        }
+    })
+
+    await test('large collection: a FILTERED to-do search is never cut short by the time switch either - every slow page is searched, and nothing is walked or built', async () => {
+        const bigTodo = { id: 'c'.repeat(32), title: 'Big tagged todo', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: bigFolder, user_updated_time: 5 }
+        const realNow = Date.now
+        let skew = 0
+        Date.now = () => realNow() + skew
+        let state
+        try {
+            state = await bigRun({
+                todos: () => { skew += 250; return [bigTodo] }, todoSearchPages: 14,
+                initialSettings: {
+                    profileData: JSON.stringify({ nextID: 2, profiles: [{ ...bigProfile, id: 1, sortOrder: 0, noteID: '', searchCriteria: 'tag:big' }] }),
+                    currentProfileID: 1,
+                },
+            })
+        } finally {
+            Date.now = realNow
+        }
+        const pages = state.gets.filter(g => g.path[0] === 'search' && String(g.query.query).includes('type:todo')).map(g => g.query.page)
+        assert.deepStrictEqual(pages.slice(0, 14), Array.from({ length: 14 }, (_, i) => i + 1), 'all fourteen pages, each of them slow, are searched')
+        assert.strictEqual(listingReads(state).filter(g => g.query.order_by === 'id').length, 0, 'no listing walk')
+        assert.strictEqual(state.gets.filter(g => g.path[0] === 'events').length, 0, 'and the store is not built early: a filtered view is the search\'s')
+        assert.ok(state.panelHtml['panel-panel'].includes('Big tagged todo'))
     })
 
     await test('large collection: a FILTERED to-do search is never cut short, whatever its size', async () => {
@@ -10950,6 +11057,9 @@ async function main() {
     // lane drains the store before its render, and the panel's own writes (panel.ts) tell the store at once. Each fixture set serves the search
     // (todos / searchNotes) and the store (the note map, listingFromNotes) from the same notes, so the two paths can be held against each other.
     const STORE_RENDER_DELAY = 0
+    // The last Joplin release whose own moveToFolder returned before its prompt closed; from 3.5.9 it awaits the prompt and the moves (2.7.1's
+    // version gate, MOVE_COMMAND_AWAITS_FROM in src/ui/panel/panel.ts). Every other run here is 3.7.0.
+    const PRE_AWAIT_APP = { version: '3.5.7', platform: 'desktop' }
     const readSub = 'e'.repeat(31) + '2'
     const readArchive = 'e'.repeat(31) + '3'
     const readQuoted = 'e'.repeat(31) + '4'
@@ -11058,7 +11168,7 @@ async function main() {
         let mark = capped.gets.length
         await capped.panelMessageHandler(['sortDirectionClicked'])
         assert.strictEqual(noteRows(capped), 1000, 'the cap holds on the store path')
-        assert.ok(capped.panelHtml['panel-panel'].includes('Showing the 1000 most recently updated notes'), 'with the footer')
+        assert.ok(capped.panelHtml['panel-panel'].includes('Showing the 1,000 most recently updated notes'), 'with the footer')
         assert.ok(!capped.panelHtml['panel-panel'].includes('>Read note 1<'), 'the oldest note is the one left out')
         await capped.panelMessageHandler(['showMoreNotes'])
         assert.strictEqual(noteRows(capped), 1001, '"show more" brings the last one')
@@ -11354,7 +11464,9 @@ async function main() {
 
     await test('note store reads: the reconcile lane drains the store before its render, so an app command\'s late write shows without a search - and it never builds', async () => {
         const moved = readTodo(1)
-        const state = await readRun([moved, readNote(2)])
+        // An app older than 3.5.9, whose moveToFolder returns before its dialog closes (runMoveCommand in panel.ts): the one kind of desktop the
+        // native move still arms the lane for since 2.7.1's version gate.
+        const state = await readRun([moved, readNote(2)], { versionInfo: PRE_AWAIT_APP })
         await buildAndRender(state)
         const timerMark = state.timeouts.length
         // moveToFolder is not registered in the harness, as on a desktop whose dialog has not closed yet: the command returns and nothing is written.
@@ -11642,7 +11754,8 @@ async function main() {
     })
 
     await test('note store reads: a reconcile poll whose drain changes the mirror paints once - the store render the drain armed is dropped', async () => {
-        const state = await readRun([readTodo(1), readNote(2)])
+        // The lane is armed by the native move on an app older than 3.5.9, as in the check above.
+        const state = await readRun([readTodo(1), readNote(2)], { versionInfo: PRE_AWAIT_APP })
         await buildAndRender(state)
         const timerMark = state.timeouts.length
         await state.panelMessageHandler(['moveToNotebookClicked', [storeId(1)]])
@@ -11736,6 +11849,10 @@ async function main() {
     // only when something the panel or the overview notes are drawn from has moved (the redraw stamps in timer.ts). One view that still needs the
     // search puts every trigger back on its 2.6.3 path, which the B2 budget checks and the phase 2 and 3 sections above pin in full.
     const allStoreServed = (state) => state.triggers.allConsumersStoreServed()
+    // Since 2.7.1 the current profile id is kept in memory (src/core/settings.ts), so an ask of the predicate reads nothing from the host once the id
+    // is known. The host reporting the key changed - its settings change handler hearing of 'currentProfileID' - forgets it, and the next ask reads it
+    // again: that is how a check reaches the one read an ask used to make every time.
+    const forgetProfileID = async (state) => { for (const handler of state.settingHandlers) await handler({ keys: ['currentProfileID'] }) }
     const lastTick = (state) => { const ticks = state.instrument.ticks(); return ticks[ticks.length - 1] }
     const tickCost = (entry, keys) => Object.fromEntries(keys.map(key => [key, entry[key]]))
     const NOTE_READ_KEYS = ['search', 'listing', 'get', 'bodies']
@@ -12204,21 +12321,23 @@ async function main() {
         const todo = readTodo(1)
         const state = await readRun([todo, readNote(2)])
         await buildAndRender(state)
-        const failNextProfileRead = () => {
+        const failNextProfileRead = async () => {
+            // The id is forgotten first (2.7.1), so the predicate's next ask reads the host, and it is that read which fails.
+            await forgetProfileID(state)
             state.onSettingRead = async (key) => {
                 if (key !== 'currentProfileID') return
                 state.onSettingRead = null
                 throw new Error('the settings read failed')
             }
         }
-        failNextProfileRead()
+        await failNextProfileRead()
         assert.strictEqual(await allStoreServed(state), false, 'the predicate answers false')
         assert.strictEqual(await allStoreServed(state), true, 'precondition: and true again once the read succeeds')
-        failNextProfileRead()
+        await failNextProfileRead()
         const timerMark = state.timeouts.length
         await state.noteChangeHandler({ id: todo.id })
         assert.strictEqual(state.timeouts.slice(timerMark).filter(t => t.ms === RECONCILE_OFFSETS[0]).length, 1, 'a note change takes the ladder')
-        failNextProfileRead()
+        await failNextProfileRead()
         await storeTick(state)
         assert.ok(tickCost(lastTick(state), ['renders']).renders > 0, 'and a tick runs the full refresh')
         state.onSettingRead = null
@@ -12622,7 +12741,7 @@ async function main() {
         }
     })
 
-    await test('note store actions: Joplin\'s own moveToFolder keeps the ladder on the store path - its write is Joplin\'s - and a drain shows the move in the action\'s own render', async () => {
+    await test('note store actions: Joplin\'s own moveToFolder on the store path - its write is Joplin\'s - is drained after the command and shown in the action\'s own render; from 3.5.9 it arms no ladder', async () => {
         // The 3.6.14 command: it awaits its folder prompt and the move, so the notes have moved when execute answers; the feed's row follows.
         const moved = readTodo(1)
         let rowLandsNow = true
@@ -12642,8 +12761,8 @@ async function main() {
         assert.deepStrictEqual(noteCallsSince(state, mark).map(g => g.path[0]), ['events', 'notes'], 'one drain after the command: its events call and the fetch of the moved note')
         assert.strictEqual(storeModel(state).get(moved.id).parent_id, readSub, 'the store has the move')
         assert.strictEqual(pillOf(state, moved.id), readSub, 'the action\'s own render shows it')
-        assert.deepStrictEqual(state.timeouts.slice(timerMark).filter(t => RECONCILE_OFFSETS.includes(t.ms)).map(t => t.ms), RECONCILE_OFFSETS,
-            'and the ladder is armed, blind, for an app that lands the write after the command has returned')
+        assert.deepStrictEqual(state.timeouts.slice(timerMark).filter(t => RECONCILE_OFFSETS.includes(t.ms)).map(t => t.ms), [],
+            'and no rung is armed: this app (3.7.0) awaited the move, so the drain already has it (the older side is the version gate\'s check below)')
         assert.deepStrictEqual(held(state), NOTHING_HELD, 'nothing held')
         // The row lands a beat late: the drain after the command misses it, the follow-up it armed brings it, and its render draws it.
         await firePending(state, STORE_FOLLOW_UP)
@@ -12983,7 +13102,9 @@ async function main() {
             await state.panelMessageHandler(['todoChecked', ticked.id, true])
             await state.syncCompleteHandler({ withErrors: false })
             assert.strictEqual(held(state).anything, true, `${label}: precondition - an override from a tick made during a sync is held`)
-            // Un-ticked elsewhere. The drain brings it; the settle it queues is held on its one setting read, the first after the drain's events call.
+            // Un-ticked elsewhere. The drain brings it; the settle it queues is held on its gate's setting read, the first after the drain's events call.
+            // With the current profile id kept in memory (2.7.1) the gate reads nothing from the host, so the id is forgotten at the events call, and
+            // the settle's gate makes that one read again.
             Object.assign(state.notes[ticked.id], { todo_completed: 0, user_updated_time: 5000 })
             state.pushChange({ item_id: ticked.id, type: 2 })
             let release
@@ -12991,6 +13112,7 @@ async function main() {
             let holding = false
             state.onEventsCall = async () => {
                 state.onEventsCall = null
+                await forgetProfileID(state)
                 state.onSettingRead = async (key) => {
                     if (key !== 'currentProfileID') return
                     state.onSettingRead = null
@@ -13225,6 +13347,416 @@ async function main() {
         const storeFetches = session.filter(isStoreFetch)
         assert.ok(storeFetches.length > 0 && storeFetches.every(g => !ownReads.includes(g)), 'every fetch by id is the follow-ups\'')
         assert.deepStrictEqual(held(state), NOTHING_HELD, 'and the session ends holding nothing')
+    })
+
+    // ============================================================ to-do cap (2.7.1): a drawing cap for to-dos, the profile id cache, the seed option, dead code
+    // Every group of to-do rows the panel draws stops at TODO_SECTION_BATCH rows (src/core/formats.ts) with the Notes section's footer, and its
+    // "show more" (the showMoreTodos message) widens that group alone, by one batch, for the session (todoSectionLimits in src/ui/panel/panel.ts).
+    // It is a drawing cap: the fetch still returns every to-do, the overview markdown is never capped, and the ring fill neither reads nor owes a
+    // ring the drawing leaves out, so its viewport index counts drawn rows. Group keys: the interval horizon's name, a day's YYYY-MM-DD, 'all' for
+    // basic, 'undated' for every undated group.
+    const TODO_BATCH = 1000
+    const capTodos = (from, count, due, extra) => Array.from({ length: count }, (_, i) => readTodo(from + i,
+        Object.assign({ title: `Cap ${String(from + i).padStart(5, '0')}`, todo_due: typeof due === 'function' ? due(i) : due }, extra || {})))
+    const overdueAt = (i) => Date.now() - 3 * DAY + i * 1000
+    const futureAt = (i) => Date.now() + 3 * 365 * DAY + i * 1000
+    const capProfileRun = async (items, profile, extra) => await readRun(items, Object.assign({
+        initialSettings: { profileData: readProfileData([Object.assign({ name: 'Cap', showNotes: false }, profile || {})]), currentProfileID: 1 },
+    }, extra || {}))
+    // The drawn to-do rows under each heading, in order ("" for rows before any heading: the basic list).
+    const rowsUnder = (state) => {
+        const counts = {}
+        let heading = ''
+        for (const token of readSections(state)){
+            if (token.startsWith('# ')){ heading = token.slice(2); if (!(heading in counts)) counts[heading] = 0; continue }
+            if (token.startsWith('todo ')) counts[heading] = (counts[heading] || 0) + 1
+        }
+        return counts
+    }
+    const todoRowCount = (state) => (String(state.panelHtml['panel-panel'] || '').match(/data-todo-id="/g) || []).length
+    // Every cap footer on the panel, in order: what it says it shows, of how many, and the group its button widens.
+    const capFooters = (state) => [...String(state.panelHtml['panel-panel'] || '').matchAll(
+        /<p class="notes-more-message">Showing the first ([\d,]+) of ([\d,]+) to-dos in this group\.\s*<button type="button" class="notes-more-button" data-todo-group="([^"]*)" onclick="onShowMoreTodosClicked\(this\.dataset\.todoGroup\)">show more<\/button><\/p>/g)]
+        .map(match => `${match[3]}: ${match[1]} of ${match[2]}`)
+    const headingIds = (state, text) => {
+        const match = String(state.panelHtml['panel-panel'] || '').match(new RegExp(`<h2[^>]*data-todo-ids="([^"]*)"[^>]*>${text}</h2>`))
+        return match ? match[1].split(',') : null
+    }
+
+    await test('to-do cap: a group of 1,001 to-dos draws 1,000 with the footer, and "show more" draws the rest and drops it; 1,000 and 999 draw no footer', async () => {
+        const state = await capProfileRun(capTodos(1, 1001, overdueAt))
+        await buildAndRender(state)
+        assert.deepStrictEqual(rowsUnder(state), { Overdue: 1000 }, 'the group draws one batch')
+        assert.deepStrictEqual(capFooters(state), ['Overdue: 1,000 of 1,001'], 'and says so, under the group, keyed by its horizon')
+        assert.ok(state.panelHtml['panel-panel'].includes(`data-todo-id="${storeId(1000)}"`) && !state.panelHtml['panel-panel'].includes(`data-todo-id="${storeId(1001)}"`),
+            'the first 1,000 in the group\'s own order are the ones drawn')
+        const mark = state.gets.length
+        await state.panelMessageHandler(['showMoreTodos', 'Overdue'])
+        assert.deepStrictEqual(rowsUnder(state), { Overdue: 1001 }, '"show more" draws the rest')
+        assert.deepStrictEqual(capFooters(state), [], 'and the footer goes')
+        assert.deepStrictEqual(noteCallsSince(state, mark), [], 'from the store, with no data call: the fetch already had every to-do')
+        for (const count of [1000, 999]){
+            const under = await capProfileRun(capTodos(1, count, overdueAt))
+            await buildAndRender(under)
+            assert.deepStrictEqual(rowsUnder(under), { Overdue: count })
+            assert.ok(!under.panelHtml['panel-panel'].includes('notes-more-message'), `${count} to-dos draw no footer: nothing was left out`)
+        }
+    })
+
+    await test('to-do cap: two capped groups keep their own limits - a "show more" on one widens it alone, and each limit holds across renders', async () => {
+        const state = await capProfileRun(capTodos(1, 1001, overdueAt).concat(capTodos(2001, 2002, 0)))
+        await buildAndRender(state)
+        assert.deepStrictEqual(rowsUnder(state), { 'No Due Date': 1000, Overdue: 1000 }, 'both groups draw one batch')
+        assert.deepStrictEqual(capFooters(state), ['undated: 1,000 of 2,002', 'Overdue: 1,000 of 1,001'], 'each under its own footer and key')
+        await state.panelMessageHandler(['showMoreTodos', 'undated'])
+        assert.deepStrictEqual(rowsUnder(state), { 'No Due Date': 2000, Overdue: 1000 }, 'the undated group takes one more batch, and Overdue none')
+        assert.deepStrictEqual(capFooters(state), ['undated: 2,000 of 2,002', 'Overdue: 1,000 of 1,001'])
+        await state.panelMessageHandler(['showMoreTodos', 'Today'])
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.deepStrictEqual(rowsUnder(state), { 'No Due Date': 2000, Overdue: 1000 }, 'a key no group has widens nothing, and two more renders keep both limits')
+        await state.panelMessageHandler(['showMoreTodos', 'undated'])
+        await state.panelMessageHandler(['showMoreTodos', 'Overdue'])
+        assert.deepStrictEqual(rowsUnder(state), { 'No Due Date': 2002, Overdue: 1001 }, 'and each group is widened by its own button')
+        assert.deepStrictEqual(capFooters(state), [])
+    })
+
+    await test('to-do cap: every format caps its row groups - interval, date, basic, the month\'s undated section and selected day, the week\'s undated section', async () => {
+        const noon = new Date(); noon.setHours(12, 0, 0, 0)
+        const today = toISODateLocal(noon)
+        const inFiveDays = new Date(noon.getTime()); inFiveDays.setDate(inFiveDays.getDate() + 5)
+        const cases = [
+            { label: 'interval', profile: {}, items: capTodos(1, 1001, overdueAt), key: 'Overdue' },
+            { label: 'date', profile: { displayFormat: 'date' }, items: capTodos(1, 1001, (i) => inFiveDays.getTime() + i * 1000), key: toISODateLocal(inFiveDays) },
+            { label: 'basic', profile: { displayFormat: 'basic' }, items: capTodos(1, 1001, overdueAt), key: 'all' },
+            { label: 'month undated', profile: { displayFormat: 'month' }, items: capTodos(1, 1001, 0), key: 'undated' },
+            { label: 'month selected day', profile: { displayFormat: 'month' }, items: capTodos(1, 1001, (i) => noon.getTime() + i * 1000), key: today, select: today },
+            { label: 'week undated', profile: { displayFormat: 'week' }, items: capTodos(1, 1001, 0), key: 'undated' },
+        ]
+        for (const { label, profile, items, key, select } of cases){
+            const state = await capProfileRun(items, profile)
+            await buildAndRender(state)
+            if (select) await state.panelMessageHandler(['calendarDaySelected', select])
+            assert.strictEqual(todoRowCount(state), 1000, `${label}: 1,000 rows drawn`)
+            assert.deepStrictEqual(capFooters(state), [`${key}: 1,000 of 1,001`], `${label}: one footer, keyed "${key}"`)
+            await state.panelMessageHandler(['showMoreTodos', key])
+            assert.strictEqual(todoRowCount(state), 1001, `${label}: "show more" draws the last one`)
+            assert.deepStrictEqual(capFooters(state), [], `${label}: and the footer goes`)
+        }
+    })
+
+    await test('to-do cap: the overview note\'s markdown is not capped - a note is not drawn - while the panel on the same profile is', async () => {
+        const items = capTodos(1, 1001, overdueAt)
+        const state = await run({
+            dataDir: path.join(tmp, 'cap-note-data'),
+            installationDir: path.join(tmp, 'desktop-install'),
+            require: desktopRequire,
+            versionInfo: { version: '3.7.0', platform: 'desktop' },
+            todos: items.map(item => ({ ...item })),
+            initialSettings: { profileData: readProfileData([{ name: 'Cap', showNotes: false, noteID: 'capnote' }]), currentProfileID: 1 },
+            notes: { capnote: { id: 'capnote', title: 'Overview', body: 'stale' } },
+        })
+        const put = state.notePuts.filter(p => p.id === 'capnote').pop()
+        assert.ok(put, 'precondition: the overview note was written')
+        assert.strictEqual((put.body.match(/^- \[ \] \[/gm) || []).length, 1001, 'every to-do is in the note')
+        assert.ok(!put.body.includes('notes-more') && !put.body.includes('Showing the first'), 'with no footer')
+        assert.strictEqual(todoRowCount(state), 1000, 'while the panel draws one batch')
+    })
+
+    await test('to-do cap: a capped heading\'s data-todo-ids names the drawn rows only, so its context menu acts on what is on screen', async () => {
+        const state = await capProfileRun(capTodos(1, 1001, overdueAt))
+        await buildAndRender(state)
+        const drawn = readSections(state).filter(token => token.startsWith('todo ')).map(token => token.slice(5))
+        assert.deepStrictEqual(headingIds(state, 'Overdue'), drawn, 'the heading lists exactly the drawn rows, in order')
+        assert.strictEqual(drawn.length, 1000)
+        assert.ok(!headingIds(state, 'Overdue').includes(storeId(1001)), 'and not the row the cap left out')
+        await state.panelMessageHandler(['showMoreTodos', 'Overdue'])
+        assert.strictEqual(headingIds(state, 'Overdue').length, 1001, 'once drawn, it is listed')
+    })
+
+    await test('to-do cap: the ring fill counts drawn rows - priorityStart indexes the drawn list, and a row the cap leaves out is neither read nor owed', async () => {
+        // Overdue holds 1,300 to-dos, of which 1,000 are drawn; Future's 400 follow them, drawn from index 1,000. Every to-do has a body, so every
+        // ring is read once, 300 per render.
+        const items = capTodos(1, 1300, overdueAt, { body: '- [ ] a' }).concat(capTodos(2001, 400, futureAt, { body: '- [x] a' }))
+        const cut = new Set(items.slice(1000, 1300).map(item => item.id))
+        const state = await capProfileRun(items)
+        await buildAndRender(state)
+        assert.deepStrictEqual(rowsUnder(state), { Overdue: 1000, Future: 400 }, 'precondition: Overdue is capped and Future drawn whole')
+        const bodyReadIds = (from) => state.gets.slice(from).filter(isBodyRead).map(g => g.path[1])
+        assert.ok(bodyReadIds(0).length > 0, 'precondition: the first renders read rings')
+        // The panel is scrolled to the 1,100th drawn row (estimateFirstVisibleIndex in panel.ts: 40 px a row, two rows of slack).
+        const nonce = Number(String(state.panelHtml['panel-panel']).match(/data-render-nonce="(\d+)"/)[1])
+        await state.panelMessageHandler(['scrollChanged', (1100 + 2) * 40, nonce])
+        const mark = state.gets.length
+        await storeTick(state)
+        const read = bodyReadIds(mark)
+        assert.strictEqual(read.length, 300, 'the tick reads one cap of bodies')
+        assert.strictEqual(read[0], storeId(2001 + 100), 'the first is the 1,100th DRAWN row - Future\'s 101st - not the 1,100th fetched, which the cap left out')
+        assert.deepStrictEqual(read, items.slice(1400, 1700).map(item => item.id), 'and the rest follow it down the drawn list')
+        for (let n = 1; n <= 10 && tickCost(lastTick(state), ['renders']).renders > 0; n++) await withLaterNow(n * 60000, () => storeTick(state))
+        assert.deepStrictEqual(tickCost(lastTick(state), ['renders']), { renders: 0 }, 'the ticks go idle once every drawn ring is read')
+        const everRead = new Set(bodyReadIds(0))
+        assert.strictEqual([...cut].filter(id => everRead.has(id)).length, 0, 'not one ring the cap left out was read')
+        assert.strictEqual(items.filter(item => !cut.has(item.id) && !everRead.has(item.id)).length, 0, 'and every drawn one was')
+        assert.ok(state.panelHtml['panel-panel'].includes(`data-todo-id="${storeId(2400)}"`) && /data-todo-id="e+00002400"[\s\S]*?title="1\/1 checkboxes done/.test(state.panelHtml['panel-panel']),
+            'the last drawn row shows its ring')
+    })
+
+    await test('to-do cap: a typed search is capped the same way - drawing is drawing, whichever route read the rows', async () => {
+        const state = await capProfileRun(capTodos(1, 1001, overdueAt))
+        await buildAndRender(state)
+        const mark = state.gets.length
+        await state.panelMessageHandler(['searchFilterChanged', 'Cap'])
+        assert.ok(searchesSince(state, mark).length > 0, 'precondition: the typed text went to the search')
+        assert.deepStrictEqual(rowsUnder(state), { Overdue: 1000 }, 'the searched group draws one batch')
+        assert.deepStrictEqual(capFooters(state), ['Overdue: 1,000 of 1,001'], 'with the same footer')
+        await state.panelMessageHandler(['showMoreTodos', 'Overdue'])
+        assert.deepStrictEqual(rowsUnder(state), { Overdue: 1001 }, 'and the same "show more"')
+    })
+
+    // The draw budget (TODO_DRAW_BUDGET in src/core/formats.ts): when the groups the user has not widened would draw more than 2,000 rows between
+    // them, each draws max(100, floor(2,000 / non-empty groups)), never over its own limit; a widened group draws what "show more" asked for.
+    // The date format makes one group per day, so any number of groups is a matter of dates.
+    const dayAt = (days) => { const day = new Date(); day.setHours(12, 0, 0, 0); day.setDate(day.getDate() + days); return day }
+    const dayGroups = (sizes) => {
+        let n = 0
+        return sizes.flatMap((size, index) => capTodos(10000 * (index + 1), size, (i) => dayAt(index + 2).getTime() + i * 1000, { title: `Day ${index + 2} todo ${String(n++).padStart(5, '0')}` }))
+    }
+    const footersByKey = (state) => Object.fromEntries(capFooters(state).map(footer => footer.split(': ')))
+
+    await test('to-do cap: the draw budget - ten groups of 1,000 draw 200 each, each with its footer; "show more" on one draws 1,200 of it and leaves the others at 200; the Notes cap is independent', async () => {
+        const sizes = [1500, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000]
+        const notes = Array.from({ length: 1001 }, (_, i) => readNote(500000 + i))
+        const state = await capProfileRun(dayGroups(sizes).concat(notes), { displayFormat: 'date', showNotes: true })
+        await buildAndRender(state)
+        const keys = sizes.map((_, index) => toISODateLocal(dayAt(index + 2)))
+        const counts = () => Object.values(rowsUnder(state)).filter((_, index, all) => index < all.length - 1)
+        assert.strictEqual(todoRowCount(state), 2000, 'the budget: 2,000 to-do rows in all')
+        assert.deepStrictEqual(counts(), sizes.map(() => 200), 'ten groups, 200 each')
+        assert.deepStrictEqual(footersByKey(state), Object.fromEntries(keys.map((key, index) => [key, `200 of ${sizes[index].toLocaleString('en-US')}`])),
+            'ten footers, each saying what its group shows')
+        assert.strictEqual(noteRows(state), 1000, 'the Notes section keeps its own cap of 1,000, outside the to-do budget')
+        assert.ok(state.panelHtml['panel-panel'].includes('Showing the 1,000 most recently updated notes'), 'with its own footer')
+        await state.panelMessageHandler(['showMoreTodos', keys[0]])
+        assert.deepStrictEqual(counts(), [1200].concat(sizes.slice(1).map(() => 200)), '"show more" adds a batch to what the group showed: 1,200, and the others stay at 200')
+        assert.strictEqual(footersByKey(state)[keys[0]], '1,200 of 1,500', 'its footer follows')
+        assert.strictEqual(noteRows(state), 1000, 'and the Notes section is untouched')
+        await state.panelMessageHandler(['showMoreTodos', keys[0]])
+        assert.deepStrictEqual(counts(), [1500].concat(sizes.slice(1).map(() => 200)), 'the next click draws the rest of it, whatever the budget')
+        assert.ok(!(keys[0] in footersByKey(state)), 'and its footer goes')
+    })
+
+    await test('to-do cap: the draw budget\'s equal share binds only past 2,000 rows - three groups of 600 are untouched, three of 700 draw 666 each - and every group counts at one batch, widened or not, so widening one never changes another', async () => {
+        const untouched = await capProfileRun(dayGroups([600, 600, 600]), { displayFormat: 'date' })
+        await buildAndRender(untouched)
+        assert.strictEqual(todoRowCount(untouched), 1800, '1,800 rows is under the budget: every row is drawn')
+        assert.deepStrictEqual(capFooters(untouched), [], 'and no footer')
+        const bound = await capProfileRun(dayGroups([700, 700, 700]), { displayFormat: 'date' })
+        await buildAndRender(bound)
+        assert.deepStrictEqual(Object.values(rowsUnder(bound)), [666, 666, 666], '2,100 rows is over it: floor(2,000 / 3) each')
+        assert.strictEqual(capFooters(bound).length, 3)
+        // A widened group draws what the user asked for and takes no part in the sum, so widening one never narrows another: 1,000 + 800 + 100 is
+        // under the budget, and it stays under once the first group is widened to 1,500 rows.
+        const widened = await capProfileRun(dayGroups([1500, 800, 100]), { displayFormat: 'date' })
+        await buildAndRender(widened)
+        assert.deepStrictEqual(Object.values(rowsUnder(widened)), [1000, 800, 100], 'precondition: under the budget, the first group capped at its batch')
+        await widened.panelMessageHandler(['showMoreTodos', toISODateLocal(dayAt(2))])
+        assert.deepStrictEqual(Object.values(rowsUnder(widened)), [1500, 800, 100], 'the widened group draws all 1,500, and the 800 keep their rows')
+        // A click on the first group draws all of it and leaves the others exactly where they were, because the widened group still counts at one batch:
+        // counted at what it drew before (666), the sum would drop and could stop the budget binding; counted at its new limit, it would grow.
+        for (const [sizes, before, after] of [
+            [[1000, 1000, 1000], [666, 666, 666], [1000, 666, 666]],
+            [[1000, 900, 400], [666, 666, 400], [1000, 666, 400]],
+            [[1000, 667, 667], [666, 666, 666], [1000, 666, 666]],
+        ]){
+            const label = sizes.join(' / ')
+            const three = await capProfileRun(dayGroups(sizes), { displayFormat: 'date' })
+            await buildAndRender(three)
+            assert.deepStrictEqual(Object.values(rowsUnder(three)), before, `${label}: precondition - the share`)
+            await three.panelMessageHandler(['showMoreTodos', toISODateLocal(dayAt(2))])
+            assert.deepStrictEqual(Object.values(rowsUnder(three)), after, `${label}: the widened group whole, every other group as before`)
+            assert.ok(!(toISODateLocal(dayAt(2)) in footersByKey(three)), `${label}: and the widened group's footer goes`)
+        }
+    })
+
+    const laterFooter = (state) => {
+        const found = String(state.panelHtml['panel-panel'] || '').match(/<p class="notes-more-message">([\d,]+ more to-dos? in [\d,]+ later groups?\.)\s*<button type="button" class="notes-more-button" onclick="onShowMoreTodoGroupsClicked\(\)">show more<\/button><\/p>/g) || []
+        return found.map(match => match.replace(/^<p class="notes-more-message">/, '').replace(/\s*<button[\s\S]*$/, ''))
+    }
+
+    await test('to-do cap: past 20 groups the budget draws whole groups in order - 180 days of 44 draw 45 days, then one trailing footer for the rest, whose "show more" draws the next 2,000 rows\' worth; 25 groups of 101 draw 19; eight interval horizons still take the equal share', async () => {
+        const days = await capProfileRun(dayGroups(Array.from({ length: 180 }, () => 44)), { displayFormat: 'date' })
+        await buildAndRender(days)
+        const drawnDays = () => Object.values(rowsUnder(days))
+        assert.strictEqual(drawnDays().length, 45, '45 whole days: 1,980 rows, and the 46th would pass 2,000')
+        assert.ok(drawnDays().every(count => count === 44), 'each of them whole')
+        assert.deepStrictEqual(capFooters(days), [], 'no group has a footer of its own')
+        assert.deepStrictEqual(laterFooter(days), ['5,940 more to-dos in 135 later groups.'], 'one footer stands in for the 135 days left out')
+        assert.ok(new RegExp(`data-todo-id="${storeId(10000 * 45 + 43)}"[\\s\\S]*?</div>\\s*<p class="notes-more-message">\\d`).test(days.panelHtml['panel-panel']), 'right after the last drawn row')
+        await days.panelMessageHandler(['showMoreTodoGroups'])
+        assert.strictEqual(drawnDays().length, 90, '"show more" raises the budget by 2,000 for the session: 90 whole days, 3,960 rows')
+        assert.deepStrictEqual(laterFooter(days), ['3,960 more to-dos in 90 later groups.'])
+        await days.panelMessageHandler(['sortDirectionClicked'])
+        await days.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(drawnDays().length, 90, 'and it holds across renders')
+        const many = await capProfileRun(dayGroups(Array.from({ length: 25 }, () => 101)), { displayFormat: 'date' })
+        await buildAndRender(many)
+        assert.deepStrictEqual(Object.values(rowsUnder(many)), Array.from({ length: 19 }, () => 101), '25 groups is past 20: 19 whole groups, 1,919 rows')
+        assert.deepStrictEqual(laterFooter(many), ['606 more to-dos in 6 later groups.'])
+        // The interval view's eight horizons: a handful of groups, each worth a share.
+        const plan = Horizons.horizonPlan(Date.now(), 1)
+        const noonOf = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d, 12).getTime() }
+        const dues = [overdueAt, (i) => 0, (i) => futureAt(i)].concat(plan.sections.map(section => (i) => noonOf(section.dropDate) + i * 1000))
+        const horizons = await capProfileRun(dues.flatMap((due, index) => capTodos(10000 * (index + 1), 400, due)))
+        await buildAndRender(horizons)
+        assert.strictEqual(Object.keys(rowsUnder(horizons)).length, 8, 'precondition: eight horizons')
+        assert.ok(Object.values(rowsUnder(horizons)).every(count => count === 250), '3,200 rows over eight groups: 250 each, the equal share')
+        assert.strictEqual(capFooters(horizons).length, 8, 'each with its own footer')
+        assert.deepStrictEqual(laterFooter(horizons), [], 'and no trailing one')
+    })
+
+    await test('to-do cap: one grouping pass per render - the ring fill\'s question and the drawing share it, while a capped group leaves rings unread', async () => {
+        // The date format's headings are its costly part (a locale date per to-do). A capped group's rows past the cap are never read, so the ring fill
+        // asks which rows the drawing leaves out on every full render; it and the drawing group the same list once between them.
+        const state = await capProfileRun(capTodos(1, 1500, (i) => dayAt(3).getTime() + i * 1000, { body: '- [ ] a' }), { displayFormat: 'date' })
+        await buildAndRender(state)
+        assert.strictEqual(todoRowCount(state), 1000, 'precondition: capped')
+        const before = state.instrument.groupings()
+        const reads = state.gets.length
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.ok(state.gets.slice(reads).some(isBodyRead), 'precondition: the render read rings, so the fill asked its question')
+        assert.strictEqual(state.instrument.groupings() - before, 1, 'one full render, one grouping pass')
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(state.instrument.groupings() - before, 2, 'and one more for the next')
+    })
+
+    await test('to-do cap: the gap below a capped group\'s last drawn row is inert on both drags - the rows the cap left out follow it, and a drop there would vanish', async () => {
+        const state = await capProfileRun(capTodos(1, 1001, overdueAt))
+        await buildAndRender(state)
+        assert.ok(new RegExp(`data-todo-id="${storeId(1000)}"[\\s\\S]*?</div>\\s*<p class="notes-more-message">`).test(state.panelHtml['panel-panel']),
+            'the cap footer is the next sibling of the last drawn row')
+        const follows = handlerBody('capFooterFollows')
+        assert.ok(follows.includes('row.nextElementSibling') && follows.includes("classList.contains('notes-more-message')"), 'which is what the webview asks')
+        assert.ok(follows.includes("next.querySelector('[data-todo-group]')"), 'of a group\'s own footer only: below the trailing footer of whole groups left out, the group above is whole, and its end takes drops')
+        const target = handlerBody('betweenTargetAt')
+        const bottom = target.slice(target.indexOf('rect.height * (1 - BETWEEN_BAND)'))
+        assert.ok(bottom.indexOf('if (capFooterFollows(row)) return null') >= 0 && bottom.indexOf('if (capFooterFollows(row)) return null') < bottom.indexOf('before: false'),
+            'the desktop drag: the bottom band of that row answers no target')
+        assert.ok(!target.slice(0, target.indexOf('rect.height * (1 - BETWEEN_BAND)')).includes('capFooterFollows'), 'and its top band is untouched')
+        assert.ok(handlerBody('resolveDragTarget').includes("if (!before && capFooterFollows(entry.el)) return dragTargetNone('cap-edge')"),
+            'the touch drag: the same gap is a named refusal')
+    })
+
+    await test('profile id cache: with the id known, the gate reads nothing from the host - not an ask, not a whole store-path action - and a switch writes it through', async () => {
+        const state = await readRun(readMix(), { initialSettings: { profileData: readProfileData([{ name: 'One' }, { name: 'Two' }]), currentProfileID: 1 } })
+        await buildAndRender(state)
+        let reads = 0
+        state.onSettingRead = async (key) => { if (key === 'currentProfileID') reads++ }
+        for (let ask = 0; ask < 4; ask++) assert.strictEqual(await state.triggers.storeServesAction(), true, 'precondition: store-served')
+        assert.strictEqual(reads, 0, 'four asks of the gate: no host read')
+        const timerMark = state.timeouts.length
+        await state.panelMessageHandler(['todoChecked', storeId(2), true])
+        assert.strictEqual(laddersArmedSince(state, timerMark), 0, 'precondition: the tick took the store path, asking the gate around its render')
+        assert.strictEqual(reads, 0, 'a whole store-path action: no host read')
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.strictEqual(state.settings.currentProfileID, 2, 'the switch wrote the host')
+        assert.ok(state.panelHtml['panel-panel'].includes(`class="dropdown-item -current" onclick="onDropdownItemClicked(event, 'profilesDropdownChanged', '2')"`), 'and the panel draws the new profile')
+        assert.strictEqual(reads, 0, 'from the id written through: nothing read it back')
+        state.onSettingRead = null
+        const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'settings.ts'), 'utf8')
+        assert.strictEqual((source.match(/settings\.value\("currentProfileID"\)/g) || []).length, 1, 'the one host read of the setting is getCurrentProfileID\'s, behind the cache')
+    })
+
+    await test('profile id cache: forgotten when the settings change handler hears of the key, and when the profiles are replaced wholesale - the next ask reads the host once, the one after nothing', async () => {
+        const syncBodyText = syncBody(syncStore(2, [syncProfile(1, 'Synced view')]), syncSettings())
+        const state = await readRun([readTodo(1), readNote(2), syncNoteFixture(syncBodyText)], { initialSettings: {
+            settingsNoteId: SYNC_NOTE_ID, profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Synced view')])), currentProfileID: 1,
+        } })
+        await buildAndRender(state)
+        let reads = 0
+        state.onSettingRead = async (key) => { if (key === 'currentProfileID') reads++ }
+        await allStoreServed(state)
+        assert.strictEqual(reads, 0, 'precondition: known')
+        await forgetProfileID(state)
+        await allStoreServed(state)
+        assert.strictEqual(reads, 1, 'the change handler heard of the key: the next ask reads the host')
+        await allStoreServed(state)
+        assert.strictEqual(reads, 1, 'and the one after it reads nothing')
+        // The other device renames the profile and adds one; the sync brings the note, and the apply replaces the profiles wholesale.
+        state.notes[SYNC_NOTE_ID].body = syncBody(syncStore(3, [syncProfile(1, 'Renamed there'), syncProfile(2, 'Made there')]), syncSettings())
+        state.notes[SYNC_NOTE_ID].updated_time = 11
+        reads = 0
+        await state.syncStartHandler()
+        await state.syncCompleteHandler({ withErrors: false })
+        assert.deepStrictEqual(syncProfileNames(state), ['Renamed there', 'Made there'], 'precondition: the profiles were replaced')
+        assert.strictEqual(reads, 1, 'the replace forgot the id: read once, by the replace itself, and by nothing else in the sync')
+        await allStoreServed(state)
+        assert.strictEqual(reads, 1, 'and the next ask reads nothing')
+        state.onSettingRead = null
+    })
+
+    await test('move version gate: Joplin\'s own moveToFolder on the store path arms the ladder on an app older than 3.5.9 and not from 3.5.9 on; the version is read once per session, and one that cannot be read keeps the ladder', async () => {
+        // The command as 3.6.14 runs it: the move is made before execute answers, and its feed row lands with it.
+        const moveTwice = async (versionInfo) => {
+            const state = await readRun([readTodo(1), readTodo(2), readNote(3)], { versionInfo })
+            await buildAndRender(state)
+            state.commands.push({ name: 'moveToFolder', execute: async (ids) => {
+                for (const id of ids){ state.notes[id].parent_id = readSub; state.pushChange({ item_id: id, type: 2 }) }
+            } })
+            const versionReads = state.versionInfoCalls
+            const rungs = []
+            for (const id of [storeId(1), storeId(2)]){
+                const timerMark = state.timeouts.length
+                await state.panelMessageHandler(['moveToNotebookClicked', [id]])
+                assert.strictEqual(pillOf(state, id), readSub, `${versionInfo.version}: the action's own render shows the move, whatever the version`)
+                rungs.push(state.timeouts.slice(timerMark).filter(t => RECONCILE_OFFSETS.includes(t.ms)).map(t => t.ms))
+            }
+            assert.deepStrictEqual(held(state), NOTHING_HELD, `${versionInfo.version}: nothing held`)
+            return { rungs, versionReads: state.versionInfoCalls - versionReads }
+        }
+        for (const version of ['3.5.9', '3.6.14', '3.7.0', '4.0.0']){
+            const moved = await moveTwice({ version, platform: 'desktop' })
+            assert.deepStrictEqual(moved.rungs, [[], []], `${version}: the command awaited its move, so no rung is armed`)
+            assert.strictEqual(moved.versionReads, 1, `${version}: and the version was read once, for both moves`)
+        }
+        for (const version of ['3.5.7', '3.0.15', '2.9.17']){
+            const moved = await moveTwice({ version, platform: 'desktop' })
+            assert.deepStrictEqual(moved.rungs, [RECONCILE_OFFSETS, RECONCILE_OFFSETS], `${version}: the ladder is armed, blind, for an app that lands the write after the command has returned`)
+            assert.strictEqual(moved.versionReads, 1, `${version}: the version was read once`)
+        }
+        const unknown = await moveTwice({ version: 'dev', platform: 'desktop' })
+        assert.deepStrictEqual(unknown.rungs, [RECONCILE_OFFSETS, RECONCILE_OFFSETS], 'a version that cannot be read keeps the ladder')
+    })
+
+    await test('perf seed: PERF_TODOS is an e2e-only option - the seed takes it, keeps the default template name without it, and nothing in src/ reads it', async () => {
+        const spec = fs.readFileSync(path.join(__dirname, '..', 'e2e', 'perf-large-vault.spec.ts'), 'utf8')
+        assert.ok(spec.includes('const TODOS = TODOS_SET ? Number(process.env.PERF_TODOS) : Math.round(NOTES * 0.05);'), 'the count, 5% of the notes by default')
+        assert.ok(spec.includes('const SEED_NAME = TODOS_SET ? `${NOTES}-t${TODOS}` : `${NOTES}`;'), 'a template of its own only when set')
+        assert.ok(spec.includes("const TEMPLATE = path.join(PROFILES_ROOT, `perf-template-${SEED_NAME}`);"), 'so the default template, perf-template-<N>, is reused')
+        assert.ok(spec.includes('const due = t % 5 < 2 ? Date.now() - (1 + (t % 90)) * day : t % 5 < 4 ? Date.now() + (1 + (t % 90)) * day : 0;') &&
+            spec.includes('const completed = t % 3 === 0 ? Date.now() - day : 0;'), 'with the same mix: 40% overdue, 40% upcoming, 20% undated, a third completed')
+        const offenders = []
+        const walk = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })){
+                const full = path.join(dir, entry.name)
+                if (entry.isDirectory()) walk(full)
+                else if (/PERF_/.test(fs.readFileSync(full, 'utf8'))) offenders.push(path.relative(path.join(__dirname, '..'), full))
+            }
+        }
+        walk(path.join(__dirname, '..', 'src'))
+        assert.deepStrictEqual(offenders, [], 'no product source mentions a perf option')
+    })
+
+    await test('dead code: the sort-field and three profile-button handlers the 2.8 survey found are gone from the webview, and the live routes they shadowed remain', async () => {
+        for (const name of ['onSortFieldClicked', 'sortFieldClicked', 'onCreateProfileClicked', 'onEditProfileClicked', 'onDeleteProfileClicked']){
+            assert.ok(!webviewSource.includes(name), `${name} is gone from panelWebview.js`)
+        }
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        assert.ok(panelSource.includes("message[0] == 'sortFieldSelected'") && webviewSource.includes("'sortFieldSelected'"), 'the sort field is still chosen through its menu')
+        for (const message of ['createProfileClicked', 'editProfileClicked', 'deleteProfileClicked']){
+            assert.ok(new RegExp(`onDropdown(?:Action|Item)Clicked\\(event, '${message}'`).test(panelSource), `${message} is still posted by the profile menu`)
+            assert.ok(panelSource.includes(`message[0] == '${message}'`), `and still handled`)
+        }
     })
 
     await fs.remove(tmp)

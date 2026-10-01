@@ -41,6 +41,18 @@ export function countPaint(){
     counters.paints++
 }
 
+/** countGroupingPass (2.7.1) ***********************************************************************************************************************
+ * One pass of a format grouping its to-dos for the panel (memoLayout in formats.ts): the headings or days of every to-do, and each group's limit   *
+ * under the drawing cap and budget. The ring fill asks which rows the cap leaves out before the drawing groups the same list, and the two share    *
+ * one pass; this counts the passes, so a check can hold a render to one. Kept beside the counters rather than in them, so snapshot() and the per-  *
+ * tick record keep the keys they always had; published on the handle below as groupings().                                                         *
+ ***************************************************************************************************************************************************/
+var groupingPasses = 0
+
+export function countGroupingPass(){
+    groupingPasses++
+}
+
 /** snapshot / delta *******************************************************************************************************************************/
 export function snapshot(){
     return { search: counters.search, listing: counters.listing, get: counters.get, put: counters.put, post: counters.post, del: counters.del, bodies: counters.bodies, events: counters.events, folders: counters.folders, tags: counters.tags, renders: counters.renders, paints: counters.paints }
@@ -151,8 +163,9 @@ export function markStoreBuildEnd(notes){
 }
 
 /** The inspection handle **************************************************************************************************************************/
-// snapshot() is the counters as they always were, with storeHeap beside them (2.7); ticks() is unchanged.
+// snapshot() is the counters as they always were, with storeHeap beside them (2.7); ticks() is unchanged; groupings() is 2.7.1's grouping passes.
 ;(globalThis as any).CockpitInstrument = Object.freeze({
     snapshot: () => ({ ...snapshot(), storeHeap: { ...storeHeap } }),
     ticks: () => tickHistory.map(entry => ({ ...entry })),
+    groupings: () => groupingPasses,
 })

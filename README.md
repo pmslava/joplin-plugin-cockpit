@@ -73,7 +73,7 @@ Cockpit needs Joplin 2.9 or newer on desktop and 3.3 or newer on mobile.
 
 Both calendar views keep undated to-dos in their own "No Due Date" section beneath, so a calendar never silently drops them. Arrows step a month or a week, and clicking the title returns to today; where you navigated to lasts for the session and is not written into the profile.
 
-Regular notes appear in their own "Notes" group, before or after the to-dos, per profile. Dates, weekdays and times are rendered in your own locale, and each profile chooses the shape: year 2022 or 22, month January / Jan / J / 01, day 9 or 09, weekday Monday / Mon / M, and 24-hour or AM/PM.
+Regular notes appear in their own "Notes" group, before or after the to-dos, per profile. On a large collection each group draws only its first rows — the Notes group its 1,000 most recently updated notes, each group of to-dos its first 1,000 in its own order, and all the to-do groups together at most 2,000 rows (the week planner's day columns aside): an equal share each when there are a few large groups, whole groups in order when there are many, with one line saying how many more to-dos the later groups hold — and a "show more" button under each that adds the next 1,000 rows, or the next 2,000 rows' worth of groups. Dates, weekdays and times are rendered in your own locale, and each profile chooses the shape: year 2022 or 22, month January / Jan / J / 01, day 9 or 09, weekday Monday / Mon / M, and 24-hour or AM/PM.
 
 ## Due dates
 

@@ -55,6 +55,7 @@ function makeJoplin(options) {
         onStart: null,
         panelMessageHandler: null,
         setHtmlCalls: 0,
+        versionInfoCalls: 0,
         // An ordered log of the events the fast-first-paint checks care about: a panel paint ('setHtml'), a
         // checkbox-count note-body fetch ('bodyFetch', a ['notes', id] GET asking only for the body) and a call of
         // the change feed ('events', the note store's route). Recording them in one sequence lets a test assert a
@@ -198,7 +199,8 @@ function makeJoplin(options) {
             register: async (type, id, scriptPath) => { state.contentScripts.push({ type, id, scriptPath }) },
             onMessage: async (id, handler) => { state.contentScriptHandlers[id] = withTimerCapture(handler) },
         },
-        versionInfo: async () => options.versionInfo,
+        // Counted, so a check can pin how often the plugin asks (the move command's version gate reads it once per session, 2.7.1).
+        versionInfo: async () => { state.versionInfoCalls++; return options.versionInfo },
         settings: {
             registerSection: async () => {},
             registerSettings: async (defs) => {

@@ -7,6 +7,7 @@
 import joplin from "api";
 import { getTodos, getNotes, getExcludedNotebookIdSet, getNotebookMap, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks, viewCriteria } from "./joplin";
 import { viewKeyFor } from "./optimistic";
+import { countGroupingPass } from "./instrument";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
 import {
     CalendarViewState,
@@ -27,6 +28,87 @@ import {
 const { horizonPlan, horizonOf, kindOf, dropDateFor, dropEndDateFor } = require("./horizons");
 
 export { escapeHtml } from "./html";
+
+/** TODO_SECTION_BATCH (2.7.1) **********************************************************************************************************************
+ * How many to-do rows one group of the panel draws before its "show more" footer, and how many more each click on that footer adds. Drawing is the *
+ * last thing a large collection can hang Joplin with once the data is cheap (2.7's note store): measured on 20,000 notes + 1,000 to-dos in         *
+ * e2e/perf-large-vault.spec.ts, 21,000 rows drawn took 21.7 s to paint with 55 s of main-window lag over two and a half minutes, while 2,000 rows  *
+ * painted in 8.5 s with under 2 s of lag. The Notes section has been capped at 1,000 rows since 2.6.3 (NOTES_BATCH in panel.ts); the to-do side    *
+ * had no cap at all, so a profile showing thousands of to-dos drew every one of them. 2.7.1 caps it at the same size, per group, instead of the    *
+ * virtualised list (docs/BRIEF-2.8-virtualised-list.md, shelved by Slava's decision).                                                              *
+ *                                                                                                                                                  *
+ * A DRAWING cap only. The fetch still returns every to-do (the store answers the whole set cheaply, and a filtered to-do search still pages to its *
+ * end, since the search is the one route that understands the query); the cap applies where the rows are drawn, per group, keeping each group's    *
+ * first rows in its own order. The overview notes (outputFormat 'markdown') are never capped: a note is not drawn. The host keeps a per-session    *
+ * limit per group key (todoSectionLimits in panel.ts); a group with no entry draws this many.                                                      *
+ ***************************************************************************************************************************************************/
+export const TODO_SECTION_BATCH = 1000
+
+/** TODO_DRAW_BUDGET (2.7.1) ************************************************************************************************************************
+ * How many to-do rows one render draws in all, beneath the per-group cap. The cap alone bounds each group, not their sum: the perf run with 20,000 *
+ * notes and 10,000 to-dos on the interval view (perf-template-20000-t10000) drew Overdue, This Month, This Year and No Due Date at 1,000 each plus *
+ * 1,000 notes, 5,112 rows, and missed every target - first paint 27.4 s, 9.65 s of main-window lag over 150 s, two stalls with a 1.27 s gap. A     *
+ * scratch build at 250 per group drew 2,112 rows: first paint 23.8 s, 3.85 s of lag, no stall, the longest gap 0.53 s. With this budget the rerun  *
+ * drew 2,712 rows (400 in each of Overdue, This Month, This Year and No Due Date, 112 in This Week, 1,000 notes): first paint 19.2 s, 3.58 s of    *
+ * lag, no stall.                                                                                                                                   *
+ *                                                                                                                                                  *
+ * TWO SHAPES, because groups come in two kinds. A handful of horizons (the interval view's eight at most, the month's selected day and its undated *
+ * section) each deserve a share: up to TODO_DRAW_BUDGET / TODO_DRAW_FLOOR (20) non-empty groups, when the groups would draw more than the budget   *
+ * between them, each draws floor(budget / groups) - never under TODO_DRAW_FLOOR, since there are at most 20 - never over its own limit, and says   *
+ * so in its own footer. A long chronological run of days (the date view over a year of to-dos) reads best cut at a point: past 20 groups, the      *
+ * groups are drawn in order, whole up to their own limits, until the next one would take the count past the budget, and every group from there on  *
+ * is left out under one trailing footer, "N more to-dos in M later groups.", whose "show more" raises the panel's budget by one budget for the     *
+ * session. So without a "show more", the rows of one render's to-do groups never pass the budget, in every format: every group of the list         *
+ * formats, the month's selected day and the calendars' undated sections; the week planner's seven day columns are cards bounded by their day and   *
+ * drawn whole, outside it.                                                                                                                         *
+ *                                                                                                                                                  *
+ * A group the user widened with "show more" draws what they asked for. Against the budget it counts at one batch, as every group does whether      *
+ * widened or not, so a click moves neither the sum nor the share nor the order shape's cut, and widening one group never shrinks or grows another. *
+ * The Notes section has its own cap and plays no part in this.                                                                                     *
+ ***************************************************************************************************************************************************/
+export const TODO_DRAW_BUDGET = 2000
+// The smallest share a group is given; with it, the most groups the equal share is for (TODO_DRAW_BUDGET / TODO_DRAW_FLOOR, 20).
+const TODO_DRAW_FLOOR = 100
+
+/** sameItems ***************************************************************************************************************************************
+ * Whether two lists hold the very same items in the same order - the test memoLayout keeps its layouts by, so one render groups its list once.     *
+ ***************************************************************************************************************************************************/
+function sameItems(first, second){
+    if (!first || !second || first.length !== second.length) return false
+    for (var index = 0; index < first.length; index++){
+        if (first[index] !== second[index]) return false
+    }
+    return true
+}
+
+/** formatCount *************************************************************************************************************************************
+ * 1000 as "1,000". Written out rather than left to toLocaleString, so the footer reads the same on every device whatever its locale.               *
+ ***************************************************************************************************************************************************/
+function formatCount(value){
+    return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+}
+
+/** renderTodoCapFooter (2.7.1) *********************************************************************************************************************
+ * The footer a capped to-do group draws after its last drawn row: the Notes section's footer in shape and classes (p.notes-more-message with a     *
+ * button.notes-more-button), so it is styled by the rules that already exist and nothing new is. The button carries the group's key in a data      *
+ * attribute rather than inside the inline handler's string, so a key never has to be escaped into JavaScript; the webview posts it back as         *
+ * showMoreTodos, and the host widens that group alone.                                                                                             *
+ ***************************************************************************************************************************************************/
+function renderLaterGroupsFooter(later){
+    var todos = `${formatCount(later.todos)} more to-do${later.todos === 1 ? "" : "s"}`
+    var groups = `${formatCount(later.groups)} later group${later.groups === 1 ? "" : "s"}`
+    return `
+                <p class="notes-more-message">${todos} in ${groups}.
+                    <button type="button" class="notes-more-button" onclick="onShowMoreTodoGroupsClicked()">show more</button></p>
+            `
+}
+
+function renderTodoCapFooter(groupKey, shown, total){
+    return `
+                <p class="notes-more-message">Showing the first ${formatCount(shown)} of ${formatCount(total)} to-dos in this group.
+                    <button type="button" class="notes-more-button" data-todo-group="${escapeHtml(groupKey)}" onclick="onShowMoreTodosClicked(this.dataset.todoGroup)">show more</button></p>
+            `
+}
 
 /** renderTodoRowHtml *******************************************************************************************************************************
  * The markup for a single to-do row: a progress-ringed checkbox that completes it, a title link that opens it, and its notebook pill. Shared by      *
@@ -182,6 +264,30 @@ abstract class BaseFormat {
     public async getTodos(){
         var todoString = ""
         var todoList = await this.fetchTodos()
+        var layout = this.listLayout(todoList)
+        if (this.outputFormat === "html") this.drawnTodoLimits = layout.limits
+        for (var index = 0; index < layout.shownGroups; index++){
+            var group = layout.groups[index]
+            var heading = group.heading
+            // The panel draws at most its limit of each group (the cap and the budget, see planTodoDraw); the heading's data-todo-ids names the DRAWN
+            // rows only, so its context menu acts on what the user sees, and the footer says the rest exists. The markdown output takes the whole group.
+            var capped = this.capTodoGroup(group.key, group.todos, layout.limits)
+            todoString += this.getHeadingString(heading, this.getHeadingDropTarget(heading, group.todos), capped.drawn.map(todo => todo.id), this.getHeadingDropEnd(heading, group.todos))
+            for (var todo of capped.drawn){
+                todoString += this.getTodoString(todo, heading)
+            }
+            todoString += capped.footer
+        }
+        // The groups past the budget's cut (the order shape of planTodoDraw) are not drawn at all; one footer stands in for them.
+        if (layout.later) todoString += renderLaterGroupsFooter(layout.later)
+        return todoString
+    }
+
+    /** todoGroups **********************************************************************************************************************************
+     * The list's groups, in the order they are drawn: by heading, in order of first appearance, with "No Due Date" moved to the end when the       *
+     * profile asks for it.                                                                                                                         *
+     ***********************************************************************************************************************************************/
+    private todoGroups(todoList){
         var todoMap = this.groupBy(todoList)
         if (this.profile.noDueDatesAtEnd){
             var noDueDates = todoMap.get("No Due Date")
@@ -190,14 +296,172 @@ abstract class BaseFormat {
                 todoMap.set("No Due Date", noDueDates);
             }
         }
-        for (var headingGroup of todoMap){
-            var heading = headingGroup[0]
-            todoString += this.getHeadingString(heading, this.getHeadingDropTarget(heading, headingGroup[1]), headingGroup[1].map(todo => todo.id), this.getHeadingDropEnd(heading, headingGroup[1]))
-            for (var todo of headingGroup[1]){
-                todoString += this.getTodoString(todo, heading)
+        return todoMap
+    }
+
+    /** Layouts (2.7.1) *****************************************************************************************************************************
+     * A layout is how one list of to-dos is drawn: its row groups in order, each as { key, heading, todos }, and the limit each group draws under  *
+     * the cap and the budget (planTodoDraw). listLayout is the grouped list every format writes to the overview notes and the list formats draw in *
+     * the panel; the calendar formats answer drawnLayout with a layout of their own.                                                               *
+     *                                                                                                                                              *
+     * ONE GROUPING PASS PER RENDER. The ring fill asks which rows the cap leaves out (undrawnTodoIds) of the list the fetch returned, before the   *
+     * drawing groups the list fetchTodos returns - while any group is capped that question is asked on every full render, since the rows beyond    *
+     * the cap are never read. The two lists are the same items in the same order unless the optimistic layer changed something in between, so a    *
+     * layout is kept per kind and reused when the next list is that same list (sameItems); the date format's headings alone cost about 340 ms per  *
+     * 10,000 to-dos, and are computed once. Each pass is counted (countGroupingPass in instrument.ts).                                             *
+     ***********************************************************************************************************************************************/
+    private layoutMemo = {}
+
+    protected memoLayout(kind, todoList, build){
+        var kept = this.layoutMemo[kind]
+        if (kept && sameItems(kept.list, todoList)) return kept.layout
+        countGroupingPass()
+        var layout = build()
+        var plan = this.planTodoDraw(layout.groups)
+        layout.limits = plan.limits
+        layout.shownGroups = plan.shownGroups
+        layout.later = plan.later
+        this.layoutMemo[kind] = { list: todoList, layout: layout }
+        return layout
+    }
+
+    protected listLayout(todoList){
+        return this.memoLayout("list", todoList, () => {
+            var groups = []
+            for (var headingGroup of this.todoGroups(todoList)){
+                groups.push({ key: this.getGroupKey(headingGroup[0], headingGroup[1]), heading: headingGroup[0], todos: headingGroup[1] })
             }
+            return { groups: groups }
+        })
+    }
+
+    protected drawnLayout(todoList){
+        return this.listLayout(todoList)
+    }
+
+    /** drawnTodoLimits / getDrawnTodoLimits (2.7.1) ************************************************************************************************
+     * The limit each group of the panel's last drawing drew under, by key. The host widens a group from what it showed (a budget can hold a group  *
+     * below one batch), so its "show more" adds one batch to what the user saw.                                                                    *
+     ***********************************************************************************************************************************************/
+    protected drawnTodoLimits = new Map<string, number>()
+
+    public getDrawnTodoLimits(){
+        return new Map(this.drawnTodoLimits)
+    }
+
+    /** getGroupKey (2.7.1) *************************************************************************************************************************
+     * The key the drawing cap keeps a group's limit under: stable across renders, so a "show more" on a group still holds on the next tick, and    *
+     * distinct between the groups of one render, so it widens that group alone. Basic's one implicit group (no heading) is 'all'; the formats with *
+     * headings refine this below. The undated group is 'undated' in every format, as the calendars' undated sections are.                          *
+     ***********************************************************************************************************************************************/
+    protected getGroupKey(heading, todos){
+        return heading ? heading : "all"
+    }
+
+    /** A group's own limit, and the panel's budget (2.7.1) *****************************************************************************************
+     * What the host's session state says, snapshotted into the view state: todoLimits holds, per group key "show more" was clicked on, the limit   *
+     * the group draws now, and todoBudget the panel's budget, TODO_DRAW_BUDGET until the trailing footer's "show more" raises it. A group with no  *
+     * entry has one batch as its own limit. A widened group is one the user asked to see more of, which the budget leaves alone.                   *
+     ***********************************************************************************************************************************************/
+    protected todoGroupWidened(groupKey){
+        var limits = this.viewState ? (this.viewState as any).todoLimits : null
+        return !!(limits && typeof limits.has === "function" && limits.has(groupKey))
+    }
+
+    protected todoGroupLimit(groupKey){
+        var limits = this.viewState ? (this.viewState as any).todoLimits : null
+        var raised = limits && typeof limits.get === "function" ? Number(limits.get(groupKey)) || 0 : 0
+        return raised > TODO_SECTION_BATCH ? raised : TODO_SECTION_BATCH
+    }
+
+    protected todoPanelBudget(){
+        var budget = this.viewState ? Number((this.viewState as any).todoBudget) : 0
+        return budget > TODO_DRAW_BUDGET ? budget : TODO_DRAW_BUDGET
+    }
+
+    /** planTodoDraw (2.7.1) ************************************************************************************************************************
+     * How much of each group this render draws, as { limits, shownGroups, later }: the limit of each drawn group by key, how many groups from the  *
+     * front are drawn at all, and what the groups after them hold ({ todos, groups }), or null. The markdown output is never limited.              *
+     *                                                                                                                                              *
+     * Against the panel's budget EVERY group counts for its rows under one batch - min(its size, TODO_SECTION_BATCH), its own limit before any     *
+     * "show more" - widened or not. So a click never moves the sum, whether the budget binds, the share, or where the order shape cuts: the        *
+     * widened group draws its own limit whatever the budget says (the user asked), and every other group draws exactly what it drew before the     *
+     * click. The two shapes (TODO_DRAW_BUDGET says why): up to TODO_DRAW_BUDGET / TODO_DRAW_FLOOR non-empty groups, the EQUAL SHARE - when the     *
+     * groups count for more than the budget, each group the user has not widened draws floor(budget / groups), never over its own limit; past that *
+     * many groups, the ORDER - the groups are drawn in order, whole up to their own limits, until the next one would take the count past the       *
+     * budget, and every group from there on is left out, under one trailing footer.                                                                *
+     ***********************************************************************************************************************************************/
+    protected planTodoDraw(groups){
+        var plan = { limits: new Map<string, number>(), shownGroups: groups.length, later: null }
+        if (this.outputFormat !== "html") return plan
+        var nonEmpty = groups.filter(group => group.todos && group.todos.length)
+        var budget = this.todoPanelBudget()
+        var counted = (group) => Math.min(group.todos.length, TODO_SECTION_BATCH)
+        if (nonEmpty.length > TODO_DRAW_BUDGET / TODO_DRAW_FLOOR){
+            var total = 0
+            for (var index = 0; index < groups.length; index++){
+                var group = groups[index]
+                if (!group.todos || !group.todos.length) continue
+                if (plan.limits.size && total + counted(group) > budget){
+                    var rest = groups.filter((other, at) => at >= index && other.todos && other.todos.length)
+                    plan.shownGroups = index
+                    plan.later = { todos: rest.reduce((sum, other) => sum + other.todos.length, 0), groups: rest.length }
+                    break
+                }
+                plan.limits.set(group.key, this.todoGroupLimit(group.key))
+                total += counted(group)
+            }
+            return plan
         }
-        return todoString
+        var rows = 0
+        for (var group of nonEmpty) rows += counted(group)
+        // Up to TODO_DRAW_BUDGET / TODO_DRAW_FLOOR groups, a share is never under TODO_DRAW_FLOOR rows: past that many, the order shape above draws.
+        var share = rows > budget ? Math.floor(budget / nonEmpty.length) : Infinity
+        for (var group of nonEmpty){
+            var own = this.todoGroupLimit(group.key)
+            plan.limits.set(group.key, this.todoGroupWidened(group.key) ? own : Math.min(own, share))
+        }
+        return plan
+    }
+
+    /** capTodoGroup (2.7.1) ************************************************************************************************************************
+     * The rows a group draws and the footer after them: the group's first rows up to its limit in this render (planTodoDraw), in its own order,    *
+     * and, when that left rows out, the footer that says how many and offers the next batch. Only the panel is capped - drawing is drawing, so a   *
+     * typed or filtered view is capped the same way - and the markdown output takes every row with no footer.                                      *
+     ***********************************************************************************************************************************************/
+    protected capTodoGroup(groupKey, todos, limits){
+        if (this.outputFormat !== "html") return { drawn: todos, footer: "" }
+        var limit = limits && limits.has(groupKey) ? limits.get(groupKey) : this.todoGroupLimit(groupKey)
+        if (todos.length <= limit) return { drawn: todos, footer: "" }
+        return { drawn: todos.slice(0, limit), footer: renderTodoCapFooter(groupKey, limit, todos.length) }
+    }
+
+    /** undrawnTodoIds (2.7.1) **********************************************************************************************************************
+     * The ids of the to-dos the drawing leaves out of this render, from a list narrowed exactly as fetchTodos narrows what it returns, laid out as *
+     * the panel draws it (drawnLayout). The ring fill asks it (see fetchTodos), so a row nobody sees costs no body read, is not owed one, and does *
+     * not shift the viewport index: the rows the fill counts are the drawn ones.                                                                   *
+     ***********************************************************************************************************************************************/
+    protected undrawnTodoIds(todoList){
+        var ids = new Set<string>()
+        var layout = this.drawnLayout(todoList)
+        layout.groups.forEach((group, index) => this.addUndrawn(ids, group.todos, index < layout.shownGroups ? layout.limits.get(group.key) : 0))
+        return ids
+    }
+
+    /** addUndrawn (2.7.1) **************************************************************************************************************************
+     * Adds to ids every to-do of one group past the limit it draws under (none for a group with no limit: an empty one).                           *
+     ***********************************************************************************************************************************************/
+    protected addUndrawn(ids, todos, limit){
+        if (!todos || limit === undefined) return
+        for (var index = limit; index < todos.length; index++) ids.add(todos[index].id)
+    }
+
+    /** renderUndatedSection (2.7.1) ****************************************************************************************************************
+     * The calendars' "No Due Date" section under the grid (month and week), drawn as the group 'undated' of their layout.                          *
+     ***********************************************************************************************************************************************/
+    protected renderUndatedSection(undatedTodos, limits){
+        var capped = this.capTodoGroup("undated", undatedTodos, limits)
+        return renderUndated(capped.drawn, (todo, label) => this.renderTodoRow(todo, label), capped.footer)
     }
 
     /** renderHtml **********************************************************************************************************************************
@@ -253,7 +517,24 @@ abstract class BaseFormat {
         // markdown carries no such view state, so it keeps the ordinary drop.
         var keepMistypedRows = this.viewState ? !!(this.viewState as any).keepMistypedRows : false
         var ringsChangedOnly = this.viewState ? (this.viewState as any).ringsChangedOnly || null : null
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows, storeView: storeView, ringsChangedOnly: ringsChangedOnly })
+        // The rows the panel's drawing cap will leave out (2.7.1), asked by the ring fill of the list it is about to read bodies for: narrowed here as
+        // below and grouped as the drawing groups it, so a ring nobody sees is neither read nor owed, and the viewport index counts drawn rows. The
+        // markdown output draws nothing and reads no body, so it asks nothing.
+        var undrawn = isMarkdown ? null : (fetched) => this.undrawnTodoIds(this.narrowTodos(fetched, notebooks, notebookFilter, showAnyCompleted))
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows, storeView: storeView, ringsChangedOnly: ringsChangedOnly, undrawn: undrawn })
+        todos = this.narrowTodos(todos, notebooks, notebookFilter, showAnyCompleted)
+        // Record the fully-filtered set so the panel can detect an empty view (the outside-results trigger)
+        // without re-running the query. Kept here, the single choke point every renderHtml path passes through.
+        this.lastFetchedTodos = todos
+        return todos
+    }
+
+    /** narrowTodos *********************************************************************************************************************************
+     * What fetchTodos does to the list the fetch returns before anyone draws it: the completed switches by bucket, the notebook pill's title and   *
+     * path, the notebook filter (sub-notebooks included) and the panel's sort. One function, so the ring fill's question about which rows the cap  *
+     * leaves out (undrawnTodoIds) is asked of the same list the drawing gets.                                                                      *
+     ***********************************************************************************************************************************************/
+    private narrowTodos(todos, notebooks, notebookFilter, showAnyCompleted){
         if (showAnyCompleted){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
@@ -278,9 +559,6 @@ abstract class BaseFormat {
             var compare = itemComparator(sort)
             todos.sort((first, second) => (first.todo_due - second.todo_due) || compare(first, second))
         }
-        // Record the fully-filtered set so the panel can detect an empty view (the outside-results trigger)
-        // without re-running the query. Kept here, the single choke point every renderHtml path passes through.
-        this.lastFetchedTodos = todos
         return todos
     }
 
@@ -497,6 +775,16 @@ class DateFormat extends BaseFormat {
         var first = todos && todos.length ? todos[0] : null
         return first && first.todo_due ? toISODate(new Date(first.todo_due)) : null
     }
+
+    /** getGroupKey *********************************************************************************************************************************
+     * A day's group is kept under its date (YYYY-MM-DD, read from its first to-do as the drop target is, not from the locale-formatted heading),   *
+     * the undated group under 'undated'.                                                                                                           *
+     ***********************************************************************************************************************************************/
+    protected getGroupKey(heading, todos){
+        if (heading == "No Due Date") return "undated"
+        var first = todos && todos.length ? todos[0] : null
+        return first && first.todo_due ? toISODate(new Date(first.todo_due)) : super.getGroupKey(heading, todos)
+    }
 }
 
 /** IntervalFormat **********************************************************************************************************************************
@@ -553,6 +841,13 @@ class IntervalFormat extends BaseFormat {
     protected getHeadingDropEnd(heading, todos){
         return dropEndDateFor(heading, this.getPlan())
     }
+
+    /** getGroupKey *********************************************************************************************************************************
+     * A period section is kept under its horizon's name ("Overdue", "Today", "This Week", "Future"...), the undated group under 'undated'.         *
+     ***********************************************************************************************************************************************/
+    protected getGroupKey(heading, todos){
+        return heading == "No Due Date" ? "undated" : super.getGroupKey(heading, todos)
+    }
 }
 
 /** MonthFormat *************************************************************************************************************************************
@@ -563,7 +858,9 @@ class MonthFormat extends DateFormat {
 
     public async renderHtml(){
         var todoList = await this.fetchTodos()
-        var grouped = groupTodosByDate(todoList)
+        var layout = this.drawnLayout(todoList)
+        this.drawnTodoLimits = layout.limits
+        var grouped = layout.grouped
         var weekStartsOn = this.getWeekStartsOn()
         var anchor = fromISODate(this.viewState ? this.viewState.anchor : toISODate(new Date()))
         var today = new Date()
@@ -591,9 +888,24 @@ class MonthFormat extends DateFormat {
                 <thead><tr>${headerCells}</tr></thead>
                 <tbody>${rows}</tbody>
             </table>
-            ${this.renderSelectedDay(grouped.byDate, selectedKey)}
-            ${renderUndated(grouped.undated, (todo, label) => this.renderTodoRow(todo, label))}
+            ${this.renderSelectedDay(grouped.byDate, selectedKey, layout.limits)}
+            ${this.renderUndatedSection(grouped.undated, layout.limits)}
         `
+    }
+
+    /** drawnLayout *********************************************************************************************************************************
+     * The month draws rows in two groups, the selected day's (under its date) and the undated section, and caps each; a to-do the grid only dots   *
+     * is no row at all, and keeps its ring read as before. The grid's own grouping by day rides along as grouped.                                  *
+     ***********************************************************************************************************************************************/
+    protected drawnLayout(todoList){
+        return this.memoLayout("month", todoList, () => {
+            var grouped = groupTodosByDate(todoList)
+            var selectedKey = this.viewState ? this.viewState.selectedDate : null
+            var groups = []
+            if (selectedKey) groups.push({ key: selectedKey, heading: selectedKey, todos: grouped.byDate.get(selectedKey) || [] })
+            groups.push({ key: "undated", heading: "No Due Date", todos: grouped.undated })
+            return { groups: groups, grouped: grouped }
+        })
     }
 
     /** renderDayCell *******************************************************************************************************************************
@@ -631,16 +943,18 @@ class MonthFormat extends DateFormat {
     /** renderSelectedDay ***************************************************************************************************************************
      * The to-dos of the day the user picked, listed under the grid                                                                                  *
      ***********************************************************************************************************************************************/
-    private renderSelectedDay(byDate, selectedKey){
+    private renderSelectedDay(byDate, selectedKey, limits){
         if (!selectedKey) return ""
         var day = fromISODate(selectedKey)
         var todos = byDate.get(selectedKey) || []
+        // A day's rows are a group like any other, capped under the day's date (2.7.1); the heading names the drawn rows only.
+        var capped = this.capTodoGroup(selectedKey, todos, limits)
         var rows = todos.length
-            ? todos.map(todo => this.renderTodoRow(todo, `${this.getTimeString(todo.todo_due)} - ${todo.title}`)).join("")
+            ? capped.drawn.map(todo => this.renderTodoRow(todo, `${this.getTimeString(todo.todo_due)} - ${todo.title}`)).join("") + capped.footer
             : `<p class="calendar-empty">Nothing due</p>`
         return `
             <section class="calendar-selected">
-                <h2${headingContextAttributes(todos.map(todo => todo.id))}>${escapeHtml(this.getFullDateString(day))}</h2>
+                <h2${headingContextAttributes(capped.drawn.map(todo => todo.id))}>${escapeHtml(this.getFullDateString(day))}</h2>
                 ${rows}
             </section>
         `
@@ -654,7 +968,9 @@ class WeekFormat extends DateFormat {
 
     public async renderHtml(){
         var todoList = await this.fetchTodos()
-        var grouped = groupTodosByDate(todoList)
+        var layout = this.drawnLayout(todoList)
+        this.drawnTodoLimits = layout.limits
+        var grouped = layout.grouped
         var weekStartsOn = this.getWeekStartsOn()
         var anchor = fromISODate(this.viewState ? this.viewState.anchor : toISODate(new Date()))
         var todayKey = toISODate(new Date())
@@ -681,8 +997,19 @@ class WeekFormat extends DateFormat {
         return `
             ${renderNavigation(title)}
             <section class="week-planner">${sections}</section>
-            ${renderUndated(grouped.undated, (todo, label) => this.renderTodoRow(todo, label))}
+            ${this.renderUndatedSection(grouped.undated, layout.limits)}
         `
+    }
+
+    /** drawnLayout *********************************************************************************************************************************
+     * The week caps its undated section; the seven day columns are cards bounded by their day, and are drawn whole. The grouping by day rides      *
+     * along as grouped.                                                                                                                            *
+     ***********************************************************************************************************************************************/
+    protected drawnLayout(todoList){
+        return this.memoLayout("week", todoList, () => {
+            var grouped = groupTodosByDate(todoList)
+            return { groups: [{ key: "undated", heading: "No Due Date", todos: grouped.undated }], grouped: grouped }
+        })
     }
 
     /** renderWeekCard ******************************************************************************************************************************
@@ -808,7 +1135,7 @@ export async function renderNotesSection(profile, viewState){
     var rows = notes.map(note => renderNoteRowHtml(note, { mobile: mobile })).join("")
     // A capped section says so, and offers the next batch; search and the notebook filter reach any note directly.
     var moreFooter = fetched.more
-        ? `<p class="notes-more-message">Showing the ${notesLimit} most recently updated notes. Search or pick a notebook to find others, or
+        ? `<p class="notes-more-message">Showing the ${formatCount(notesLimit)} most recently updated notes. Search or pick a notebook to find others, or
             <button type="button" class="notes-more-button" onclick="onShowMoreNotesClicked()">show more</button></p>`
         : ""
     return `

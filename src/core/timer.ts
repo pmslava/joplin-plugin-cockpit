@@ -100,7 +100,7 @@ export async function refreshInterfaces(){
  *                                                                                                                                                       *
  * Since 2.7 phase 5 the panel's own actions arm it only when storeServesAction does not hold (a view needs the search, a sync runs, the store is not    *
  * ready), or when the store went stale while the action ran. Two callers arm it whatever the gate says: onNoteAlarmTrigger, and Joplin's own            *
- * moveToFolder command run from the panel, whose write an older desktop app lands after the command has returned (see runMoveCommand in panel.ts).      *
+ * moveToFolder command run from the panel on an app older than 3.5.9, which lands its write after the command has returned (runMoveCommand, panel.ts).  *
  ***************************************************************************************************************************************************/
 const reconcileOffsetsMs = [1000, 3000, 7000, 15000, 30000]
 var reconcileTimers = []

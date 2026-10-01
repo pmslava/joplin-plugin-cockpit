@@ -150,15 +150,17 @@ export function renderNavigation(title): string {
 }
 
 /** renderUndated ***********************************************************************************************************************************
- * The to-dos that have no due date, shown under a calendar so that they are not silently dropped when a profile shows them                          *
+ * The to-dos that have no due date, shown under a calendar so that they are not silently dropped when a profile shows them. The caller passes the  *
+ * rows it draws - the section is capped like any other to-do group (2.7.1, capTodoGroup in formats.ts), so the heading names the drawn rows only - *
+ * and the cap's footer, which follows the rows ("" when nothing was left out, which leaves the markup exactly as it was).                          *
  ***************************************************************************************************************************************************/
-export function renderUndated(undatedTodos, renderTodoRow): string {
+export function renderUndated(undatedTodos, renderTodoRow, footer?): string {
     if (!undatedTodos.length) return ""
     var rows = undatedTodos.map(todo => renderTodoRow(todo, todo.title)).join("")
     return `
         <section class="calendar-undated">
             <h2${dropTargetAttributes("clear")}${headingContextAttributes(undatedTodos.map(todo => todo.id))}>No Due Date</h2>
-            ${rows}
+            ${rows}${footer || ""}
         </section>
     `
 }

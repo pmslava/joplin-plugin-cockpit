@@ -17,15 +17,21 @@ import { launchJoplin, closeJoplin, createProfile, JoplinInstance, E2E_PATHS, PL
  * The seeded profile is kept as a template under e2e/.profiles/perf-template-<N>, so later runs skip the seeding.
  * Each measured launch gets its own copy of the template, so every plugin run is a first run on that collection,
  * the situation of the 2026-09-29 forum report. The report is written as JSON to PERF_OUT.
+ *
+ * The seed makes 5% as many to-dos as notes (1,000 at 20,000). PERF_TODOS=<n> seeds n to-dos instead, for the scenarios
+ * where the to-do side is what is large (2.7.1's to-do drawing cap): that template is perf-template-<N>-t<n>, so the
+ * default one stays as it is and is reused, and so does its report name.
  */
 
 const NOTES = Number(process.env.PERF_NOTES || 20000);
-const TODOS = Math.round(NOTES * 0.05);
+const TODOS_SET = !!process.env.PERF_TODOS;
+const TODOS = TODOS_SET ? Number(process.env.PERF_TODOS) : Math.round(NOTES * 0.05);
+const SEED_NAME = TODOS_SET ? `${NOTES}-t${TODOS}` : `${NOTES}`;
 const FOLDERS = 40;
 const WINDOW_MS = Number(process.env.PERF_WINDOW_MS || 180_000);
 const PROFILES_ROOT = path.join(E2E_PATHS.REPO_ROOT, 'e2e', '.profiles');
-const TEMPLATE = path.join(PROFILES_ROOT, `perf-template-${NOTES}`);
-const OUT = process.env.PERF_OUT || path.join(PROFILES_ROOT, `perf-report-${NOTES}.json`);
+const TEMPLATE = path.join(PROFILES_ROOT, `perf-template-${SEED_NAME}`);
+const OUT = process.env.PERF_OUT || path.join(PROFILES_ROOT, `perf-report-${SEED_NAME}.json`);
 const API_TOKEN = 'cockpit-perf';
 const API_PORT = 41207;
 // Every seeded body carries this token, so one full-text search can tell when the index holds them all.
@@ -100,6 +106,8 @@ async function pool(count: number, width: number, work: (i: number) => Promise<v
 }
 
 async function seedTemplate(): Promise<void> {
+  // Checked here, where a count is needed, rather than when the file loads, so a stray value cannot keep the rest of the suite from listing.
+  if (!Number.isInteger(TODOS) || TODOS < 0) throw new Error(`PERF_TODOS must be a whole number of to-dos, not "${process.env.PERF_TODOS}"`);
   const profileDir = createProfile(false, { 'clipperServer.autoStart': true, 'api.token': API_TOKEN, 'api.port': API_PORT });
   const joplin = await launchJoplin({ profileDir });
   try {
@@ -197,6 +205,11 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
   const samples: Array<Record<string, number>> = [];
   let firstRowsAt = -1;
   let notesSectionAt = -1;
+  // The rows the panel drew under each heading, from the last sample that found rows: with the to-do cap (2.7.1) a group stops at 1,000 rows
+  // and says so in a footer, and this is where the report shows it.
+  let sections: Array<{ heading: string; todos: number; notes: number; capped: boolean }> = [];
+  // The footer that stands in for whole to-do groups the draw budget left out ("N more to-dos in M later groups."), at the same sample, or null.
+  let laterGroups: string | null = null;
   let heartbeat: any = null;
   try {
     joplin = await launchJoplin({ profileDir });
@@ -238,16 +251,47 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
         const panel = await within(findPanel(win), 10_000, null);
         if (panel) {
           const counts = await within(
-            panel.evaluate(() => ({
-              rows: document.querySelectorAll('[data-todo-id], [data-note-id]').length,
-              notes: document.querySelectorAll('.notes-section').length,
-              nodes: document.getElementsByTagName('*').length,
-            })),
+            panel.evaluate(() => {
+              // One pass over the headings, rows and cap footers in document order: each row counts under the heading before it (rows before
+              // any heading - the basic format - under ""), and a group's own footer (the Notes one, or a to-do group's, which names its group)
+              // marks that heading's group as capped. The footer naming no group stands for the groups the budget left out.
+              const sections: Array<{ heading: string; todos: number; notes: number; capped: boolean }> = [];
+              let later: string | null = null;
+              let current: { heading: string; todos: number; notes: number; capped: boolean } | null = null;
+              for (const el of Array.from(document.querySelectorAll('.todos h2, .todos .todo[data-todo-id], .todos [data-note-id], .todos .notes-more-message'))) {
+                if (el.tagName === 'H2') {
+                  current = { heading: (el.textContent || '').trim(), todos: 0, notes: 0, capped: false };
+                  sections.push(current);
+                  continue;
+                }
+                if (!current) {
+                  current = { heading: '', todos: 0, notes: 0, capped: false };
+                  sections.push(current);
+                }
+                if (el.classList.contains('notes-more-message')) {
+                  if (el.querySelector('[data-todo-group]') || el.closest('.notes-section')) current.capped = true;
+                  else later = (el.textContent || '').replace(/\s*show more\s*$/, '').replace(/\s+/g, ' ').trim();
+                }
+                else if (el.hasAttribute('data-todo-id')) current.todos++;
+                else current.notes++;
+              }
+              return {
+                rows: document.querySelectorAll('[data-todo-id], [data-note-id]').length,
+                notes: document.querySelectorAll('.notes-section').length,
+                nodes: document.getElementsByTagName('*').length,
+                sections,
+                later,
+              };
+            }),
             10_000,
-            { rows: 0, notes: 0, nodes: 0 }
+            { rows: 0, notes: 0, nodes: 0, sections: [] as Array<{ heading: string; todos: number; notes: number; capped: boolean }>, later: null as string | null }
           );
           rows = counts.rows;
           domNodes = counts.nodes;
+          if (counts.rows > 0) {
+            sections = counts.sections;
+            laterGroups = counts.later;
+          }
           if (counts.rows > 0 && firstRowsAt < 0) firstRowsAt = Date.now() - windowStart;
           if (counts.notes > 0 && notesSectionAt < 0) notesSectionAt = Date.now() - windowStart;
         }
@@ -300,6 +344,10 @@ async function measure(withPlugin: boolean): Promise<Record<string, unknown>> {
       firstRowsAtMs: firstRowsAt,
       notesSectionAtMs: notesSectionAt,
       maxRows: Math.max(0, ...samples.map((s) => s.rows)),
+      // The drawn rows per heading at the last sample with rows, whether the group's cap footer was drawn under it, and the trailing footer's text
+      // when the budget left whole groups out.
+      sections,
+      laterGroups,
       heartbeat: heartbeat && {
         maxGapMs: Math.round(heartbeat.maxGap),
         lagMs: Math.round(heartbeat.lagMs),

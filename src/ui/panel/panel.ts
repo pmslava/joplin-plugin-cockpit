@@ -15,11 +15,11 @@ import { applyLocalCreate, applyLocalRemoval, applyLocalWrite, isReady as isStor
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
-import { escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
+import { TODO_DRAW_BUDGET, TODO_SECTION_BATCH, escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
-import { getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
+import { forgetCurrentProfileID, getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
-import { isMobile } from "../../core/platform";
+import { appVersionAtLeast, isMobile } from "../../core/platform";
 import { isSettingsNoteConnected } from "../../core/settingsSync";
 import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
@@ -257,6 +257,25 @@ const sortFieldLabels = { title: "Title", updated: "Updated", created: "Created"
 const NOTES_BATCH = 1000
 var notesLimit = NOTES_BATCH
 
+/** To-do group sizes and the panel's budget (2.7.1) ************************************************************************************************
+ * What "show more" has asked for, this session. todoSectionLimits holds, by group key (getGroupKey in formats.ts: the interval horizon's name, a   *
+ * day's YYYY-MM-DD, 'all' for the basic list, 'undated'), the limit of each group whose own footer was clicked: what the group showed at the first *
+ * click - one batch, or less while the budget held it - plus TODO_SECTION_BATCH, then one batch more per click, for that group alone. A widened    *
+ * group draws its limit whatever the budget says, since the user asked for it. Against the budget every group counts at one batch whether it was   *
+ * widened or not (planTodoDraw in formats.ts), so a click never changes what any other group draws. A group with no entry draws one batch          *
+ * (TODO_SECTION_BATCH, with the measurements behind it), or less while the budget holds it. todoDrawBudget is the panel's budget                   *
+ * (TODO_DRAW_BUDGET), raised by one budget each time the trailing footer of a render that left whole groups out is clicked.                        *
+ *                                                                                                                                                  *
+ * Like notesLimit, all of it lasts the session and is shared by every profile and every format: a key names a kind of group, not one profile's     *
+ * group, so "Overdue" widened under one profile is widened under the next, and a day's date is the same key in the date list and the month's       *
+ * selected day. Each render takes a copy into its view state (todoLimits, todoBudget), so a click landing while a render runs changes the next     *
+ * render, not that one. lastDrawnTodoLimits is what each group drew in the last render that got as far as its paint (the formatter's               *
+ * getDrawnTodoLimits), which is what a first "show more" widens from.                                                                              *
+ ***************************************************************************************************************************************************/
+var todoSectionLimits = new Map<string, number>()
+var todoDrawBudget = TODO_DRAW_BUDGET
+var lastDrawnTodoLimits = new Map<string, number>()
+
 /** notebookPickerDialog ****************************************************************************************************************************/
 var notebookPickerDialog = null
 
@@ -439,6 +458,8 @@ async function applyProfileHeaderState(profile){
  * the user is looking at is now a different profile's view - minus the painting: the caller runs refreshInterfaces() itself, once, after this.      *
  ***************************************************************************************************************************************************/
 export async function onProfilesReplaced(){
+    // The in-memory current profile id (2.7.1, settings.ts) is read afresh after a wholesale replace, rather than trusted across it.
+    forgetCurrentProfileID()
     // The incoming profiles may show a different calendar, so start it at today rather than wherever the previous one was scrolled to.
     resetCalendarViewState()
     lastScrollTop = 0
@@ -507,6 +528,18 @@ async function eventHandler(message){
     } else if (message[0] == 'showMoreNotes'){
         // The next batch of notes. The scroll position is kept: the user is at the footer, and the new rows land around it.
         notesLimit += NOTES_BATCH
+        await refreshPanelFastThenFill()
+    } else if (message[0] == 'showMoreTodos'){
+        // The next batch of one to-do group (2.7.1): that group's key alone is widened, so a "show more" on one group never widens another. Drawn
+        // exactly as the notes' next batch is, keeping the scroll position.
+        var groupKey = String(message[1] == null ? "" : message[1])
+        var widenedTo = todoSectionLimits.get(groupKey)
+        todoSectionLimits.set(groupKey, (widenedTo || lastDrawnTodoLimits.get(groupKey) || TODO_SECTION_BATCH) + TODO_SECTION_BATCH)
+        await refreshPanelFastThenFill()
+    } else if (message[0] == 'showMoreTodoGroups'){
+        // The trailing footer of a render that left whole to-do groups out (the order shape of planTodoDraw in formats.ts): the panel's budget grows by
+        // one budget for the session, so the next groups in order are drawn, whole.
+        todoDrawBudget += TODO_DRAW_BUDGET
         await refreshPanelFastThenFill()
     } else if (message[0] == 'sortDirectionClicked'){
         sortDirection = sortDirection === "asc" ? "desc" : "asc"
@@ -1386,7 +1419,7 @@ export async function revealNote(noteID){
     // the row from BOTH sections for the whole index lag (the user's own type flip would look like a delete).
     // Such a view therefore keeps the row where the index still files it, exactly as before the re-check existed;
     // the two lists can never both hold it, since the index answers type:todo and type:note from one stale value.
-    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit, ringsChangedOnly: ringsChangedOnly }
+    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit, todoLimits: new Map(todoSectionLimits), todoBudget: todoDrawBudget, ringsChangedOnly: ringsChangedOnly }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     var notesHtml = ""
@@ -1471,6 +1504,8 @@ export async function revealNote(noteID){
     // paint (nor corrupt the equality baseline with markup that never reached the panel). The newer run owns
     // the paint. Any note bodies this run fetched already warmed the shared cache, so nothing is wasted.
     if (myGeneration !== refreshGeneration) return
+    // What each to-do group drew under the cap and the budget, for the next "show more" to widen from (see todoSectionLimits).
+    lastDrawnTodoLimits = formatter.getDrawnTodoLimits()
     // The panel now shows this markup (painted below, or already on screen). It is COMPLETE when nothing about it is provisional: a stamp was
     // taken (neither fast nor optimistic), and no ring was left unread (the per-refresh body cap, or a changed-only fill). Only then may the
     // periodic tick take it as current until one of its inputs moves.
@@ -1984,8 +2019,8 @@ async function tryAppCommandWithFallback(commandName, args, fallback){
 /** runMoveCommand (2.7 phase 5) ********************************************************************************************************************
  * "Move to notebook" for the given notes through Joplin's own moveToFolder command - desktop only; mobile has none and falls back to the notebook  *
  * picker and a parent_id PUT per note, which tells the note store itself (moveNotesFallback) - followed by the refresh every action ends with      *
- * (afterOwnWrite in timer.ts). The one panel action that keeps the reconcile ladder on the store path, because the write is Joplin's, not          *
- * Cockpit's:                                                                                                                                       *
+ * (afterOwnWrite in timer.ts). Before Joplin 3.5.9, the one panel action that keeps the reconcile ladder on the store path, because the write is   *
+ * Joplin's, not Cockpit's:                                                                                                                         *
  *  - Cockpit never learns the target notebook - the command asks for it and makes the move - so there is nothing it could write into the store     *
  *    itself, and a read-back cannot tell a moved note from one whose dialog is still open.                                                         *
  *  - In 3.6.14 the command awaits its folder prompt and every Note.moveToFolder before it answers (read in the bundle: showFolderPicker awaits the *
@@ -1993,15 +2028,19 @@ async function tryAppCommandWithFallback(commandName, args, fallback){
  *    (pollStoreAfterAppWrite, as for duplicateNote) shows the move in the action's own render, and the follow-up it arms repaints half a second on *
  *    when the feed's row lands a beat after the save.                                                                                              *
  *  - Older desktop apps - 2.9.17 and 3.0.15 were read - ran the moves from the prompt's onClose, after execute had returned, and Cockpit supports  *
- *    2.9 and later. Nothing announces that write (onNoteChange fires for the selected note only), so the ladder stays armed, blind, as before      *
- *    phase 5: each rung drains the store and renders from it, with no search, and the move shows at the first rung after the dialog closes. Once   *
- *    the release that changed this is known, a version gate can drop the ladder for the apps that await.                                           *
+ *    2.9 and later. Nothing announces that write (onNoteChange fires for the selected note only), so for them the ladder stays armed, blind, as    *
+ *    before phase 5: each rung drains the store and renders from it, with no search, and the move shows at the first rung after the dialog closes. *
+ *  - The release that changed it is 3.5.9 (2.7.1, read on GitHub): Joplin's commit d94d057f1d of 2025-11-29 moved the prompt into                  *
+ *    showFolderPicker, which awaits the window's showPrompt, and the command awaits it and then each Note.moveToFolder. 3.5.7 is the last release  *
+ *    without it (there is no 3.5.8 tag). So on 3.5.9 and later the drain after the command already holds the move, and the ladder is not armed.    *
  ***************************************************************************************************************************************************/
+const MOVE_COMMAND_AWAITS_FROM = [3, 5, 9]
+
 async function runMoveCommand(noteIDs){
     var storePath = await startOwnWrite(noteIDs)
     var ranCommand = await tryAppCommandWithFallback('moveToFolder', noteIDs, () => moveNotesFallback(noteIDs))
     if (storePath && ranCommand) await pollStoreAfterAppWrite()
-    await afterOwnWrite(storePath && !ranCommand)
+    await afterOwnWrite(storePath && (!ranCommand || await appVersionAtLeast(MOVE_COMMAND_AWAITS_FROM)))
 }
 
 /** moveNotesFallback *******************************************************************************************************************************

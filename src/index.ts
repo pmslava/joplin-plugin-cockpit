@@ -73,10 +73,12 @@ joplin.plugins.register({ onStart: setupPlugin })
         console.warn("Cockpit: could not refresh the excluded notebooks at startup", error)
     }
     await refreshInterfaces()
-    // THE NOTE STORE (2.7), ONLY NOW AND NEVER AWAITED. Its build walks the whole notes listing - 201 pages on a 20,000-note collection - so it is
-    // armed as a timeout after the first paint has happened, and onStart does not wait for it. That first paint took the 2.6.3 paths; the unfiltered
-    // views read the store once its build is done, and until the timeout fires its triggers (the tick, a sync, a note change) do nothing at all.
-    // Before the database report, which can hold onStart on a message box.
+    // THE NOTE STORE (2.7), ARMED NOW AND NEVER AWAITED HERE. Its build walks the whole notes listing - 201 pages on a 20,000-note collection - so
+    // it is armed as a timeout after the first paint has happened, and onStart does not wait for it. On an ordinary collection that first paint took
+    // the 2.6.3 paths, the unfiltered views read the store once the timeout's build is done, and until the timeout fires the store's triggers (the
+    // tick, a sync, a note change) do nothing at all. On a large one (2.7.1) the first paint may have built the store already: a to-do search that
+    // proved large would have walked the same listing, so that render built the store instead and read it (ensureBuilt in noteStore.ts), and the
+    // timeout then finds the store ready and does nothing. Before the database report, which can hold onStart on a message box.
     scheduleNoteStoreBuild()
     await reportDatabaseProblems()
 }

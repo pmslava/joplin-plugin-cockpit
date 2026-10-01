@@ -317,6 +317,8 @@ export async function setupSettings(){
 	await resetUnavailableGestureTrace()
 	await joplin.settings.onChange(async (event) => {
 		var keys = event && event.keys ? event.keys : []
+		// The in-memory current profile id (2.7.1) is forgotten when the host reports its key changed: the next ask reads the host again.
+		if (keys.includes("currentProfileID")) forgetCurrentProfileID()
 		if (keys.includes(updateFrequencySettingKey)) await setupTimer()
 		// A theme setting change needs the panel redrawn. buildThemeCss is rebuilt inside
 		// refreshPanelData, so the new colours reach the markup and get past its equality guard.
@@ -473,19 +475,45 @@ async function resolveExcludedNotebooks(){
 	}
 }
 
+/** The current profile id, cached in memory (2.7.1) ************************************************************************************************
+ * The panel's actions ask the note store's gate (storeServesAction in timer.ts) two to four times each, and every ask began with a host read of this	*
+ * setting. The setting is private (public: false), so nothing outside Cockpit edits it and its only writer is setCurrentProfileID below - which the	*
+ * settings-note sync reaches too, through getCurrentProfileID's fallback when the incoming profiles lack this device's choice. So the value is kept	*
+ * here, write-through: read from the host once, updated by every write, and forgotten (read again on the next ask) whenever the profiles are			*
+ * replaced wholesale (onProfilesReplaced in panel.ts) and whenever the settings change handler hears of the key, which is the only way a write that	*
+ * did not come through here could ever show. undefined means "not known": null is a value the setting can hold (its registered default).				*
+ ***************************************************************************************************************************************************/
+var cachedCurrentProfileID = undefined
+// Moved by every write and every forget, so a host read that was out while one of them landed is not kept over the newer word.
+var currentProfileIDChanges = 0
+
+export function forgetCurrentProfileID(){
+	cachedCurrentProfileID = undefined
+	currentProfileIDChanges++
+}
+
 /** setCurrentProfileID *****************************************************************************************************************************
- * Saves the current profile ID to settings																											*
+ * Saves the current profile ID to settings, and to the in-memory copy above once the host has it. The host's change handler for this key forgets	*
+ * the copy again (in the app it fires after the write; the harness runs it inside it), which costs the next ask one read and never a stale value.	*
  ***************************************************************************************************************************************************/
 export async function setCurrentProfileID(profileID){
 	await joplin.settings.setValue("currentProfileID", Number(profileID))
+	cachedCurrentProfileID = Number(profileID)
+	currentProfileIDChanges++
 }
 
 /** getCurrentProfileID *****************************************************************************************************************************
  * Gets the currently selected profile ID from settings and check that it is valid. If it empty or points to an invalid profile, the first profile	*
- * in the database is selected as the new current profile.																							*																									*
+ * in the database is selected as the new current profile. The host is read only while the in-memory copy is not known; a read that throws leaves	*
+ * it not known, so the next ask tries the host again.																								*
  ***************************************************************************************************************************************************/
 export async function getCurrentProfileID(){
-	var currentProfileID = await joplin.settings.value("currentProfileID")
+	var currentProfileID = cachedCurrentProfileID
+	if (currentProfileID === undefined){
+		var changesBefore = currentProfileIDChanges
+		currentProfileID = await joplin.settings.value("currentProfileID")
+		if (currentProfileIDChanges === changesBefore) cachedCurrentProfileID = currentProfileID
+	}
 	var currentProfile = await getProfile(currentProfileID)
 	if (!currentProfile){
 		currentProfileID = (await getAllProfiles())[0].id

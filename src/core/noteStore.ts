@@ -8,7 +8,9 @@
  * THE BUILD runs AFTER the first paint, from a timeout index.ts arms once refreshInterfaces has painted, and is never awaited: on a 20,000-note    *
  * collection the walk is 201 pages (the route answers has_more whenever a page is full, so an exact multiple of 100 costs one more, empty page),   *
  * and the panel must not wait for any of them. It takes the feed's cursor FIRST (a no-cursor call), then walks the listing by id, 100 at a time,   *
- * then drains the feed from that cursor, so whatever changed while the walk ran is replayed on top of it.                                          *
+ * then drains the feed from that cursor, so whatever changed while the walk ran is replayed on top of it. One render builds it sooner (2.7.1): a   *
+ * first paint whose to-do search proves large would walk the whole listing for its own sake and leave the startup build to walk it again, so it    *
+ * awaits the build instead and reads the store (ensureBuilt), and the startup timeout then finds the store ready and does nothing.                 *
  *                                                                                                                                                  *
  * THE AVAILABILITY GUARD is that first no-cursor call. The route is proven on desktop and unproven on mobile (the harness cannot reach a phone),   *
  * so a throw there means "not in this app": one warning, the store is off for the session, and the route is never called again. Every read path    *
@@ -40,9 +42,9 @@
  *                                                                                                                                                  *
  * THE READERS' SURFACE is isAvailable, isReady, getModel, pollNow, applyLocalWrite and subscribe (pollOnTick is the tick's own); phase 3 added     *
  * applyLocalCreate and applyLocalRemoval for the panel's own creates and trashes, and catchUp for the renders that must show outside writes (see   *
- * catchUpNoteStore in timer.ts). The first six functions are also put on the plugin's global, in a frozen object called CockpitNoteStore, the way  *
- * the pure modules publish themselves, so the harness (and a DevTools console in the plugin's window) can inspect the mirror without a command or  *
- * a menu entry.                                                                                                                                    *
+ * catchUpNoteStore in timer.ts), and 2.7.1 ensureBuilt for that early build. The first six functions are also put on the plugin's global, in a     *
+ * frozen object called CockpitNoteStore, the way the pure modules publish themselves, so the harness (and a DevTools console in the plugin's       *
+ * window) can inspect the mirror without a command or a menu entry.                                                                                *
  ***************************************************************************************************************************************************/
 
 /** Imports ****************************************************************************************************************************************/
@@ -84,6 +86,9 @@ var cursor = null
 var failedBuilds = 0
 // The run in progress (its promise), and the one more run requested while it lasts.
 var running = null
+// The one run in progress inside that burst - the build, or the poll, the pump is awaiting right now - which ensureBuilt waits for rather than the
+// whole burst (2.7.1).
+var currentRun = null
 var rerunRequested = false
 var rerunMayBuild = false
 var followUpTimer = null
@@ -130,8 +135,40 @@ export function scheduleNoteStoreBuild(){
     // The callback returns the run's promise so the harness can await the build it fires; setTimeout ignores it.
     setTimeout(() => {
         started = true
+        // A render that would have walked the listing may have built the store already (ensureBuilt, 2.7.1), or be building it now: then this build
+        // has nothing to do, or joins that one. After an early build that failed it is the retry, as any trigger's would be.
+        if (ready) return Promise.resolve()
+        if (running) return running
         return requestRun(true)
     }, buildDelayMs)
+}
+
+/** ensureBuilt (2.7.1) *****************************************************************************************************************************
+ * The build, now, for a render that is about to walk the whole listing anyway. Before the store is ready an unfiltered view reads the 2.6.3 paths, *
+ * and when its to-do search proves large (getTodos in joplin.ts: past its page budget, or a page slower than todoSearchPageSlowMs) that path walks *
+ * the listing for the render - which the startup build then walks again two seconds later: two walks of 300 pages at 30,000 items before the panel *
+ * is store-served. Building the store in that render instead costs the same walk once, and the render reads the store at the end of it.            *
+ *                                                                                                                                                  *
+ * It is the ordinary build, through the single-flight gate: the cursor first, the walk, the replay, the lost-note rule, the availability guard (a  *
+ * missing route answers false here and switches the store off, as at startup). It marks the store started, so Cockpit's own writes and the         *
+ * triggers reach the mirror from here on, and the startup timeout then finds it ready and does nothing. Answers whether the store is ready; a      *
+ * caller that gets false takes the walk it would have taken. Never rejects.                                                                        *
+ *                                                                                                                                                  *
+ * ONE RUN, NEVER TWO. The render waits for the run it starts, or for the run already in progress, which it joins - not for the burst around it. A  *
+ * trigger landing while that run lasts (a sync completing, a note change) queues one more run on the same pump, and when the build ends untrusted  *
+ * or fails, that rerun is another walk; it goes on in the background, and the render takes its answer from the run it waited for.                  *
+ ***************************************************************************************************************************************************/
+export async function ensureBuilt(){
+    if (!available) return false
+    if (ready) return true
+    started = true
+    if (!running) requestRun(true)
+    try {
+        await currentRun
+    } catch (error) {
+        // The pump that owns the run handles its failure; the answer below says what it left.
+    }
+    return isReady()
 }
 
 /** pollNow *****************************************************************************************************************************************
@@ -291,12 +328,14 @@ async function pump(mayBuild){
     burstFetched = new Set()
     burstRemoved = new Set()
     try {
-        await runOnce(mayBuild)
+        currentRun = runOnce(mayBuild)
+        await currentRun
         while (rerunRequested && available){
             var queuedMayBuild = rerunMayBuild
             rerunRequested = false
             rerunMayBuild = false
-            await runOnce(queuedMayBuild)
+            currentRun = runOnce(queuedMayBuild)
+            await currentRun
         }
     } catch (error) {
         // Every call is guarded where it is made; this only catches a bug, and a bug must not leave the mirror trusted.
@@ -304,6 +343,7 @@ async function pump(mayBuild){
         console.warn("Cockpit: the note store stopped on an unexpected error", error)
     } finally {
         running = null
+        currentRun = null
         rerunRequested = false
         rerunMayBuild = false
     }

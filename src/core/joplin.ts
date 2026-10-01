@@ -7,7 +7,7 @@ import joplin from 'api';
 import { applyTodoCompletionOverrides, mergeOptimisticNotes, mergeOptimisticTodos } from './optimistic';
 import { EXCLUDED_NOTEBOOK_IDS_KEY, buildExclusionClauses, excludedDescendantIdSet, parseExcludedIds } from './exclusion';
 import { countData } from './instrument';
-import { applyLocalWrite, getModel as getStoreModel, isAvailable as isStoreAvailable, isReady as isStoreReady } from './noteStore';
+import { applyLocalWrite, ensureBuilt as ensureStoreBuilt, getModel as getStoreModel, isAvailable as isStoreAvailable, isReady as isStoreReady } from './noteStore';
 
 /** Excluded notebooks *****************************************************************************************************************************
  * The "Excluded notebooks" feature evaluates exclusion by notebook ID (the hidden excludedNotebookIds setting is the single source of truth). Two      *
@@ -161,8 +161,17 @@ export const listingFields = ['id', 'title', 'is_todo', 'todo_completed', 'todo_
 // How many pages an UNFILTERED to-do search may take before the collection counts as large. Ten pages is 1,000 to-dos, where a page still costs
 // tens of milliseconds; past it the per-page cost grows with the whole set and the listing is the cheaper walk.
 const todoSearchPageBudget = 10
-// Set once an unfiltered to-do search ran past the budget: from then on that view reads the listing straight away. Per session - a collection that
-// big does not shrink back under the budget between two refreshes, and a wrong "large" only costs a listing walk.
+// The same question asked of time (2.7.1), which is what the user waits on: a page of an UNFILTERED to-do search slower than this, with more pages to
+// come, moves the view to the listing at once, whatever page it is. The route re-runs the whole search for every page, so a page costs more the more
+// to-dos match: 28 ms at 1,000, about a second at 10,000 (the perf run with 20,000 notes and 10,000 to-dos), where the ten pages of the budget above
+// were ten seconds before the first paint could start; the switch took 8.2 s off that run's first paint. The listing's cost is known, about 25 ms a
+// page whatever matches. The page budget stays as the second guard, for a search that is slow in total without any one page being slow.
+// The trade-off is the page budget's: when Joplin is busy at startup, a small to-do set's page can be slow too, and the view then walks the listing
+// on every unfiltered refresh until the note store serves it. With the store available that walk is the store's own build (ensureStoreBuilt below),
+// made once, which is the better outcome anyway; only with the store off does the walk repeat.
+const todoSearchPageSlowMs = 200
+// Set once an unfiltered to-do search ran past the budget or was slow: from then on that view reads the listing straight away. Per session - a
+// collection that big does not shrink back under the budget between two refreshes, and a wrong "large" only costs a listing walk.
 var preferTodoListing = false
 
 function isUnfilteredQuery(criteria){
@@ -321,6 +330,9 @@ async function listRecentNotes(limit, keep){
     // The note store's render of a drain (2.7, timer.ts) fills only the changed rings: those read before whose note has changed since, and those of
     // the notes the drain fetched (the Set this carries), new ones included. A ring never read of a note the drain did not fetch is the tick's.
     var ringsChangedOnly = opts && opts.ringsChangedOnly ? opts.ringsChangedOnly : null
+    // The panel's drawing cap (2.7.1, TODO_SECTION_BATCH in formats.ts): which of the rows about to have their rings read the drawing will leave out.
+    // The caller answers it (fetchTodos narrows and groups the list as it will draw it), of a copy in the order this function returns the list in.
+    var undrawn = undrawnRows(opts)
     // A view that keeps mistyped rows caches a DIFFERENT list under the same query as one that drops them, so
     // the flag belongs in the key - the same reason the any-mode key carries the narrowing it applied.
     var keepMistypedRows = !!(opts && opts.keepMistypedRows)
@@ -344,7 +356,7 @@ async function listRecentNotes(limit, keep){
         if (fillCounts){
             // The fast paint cached these with empty rings; fetch the bodies now (viewport first) and
             // refresh the cache so the follow-up render and any later optimistic paint show real counts.
-            await attachCheckboxCounts(allTodos, false, priorityStart, ringsChangedOnly)
+            await attachCheckboxCounts(allTodos, false, priorityStart, ringsChangedOnly, undrawn)
             cacheResult(todosResultCache, cacheKey, allTodos)
         }
     } else if (fromStore){
@@ -352,7 +364,7 @@ async function listRecentNotes(limit, keep){
         allTodos = readStoreTodos(showCompleted, showNoDue, excluded.set, storeNotebooks)
         // An optimistic repaint lands here whenever the revision moved (every own write moves it), and it must paint before any body is read, as it
         // does on the search path, where it is served from the cache: its rings come from the cache, and the fill or the next full render reads them.
-        await attachCheckboxCounts(allTodos, fast || !!useCache, priorityStart, ringsChangedOnly)
+        await attachCheckboxCounts(allTodos, fast || !!useCache, priorityStart, ringsChangedOnly, undrawn)
         cacheResult(todosResultCache, cacheKey, allTodos)
     } else {
         // An unfiltered view (see isUnfilteredQuery) is answered by the search while the to-do set is small, and by the live
@@ -369,6 +381,7 @@ async function listRecentNotes(limit, keep){
                 break
             }
             countData('search')
+            var pageStartedAt = Date.now()
             var response = await joplin.data.get(['search'], {
                 query: query,
                 // is_todo rides along so the any:1 path can apply `type:todo` itself; it costs nothing on the
@@ -380,6 +393,19 @@ async function listRecentNotes(limit, keep){
             })
             allTodos = allTodos.concat(response.items)
             if (!response.has_more) break
+            // A slow page with more to come is a large set (todoSearchPageSlowMs): the rest is the listing's. A slow LAST page switches nothing, since
+            // the search is already done, and a single page proves no size.
+            if (unfiltered && Date.now() - pageStartedAt > todoSearchPageSlowMs){
+                preferTodoListing = true
+                useListing = true
+                break
+            }
+        }
+        // The walk the fallback is about to make is the walk the note store's build makes (2.7.1): with the store available and not yet ready, it is
+        // built now instead (ensureStoreBuilt, which joins a build already running), and this render reads it - the store path, exactly as once the
+        // startup build had made it ready, and the startup build then has nothing left to do. A build that fails leaves the walk below as it was.
+        if (useListing && isStoreAvailable() && !isStoreReady() && await ensureStoreBuilt() && storeServes(storeView ? storeView.criteria : searchCritera)){
+            return getTodos(showCompleted, showNoDue, searchCritera, fast, useCache, opts)
         }
         if (useListing) allTodos = applyTodoNarrowing(await listAllNotes(), showCompleted, showNoDue)
         // The any:1 path asked for none of Cockpit's narrowing in the query, so it is applied here - in the
@@ -397,7 +423,7 @@ async function listRecentNotes(limit, keep){
         // Excluded rows are dropped BEFORE the checkbox-body fetch, so an excluded note never costs a body
         // GET, and BEFORE the cache is written, so the cache holds only kept rows.
         allTodos = filterExcluded(allTodos, excluded.set)
-        await attachCheckboxCounts(allTodos, fast, priorityStart)
+        await attachCheckboxCounts(allTodos, fast, priorityStart, null, undrawn)
         cacheResult(todosResultCache, cacheKey, allTodos)
     }
     // Fold in the host-held optimistic layer: created/newly-matching to-dos the index has not returned
@@ -410,14 +436,28 @@ async function listRecentNotes(limit, keep){
     // Re-apply the id filter after the merge so an optimistic overlay entry can never surface an excluded
     // notebook's note. The id set is the authority; the server clauses above are only an optimisation on top.
     allTodos = filterExcluded(allTodos, excluded.set)
-    // The search only orders by due date, which leaves to-dos sharing a due date - and the whole
-    // "No Due Date" group - in arbitrary order. Ties are broken by title, so that a naming scheme
-    // gives a deliberate order. The comparison is case insensitive and number aware ("2" < "10").
-    allTodos.sort((first, second) => {
-        return (first.todo_due - second.todo_due)
-            || String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" })
-    })
+    allTodos.sort(compareTodosByDue)
     return allTodos
+}
+
+/** compareTodosByDue *******************************************************************************************************************************
+ * The order getTodos returns its list in. The search only orders by due date, which leaves to-dos sharing a due date - and the whole "No Due Date" *
+ * group - in arbitrary order. Ties are broken by title, so that a naming scheme gives a deliberate order. The comparison is case insensitive and   *
+ * number aware ("2" < "10").                                                                                                                       *
+ ***************************************************************************************************************************************************/
+function compareTodosByDue(first, second){
+    return (first.todo_due - second.todo_due)
+        || String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" })
+}
+
+/** undrawnRows (2.7.1) *****************************************************************************************************************************
+ * The caller's answer to "which of these rows will the drawing leave out" (opts.undrawn, given by fetchTodos for the panel), as a function the     *
+ * ring fill can ask of the rows it is about to read bodies for: handed a copy in the order getTodos returns the list in, so the caller groups      *
+ * exactly what it will draw. null when the caller asked nothing (the overview markdown, which reads no body at all).                               *
+ ***************************************************************************************************************************************************/
+function undrawnRows(opts){
+    var undrawn = opts && typeof opts.undrawn === "function" ? opts.undrawn : null
+    return undrawn ? (items) => undrawn(items.slice().sort(compareTodosByDue)) : null
 }
 
 /** searchTitleSuggestions **************************************************************************************************************************
@@ -745,12 +785,21 @@ function viewportRank(idx, start, total){
     return idx >= start ? idx - start : total + (start - idx)
 }
 
-async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: Set<string>){
+async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: Set<string>, undrawn?: (items) => Set<string>){
     if (!fast){
+        // The rows the panel's drawing cap leaves out of this render (2.7.1) have no ring on screen: none is read and none is owed (a render is
+        // complete without them), and they take no place in the viewport index, which counts the drawn rows only - priorityStart is estimated from
+        // the drawn list's scroll offset, so a capped group above the viewport must not push the index past the rows the user is looking at. Asked
+        // only when some ring is stale or unread (with every ring cached nothing is read or owed either way, and the grouping is not paid for);
+        // with nothing left out, every row keeps its position and this is the pass it always was.
+        var skipped = undrawn && items.some(item => { var known = checkboxCounts.get(item.id); return !known || known.stamp !== item.user_updated_time }) ? undrawn(items) : null
         // Collect the rows whose body needs (re)fetching, keeping each row's position in the rendered
         // list so the fetch order can be biased toward the viewport.
         var staleEntries = []
-        items.forEach((item, idx) => {
+        var drawnCount = 0
+        items.forEach((item) => {
+            if (skipped && skipped.has(item.id)) return
+            var idx = drawnCount++
             var cached = checkboxCounts.get(item.id)
             // changedOnly (the note store's render of a drain, 2.7: the Set of ids the drain fetched): a ring never read is left for a later
             // refresh - counted as deferred, like the rows past the cap - unless the drain fetched its note; a ring read before is read again when
@@ -762,7 +811,7 @@ async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: 
         // scroll position), fetch the rows at/after it before the rows above it, so what the user is
         // looking at fills its rings first when the per-refresh body-fetch cap truncates a large set.
         if (priorityStart && priorityStart > 0 && staleEntries.length){
-            var total = items.length
+            var total = drawnCount
             staleEntries.sort((first, second) => viewportRank(first.idx, priorityStart, total) - viewportRank(second.idx, priorityStart, total))
         }
         var stale = staleEntries.slice(0, maxBodyFetchesPerRefresh).map(entry => entry.item)

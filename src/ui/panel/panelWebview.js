@@ -1372,8 +1372,21 @@ function betweenTargetAt(element, clientY){
     if (!rect.height) return null
     var offset = clientY - rect.top
     if (offset <= rect.height * BETWEEN_BAND) return { row: row, before: true, groupDate: info.groupDate, groupEndDate: info.groupEndDate }
-    if (offset >= rect.height * (1 - BETWEEN_BAND)) return { row: row, before: false, groupDate: info.groupDate, groupEndDate: info.groupEndDate }
+    if (offset >= rect.height * (1 - BETWEEN_BAND)){
+        if (capFooterFollows(row)) return null                     // the last DRAWN row of a capped group: see capFooterFollows
+        return { row: row, before: false, groupDate: info.groupDate, groupEndDate: info.groupEndDate }
+    }
     return null                                                    // the inert middle: keep today's behaviour (nothing)
+}
+
+// Whether the row is the last one a capped to-do group draws (2.7.1): the group's own cap footer - a p.notes-more-message whose button names the
+// group (data-todo-group) - is its next sibling. The gap below it is not the group's end - the rows the cap left out follow it - so a drop there
+// would land beyond the cap and vanish from the list, and its bottom band is inert, on the desktop drag and the touch drag alike. The footer that
+// stands in for whole groups left out names none: the group above it is drawn whole, and the gap below its last row is that group's end. The Notes
+// section's footer sits inside its own section, never beside a to-do row.
+function capFooterFollows(row){
+    var next = row ? row.nextElementSibling : null
+    return !!(next && next.classList && next.classList.contains('notes-more-message') && next.querySelector('[data-todo-group]'))
 }
 
 // The same question asked of a drag event. Split from the form above so the edge auto-scroll can re-ask it from its
@@ -1936,6 +1949,7 @@ function resolveDragTarget(){
     if (!entry) return dragTargetNone('no-row')
     if (!entry.info) return dragTargetNone('no-info')
     var before = window.TouchDrag.bandSide(touchDrag.y - entry.top, entry.bottom - entry.top, TOUCH_DRAG_BAND) === 'before'
+    if (!before && capFooterFollows(entry.el)) return dragTargetNone('cap-edge')
     if (entry.info.groupDate == null){
         var neighbours = betweenNeighboursAt(entry.el, before, new Set(touchDrag.ids))
         if (!neighbours.prevId && !neighbours.nextId) return dragTargetNone('both-null')
@@ -2303,11 +2317,23 @@ async function onShowMoreNotesClicked(){
     await webviewApi.postMessage(['showMoreNotes']);
 }
 
-/** onSortFieldClicked / onSortDirectionClicked ******************************************************************************************************/
-async function onSortFieldClicked(){
-    await webviewApi.postMessage(['sortFieldClicked']);
+/** onShowMoreTodosClicked (2.7.1) ******************************************************************************************************************
+ * A capped to-do group's footer button: asks the plugin for that group's next batch. The group's key comes from the button's own data-todo-group   *
+ * attribute (renderTodoCapFooter in formats.ts), so the host widens exactly the group the footer sits under.                                       *
+ ***************************************************************************************************************************************************/
+async function onShowMoreTodosClicked(groupKey){
+    await webviewApi.postMessage(['showMoreTodos', String(groupKey == null ? '' : groupKey)]);
 }
 
+/** onShowMoreTodoGroupsClicked (2.7.1) *************************************************************************************************************
+ * The trailing footer of a render that left whole to-do groups out ("N more to-dos in M later groups."): asks the plugin to raise the panel's      *
+ * budget, so the next groups in order are drawn.                                                                                                   *
+ ***************************************************************************************************************************************************/
+async function onShowMoreTodoGroupsClicked(){
+    await webviewApi.postMessage(['showMoreTodoGroups']);
+}
+
+/** onSortDirectionClicked **************************************************************************************************************************/
 async function onSortDirectionClicked(){
     // Re-sorting reorders the whole list, so the old pixel offset points at arbitrary rows; start at
     // the top like the other deliberate view changes rather than letting the scroll restore run.
@@ -3720,28 +3746,6 @@ function restoreSearchFromEmbeddedState(){
         : null
     reopenSearchSuggestions({ marks: marks, filter: String(state.filter || ''), caret: Number(state.filterCaret) || 0, focus: state.focus || 'field' })
 }
-
-/** onCreateProfileClicked **************************************************************************************************************************
- * When the edit profile button for a profile is clicked, this function sends a message to the main plugin containing the profile id                *
- ***************************************************************************************************************************************************/ 
- async function onCreateProfileClicked(){
-    await webviewApi.postMessage(['createProfileClicked']);
-}
-
-/** onEditProfileClicked ****************************************************************************************************************************
- * When the edit profile button for a profile is clicked, this function sends a message to the main plugin containing the profile id                *
- ***************************************************************************************************************************************************/ 
- async function onEditProfileClicked(profileID){
-    await webviewApi.postMessage(['editProfileClicked']);
-}
-
-/** onDeleteProfileClicked **************************************************************************************************************************
- * When the delete profile button for a profile is clicked, this function sends a message to the main plugin containing the profile id              *
- ***************************************************************************************************************************************************/
- async function onDeleteProfileClicked(profileID){
-    await webviewApi.postMessage(['deleteProfileClicked']);
-}
-
 
 /** onSynchronizeClicked ****************************************************************************************************************************
  * Starts a synchronisation (or cancels the one in progress - Joplin's command is a toggle). The button's spinning state and tooltip are driven by     *

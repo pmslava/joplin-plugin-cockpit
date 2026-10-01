@@ -1,5 +1,7 @@
 # Cockpit 2.8: the virtualised row list (orchestration brief)
 
+Shelved 2026-09-30 by Slava's decision: 2.7.1 takes the to-do drawing cap instead; this brief stays as the plan for when a large-collection report asks for uncapped views.
+
 Written 2026-09-30, the day v2.7.0 shipped, from a read-only survey of the rendering paths at commit 5c0233b. It is for the managing session that plans and runs the 2.8 build, in the shape of `docs/BRIEF-2.7-local-mirror.md`: what is measured, what the code does today, the proposed design, the open questions for Slava, the phases with their gates, and the standing rules.
 
 Read these first: this brief, the 2.7 brief (its sections 4 and 8 still hold), `docs/DEVLOG.md` (the v2.7.0 entry and the 2026-09-29 entry), `docs/MOBILE.md`, and the project's main Joplin note (`164d64772c624ef99baeb751d4ef8e36`).
@@ -146,6 +148,6 @@ Section 8 of the 2.7 brief applies unchanged: who codes, publishing needs Slava'
 
 ## 9. Loose ends from 2.7
 
-- Next-pass items recorded in the 2.7 brief: a write-through cache for `currentProfileID` so the actions' gate costs no host read; a version gate for the native move's ladder once the Joplin release that made the command await its prompt is known. Either fits a 2.7.1 or rides along with 2.8's phase 2.
-- Dead code the survey found in `panelWebview.js`: `sortFieldClicked` and the three profile-button handlers have no callers and, for the first, no host handler.
+- Next-pass items recorded in the 2.7 brief: a write-through cache for `currentProfileID` so the actions' gate costs no host read; a version gate for the native move's ladder once the Joplin release that made the command await its prompt is known. **Done in 2.7.1:** the cache is in `settings.ts`, and the gate starts at Joplin 3.5.9 (`MOVE_COMMAND_AWAITS_FROM` in `panel.ts`).
+- Dead code the survey found in `panelWebview.js`: `sortFieldClicked` and the three profile-button handlers have no callers and, for the first, no host handler. **Done in 2.7.1:** all four removed, after a repo-wide search found no reference.
 - The worktree `~/worktrees/cockpit-2.7` is warm with the 20k perf template copied in; reuse it for 2.8 under a new branch.

@@ -44,6 +44,35 @@ async function detectPlatform(){
     return requireNodeModule("fs-extra", "readFile") ? "desktop" : "mobile"
 }
 
+// The app version's one read (appVersionAtLeast below): the promise of [major, minor, patch], or of null, taken on the first ask.
+var appVersionRead = null
+
+/** appVersionAtLeast (2.7.1) ***********************************************************************************************************************
+ * Whether the running app is the given release or a later one, as [major, minor, patch]. The version is read once per session - one read-and-call  *
+ * of joplin.versionInfo(), whose answer cannot change while the plugin is loaded - and shared by every later ask. A version that cannot be read or *
+ * parsed answers false, so a caller gating new behaviour on a release keeps the old behaviour when it cannot tell.                                 *
+ ***************************************************************************************************************************************************/
+export async function appVersionAtLeast(wanted){
+    if (!appVersionRead) appVersionRead = readAppVersion()
+    var version = await appVersionRead
+    if (!version) return false
+    for (var index = 0; index < 3; index++){
+        if (version[index] !== wanted[index]) return version[index] > wanted[index]
+    }
+    return true
+}
+
+async function readAppVersion(){
+    try {
+        var versionInfo = await joplin.versionInfo() as any
+        var parts = /^(\d+)\.(\d+)\.(\d+)/.exec(String(versionInfo && versionInfo.version ? versionInfo.version : ""))
+        return parts ? [Number(parts[1]), Number(parts[2]), Number(parts[3])] : null
+    } catch (error) {
+        console.warn("Cockpit: could not read the app version", error)
+        return null
+    }
+}
+
 /** requireNodeModule *******************************************************************************************************************************
  * Loads one of the node modules that Joplin exposes to plugins, and returns null when it is not usable. joplin.require() is a desktop only API: on  *
  * mobile it resolves to a promise rather than a module, so the returned value is checked for a member that the real module is known to have.        *
