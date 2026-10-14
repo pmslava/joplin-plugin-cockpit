@@ -32,7 +32,10 @@ const PLUGIN_DIST = path.join(REPO_ROOT, 'dist');
  * `jot.open` from the panel, so the spec that drives those calls needs the real plugin installed next to this one -
  * as a user has it, from a .jpl, not as a second development plugin. Pass it in `launchJoplin({ extraPlugins })`.
  */
-export const JOT_JPL = path.join(CACHE_DIR, 'io.github.pmslava.jot.jpl');
+// The version is part of the file name (scripts/setup-e2e.sh writes the same name), so a bumped JOT_E2E_VERSION runs its own
+// archive rather than whichever one the cache already held.
+export const JOT_E2E_VERSION = process.env.JOT_E2E_VERSION ?? '0.2.2';
+export const JOT_JPL = path.join(CACHE_DIR, `io.github.pmslava.jot-${JOT_E2E_VERSION}.jpl`);
 
 // The plugin id this fork ships under (see src/manifest.json). Joplin embeds it in the panel/
 // background webview URLs (?pluginId=...) and in the panel iframe's element id, so the harness must
