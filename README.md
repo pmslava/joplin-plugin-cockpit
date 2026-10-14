@@ -327,6 +327,10 @@ The build writes `publish/io.github.pmslava.cockpit.jpl`. The same file serves b
 
 Profiles from the older sqlite3 database — including the one under the plugin id Cockpit used to be published under, as Agenda — and custom CSS from the old custom.css file are imported once into plugin settings, leaving the originals untouched. Profiles saved before the completed-period switches existed inherit their old all-or-nothing setting. The import runs on desktop only; the settings themselves are stored the same way on both platforms.
 
+## Support
+
+If this plugin is useful to you, support the work: [GitHub Sponsors](https://github.com/sponsors/pmslava) for monthly or one-time sponsorship, or [Ko-fi](https://ko-fi.com/pmslava) for a one-off tip by PayPal or card without an account. All options: [pmslava.com/support](https://pmslava.com/support/).
+
 ## Credits
 
 Cockpit began as a fork of [Agenda](https://github.com/TheScriptingGuy/Joplin-Agenda-Plugin) by BeatLink and TheScriptingGuy (MIT). The panel, dialogs, and most behaviour have since been reworked, but the profile system and overview notes trace back to their work. The idea of aggregating all your scattered work into one live view came from the [Inline Tag Navigator](https://github.com/alondmnt/joplin-plugin-tag-navigator) plugin by alondmnt, though Cockpit built it on Joplin's core to-do functionality rather than inline tag syntax.

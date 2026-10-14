@@ -6,6 +6,10 @@
     "type": "git",
     "url": "https://github.com/pmslava/joplin-plugin-cockpit"
   },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/pmslava"
+  },
   "publishConfig": {
     "access": "public"
   },
