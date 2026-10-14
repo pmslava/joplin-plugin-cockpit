@@ -6024,8 +6024,8 @@ async function main() {
             'the new-to-do button must carry the full and short wordings')
         // The icon-only stage still names the action for the tooltip and for assistive tech.
         // Since 2.8 the title is the tooltip that tells both routes (see the jot markup checks); the name is the aria-label.
-        assert.ok(/title="New note\. [^"]+" aria-label="New note"/.test(html), 'the new-note button must stay named at every stage')
-        assert.ok(/title="New to-do\. [^"]+" aria-label="New to-do"/.test(html), 'the new-to-do button must stay named at every stage')
+        assert.ok(/title="New note&#10;[^"]+" aria-label="New note"/.test(html), 'the new-note button must stay named at every stage')
+        assert.ok(/title="New to-do&#10;[^"]+" aria-label="New to-do"/.test(html), 'the new-to-do button must stay named at every stage')
         // Mobile stays icon-only (MOBILE.md §5): the label spans exist only in the desktop markup.
         assert.ok(!mobile.panelHtml['panel-panel'].includes('create-label'), 'mobile keeps its icon-only create buttons')
     })
@@ -14598,26 +14598,28 @@ async function main() {
     // -- the buttons' markup and the webview ------------------------------------------------------------------
     await test('jot (markup): each desktop create button takes a right-click - oncontextmenu on New note and on New to-do - beside its unchanged click, and its tooltip tells both routes', async () => {
         const html = (await jotRun()).panelHtml['panel-panel']
-        assert.ok(html.includes('<button type="button" class="create-button" title="New note. Click: creates it and opens it in the editor. Right-click: opens Jot\'s quick-capture form." aria-label="New note" onclick="onNewNoteClicked()" oncontextmenu="onNewNoteRightClicked(event)">'),
+        assert.ok(html.includes('<button type="button" class="create-button" title="New note&#10;Left click to create and open in the editor&#10;Right click to open Jot\'s form" aria-label="New note" onclick="onNewNoteClicked()" oncontextmenu="onNewNoteRightClicked(event)">'),
             'New note: the click as before, the right-click handler, and the default routes in the tooltip')
-        assert.ok(html.includes('<button type="button" class="create-button" title="New to-do. Click: creates it and opens it in the editor. Right-click: opens Jot\'s quick-capture form." aria-label="New to-do" onclick="onNewTodoClicked()" oncontextmenu="onNewTodoRightClicked(event)">'),
+        assert.ok(html.includes('<button type="button" class="create-button" title="New to-do&#10;Left click to create and open in the editor&#10;Right click to open Jot\'s form" aria-label="New to-do" onclick="onNewTodoClicked()" oncontextmenu="onNewTodoRightClicked(event)">'),
             'New to-do: the click as before, the right-click handler, and the default routes in the tooltip')
     })
 
-    await test('jot (markup): the tooltip follows the two settings - each value in its words, one phrase when both agree - and a change to either setting redraws it', async () => {
-        const titleOf = (html, name) => (new RegExp(`class="create-button" title="(${name}\\.[^"]*)"`).exec(html) || [])[1]
+    await test('jot (markup): the tooltip is the rows\' three-line shape - the name, then one line per gesture in the settings\' words, one line when both agree - and a change to either setting redraws it', async () => {
+        const titleOf = (html, name) => (new RegExp(`class="create-button" title="(${name}&#10;[^"]*)"`).exec(html) || [])[1]
         const windowed = await jotRun({ initialSettings: { [JOT_CLICK_KEY]: 'newWindow', [JOT_RIGHT_CLICK_KEY]: 'editor' } })
         assert.strictEqual(titleOf(windowed.panelHtml['panel-panel'], 'New note'),
-            'New note. Click: creates it and opens it in a new window. Right-click: creates it and opens it in the editor.')
+            'New note&#10;Left click to create and open in a new window&#10;Right click to create and open in the editor')
+        // Three lines, as the rows' tooltip has (formats.ts), broken on the same entity.
+        assert.strictEqual(titleOf(windowed.panelHtml['panel-panel'], 'New note').split('&#10;').length, 3, 'name, left click, right click')
         const agreed = await jotRun({ initialSettings: { [JOT_CLICK_KEY]: 'jot', [JOT_RIGHT_CLICK_KEY]: 'jot' } })
         assert.strictEqual(titleOf(agreed.panelHtml['panel-panel'], 'New to-do'),
-            "New to-do. Click or right-click: opens Jot's quick-capture form.")
+            "New to-do&#10;Left or right click to open Jot's form")
         // A change through the Options screen redraws the panel, so the tooltip never lags the setting.
         const paints = agreed.setHtmlCalls
         await agreed.setSetting(JOT_RIGHT_CLICK_KEY, 'editor')
         assert.ok(agreed.setHtmlCalls > paints, 'the change redraws the panel')
         assert.strictEqual(titleOf(agreed.panelHtml['panel-panel'], 'New to-do'),
-            "New to-do. Click: opens Jot's quick-capture form. Right-click: creates it and opens it in the editor.")
+            "New to-do&#10;Left click to open Jot's form&#10;Right click to create and open in the editor")
         // Mobile reads neither setting for its buttons: their markup is pinned byte-identical in the check below.
     })
 

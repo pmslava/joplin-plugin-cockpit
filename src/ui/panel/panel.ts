@@ -1746,20 +1746,22 @@ function dropdownHTML(menuID, toggleLabel, itemsHtml){
 }
 
 /** createButtonTooltip (2.8) ***********************************************************************************************************************
- * The desktop create button's tooltip: its name, then what a click and a right-click do, in the words of the two settings' routes. The same route  *
- * on both is said once ("Click or right-click: ..."), so the tooltip never repeats itself. Static phrases only, so nothing here is HTML-escaped.    *
+ * The desktop create button's tooltip, in the shape of the rows' own ("Left click to show / Right click to options", formats.ts): the button's   *
+ * name, then one line per gesture saying what it does, in the words of the two settings' routes. The same route on both is one line ("Left or    *
+ * right click to ..."), so the tooltip never repeats itself. The lines are joined with the entity the row tooltip uses, since a title attribute   *
+ * breaks lines on it. Static phrases only, so nothing here is HTML-escaped.                                                                        *
  ***************************************************************************************************************************************************/
 var CREATE_ROUTE_PHRASES = {
-    editor: "creates it and opens it in the editor",
-    newWindow: "creates it and opens it in a new window",
-    jot: "opens Jot's quick-capture form",
+    editor: "create and open in the editor",
+    newWindow: "create and open in a new window",
+    jot: "open Jot's form",
 }
 
 function createButtonTooltip(name, clickRoute, rightClickRoute){
     var click = CREATE_ROUTE_PHRASES[clickRoute] || CREATE_ROUTE_PHRASES.editor
     var right = CREATE_ROUTE_PHRASES[rightClickRoute] || CREATE_ROUTE_PHRASES.jot
-    if (click === right) return `${name}. Click or right-click: ${click}.`
-    return `${name}. Click: ${click}. Right-click: ${right}.`
+    if (click === right) return `${name}&#10;Left or right click to ${click}`
+    return `${name}&#10;Left click to ${click}&#10;Right click to ${right}`
 }
 
 /** runCreateButton (2.8) ***************************************************************************************************************************
