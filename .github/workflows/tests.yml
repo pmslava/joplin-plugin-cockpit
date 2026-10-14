@@ -34,6 +34,8 @@ jobs:
     env:
       # Must be >= the plugin's manifest app_min_version. Keep in sync with scripts/setup-e2e.sh.
       JOPLIN_E2E_VERSION: 3.6.14
+      # The Jot release installed beside Cockpit for the Jot integration spec. Keep in sync with scripts/setup-e2e.sh.
+      JOT_E2E_VERSION: 0.2.2
     steps:
       - uses: actions/checkout@v4
 

@@ -619,6 +619,30 @@ export async function activateJoplinMenuItem(win: Page, label: RegExp): Promise<
   }
 }
 
+/**
+ * Whether Joplin's application menu holds an item with exactly this label, at any depth. Read through the same
+ * `@electron/remote` handle as activateJoplinMenuItem, and it clicks nothing.
+ *
+ * A plugin's menu item is the first thing a spec can SEE of another plugin having started: Joplin rebuilds the menu
+ * when a plugin adds an item, and a plugin adds its items after registering the commands they run. So a spec that
+ * calls into another plugin (Jot) waits for its item before the first call, rather than racing that plugin's startup
+ * into the "not installed" path.
+ */
+export async function joplinMenuHasItem(win: Page, label: string): Promise<boolean> {
+  try {
+    return await win.evaluate((wanted) => {
+      const remote = (window as any).require('@electron/remote');
+      if (!remote || !remote.Menu) return false;
+      const walk = (items: any[]): boolean =>
+        items.some((item) => String(item.label || '') === wanted || (!!item.submenu && walk(item.submenu.items)));
+      const menu = remote.Menu.getApplicationMenu();
+      return !!menu && walk(menu.items);
+    }, label);
+  } catch {
+    return false;
+  }
+}
+
 /** Resize the Joplin window itself, so a capture has a known frame. */
 export async function setJoplinWindowSize(win: Page, width: number, height: number): Promise<void> {
   await win
