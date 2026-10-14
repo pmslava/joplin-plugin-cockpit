@@ -28,7 +28,7 @@ Cockpit is a single [Joplin](https://joplinapp.org) panel built to replace the n
 
 One screen gives you the whole picture. A profile is a whole saved view — its format, filters, search and sorting — so switching profiles switches everything in one step. Narrow the list by notebook, or by anything Joplin's own search understands. Reschedule by dragging a to-do onto a day, or open the date picker for an exact time. The same file runs on Android.
 
-[Views](#views) · [Due dates](#due-dates) · [Search and filtering](#search-and-filtering) · [Selecting rows](#selecting-rows-and-the-row-menu) · [Profiles](#profiles) · [Appearance](#appearance) · [Settings](#settings) · [On Android](#on-android)
+[Views](#views) · [Due dates](#due-dates) · [Search and filtering](#search-and-filtering) · [Selecting rows](#selecting-rows-and-the-row-menu) · [Profiles](#profiles) · [Works with Whereabouts](#works-with-whereabouts) · [Works with Jot](#works-with-jot) · [Appearance](#appearance) · [Settings](#settings) · [On Android](#on-android)
 
 ## Install
 
@@ -134,7 +134,7 @@ Excluded notebooks are named in the settings, and are hidden from Cockpit everyw
 
 The field shows both halves of what it points at — `Lab / Joplin (fdfd6c06e6f549df944a4fb442e1f318)`: the name you recognise, and the whole id Cockpit is really tracking, so a setting aimed at the wrong one of two same-named notebooks says so at a glance. The id is printed in full because a shortened one reads as a different id; a long entry simply scrolls in the box. You go on typing whatever is easiest — a name, a Parent/Sub path or a full id — and Cockpit rewrites each entry into that form. A name it cannot match is left exactly as you typed it, with no id, so a typo stays visible. Where the id is the part that still matches (you renamed the notebook in Joplin and never re-typed the setting), the id wins and the name shown catches up. A notebook genuinely called `Budget (deadbeef)` is not mistaken for one: brackets are read as an id only when what is in them is the start of an id that exists.
 
-An excluded notebook can never become the panel's notebook filter, by any route: not from the dropdown, which does not list it; not from another plugin's command, which is refused with a notice; and not from a profile that stored it before it was excluded, which starts at "All notebooks" for the session while keeping its own saved notebook untouched. Exclude the notebook the panel is currently filtered to — or delete it in Joplin — and the filter returns to "All notebooks" on the spot. This is also why New note and New to-do ask where to create whenever the header says "All notebooks": the filter and the label can never disagree.
+An excluded notebook can never become the panel's notebook filter, by any route: not from the dropdown, which does not list it; not from another plugin's command, which is refused with a notice; and not from a profile that stored it before it was excluded, which starts at "All notebooks" for the session while keeping its own saved notebook untouched. Exclude the notebook the panel is currently filtered to — or delete it in Joplin — and the filter returns to "All notebooks" on the spot. This is also why New note and New to-do ask where to create whenever the header says "All notebooks" (unless they open Jot's form, which has a notebook field of its own): the filter and the label can never disagree.
 
 The notebook dropdown lists every notebook by its full path, with a filter box pinned at the top; typing narrows it and Enter picks the first match. It offers every notebook, not only the ones the current to-dos live in. Every row also carries the notebook it lives in: click that pill to filter to it, right-click it to move the note somewhere else, hover it for the full path.
 
@@ -144,7 +144,7 @@ A sort picker decides how items sharing a due time — and the Notes group — a
 
 On desktop, Ctrl+click adds a row and Shift+click takes a range. A selection can mix to-dos and regular notes freely — a to-do is a note, so every batch action applies to both. With several rows selected, Escape leaves exactly one selected, the last row you actually selected, rather than clearing the lot; and it reaches the selection only when nothing else is open, since a menu, dropdown or suggestion list wins Escape first.
 
-Right-clicking a row opens Cockpit's own menu: Open, Switch between note and to-do type, Tags…, Move to notebook…, Duplicate, Copy Markdown link, Copy note ID, Delete note. The same menu opens on a long press on mobile.
+Right-clicking a row opens Cockpit's own menu: Open, Quick edit…, Switch between note and to-do type, Tags…, Move to notebook…, Duplicate, Copy Markdown link, Copy note ID, Delete note. Quick edit… opens Jot's form over the row's title, type, notebook, tags and due date, and saves what you change without opening the note; the row updates at once. It needs the Jot plugin (see [Works with Jot](#works-with-jot)) and is desktop only: a long press on mobile opens the same menu without it.
 
 ![Cockpit's row menu over a three-row selection](docs/images/row-menu-multi.png)
 
@@ -152,12 +152,14 @@ Right-clicking a row opens Cockpit's own menu: Open, Switch between note and to-
 
 <!-- row-menu-multi.png: the panel iframe with three rows selected by Ctrl+click, at least one of
      them from the Notes group, and Cockpit's own #noteContextMenu open over the upper half of the
-     panel so nothing is clipped. The menu must legibly read: Open (greyed), "Switch type of 3
-     items", "Tags for 3 notes...", "Move 3 to notebook...", "Duplicate 3 notes", "Copy 3 Markdown
-     links", "Copy 3 note IDs", "Delete 3 notes" (in red). The three selected rows must be visibly
-     highlighted behind it. Joplin Dark + Match Joplin. -->
+     panel so nothing is clipped. The menu must legibly read: Open (greyed), Quick edit… (greyed),
+     "Switch type of 3 items", "Tags for 3 notes...", "Move 3 to notebook...", "Duplicate 3 notes",
+     "Copy 3 Markdown links", "Copy 3 note IDs", "Delete 3 notes" (in red). The three selected rows
+     must be visibly highlighted behind it. Joplin Dark + Match Joplin. The image in the repo
+     predates 2.8 and has no Quick edit… entry; the caption holds for both, so only the image
+     needs retaking. -->
 
-Right-click inside a multi-row selection and every capable entry is retitled with the count — "Delete 6 notes", "Switch type of 3 items", "Copy 4 Markdown links" — so a mistaken batch is visible before the click; the single-only Open greys out rather than disappearing. Dragging a mixed selection onto a date, dropping it between rows or setting an alarm on it applies to the to-dos in it, in selection order; the notes ride along and are left out of anything time-based.
+Right-click inside a multi-row selection and every capable entry is retitled with the count — "Delete 6 notes", "Switch type of 3 items", "Copy 4 Markdown links" — so a mistaken batch is visible before the click; the single-only Open and Quick edit… grey out rather than disappearing. Dragging a mixed selection onto a date, dropping it between rows or setting an alarm on it applies to the to-dos in it, in selection order; the notes ride along and are left out of anything time-based.
 
 Copy Markdown link and Copy note ID copy one per line for a selection, with square brackets in titles escaped exactly as Joplin does. If a runtime has no clipboard the panel says so in its own toast rather than a blocking dialog.
 
@@ -176,9 +178,11 @@ A profile stores the display format, the search criteria, which completed to-dos
 
 Every row of the notebook dropdown carries rename, move-under-another-notebook and delete buttons, and a "+ New notebook…" entry sits at the bottom. Deleting asks first and moves the notebook and its notes to the trash.
 
-New note and New to-do create in the notebook the panel is filtered to and open it; with "All notebooks" selected they ask which notebook first. Joplin's own "when creating a new note" title-or-body preference is honoured.
+A click on New note or New to-do creates the note in the notebook the panel is filtered to and opens it in the editor; with "All notebooks" selected it asks which notebook first. Joplin's own "when creating a new note" title-or-body preference is honoured. A right-click opens the form of Jot, a separate quick-capture plugin, instead (see [Works with Jot](#works-with-jot)), with the type already chosen and the panel's notebook filled in — under "All notebooks" none is, and Jot's own default applies. It never asks with the picker, since the form has a notebook field of its own.
 
-That question, and "Move to notebook" and "Move notebook under…", all open the same notebook picker: a scrolling list of every notebook by its full path, with a filter box pinned above it and the notebook you are currently in already selected ("Move notebook under…" starts on "(top level)" instead, so a bare OK can never move a notebook under itself). The box takes focus as the dialog opens, so you can simply type — any part of the path, in any case — and the list narrows as you go. The up and down arrows walk what is left of it and wrap around, Enter takes the highlighted row (the first match, if you have just typed), a click selects a row and a double-click selects and confirms in one go. The selection always follows the filter, so it is never left on a notebook you can no longer see; filter down to nothing and there is simply no answer to confirm. Escape clears the filter first and closes the dialog on the second press. The list is drawn by Cockpit rather than by the operating system, so it follows the theme — scrollbar included. The dialog opens at a fixed height, a little under two-thirds of the panel's own, so it sits high on the screen and holds still: the list scrolls inside it and narrowing the list never resizes the window under your cursor.
+Both are settings, **New note and New to-do: click** and **New note and New to-do: right-click**, and each offers the same three: the editor, a new Joplin window and Jot. With the new window the note is created exactly as for the editor, then opened in a window of its own, as double-clicking a row's title opens one; on a Joplin without the new-window command it opens in the editor instead. On mobile the buttons work as they always have: a tap creates the note and opens it, under "All notebooks" the panel's own notebook overlay asks where first, and neither setting is read.
+
+Asking which notebook, "Move to notebook" and "Move notebook under…" all open the same notebook picker: a scrolling list of every notebook by its full path, with a filter box pinned above it and the notebook you are currently in already selected ("Move notebook under…" starts on "(top level)" instead, so a bare OK can never move a notebook under itself). The box takes focus as the dialog opens, so you can simply type — any part of the path, in any case — and the list narrows as you go. The up and down arrows walk what is left of it and wrap around, Enter takes the highlighted row (the first match, if you have just typed), a click selects a row and a double-click selects and confirms in one go. The selection always follows the filter, so it is never left on a notebook you can no longer see; filter down to nothing and there is simply no answer to confirm. Escape clears the filter first and closes the dialog on the second press. The list is drawn by Cockpit rather than by the operating system, so it follows the theme — scrollbar included. The dialog opens at a fixed height, a little under two-thirds of the panel's own, so it sits high on the screen and holds still: the list scrolls inside it and narrowing the list never resizes the window under your cursor.
 
 Move, tag and duplicate run Joplin's own dialogs on desktop — the native tag dialog with its autocomplete and common-tags behaviour, Joplin's move dialog, Joplin's duplicateNote. On mobile Cockpit does each itself: the notebook picker it draws, filter box and all, a comma-separated tag field prefilled with the note's current tags (attaching and detaching exactly the difference), and a field-by-field copy into a fresh note in the same notebook. Moving a whole selection of rows at once always uses Cockpit's own picker, on both platforms.
 
@@ -189,6 +193,20 @@ Move, tag and duplicate run Joplin's own dialogs on desktop — the native tag d
 If the note lives in a notebook you have excluded in Cockpit's settings, the chip still behaves sensibly rather than pointing the panel somewhere it will not show: a left click leaves the filter alone and says the notebook is excluded, and a double click reveals the note by pinning it below the list, as it does for anything else the active view cannot list.
 
 Both plugins reach into Joplin's note title bar, and they do not collide: Whereabouts mounts its chip below the title, while Cockpit's two title-bar settings touch only the alarm bell inside Joplin's own button row (`.note-title-info-group`) — matched by the bell's own icon, so the other buttons in that row keep their appearance and their clicks — and the chip never enters that row. Run both with everything switched on and each does its own thing.
+
+## Works with Jot
+
+[Jot](https://github.com/pmslava/joplin-plugin-jot) is a separate plugin for quick capture: a small form for a title, a line or two of text, the notebook, tags and a due date, which creates the note or to-do without opening it unless you ask it to, so you stay in the note you were in. It has its own ways in — Ctrl+Shift+J, Tools › Jot…, the editor's right-click on highlighted text, and typing `++` in the editor — and an edit mode that changes a note's title, type, notebook, tags and due date without opening it, writing only what changed.
+
+With Jot installed, Cockpit calls it from two places, on desktop. A **right-click on New note or New to-do** opens Jot's form with the button's type and the panel's notebook, and either create setting can send a plain click there too — see [Notebooks and notes](#notebooks-and-notes). **Quick edit…** in the row menu opens Jot's edit mode on that row; Jot puts the same form in Joplin's own note list as "Edit with Jot…", so this is that form, reached from the panel. Jot writes the note, and Cockpit reads its change feed the moment the form saves, so the new row appears, or the edited one changes, at once rather than at the next refresh. Cancel the form and nothing happens.
+
+Neither plugin needs the other. Without Jot, the first press that calls it in a session says so, once:
+
+> Cockpit: this needs the Jot plugin, which is not installed. Install "Jot" from Settings › Plugins, or change the "New note and New to-do" settings.
+
+A create button then does what a click does by default — it creates the note and opens it in the editor — on that press and every one after it, and Quick edit… does nothing. Without Cockpit, Jot is simply Jot.
+
+On mobile Cockpit does not call Jot: a tap on New note or New to-do creates and opens as it always has, and Quick edit… is not in the long-press menu. Jot's own typed `++` trigger in the editor is the way into it there.
 
 ## Overview notes
 
@@ -219,7 +237,7 @@ Copying the first device's field text across instead — `Joplin Cockpit Plugin 
 
 There is also a `Cockpit: Connect settings note` command in the command palette. It is the same three steps and the same rules; the field is the one to reach for.
 
-What travels: your profiles, the custom panel CSS, the theme and its colours, the completed-to-do style, the day start time and the excluded notebooks. What stays per device: the font and circle sizes (a phone and a 27-inch monitor want different ones), the refresh interval, the toolbar button, the two title-bar options, and which profile is currently selected.
+What travels: your profiles, the custom panel CSS, the theme and its colours, the completed-to-do style, the day start time and the excluded notebooks. What stays per device: the font and circle sizes (a phone and a 27-inch monitor want different ones), the refresh interval, the toolbar button, the two title-bar options, the two New note and New to-do settings, and which profile is currently selected.
 
 - A change on either side reaches the other on your next sync, a few seconds after you make it.
 - The note carries the whole picture, not a list of edits, so the last device to write wins — including deletions. Two devices changing profiles at the same moment produce an ordinary Joplin conflict copy, which you resolve like any other.
@@ -270,6 +288,8 @@ Cockpit's settings live in Joplin's own Settings › Plugins › Cockpit.
 - **Show the Cockpit button in the note toolbar** — a gauge button in the note toolbar toggles the panel, and the same command sits in Tools › Cockpit alongside this switch and Set Panel CSS, with **Ctrl+Shift+H** as its keyboard shortcut on every desktop platform (change it under Options › Keyboard Shortcuts). Joplin cannot add or remove a toolbar button while running, so turning it on or off applies after a restart, and Cockpit says so.
 - **Hide the due date next to the bell in the note title bar and show it on hover** — when a to-do has an alarm, Joplin prints the due date as text beside the bell in the note title bar, and that text eats the space the title has. With this on, the text is hidden and appears as a small bubble under the bell while the pointer is over it. Desktop only. Off by default. Joplin cannot unload a stylesheet it has already loaded, so this applies after a restart.
 - **Open Cockpit's date picker instead of Joplin's when the alarm bell is clicked** — clicking the bell opens Cockpit's picker (calendar, time columns and quick buttons) rather than Joplin's bare datetime prompt. Desktop and the **Markdown editor** only: with the Rich Text editor no plugin code runs in that window, so the bell keeps Joplin's prompt there. The Note menu's *Set alarm* item and its keyboard shortcut always keep Joplin's picker, so the original is never out of reach. Off by default; applies after a restart, since Joplin cannot register an editor content script while running.
+- **New note and New to-do: click** — what a click on either create button does: "Create and open in the editor" (the default), "Create and open in a new window" or "Jot". See [Notebooks and notes](#notebooks-and-notes) and [Works with Jot](#works-with-jot). Per device, so the settings note does not carry it. Desktop only: on mobile a tap always creates and opens.
+- **New note and New to-do: right-click** — the same three for a right-click on either button, "Jot" by default. Per device and desktop only, like the click.
 
 ## On Android
 
@@ -283,7 +303,7 @@ Android can restart the panel's webview under load, so Cockpit keeps the scroll 
 
 Settings sync is set up on Android exactly as it is on desktop, in the same one field: open Settings › Plugins › Cockpit and type `Joplin Cockpit Plugin Settings` into **Settings note**. If a desktop device made the note already, sync first so it is here to be found; if not, the phone makes it.
 
-Desktop-only: Ctrl/Shift multi-select and the batch actions that follow from it, double-click to open in a new window, custom panel CSS, the note-toolbar button, and the Ctrl+Shift+H shortcut that toggles the panel.
+Desktop-only: Ctrl/Shift multi-select and the batch actions that follow from it, double-click to open in a new window, the create buttons' right-click, their two settings and Quick edit…, custom panel CSS, the note-toolbar button, and the Ctrl+Shift+H shortcut that toggles the panel.
 
 ## Commands for other plugins
 
