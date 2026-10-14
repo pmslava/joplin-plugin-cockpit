@@ -54,7 +54,7 @@ test.describe('Plugin loads', () => {
     await expect(panel.locator('#profileControls .dropdown-toggle-label')).toHaveText(
       'All todo and notes'
     );
-    await expect(panel.locator('#profileControls button[title="New to-do"]')).toBeVisible();
+    await expect(panel.locator('#profileControls button[aria-label="New to-do"]')).toBeVisible();
   });
 
   test('a default profile exists on a fresh install', async () => {
@@ -80,7 +80,7 @@ test.describe('Plugin loads', () => {
   test('the profile buttons use inline icons rather than an icon font', async () => {
     const panel = await agendaPanel(joplin.win);
     // Font Awesome is not available in plugin webviews on mobile, so the icons must be inline SVG.
-    await expect(panel.locator('#profileControls button[title="New to-do"] svg')).toBeVisible();
+    await expect(panel.locator('#profileControls button[aria-label="New to-do"] svg')).toBeVisible();
     expect(await panel.locator('.todos i.fa').count()).toBe(0);
   });
 

@@ -1584,10 +1584,16 @@ async function getControlsHTML(currentProfileID){
     // never wraps to a second line. The title/aria-label stay the full wording at every stage, so the
     // icon-only state is still named for a tooltip and for assistive tech. Only the desktop buttons take a
     // right-click (2.8, runCreateButton); the mobile markup is the one it has always been.
+    // The desktop tooltip tells both routes (2.8): a button that does one thing on a click and another on a
+    // right-click cannot be explained by its name alone, and the settings are two screens away. The accessible
+    // name stays the plain wording, which is also what the e2e specs locate the buttons by. Neither setting is
+    // read on mobile, whose buttons do one thing.
+    var clickRoute = mobile ? null : await getCreateButtonClickRoute()
+    var rightClickRoute = mobile ? null : await getCreateButtonRightClickRoute()
     var createButtons = mobile
         ? iconButton("note", "New note", "onNewNoteClicked()") + iconButton("todo", "New to-do", "onNewTodoClicked()")
-        : `<button type="button" class="create-button" title="New note" aria-label="New note" onclick="onNewNoteClicked()" oncontextmenu="onNewNoteRightClicked(event)">${icons["note"]}<span class="create-label -long">New note</span><span class="create-label -short">Note</span></button>
-            <button type="button" class="create-button" title="New to-do" aria-label="New to-do" onclick="onNewTodoClicked()" oncontextmenu="onNewTodoRightClicked(event)">${icons["todo"]}<span class="create-label -long">New to-do</span><span class="create-label -short">To-do</span></button>`
+        : `<button type="button" class="create-button" title="${createButtonTooltip("New note", clickRoute, rightClickRoute)}" aria-label="New note" onclick="onNewNoteClicked()" oncontextmenu="onNewNoteRightClicked(event)">${icons["note"]}<span class="create-label -long">New note</span><span class="create-label -short">Note</span></button>
+            <button type="button" class="create-button" title="${createButtonTooltip("New to-do", clickRoute, rightClickRoute)}" aria-label="New to-do" onclick="onNewTodoClicked()" oncontextmenu="onNewTodoRightClicked(event)">${icons["todo"]}<span class="create-label -long">New to-do</span><span class="create-label -short">To-do</span></button>`
     // The "-sync" class gives the button a stable selector for the mobile long-press adapter (which
     // shows its status tooltip as a toast, since touch has no hover). It has no CSS of its own, so it is
     // inert on desktop; "-syncing" still drives the spin animation while a sync runs.
@@ -1737,6 +1743,23 @@ function dropdownHTML(menuID, toggleLabel, itemsHtml){
             <div class="dropdown-menu" id="${menuID}" hidden>${itemsHtml}</div>
         </div>
     `
+}
+
+/** createButtonTooltip (2.8) ***********************************************************************************************************************
+ * The desktop create button's tooltip: its name, then what a click and a right-click do, in the words of the two settings' routes. The same route  *
+ * on both is said once ("Click or right-click: ..."), so the tooltip never repeats itself. Static phrases only, so nothing here is HTML-escaped.    *
+ ***************************************************************************************************************************************************/
+var CREATE_ROUTE_PHRASES = {
+    editor: "creates it and opens it in the editor",
+    newWindow: "creates it and opens it in a new window",
+    jot: "opens Jot's quick-capture form",
+}
+
+function createButtonTooltip(name, clickRoute, rightClickRoute){
+    var click = CREATE_ROUTE_PHRASES[clickRoute] || CREATE_ROUTE_PHRASES.editor
+    var right = CREATE_ROUTE_PHRASES[rightClickRoute] || CREATE_ROUTE_PHRASES.jot
+    if (click === right) return `${name}. Click or right-click: ${click}.`
+    return `${name}. Click: ${click}. Right-click: ${right}.`
 }
 
 /** runCreateButton (2.8) ***************************************************************************************************************************

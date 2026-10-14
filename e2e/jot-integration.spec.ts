@@ -159,7 +159,7 @@ test.describe('Calling Jot from the panel (desktop)', () => {
     expect(editorNote).toBe(plainNoteId);
 
     const panel = await agendaPanel(win);
-    await panel.locator('button.create-button[title="New to-do"]').click({ button: 'right' });
+    await panel.locator('button.create-button[aria-label="New to-do"]').click({ button: 'right' });
 
     const form = await jotForm(win);
     await expect(form.locator('#jotHeading')).toHaveText('New to-do');
@@ -185,7 +185,7 @@ test.describe('Calling Jot from the panel (desktop)', () => {
     const editorNote = await selectedNoteId(win);
 
     const panel = await agendaPanel(win);
-    await panel.locator('button.create-button[title="New note"]').click({ button: 'right' });
+    await panel.locator('button.create-button[aria-label="New note"]').click({ button: 'right' });
 
     const form = await jotForm(win);
     await expect(form.locator('#jotHeading')).toHaveText('New note');
@@ -254,7 +254,7 @@ test.describe('Calling Jot from the panel (desktop)', () => {
 
     // A fresh handle: the Options visit above unmounts the panel webview and Joplin mounts a new one on the way back.
     const panel = await agendaPanel(win);
-    await panel.locator('button.create-button[title="New note"]').click();
+    await panel.locator('button.create-button[aria-label="New note"]').click();
 
     await expect.poll(() => allPages().length, { timeout: 30_000 }).toBe(pagesBefore.length + 1);
     const newWindow = allPages().find((page) => !pagesBefore.includes(page))!;

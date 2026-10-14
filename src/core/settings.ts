@@ -353,6 +353,9 @@ export async function setupSettings(){
 		// A theme setting change needs the panel redrawn. buildThemeCss is rebuilt inside
 		// refreshPanelData, so the new colours reach the markup and get past its equality guard.
 		if (keys.some(key => themeSettingKeys.includes(key))) await refreshInterfaces()
+		// The create buttons' tooltips say what a click and a right-click do (2.8, panel.ts createButtonTooltip), so a change to either
+		// route redraws the panel.
+		if (keys.includes(createButtonClickSettingKey) || keys.includes(createButtonRightClickSettingKey)) await refreshInterfaces()
 		// The user edited the visible "Excluded notebooks" names field: resolve the names to ids (the source
 		// of truth), rewrite the field to the canonical resolved titles, and re-render everything so the
 		// exclusion takes effect at once.

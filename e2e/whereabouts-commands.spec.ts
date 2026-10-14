@@ -202,7 +202,7 @@ test.describe('Commands for other plugins (the Whereabouts contract)', () => {
     expect(await currentNotebookLabel(livePanel)).toBe('All notebooks');
     // ...and because the filter really is empty, the create asks: the picker dialog opens instead of a note
     // appearing silently inside the excluded notebook.
-    await livePanel.locator('#profileControls button[title="New to-do"]').click();
+    await livePanel.locator('#profileControls button[aria-label="New to-do"]').click();
     const pickerShowing = async () => {
       for (const frame of win.frames()) {
         if (await frame.locator('.picker-filter').count().catch(() => 0)) return true;

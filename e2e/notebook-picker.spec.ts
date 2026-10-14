@@ -115,7 +115,7 @@ test.describe('Notebook picker dialog (desktop)', () => {
   /** Click the panel's "New to-do" button and wait for the picker dialog it opens. */
   async function openPickerFromNewTodo(win: Page): Promise<Frame> {
     const panel = await agendaPanel(win);
-    await panel.locator('#profileControls button[title="New to-do"]').click();
+    await panel.locator('#profileControls button[aria-label="New to-do"]').click();
     return pickerFrame(win);
   }
 
