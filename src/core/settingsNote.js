@@ -11,8 +11,8 @@
  *                                                                                                                                                    *
  * WHAT TRAVELS: the whole profile store, and the view settings a user would otherwise re-enter by hand (the panel CSS, the theme colours, the          *
  * completed-to-do style, the day start time and the excluded notebooks). WHAT DOES NOT: everything that is a property of the DEVICE rather than of the *
- * view - the selected profile, the refresh interval, the toolbar button and title-bar switches, the font and circle sizes (a phone and a 27" monitor    *
- * want different ones) and the settings note's own id. See SYNCED_SETTING_KEYS below and README.md.                                                     *
+ * view - the selected profile, the refresh interval, the toolbar button and title-bar switches, the create buttons' routes (2.8, desktop only), the   *
+ * font and circle sizes (a phone and a 27" monitor want different ones) and the settings note's own id. See SYNCED_SETTING_KEYS below and README.md.   *
  *                                                                                                                                                    *
  * DETERMINISTIC BYTES. Every object that reaches the body is rebuilt with its keys sorted, so two devices holding the same state produce the same      *
  * characters and therefore the same content key. That is what makes "write only when there is something to say" a real no-op instead of a coin flip.   *

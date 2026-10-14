@@ -32,6 +32,9 @@ function makeJoplin(options) {
         registeredSettings: null,
         panels: [],
         dialogs: [],
+        // Every views.dialogs.open, by handle, in order: the notebook picker's opens are counted here, so "never asks with the picker" is
+        // provable rather than inferred from the markup a setHtml left behind.
+        dialogOpens: [],
         // The markup each dialog was last given, by handle. The notebook picker rewrites its whole list on every
         // open, so this is where a check reads its rows, its filter box and its hidden input.
         dialogHtml: {},
@@ -45,6 +48,15 @@ function makeJoplin(options) {
         toolbarButtons: [],
         menus: [],
         commands: [],
+        // Every commands.execute, as { name, args }, in order - Joplin's own commands and other plugins' (Jot's jot.open, 2.8) as well as
+        // the plugin's own. `commands` above stays the list of what the plugin REGISTERED, which is what the older checks read.
+        commandCalls: [],
+        // Commands of the app and of other plugins, by name: { [name]: async (...args) => result }, consulted before the plugin's own. A
+        // test can add one mid-run. Without an entry, a name the plugin did not register answers undefined, as it always has here.
+        appCommands: Object.assign({}, options.appCommands),
+        // Names whose execute throws the way Joplin's CommandService does for a command nobody registered (an app without Jot, an older
+        // desktop without openNoteInNewWindow). Checked first; a test can change it mid-run.
+        absentCommands: (options.absentCommands || []).slice(),
         workspaceEvents: [],
         messageBoxes: [],
         notePuts: [],
@@ -271,8 +283,11 @@ function makeJoplin(options) {
             onChange: async (handler) => { state.settingHandlers.push(handler) },
             // Joplin's own settings, read-only. `clientId` answers `options.clientId`, or one fixed id for every run - a profile's database keeps
             // its own, which the saved note store records and compares (2.7.1); every other key answers undefined, as a missing one would.
+            // `options.globalValues` answers any other key a test gives it (Joplin's newTodoFocus / newNoteFocus, which the create's focus step
+            // reads, 2.8), and is consulted first.
             globalValue: async (key) => {
                 state.globalValueReads.push(key)
+                if (options.globalValues && Object.prototype.hasOwnProperty.call(options.globalValues, key)) return options.globalValues[key]
                 if (key === 'clientId') return options.clientId === undefined ? 'harness-client-id' : options.clientId
                 return undefined
             },
@@ -280,6 +295,9 @@ function makeJoplin(options) {
         commands: {
             register: async (command) => { state.commands.push(command) },
             execute: async (name, ...args) => {
+                state.commandCalls.push({ name, args })
+                if (state.absentCommands.includes(name)) throw new Error('Command not found: ' + name + '. Make sure the declaration has been registered.')
+                if (state.appCommands[name]) return await state.appCommands[name](...args)
                 const command = state.commands.find(c => c.name === name)
                 if (command) return await command.execute(...args)
             },
@@ -301,7 +319,7 @@ function makeJoplin(options) {
                 addScript: async (handle, script) => { state.dialogScripts.push({ handle, script }) },
                 setHtml: async (handle, html) => { state.dialogHtml[handle] = html },
                 setButtons: async () => {},
-                open: async () => state.dialogResult || { id: 'cancel' },
+                open: async (handle) => { state.dialogOpens.push(handle); return state.dialogResult || { id: 'cancel' } },
                 showMessageBox: async (message) => { state.messageBoxes.push(message); return 0 },
             },
             toolbarButtons: {

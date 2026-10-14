@@ -806,6 +806,9 @@ function onNoteContextMenu(event, noteID){
  * MIXED KINDS: every action this menu can batch takes an id array of either kind (Joplin has one note store; a to-do IS a note with is_todo set), so  *
  * a selection of to-dos AND regular notes is routed whole, from a right click on either kind of row. The one kind-specific entry - mobile's "Move to   *
  * date…" - is added only for a to-do row and is single-note anyway.                                                                                    *
+ *                                                                                                                                                     *
+ * QUICK EDIT… (2.8) calls the Jot plugin, which Cockpit does on desktop only, so the mobile menu is built without it ({ mobile: IS_MOBILE }) and stays*
+ * the menu it was before. On desktop it is single-only: greyed in a multi-selection, as Open is.                                                      *
  ***************************************************************************************************************************************************/
 function showNoteContextMenu(event, noteID, isTodo){
     // Belt to the braces of the panel-wide contextmenu suppression above: while a touch gesture owns the finger -
@@ -837,7 +840,7 @@ function showNoteContextMenu(event, noteID, isTodo){
     var extra = (IS_MOBILE && isTodo) ? [{ action: 'setDueDate', label: 'Move to date…' }] : []
     var menu = document.createElement('div')
     menu.id = 'noteContextMenu'
-    menu.innerHTML = window.NoteMenu.menuHtml(count, extra)
+    menu.innerHTML = window.NoteMenu.menuHtml(count, extra, { mobile: IS_MOBILE })
     menu.addEventListener('click', clickEvent => {
         var button = clickEvent.target.closest ? clickEvent.target.closest('.context-menu-item') : null
         // A greyed-out (single-only, on a multi-selection) item is inert: it fires no action and leaves the
@@ -2512,6 +2515,21 @@ async function onNewNoteClicked(){
 async function onNewTodoClicked(){
     if (createNeedsNotebookOverlay()){ openNotebookOverlay('createTodo', {}); return }
     await webviewApi.postMessage(['newTodoClicked']);
+}
+
+/** onNewNoteRightClicked / onNewTodoRightClicked (2.8) *********************************************************************************************
+ * A right-click on a create button, which the host routes by the "right-click" setting (Jot by default). Only the desktop markup carries the handler: *
+ * on mobile a long press keeps its meaning and the typed trigger is the way into Jot. The browser's own context menu is cancelled, so the route is the*
+ * only thing that happens.                                                                                                                            *
+ ***************************************************************************************************************************************************/
+function onNewNoteRightClicked(event){
+    event.preventDefault()
+    void webviewApi.postMessage(['newNoteRightClicked'])
+}
+
+function onNewTodoRightClicked(event){
+    event.preventDefault()
+    void webviewApi.postMessage(['newTodoRightClicked'])
 }
 
 /** createNeedsNotebookOverlay **********************************************************************************************************************

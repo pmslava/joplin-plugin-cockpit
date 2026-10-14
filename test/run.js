@@ -4487,33 +4487,40 @@ async function main() {
     const NoteMenu = require('../src/ui/panel/noteMenu.js')
 
     // -- (1) markup -------------------------------------------------------------------------------------------
-    await test('multi-menu markup: N=1 is byte-identical to the pre-multi single-note menu', () => {
-        const item = (cls, action, label) => `<button type="button" class="${cls}" data-action="${action}">${label}</button>`
-        const expected = [
-            item('context-menu-item', 'open', 'Open'),
-            item('context-menu-item', 'toggleType', 'Switch between note and to-do type'),
-            item('context-menu-item', 'tags', 'Tags...'),
-            item('context-menu-item', 'moveToFolder', 'Move to notebook...'),
-            item('context-menu-item', 'duplicate', 'Duplicate'),
-            item('context-menu-item', 'copyMarkdownLink', 'Copy Markdown link'),
-            item('context-menu-item', 'copyNoteID', 'Copy note ID'),
-            item('context-menu-item -danger', 'delete', 'Delete note'),
-        ].join('')
-        assert.strictEqual(NoteMenu.menuHtml(1, []), expected)
-        assert.strictEqual(NoteMenu.menuHtml(1), expected, 'a lone selection coerces to the single-note menu')
+    // The single-note menu as it was before 2.8, which is what the MOBILE menu still is: Quick edit… (2.8) calls Jot, which
+    // Cockpit does on desktop only, so the mobile build of the menu leaves it out. The desktop menu has its own pins (2.8 below).
+    const menuItemHtml = (cls, action, label) => `<button type="button" class="${cls}" data-action="${action}">${label}</button>`
+    const MENU_SINGLE_BEFORE_2_8 = [
+        menuItemHtml('context-menu-item', 'open', 'Open'),
+        menuItemHtml('context-menu-item', 'toggleType', 'Switch between note and to-do type'),
+        menuItemHtml('context-menu-item', 'tags', 'Tags...'),
+        menuItemHtml('context-menu-item', 'moveToFolder', 'Move to notebook...'),
+        menuItemHtml('context-menu-item', 'duplicate', 'Duplicate'),
+        menuItemHtml('context-menu-item', 'copyMarkdownLink', 'Copy Markdown link'),
+        menuItemHtml('context-menu-item', 'copyNoteID', 'Copy note ID'),
+        menuItemHtml('context-menu-item -danger', 'delete', 'Delete note'),
+    ].join('')
+    await test('multi-menu markup: N=1 on mobile is byte-identical to the pre-multi single-note menu', () => {
+        assert.strictEqual(NoteMenu.menuHtml(1, [], { mobile: true }), MENU_SINGLE_BEFORE_2_8)
+        assert.strictEqual(NoteMenu.menuHtml(1, undefined, { mobile: true }), MENU_SINGLE_BEFORE_2_8, 'a lone selection coerces to the single-note menu')
     })
-    await test('multi-menu markup: the mobile "Move to date…" extra prepends, single-note, unchanged', () => {
-        const html = NoteMenu.menuHtml(1, [{ action: 'setDueDate', label: 'Move to date…' }])
+    await test('multi-menu markup: the mobile "Move to date…" extra prepends, single-note, byte-identical to the menu before 2.8', () => {
+        const html = NoteMenu.menuHtml(1, [{ action: 'setDueDate', label: 'Move to date…' }], { mobile: true })
         assert.ok(html.startsWith('<button type="button" class="context-menu-item" data-action="setDueDate">Move to date…</button>'),
             'the mobile set-due-date entry must prepend the menu verbatim')
         assert.ok(html.includes('data-action="delete">Delete note</button>'), 'the base single-note items follow unchanged')
         assert.ok(!/aria-disabled/.test(html), 'a single-note menu disables nothing')
+        assert.strictEqual(html, menuItemHtml('context-menu-item', 'setDueDate', 'Move to date…') + MENU_SINGLE_BEFORE_2_8,
+            'and the whole menu is the one mobile drew before 2.8, byte for byte')
     })
-    await test('multi-menu markup: N>1 greys out Open (shown, not hidden) and counts every capable action', () => {
+    await test('multi-menu markup: N>1 greys out Open and Quick edit… (shown, not hidden) and counts every capable action', () => {
         const html = NoteMenu.menuHtml(6, [])
         // Open is single-only: rendered, but disabled (greyed via -disabled + aria-disabled + inert), base label.
         assert.ok(html.includes('<button type="button" class="context-menu-item -disabled" data-action="open" aria-disabled="true">Open</button>'),
             'Open must render disabled (greyed, aria-disabled), never hidden')
+        // So is Quick edit… (2.8): Jot's edit form takes one note.
+        assert.ok(html.includes('<button type="button" class="context-menu-item -disabled" data-action="quickEdit" aria-disabled="true">Quick edit…</button>'),
+            'Quick edit… must render disabled too, with its base label')
         assert.ok(html.includes('data-action="toggleType">Switch type of 6 items</button>'), 'toggleType must count')
         assert.ok(html.includes('data-action="tags">Tags for 6 notes...</button>'), 'tags must count')
         assert.ok(html.includes('data-action="moveToFolder">Move 6 to notebook...</button>'), 'move must count')
@@ -4521,9 +4528,9 @@ async function main() {
         assert.ok(html.includes('data-action="copyMarkdownLink">Copy 6 Markdown links</button>'), 'copy-link must count')
         assert.ok(html.includes('data-action="copyNoteID">Copy 6 note IDs</button>'), 'copy-id must count')
         assert.ok(html.includes('class="context-menu-item -danger" data-action="delete">Delete 6 notes</button>'), 'delete must count and stay -danger')
-        // Only the single-only action is disabled: exactly one aria-disabled in the whole menu.
-        assert.strictEqual((html.match(/aria-disabled/g) || []).length, 1, 'only Open may be disabled on a multi-selection')
-        assert.strictEqual((html.match(/ -disabled"/g) || []).length, 1, 'only Open carries the -disabled class')
+        // Only the single-only actions are disabled: exactly two aria-disabled in the whole menu.
+        assert.strictEqual((html.match(/aria-disabled/g) || []).length, 2, 'only Open and Quick edit… may be disabled on a multi-selection')
+        assert.strictEqual((html.match(/ -disabled"/g) || []).length, 2, 'only Open and Quick edit… carry the -disabled class')
     })
 
     // -- (2) host batch glue ----------------------------------------------------------------------------------
@@ -14466,6 +14473,499 @@ async function main() {
             assert.ok(new RegExp(`onDropdown(?:Action|Item)Clicked\\(event, '${message}'`).test(panelSource), `${message} is still posted by the profile menu`)
             assert.ok(panelSource.includes(`message[0] == '${message}'`), `and still handled`)
         }
+    })
+
+    // ============================================================ 2.8: the create buttons and Quick edit… call Jot, on desktop
+    // Quick capture is a plugin of its own, Jot (docs/BRIEF-2.8-jot-integration.md); Cockpit only calls its command, jot.open, and only on desktop.
+    // Two per-device settings route a click and a right-click on New note / New to-do to the editor (today's create), to a new window, or to Jot;
+    // Quick edit… in the row menu opens Jot's edit form. Jot writes the note itself, so nothing here is an own write: after an answer the change feed
+    // is drained at once and Jot's row comes in like any outside edit. Without Jot the user is told once per session and the create falls back to
+    // today's. The webview halves are pinned by source shape, as the other webview checks are; the host half is driven for real, with jot.open,
+    // openNoteInNewWindow and the focus commands stubbed through the harness's appCommands / absentCommands / globalValues.
+    const JOT_CLICK_KEY = 'createButtonClick'
+    const JOT_RIGHT_CLICK_KEY = 'createButtonRightClick'
+    const JOT_ABSENT_BOX = 'Cockpit: this needs the Jot plugin, which is not installed. Install "Jot" from Settings › Plugins, or change the "New note and New to-do" settings.'
+    const jotFolder = 'a1' + '0'.repeat(30)
+    const jotFolders = [{ id: jotFolder, title: 'Inbox', parent_id: '' }]
+    let jotRunSeq = 0
+    const jotRun = async (opts, platform) => {
+        const n = jotRunSeq++
+        const dir = path.join(tmp, `jot-${n}`)
+        await fs.ensureDir(dir)
+        return run(Object.assign({
+            dataDir: dir,
+            installationDir: path.join(tmp, `jot-install-${n}`),
+            require: platform === 'mobile' ? mobileRequire : desktopRequire,
+            versionInfo: { version: '3.7.0', platform: platform || 'desktop' },
+            todos: [],
+            folders: jotFolders,
+        }, opts || {}))
+    }
+    const callsNamed = (state, name, mark) => state.commandCalls.slice(mark || 0).filter(call => call.name === name)
+    const jotCalls = (state, mark) => callsNamed(state, 'jot.open', mark)
+    const notePostsOf = (state, mark) => state.dataPosts.slice(mark || 0).filter(post => post.path[0] === 'notes' && post.path.length === 1)
+    const pickerOpens = (state, mark) => state.dialogOpens.slice(mark || 0).filter(handle => handle === 'dialog-notebookPicker')
+    // The console while fn runs: what the plugin warns and errs, and nothing else lets through.
+    const consoleDuring = async (fn) => {
+        const seen = { warn: [], error: [] }
+        const realWarn = console.warn, realError = console.error
+        console.warn = (...args) => { seen.warn.push(args.map(String).join(' ')) }
+        console.error = (...args) => { seen.error.push(args.map(String).join(' ')) }
+        try {
+            await fn()
+        } finally {
+            console.warn = realWarn
+            console.error = realError
+        }
+        return seen
+    }
+
+    // -- the two settings ---------------------------------------------------------------------------------------
+    await test('jot (settings): two public per-device enums, "New note and New to-do: click" and "...: right-click", offering the editor, a new window and Jot in that order, defaulting to the editor and to Jot', async () => {
+        const state = await jotRun()
+        const defs = state.registeredSettings
+        for (const [key, label, value] of [
+            [JOT_CLICK_KEY, 'New note and New to-do: click', 'editor'],
+            [JOT_RIGHT_CLICK_KEY, 'New note and New to-do: right-click', 'jot'],
+        ]){
+            const def = defs[key]
+            assert.ok(def, `the ${key} setting must be registered`)
+            assert.strictEqual(def.label, label, `${key} label`)
+            assert.strictEqual(def.isEnum, true, `${key} is an enum`)
+            assert.strictEqual(def.type, 2, `${key} is SettingItemType.String (2)`)
+            assert.strictEqual(def.public, true, `${key} is visible in Settings > Cockpit`)
+            assert.strictEqual(def.section, 'section', `${key} lives in Cockpit's own section`)
+            assert.strictEqual(def.value, value, `${key} defaults to ${value}`)
+            assert.deepStrictEqual(Object.entries(def.options), [
+                ['editor', 'Create and open in the editor'],
+                ['newWindow', 'Create and open in a new window'],
+                ['jot', 'Jot'],
+            ], `${key} offers the three routes, in this order, with these texts`)
+            assert.ok(/Jot is a separate plugin/.test(def.description) && /quick capture/.test(def.description), `${key}'s description says Jot is a separate quick-capture plugin`)
+            assert.ok(/creates the note without opening it/.test(def.description), `${key}'s description says what Jot does differently`)
+            assert.ok(def.description.endsWith('Desktop only.'), `${key}'s description ends with "Desktop only."`)
+        }
+        assert.strictEqual(state.settings[JOT_CLICK_KEY], 'editor', 'a fresh install clicks into the editor, as before 2.8')
+        assert.strictEqual(state.settings[JOT_RIGHT_CLICK_KEY], 'jot', 'and right-clicks into Jot')
+        // Registered on both platforms, like the other desktop-only settings: the registration has no platform gate.
+        const phone = await jotRun({}, 'mobile')
+        assert.ok(phone.registeredSettings[JOT_CLICK_KEY] && phone.registeredSettings[JOT_RIGHT_CLICK_KEY], 'the mobile app registers both too')
+    })
+
+    await test('jot (settings): neither create-button setting travels - not in the synced list, not in a payload, not in the note a device writes, and a change arms no write', async () => {
+        assert.ok(!SYNCED_SETTING_KEYS.includes(JOT_CLICK_KEY) && !SYNCED_SETTING_KEYS.includes(JOT_RIGHT_CLICK_KEY), 'both are per device')
+        const parsed = parseSettingsNoteBody(buildSettingsNoteBody({ profiles: syncStore(1, []), settings: { themeMode: 'nord', [JOT_CLICK_KEY]: 'jot', [JOT_RIGHT_CLICK_KEY]: 'editor' } }, '2026-10-14T08:00:00.000Z'))
+        assert.deepStrictEqual(Object.keys(parsed.settings), ['themeMode'], 'a payload that carries them comes back without them')
+        // End to end: a device whose buttons are set away from the defaults creates the settings note, and the note says nothing about them.
+        const state = await runSync('jot-per-device', {
+            notes: {},
+            livePostedNotes: true,
+            selectedFolder: { id: 'folder-1' },
+            initialSettings: {
+                profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Only on this device')])),
+                currentProfileID: 1,
+                [JOT_CLICK_KEY]: 'jot',
+                [JOT_RIGHT_CLICK_KEY]: 'newWindow',
+            },
+        })
+        await state.withTimers(() => state.setSetting('settingsNoteId', SETTINGS_NOTE_TITLE))
+        const posted = state.dataPosts.filter(post => post.path[0] === 'notes')
+        assert.strictEqual(posted.length, 1, 'precondition: the settings note was created')
+        const payload = parseSettingsNoteBody(posted[0].body.body)
+        assert.ok(!(JOT_CLICK_KEY in payload.settings) && !(JOT_RIGHT_CLICK_KEY in payload.settings), 'the note this device wrote carries neither')
+        assert.ok(!posted[0].body.body.includes(JOT_CLICK_KEY) && !posted[0].body.body.includes(JOT_RIGHT_CLICK_KEY), 'not even by name')
+        const timerMark = state.timeouts.length
+        const putsBefore = state.notePuts.length
+        await state.withTimers(() => state.setSetting(JOT_CLICK_KEY, 'newWindow'))
+        await state.withTimers(() => state.setSetting(JOT_RIGHT_CLICK_KEY, 'editor'))
+        assert.strictEqual(state.timeouts.slice(timerMark).filter(t => t.ms === 3000).length, 0, 'changing either arms no settings-note write')
+        assert.strictEqual(state.notePuts.length, putsBefore, 'and writes nothing')
+    })
+
+    await test('jot (settings): a stored value outside the three falls back to the setting\'s own default - the editor for a click, Jot for a right-click', async () => {
+        const state = await jotRun({ appCommands: { 'jot.open': async () => null }, initialSettings: { [JOT_CLICK_KEY]: 'sideways', [JOT_RIGHT_CLICK_KEY]: 'sideways' } })
+        await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.strictEqual(notePostsOf(state).length, 1, 'the click creates, as the editor route does')
+        assert.deepStrictEqual(callsNamed(state, 'openNote').map(call => call.args), [['created-1']], 'and opens in the editor')
+        assert.strictEqual(jotCalls(state).length, 0, 'without calling Jot')
+        await state.panelMessageHandler(['newTodoRightClicked'])
+        assert.strictEqual(jotCalls(state).length, 1, 'the right-click calls Jot')
+        assert.strictEqual(notePostsOf(state).length, 1, 'and creates nothing itself')
+    })
+
+    // -- the buttons' markup and the webview ------------------------------------------------------------------
+    await test('jot (markup): each desktop create button takes a right-click - oncontextmenu on New note and on New to-do - beside its unchanged click', async () => {
+        const html = (await jotRun()).panelHtml['panel-panel']
+        assert.ok(html.includes('<button type="button" class="create-button" title="New note" aria-label="New note" onclick="onNewNoteClicked()" oncontextmenu="onNewNoteRightClicked(event)">'),
+            'New note: the click as before, and the right-click handler')
+        assert.ok(html.includes('<button type="button" class="create-button" title="New to-do" aria-label="New to-do" onclick="onNewTodoClicked()" oncontextmenu="onNewTodoRightClicked(event)">'),
+            'New to-do: the click as before, and the right-click handler')
+    })
+
+    await test('jot (markup): the mobile create buttons are byte-identical to 2.7.1 - two icon buttons with the click alone, and no right-click anywhere', async () => {
+        const desktopHtml = (await jotRun()).panelHtml['panel-panel']
+        const phoneHtml = (await jotRun({}, 'mobile')).panelHtml['panel-panel']
+        // The icons are the same constants on both platforms; taken from the desktop buttons, so the expectation is built, not copied.
+        const iconOf = (name, label) => {
+            const match = new RegExp(`oncontextmenu="on${name}RightClicked\\(event\\)">([\\s\\S]*?)<span class="create-label -long">${label}</span>`).exec(desktopHtml)
+            assert.ok(match, `the desktop ${label} button carries its icon`)
+            return match[1]
+        }
+        const before = `<button type="button" class="icon-button" title="New note" aria-label="New note" onclick="onNewNoteClicked()">${iconOf('NewNote', 'New note')}</button>`
+            + `<button type="button" class="icon-button" title="New to-do" aria-label="New to-do" onclick="onNewTodoClicked()">${iconOf('NewTodo', 'New to-do')}</button>`
+        assert.ok(phoneHtml.includes(before), 'the mobile create markup is exactly what iconButton drew before 2.8')
+        assert.ok(!phoneHtml.includes('RightClicked') && !/oncontextmenu="onNew/.test(phoneHtml), 'and nothing on mobile can send a right-click message')
+    })
+
+    await test('jot (webview): the right-click handlers cancel the native menu and post newNoteRightClicked / newTodoRightClicked; the click handlers post what they always did', () => {
+        for (const [handler, message] of [['onNewNoteRightClicked', 'newNoteRightClicked'], ['onNewTodoRightClicked', 'newTodoRightClicked']]){
+            const body = handlerBody(handler)
+            assert.ok(body.startsWith(`function ${handler}(event){`), `${handler} takes the event`)
+            const cancelAt = body.indexOf('event.preventDefault()')
+            const postAt = body.indexOf(`webviewApi.postMessage(['${message}'])`)
+            assert.ok(cancelAt >= 0 && postAt > cancelAt, `${handler} cancels the browser's menu, then posts ${message}`)
+        }
+        assert.ok(handlerBody('onNewNoteClicked').includes("webviewApi.postMessage(['newNoteClicked'])"), 'the New note click still posts newNoteClicked')
+        assert.ok(handlerBody('onNewTodoClicked').includes("webviewApi.postMessage(['newTodoClicked'])"), 'the New to-do click still posts newTodoClicked')
+        assert.ok(handlerBody('showNoteContextMenu').includes('window.NoteMenu.menuHtml(count, extra, { mobile: IS_MOBILE })'),
+            'the row menu is built for the platform, so mobile never draws Quick edit…')
+    })
+
+    // -- the row menu -----------------------------------------------------------------------------------------
+    await test('jot (row menu): the desktop single-note menu has Quick edit… second, right after Open, with data-action="quickEdit"', () => {
+        const quickEdit = menuItemHtml('context-menu-item', 'quickEdit', 'Quick edit…')
+        const openItem = menuItemHtml('context-menu-item', 'open', 'Open')
+        const desktopMenu = openItem + quickEdit + MENU_SINGLE_BEFORE_2_8.slice(openItem.length)
+        assert.strictEqual(NoteMenu.menuHtml(1, []), desktopMenu, 'the desktop menu is the old one with Quick edit… after Open')
+        assert.strictEqual(NoteMenu.menuHtml(1), desktopMenu, 'options default to the desktop menu')
+        assert.strictEqual(NoteMenu.menuHtml(1, [], { mobile: false }), desktopMenu, 'and say so when asked')
+        assert.deepStrictEqual(NoteMenu.NOTE_MENU_ITEMS[1], { action: 'quickEdit', label: 'Quick edit…' }, 'second in the shared list, with the U+2026 ellipsis')
+        assert.ok(NoteMenu.isSingleOnly('quickEdit'), 'single-only, as Open is')
+        assert.strictEqual(NoteMenu.multiLabel('quickEdit', 3, 'Quick edit…'), 'Quick edit…', 'its multi-select label is its base label')
+    })
+
+    await test('jot (row menu): with three rows selected Quick edit… is greyed like Open - disabled, aria-disabled, its base label', () => {
+        const html = NoteMenu.menuHtml(3)
+        const disabled = (action, label) => `<button type="button" class="context-menu-item -disabled" data-action="${action}" aria-disabled="true">${label}</button>`
+        assert.ok(html.startsWith(disabled('open', 'Open') + disabled('quickEdit', 'Quick edit…')), 'Open and Quick edit… lead the menu, both greyed')
+        assert.strictEqual((html.match(/aria-disabled/g) || []).length, 2, 'and nothing else is greyed')
+    })
+
+    // -- the click, by default today's create -----------------------------------------------------------------
+    await test("jot (click, default): a click is today's create - one POST into the filtered notebook, openNote with its id, the focus command Joplin's setting asks for, and no jot.open", async () => {
+        const state = await jotRun({ globalValues: { newTodoFocus: 'title', newNoteFocus: 'body' } })
+        await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+        const callMark = state.commandCalls.length
+        await state.panelMessageHandler(['newTodoClicked'])
+        const todoPosts = notePostsOf(state)
+        assert.strictEqual(todoPosts.length, 1, 'one POST')
+        assert.deepStrictEqual(todoPosts[0].body, { parent_id: jotFolder, is_todo: 1, title: '' }, 'an empty to-do in the filtered notebook')
+        assert.deepStrictEqual(state.commandCalls.slice(callMark).map(call => [call.name, ...call.args]),
+            [['openNote', 'created-1'], ['focusElementNoteTitle']], 'opened in the editor, then the title focused, as newTodoFocus says')
+        assert.ok(state.panelHtml['panel-panel'].includes('data-todo-id="created-1"'), 'and the row is drawn at once')
+        const noteMark = state.commandCalls.length
+        await state.panelMessageHandler(['newNoteClicked'])
+        assert.deepStrictEqual(notePostsOf(state)[1].body, { parent_id: jotFolder, is_todo: 0, title: '' }, 'New note posts a note')
+        assert.deepStrictEqual(state.commandCalls.slice(noteMark).map(call => [call.name, ...call.args]),
+            [['openNote', 'created-2'], ['focusElementNoteBody']], 'and focuses the body, as newNoteFocus says')
+        assert.strictEqual(jotCalls(state).length, 0, 'Jot is never called')
+        assert.deepStrictEqual(state.messageBoxes, [], 'and nothing is said')
+    })
+
+    await test('jot (click, default): under All notebooks the click still asks with the picker, and a cancelled picker creates nothing', async () => {
+        const state = await jotRun()
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.strictEqual(pickerOpens(state).length, 1, 'the notebook picker is asked once')
+        assert.strictEqual(notePostsOf(state).length, 0, 'cancelled, nothing is created')
+        state.dialogResult = { id: 'ok', formData: { picker: { folderId: jotFolder } } }
+        await state.panelMessageHandler(['newTodoClicked'])
+        state.dialogResult = null
+        assert.strictEqual(notePostsOf(state).length, 1, 'answered, the to-do is created')
+        assert.strictEqual(notePostsOf(state)[0].body.parent_id, jotFolder, 'in the picked notebook')
+        assert.strictEqual(jotCalls(state).length, 0, 'and Jot is never called')
+    })
+
+    // -- the right-click, by default Jot ----------------------------------------------------------------------
+    await test('jot (right-click, default): New to-do and New note call jot.open { mode: "new", type, notebookId } with the filtered notebook - no picker, no POST, no write, nothing opened', async () => {
+        const state = await jotRun({ appCommands: { 'jot.open': async () => null } })
+        await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+        await state.panelMessageHandler(['newTodoRightClicked'])
+        await state.panelMessageHandler(['newNoteRightClicked'])
+        assert.deepStrictEqual(jotCalls(state).map(call => call.args), [
+            [{ mode: 'new', type: 'todo', notebookId: jotFolder }],
+            [{ mode: 'new', type: 'note', notebookId: jotFolder }],
+        ], 'one call per press, the type following the button, the notebook the panel is filtered to')
+        assert.strictEqual(pickerOpens(state).length, 0, 'the picker is never asked')
+        assert.strictEqual(state.dataPosts.length + state.notePuts.length + state.dataDeletes.length, 0, 'Cockpit writes nothing: Jot does')
+        assert.strictEqual(callsNamed(state, 'openNote').length + callsNamed(state, 'openNoteInNewWindow').length, 0, 'and opens nothing')
+        assert.deepStrictEqual(state.messageBoxes, [], 'and says nothing')
+    })
+
+    await test('jot (right-click, default): under All notebooks notebookId is ABSENT - not null, not "" - and the picker is never opened', async () => {
+        const state = await jotRun({ appCommands: { 'jot.open': async () => null } })
+        await state.panelMessageHandler(['newTodoRightClicked'])
+        const args = jotCalls(state)[0].args
+        assert.strictEqual(args.length, 1, 'one argument')
+        assert.deepStrictEqual(Object.keys(args[0]).sort(), ['mode', 'type'], 'no notebookId key at all, so Jot uses its own default notebook')
+        assert.deepStrictEqual(args[0], { mode: 'new', type: 'todo' })
+        assert.deepStrictEqual(state.dialogOpens, [], 'no dialog of any kind is opened')
+        assert.strictEqual(notePostsOf(state).length, 0, 'and nothing is created')
+    })
+
+    await test('jot (right-click): after { id, opened } the change feed is drained at once and the follow-up armed, and Jot\'s row comes in through the feed; after null nothing follows the one execute', async () => {
+        const state = await readRun(readMix())
+        await buildAndRender(state)
+        await state.panelMessageHandler(['notebookFilterChanged', storeFolder])
+        let jotted = null
+        let answer = 'saved'
+        state.appCommands['jot.open'] = async (args) => {
+            if (answer === 'cancel') return null
+            // What Jot's Create does: one note, saved by Jot; its feed row lands with the save.
+            jotted = storeNote(81, { is_todo: 1, title: 'Jotted to-do', parent_id: args.notebookId, todo_due: Date.now() + 2 * DAY })
+            state.notes[jotted.id] = jotted
+            state.pushChange({ item_id: jotted.id, type: 1 })
+            return { id: jotted.id, opened: false }
+        }
+        const mark = state.gets.length, timerMark = state.timeouts.length, callMark = state.commandCalls.length, logMark = state.callLog.length
+        await state.panelMessageHandler(['newTodoRightClicked'])
+        assert.deepStrictEqual(jotCalls(state, callMark).map(call => call.args[0]), [{ mode: 'new', type: 'todo', notebookId: storeFolder }], 'precondition: Jot was called')
+        assert.strictEqual(state.gets.slice(mark).filter(isEvents).length, 1, 'the feed is drained once, at once')
+        assert.ok(state.callLog.slice(logMark).includes('events'), 'in the call log too')
+        assert.strictEqual(state.pendingTimeouts(STORE_FOLLOW_UP).length, 1, 'and the follow-up is armed, for a row that lands after the save')
+        assert.strictEqual(storeModel(state).get(jotted.id).title, 'Jotted to-do', 'the drain brought Jot\'s note into the mirror')
+        assert.strictEqual(state.dataPosts.length + state.notePuts.length, 0, 'Cockpit wrote nothing')
+        assert.strictEqual(laddersArmedSince(state, timerMark), 0, 'no reconcile ladder: nothing is chased through the index')
+        assert.ok(state.timeouts.slice(timerMark).every(t => [STORE_FOLLOW_UP, STORE_RENDER_DELAY, STORE_SAVE_DELAY].includes(t.ms)),
+            'and nothing armed but the store\'s own timers - no own-write tail, no overview lane')
+        await fireStoreRender(state)
+        assert.strictEqual(rowCount(state, jotted.id, 'todo'), 1, 'the store\'s render draws the row, as for any outside edit')
+        // Cancel: the one execute, and nothing after it.
+        await state.fireTimeout(state.pendingTimeouts(STORE_FOLLOW_UP)[0])
+        answer = 'cancel'
+        const cancelMark = state.gets.length, cancelTimers = state.timeouts.length, cancelCalls = state.commandCalls.length, paints = state.setHtmlCalls
+        await state.panelMessageHandler(['newNoteRightClicked'])
+        assert.deepStrictEqual(state.commandCalls.slice(cancelCalls).map(call => call.name), ['jot.open'], 'one execute, the jot.open itself')
+        assert.strictEqual(state.gets.slice(cancelMark).filter(isEvents).length, 0, 'no drain')
+        assert.strictEqual(state.timeouts.length, cancelTimers, 'no timer of any kind')
+        assert.strictEqual(state.setHtmlCalls, paints, 'no repaint')
+        assert.strictEqual(state.dataPosts.length + state.notePuts.length, 0, 'and no write')
+    })
+
+    // -- the other routes, from both triggers -----------------------------------------------------------------
+    await test('jot (routes): the click set to Jot calls jot.open from a click, and the right-click set to the editor runs today\'s create from a right-click', async () => {
+        const state = await jotRun({
+            appCommands: { 'jot.open': async () => null },
+            initialSettings: { [JOT_CLICK_KEY]: 'jot', [JOT_RIGHT_CLICK_KEY]: 'editor' },
+        })
+        await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.deepStrictEqual(jotCalls(state).map(call => call.args[0]), [{ mode: 'new', type: 'todo', notebookId: jotFolder }], 'the click went to Jot')
+        assert.strictEqual(notePostsOf(state).length, 0, 'and created nothing itself')
+        await state.panelMessageHandler(['newNoteRightClicked'])
+        assert.strictEqual(jotCalls(state).length, 1, 'the right-click did not go to Jot')
+        assert.deepStrictEqual(notePostsOf(state).map(post => post.body), [{ parent_id: jotFolder, is_todo: 0, title: '' }], 'it created the note')
+        assert.deepStrictEqual(callsNamed(state, 'openNote').map(call => call.args), [['created-1']], 'and opened it in the editor')
+    })
+
+    await test('jot (routes): "Create and open in a new window" from either trigger POSTs, then runs openNoteInNewWindow with the new id - no openNote, no focus command, no box', async () => {
+        for (const [key, message] of [[JOT_CLICK_KEY, 'newTodoClicked'], [JOT_RIGHT_CLICK_KEY, 'newTodoRightClicked']]){
+            const state = await jotRun({ globalValues: { newTodoFocus: 'title' }, initialSettings: { [key]: 'newWindow' } })
+            await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+            const callMark = state.commandCalls.length
+            await state.panelMessageHandler([message])
+            assert.deepStrictEqual(notePostsOf(state).map(post => post.body), [{ parent_id: jotFolder, is_todo: 1, title: '' }], `${message}: today's POST`)
+            assert.deepStrictEqual(state.commandCalls.slice(callMark).map(call => [call.name, ...call.args]), [['openNoteInNewWindow', 'created-1']],
+                `${message}: the new note opens in a window of its own, and that is the only command - no openNote, no focus`)
+            assert.ok(state.panelHtml['panel-panel'].includes('data-todo-id="created-1"'), `${message}: the row is drawn at once, as today's create draws it`)
+            assert.deepStrictEqual(state.messageBoxes, [], `${message}: nothing is said`)
+        }
+    })
+
+    await test('jot (routes): under All notebooks the new-window route asks with the picker, as today\'s create does', async () => {
+        const state = await jotRun({ initialSettings: { [JOT_CLICK_KEY]: 'newWindow' } })
+        state.dialogResult = { id: 'ok', formData: { picker: { folderId: jotFolder } } }
+        await state.panelMessageHandler(['newNoteClicked'])
+        state.dialogResult = null
+        assert.strictEqual(pickerOpens(state).length, 1, 'the picker asked where')
+        assert.deepStrictEqual(notePostsOf(state).map(post => post.body.parent_id), [jotFolder], 'and the note went there')
+        assert.deepStrictEqual(callsNamed(state, 'openNoteInNewWindow').map(call => call.args), [['created-1']], 'then opened in its window')
+    })
+
+    await test('jot (routes): an app without openNoteInNewWindow gets the editor in silence - openNote and the focus command, one console warning, no message box', async () => {
+        const state = await jotRun({ globalValues: { newTodoFocus: 'title' }, absentCommands: ['openNoteInNewWindow'], initialSettings: { [JOT_CLICK_KEY]: 'newWindow' } })
+        await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+        const callMark = state.commandCalls.length
+        const seen = await consoleDuring(() => state.panelMessageHandler(['newTodoClicked']))
+        assert.strictEqual(notePostsOf(state).length, 1, 'the to-do is created')
+        assert.deepStrictEqual(state.commandCalls.slice(callMark).map(call => [call.name, ...call.args]),
+            [['openNoteInNewWindow', 'created-1'], ['openNote', 'created-1'], ['focusElementNoteTitle']], 'the window was tried, then the editor route in full')
+        assert.deepStrictEqual(state.messageBoxes, [], 'no "is not available here" box')
+        assert.strictEqual(seen.warn.length, 1, 'one console warning')
+        assert.ok(/openNoteInNewWindow/.test(seen.warn[0]), 'naming the command')
+        assert.deepStrictEqual(seen.error, [], 'and no error')
+    })
+
+    // -- without Jot ------------------------------------------------------------------------------------------
+    await test('jot (absence): without Jot, ONE message box per session naming Jot across two create right-clicks and a Quick edit…, and each create falls back to today\'s create', async () => {
+        const state = await jotRun({ absentCommands: ['jot.open'], globalValues: { newTodoFocus: 'title' }, notes: { [id32('qe')]: { id: id32('qe'), title: 'Edit me', is_todo: 1 } } })
+        await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+        await state.panelMessageHandler(['newTodoRightClicked'])
+        assert.deepStrictEqual(state.messageBoxes, [JOT_ABSENT_BOX], 'the first press is told, in these words')
+        assert.ok(/Jot/.test(state.messageBoxes[0]), 'naming the Jot plugin')
+        assert.deepStrictEqual(notePostsOf(state).map(post => post.body), [{ parent_id: jotFolder, is_todo: 1, title: '' }], 'and gets today\'s create')
+        assert.deepStrictEqual(callsNamed(state, 'openNote').map(call => call.args), [['created-1']], 'opened in the editor')
+        assert.strictEqual(callsNamed(state, 'focusElementNoteTitle').length, 1, 'focus and all')
+        await state.panelMessageHandler(['newNoteRightClicked'])
+        assert.strictEqual(state.messageBoxes.length, 1, 'the second press is not told again')
+        assert.deepStrictEqual(notePostsOf(state).map(post => post.body.is_todo), [1, 0], 'but still gets today\'s create')
+        assert.deepStrictEqual(callsNamed(state, 'openNote').map(call => call.args), [['created-1'], ['created-2']], 'opened too')
+        const putsBefore = state.notePuts.length, postsBefore = state.dataPosts.length, opensBefore = callsNamed(state, 'openNote').length
+        await state.panelMessageHandler(['noteMenuAction', 'quickEdit', id32('qe')])
+        assert.strictEqual(state.messageBoxes.length, 1, 'Quick edit… is not told again either')
+        assert.deepStrictEqual(jotCalls(state).length, 3, 'all three did try Jot')
+        assert.strictEqual(state.notePuts.length + state.dataPosts.length - putsBefore - postsBefore, 0, 'Quick edit… writes nothing')
+        assert.strictEqual(callsNamed(state, 'openNote').length, opensBefore, 'and opens nothing')
+    })
+
+    await test('jot (absence): when Quick edit… is the first to find Jot missing it tells and does nothing more; a create after it falls back without a second box, picker and all under All notebooks', async () => {
+        const state = await jotRun({ absentCommands: ['jot.open'], notes: { [id32('qf')]: { id: id32('qf'), title: 'Edit me', is_todo: 0 } } })
+        await state.panelMessageHandler(['noteMenuAction', 'quickEdit', id32('qf')])
+        assert.deepStrictEqual(state.messageBoxes, [JOT_ABSENT_BOX], 'told once')
+        assert.strictEqual(state.dataPosts.length + state.notePuts.length + state.commandCalls.filter(call => call.name !== 'jot.open').length, 0, 'nothing written, nothing run')
+        state.dialogResult = { id: 'ok', formData: { picker: { folderId: jotFolder } } }
+        await state.panelMessageHandler(['newTodoRightClicked'])
+        state.dialogResult = null
+        assert.strictEqual(state.messageBoxes.length, 1, 'no second box')
+        assert.strictEqual(pickerOpens(state).length, 1, 'the fallback is today\'s create in full: under All notebooks it asks with the picker')
+        assert.deepStrictEqual(notePostsOf(state).map(post => post.body.parent_id), [jotFolder], 'and creates where the picker said')
+    })
+
+    await test('jot (failure): an error that is not Joplin\'s "Command not found" is logged and nothing else - no box, no fallback create, no drain, no write; a data-API "Not Found" out of Jot\'s own save is such an error', async () => {
+        const state = await readRun(readMix())
+        await buildAndRender(state)
+        // Two of Jot's own failures: one of its own wording, and the data API's 404 thrown out of an edit whose note was deleted while the form was
+        // open. The second carries "Not Found", and must not read as Jot being absent.
+        const failures = ['Jot: the form could not be shown', 'Not Found: PUT /notes/' + storeId(1)]
+        state.appCommands['jot.open'] = async () => { throw new Error(failures.shift()) }
+        const mark = state.gets.length, timerMark = state.timeouts.length, paints = state.setHtmlCalls
+        const seen = await consoleDuring(async () => {
+            await state.panelMessageHandler(['newTodoRightClicked'])
+            await state.panelMessageHandler(['noteMenuAction', 'quickEdit', storeId(1)])
+        })
+        assert.strictEqual(jotCalls(state).length, 2, 'precondition: both called Jot')
+        assert.strictEqual(failures.length, 0, 'precondition: both failures were thrown')
+        assert.deepStrictEqual(state.messageBoxes, [], 'no box')
+        assert.deepStrictEqual(state.dialogOpens, [], 'no picker: there is no fallback create')
+        assert.strictEqual(state.dataPosts.length + state.notePuts.length, 0, 'nothing written')
+        assert.strictEqual(callsNamed(state, 'openNote').length, 0, 'nothing opened')
+        assert.strictEqual(state.gets.slice(mark).filter(isEvents).length, 0, 'no drain')
+        assert.strictEqual(state.timeouts.length, timerMark, 'no timer')
+        assert.strictEqual(state.setHtmlCalls, paints, 'no repaint')
+        assert.strictEqual(seen.warn.length, 2, 'one warning each')
+        assert.ok(seen.warn.every(line => /jot\.open/.test(line)), 'naming jot.open')
+    })
+
+    // -- Quick edit… ------------------------------------------------------------------------------------------
+    await test('jot (Quick edit…): the row menu calls jot.open { mode: "edit", noteId } - a saved edit drains the feed and the changed row is drawn; a cancel is the one execute and nothing else', async () => {
+        const state = await readRun(readMix())
+        await buildAndRender(state)
+        const target = storeId(2)
+        let answer = 'saved'
+        state.appCommands['jot.open'] = async (args) => {
+            if (answer === 'cancel') return null
+            // What Jot's Save does: one PUT of what changed, by Jot; its feed row lands with the save.
+            Object.assign(state.notes[args.noteId], { title: 'Renamed by Jot', user_updated_time: 99000 })
+            state.pushChange({ item_id: args.noteId, type: 2 })
+            return { id: args.noteId, changed: ['title'] }
+        }
+        const mark = state.gets.length, timerMark = state.timeouts.length, callMark = state.commandCalls.length
+        await state.panelMessageHandler(['noteMenuAction', 'quickEdit', target])
+        assert.deepStrictEqual(state.commandCalls.slice(callMark).map(call => [call.name, ...call.args]), [['jot.open', { mode: 'edit', noteId: target }]],
+            'one call, edit mode, the row\'s id')
+        assert.strictEqual(state.gets.slice(mark).filter(isEvents).length, 1, 'the feed is drained at once')
+        assert.strictEqual(state.pendingTimeouts(STORE_FOLLOW_UP).length, 1, 'with the follow-up armed')
+        assert.strictEqual(storeModel(state).get(target).title, 'Renamed by Jot', 'the mirror has Jot\'s edit')
+        assert.strictEqual(state.dataPosts.length + state.notePuts.length, 0, 'Cockpit wrote nothing')
+        assert.strictEqual(laddersArmedSince(state, timerMark), 0, 'and chases nothing')
+        await fireStoreRender(state)
+        assert.ok(state.panelHtml['panel-panel'].includes('Renamed by Jot'), 'the store\'s render draws the new title')
+        await state.fireTimeout(state.pendingTimeouts(STORE_FOLLOW_UP)[0])
+        answer = 'cancel'
+        const cancelMark = state.gets.length, cancelTimers = state.timeouts.length, cancelCalls = state.commandCalls.length, paints = state.setHtmlCalls
+        await state.panelMessageHandler(['noteMenuAction', 'quickEdit', target])
+        assert.deepStrictEqual(state.commandCalls.slice(cancelCalls).map(call => call.name), ['jot.open'], 'cancel: the one execute')
+        assert.strictEqual(state.gets.slice(cancelMark).filter(isEvents).length, 0, 'no drain')
+        assert.strictEqual(state.timeouts.length, cancelTimers, 'no timer')
+        assert.strictEqual(state.setHtmlCalls, paints, 'no repaint')
+    })
+
+    await test('jot (Quick edit…): a multi-selection never calls it - runNoteMenuActionMulti ignores quickEdit: no call, no write, no repaint, no error', async () => {
+        const ids = [id32('qm1'), id32('qm2')]
+        const notes = {}
+        for (const id of ids) notes[id] = { id, title: 'note ' + id, is_todo: 0 }
+        const state = await jotRun({ notes, appCommands: { 'jot.open': async () => null } })
+        const paints = state.setHtmlCalls, timerMark = state.timeouts.length
+        const seen = await consoleDuring(() => state.panelMessageHandler(['noteMenuActionMulti', 'quickEdit', ids]))
+        assert.deepStrictEqual(state.commandCalls, [], 'no command')
+        assert.strictEqual(state.dataPosts.length + state.notePuts.length + state.dataDeletes.length, 0, 'no write')
+        assert.strictEqual(state.setHtmlCalls, paints, 'no repaint')
+        assert.strictEqual(state.timeouts.length, timerMark, 'no timer')
+        assert.deepStrictEqual([seen.warn, seen.error, state.messageBoxes], [[], [], []], 'and nothing said')
+    })
+
+    // -- the source shape -------------------------------------------------------------------------------------
+    await test('jot (source): the Jot route makes no own write - callJot and createWithJot hold no startOwnWrite, afterOwnWrite, applyLocalCreate or data call - and the new-window open is not runAppCommand', () => {
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const fnBody = (name) => {
+            const start = panelSource.indexOf('async function ' + name + '(')
+            assert.ok(start >= 0, name + ' not found in panel.ts')
+            return panelSource.slice(start, panelSource.indexOf('\n}', start))
+        }
+        for (const name of ['callJot', 'createWithJot']){
+            const body = fnBody(name)
+            for (const banned of ['startOwnWrite', 'afterOwnWrite', 'applyLocalCreate', 'joplin.data.']){
+                assert.ok(!body.includes(banned), `${name} must not hold ${banned}`)
+            }
+        }
+        assert.ok(fnBody('callJot').includes("await joplin.commands.execute('jot.open', args)"), 'jot.open is one read-and-call expression')
+        assert.ok(fnBody('createWithJot').includes('await resolveCreatableNotebookID(notebookFilter)') && !fnBody('createWithJot').includes('pickNotebook'),
+            'the notebook is the checked filter, and the picker is never asked')
+        const quiet = fnBody('openInNewWindowQuietly')
+        assert.ok(quiet.includes("await joplin.commands.execute('openNoteInNewWindow', noteID)") && !quiet.includes('runAppCommand') && !quiet.includes('showMessageBox'),
+            'the new window is opened directly, in a try, never through runAppCommand and its box')
+    })
+
+    // -- mobile -----------------------------------------------------------------------------------------------
+    await test('jot (mobile): a click is today\'s create even with the click setting on Jot - the setting is never read, jot.open never called', async () => {
+        const state = await jotRun({ initialSettings: { [JOT_CLICK_KEY]: 'jot', [JOT_RIGHT_CLICK_KEY]: 'jot' }, appCommands: { 'jot.open': async () => null } }, 'mobile')
+        await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+        const reads = []
+        state.onSettingRead = async (key) => { reads.push(key) }
+        await state.panelMessageHandler(['newTodoClicked'])
+        state.onSettingRead = null
+        assert.deepStrictEqual(notePostsOf(state).map(post => post.body), [{ parent_id: jotFolder, is_todo: 1, title: '' }], 'today\'s POST')
+        assert.deepStrictEqual(callsNamed(state, 'openNote').map(call => call.args), [['created-1']], 'today\'s open')
+        assert.strictEqual(jotCalls(state).length, 0, 'Jot is never called on mobile')
+        assert.ok(!reads.includes(JOT_CLICK_KEY) && !reads.includes(JOT_RIGHT_CLICK_KEY), 'and neither setting is even read')
+    })
+
+    await test('jot (mobile): the right-click messages and Quick edit… do nothing - no command, no write, no dialog, no box, no setting read', async () => {
+        const state = await jotRun({ notes: { [id32('qp')]: { id: id32('qp'), title: 'A note', is_todo: 0 } }, appCommands: { 'jot.open': async () => ({ id: id32('qp'), changed: [] }) } }, 'mobile')
+        await state.panelMessageHandler(['notebookFilterChanged', jotFolder])
+        const reads = []
+        state.onSettingRead = async (key) => { reads.push(key) }
+        const paints = state.setHtmlCalls, gets = state.gets.length
+        await state.panelMessageHandler(['newNoteRightClicked'])
+        await state.panelMessageHandler(['newTodoRightClicked'])
+        await state.panelMessageHandler(['noteMenuAction', 'quickEdit', id32('qp')])
+        state.onSettingRead = null
+        assert.deepStrictEqual(state.commandCalls, [], 'no command, Jot\'s or any other')
+        assert.strictEqual(state.dataPosts.length + state.notePuts.length + state.dataDeletes.length, 0, 'no write')
+        assert.deepStrictEqual([state.dialogOpens, state.messageBoxes], [[], []], 'no dialog, no box')
+        assert.strictEqual(state.setHtmlCalls, paints, 'no repaint')
+        assert.strictEqual(state.gets.length, gets, 'no data read')
+        assert.ok(!reads.includes(JOT_CLICK_KEY) && !reads.includes(JOT_RIGHT_CLICK_KEY), 'and no setting read')
     })
 
     await fs.remove(tmp)

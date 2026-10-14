@@ -17,7 +17,7 @@ import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
 import { TODO_DRAW_BUDGET, TODO_SECTION_BATCH, escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
-import { forgetCurrentProfileID, getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
+import { forgetCurrentProfileID, getCreateButtonClickRoute, getCreateButtonRightClickRoute, getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { appVersionAtLeast, isMobile } from "../../core/platform";
 import { isSettingsNoteConnected } from "../../core/settingsSync";
@@ -520,7 +520,9 @@ async function eventHandler(message){
     } else if (message[0] == 'openInNewWindow'){
         await runAppCommand('openNoteInNewWindow', String(message[1] || ""))
     } else if (message[0] == 'newNoteClicked' || message[0] == 'newTodoClicked'){
-        await createItem(message[0] == 'newTodoClicked')
+        await runCreateButton(message[0] == 'newTodoClicked', false)
+    } else if (message[0] == 'newNoteRightClicked' || message[0] == 'newTodoRightClicked'){
+        await runCreateButton(message[0] == 'newTodoRightClicked', true)
     } else if (message[0] == 'sortFieldSelected'){
         if (sortFieldCycle.includes(String(message[1]))) sortField = String(message[1])
         lastScrollTop = 0
@@ -1580,11 +1582,12 @@ async function getControlsHTML(currentProfileID){
     // The desktop button carries BOTH label wordings - the full one and the short one - and panel.css shows
     // exactly one of them (or neither) for the panel's current width, so the row degrades in two stages and
     // never wraps to a second line. The title/aria-label stay the full wording at every stage, so the
-    // icon-only state is still named for a tooltip and for assistive tech.
+    // icon-only state is still named for a tooltip and for assistive tech. Only the desktop buttons take a
+    // right-click (2.8, runCreateButton); the mobile markup is the one it has always been.
     var createButtons = mobile
         ? iconButton("note", "New note", "onNewNoteClicked()") + iconButton("todo", "New to-do", "onNewTodoClicked()")
-        : `<button type="button" class="create-button" title="New note" aria-label="New note" onclick="onNewNoteClicked()">${icons["note"]}<span class="create-label -long">New note</span><span class="create-label -short">Note</span></button>
-            <button type="button" class="create-button" title="New to-do" aria-label="New to-do" onclick="onNewTodoClicked()">${icons["todo"]}<span class="create-label -long">New to-do</span><span class="create-label -short">To-do</span></button>`
+        : `<button type="button" class="create-button" title="New note" aria-label="New note" onclick="onNewNoteClicked()" oncontextmenu="onNewNoteRightClicked(event)">${icons["note"]}<span class="create-label -long">New note</span><span class="create-label -short">Note</span></button>
+            <button type="button" class="create-button" title="New to-do" aria-label="New to-do" onclick="onNewTodoClicked()" oncontextmenu="onNewTodoRightClicked(event)">${icons["todo"]}<span class="create-label -long">New to-do</span><span class="create-label -short">To-do</span></button>`
     // The "-sync" class gives the button a stable selector for the mobile long-press adapter (which
     // shows its status tooltip as a toast, since touch has no hover). It has no CSS of its own, so it is
     // inert on desktop; "-syncing" still drives the spin animation while a sync runs.
@@ -1736,10 +1739,39 @@ function dropdownHTML(menuID, toggleLabel, itemsHtml){
     `
 }
 
+/** runCreateButton (2.8) ***************************************************************************************************************************
+ * New note / New to-do, clicked or right-clicked, by the route the per-device setting gives that trigger on desktop (settings.ts): "editor" is      *
+ * today's create and open, "newWindow" the same create opened in a window of its own, "jot" the Jot plugin's form (createWithJot). On mobile the    *
+ * click is today's create whatever the setting holds - it is never even read - and a right-click message, which only the desktop markup can send,   *
+ * does nothing.                                                                                                                                     *
+ ***************************************************************************************************************************************************/
+async function runCreateButton(isTodo, rightClick){
+    if (await isMobile()){
+        if (!rightClick) await createItem(isTodo)
+        return
+    }
+    var route = rightClick ? await getCreateButtonRightClickRoute() : await getCreateButtonClickRoute()
+    if (route === "jot") await createWithJot(isTodo)
+    else await createItem(isTodo, route === "newWindow")
+}
+
+/** createWithJot (2.8) *****************************************************************************************************************************
+ * Opens Jot's create form with the button's type and the panel's notebook. The notebook is the filter as createItem checks it, and nothing more:    *
+ * under "All notebooks" no notebookId is passed at all, so Jot's own default notebook applies - the picker is never asked, since Jot's form has a   *
+ * notebook field of its own. Without Jot installed, today's create runs instead, every time (callJot tells the user once per session).             *
+ ***************************************************************************************************************************************************/
+async function createWithJot(isTodo){
+    var folderID = await resolveCreatableNotebookID(notebookFilter)
+    var args: any = { mode: "new", type: isTodo ? "todo" : "note" }
+    if (folderID) args.notebookId = folderID
+    if ((await callJot(args)) === "absent") await createItem(isTodo)
+}
+
 /** createItem **************************************************************************************************************************************
  * Creates a note or a to-do and opens it. It goes into the notebook the panel is filtered to; with "All notebooks" selected, a dialog asks where.   *
+ * inNewWindow (2.8) opens it in a window of its own instead of the editor; see createItemInFolder.                                                 *
  ***************************************************************************************************************************************************/
-async function createItem(isTodo){
+async function createItem(isTodo, inNewWindow = false){
     // The filter is re-checked here rather than trusted, whatever wrote it: creating silently into a notebook the
     // panel is not showing is the worst of the three symptoms this guards against, because it puts a note
     // somewhere the user cannot see and did not choose. A filter that does not survive the check is treated as no
@@ -1754,14 +1786,15 @@ async function createItem(isTodo){
         folderID = await pickNotebook(isTodo ? "Create to-do in notebook" : "Create note in notebook")
     }
     if (!folderID) return
-    await createItemInFolder(isTodo, folderID)
+    await createItemInFolder(isTodo, folderID, inNewWindow)
 }
 
 /** createItemInFolder ******************************************************************************************************************************
  * Creates a note or to-do in the given notebook and opens it. Shared by createItem (desktop picker / active filter) and the mobile notebook overlay's *
- * createNote / createTodo result.                                                                                                                   *
+ * createNote / createTodo result. With inNewWindow (2.8, desktop) the note opens in a new window (openInNewWindowQuietly) and the editor's focus     *
+ * step is skipped, since the editor did not move; an app without that command gets the editor, focus and all.                                      *
  ***************************************************************************************************************************************************/
-async function createItemInFolder(isTodo, folderID){
+async function createItemInFolder(isTodo, folderID, inNewWindow = false){
     if (!folderID) return
     // Whether the create can rely on the note store (2.7 phase 5): asked before the POST, as every action asks it at its start.
     var storePath = await startOwnWrite([])
@@ -1769,12 +1802,14 @@ async function createItemInFolder(isTodo, folderID){
     // The note store (2.7) takes the saved note from the answer at once, like every write the panel makes through joplin.data (see the
     // "Cockpit's own writes" banner in joplin.ts): the feed's row lands after the save returns, and the follow-up poll this arms brings it.
     applyLocalCreate(newItem)
-    await openTodo(newItem.id)
-    // Honour Joplin's own "When creating a new note/to-do" setting (title vs body). A data-API note is not
-    // provisional, so the app's own auto-focus never fires for it; this applies the same choice. Desktop-only
-    // in effect (the setting and the focus commands are desktop-only, guarded to a no-op on mobile), so this
-    // also covers the mobile notebook-overlay create path (applyNotebookPicked -> createItemInFolder) safely.
-    await focusNewItemEditor(isTodo)
+    if (!(inNewWindow && await openInNewWindowQuietly(newItem.id))){
+        await openTodo(newItem.id)
+        // Honour Joplin's own "When creating a new note/to-do" setting (title vs body). A data-API note is not
+        // provisional, so the app's own auto-focus never fires for it; this applies the same choice. Desktop-only
+        // in effect (the setting and the focus commands are desktop-only, guarded to a no-op on mobile), so this
+        // also covers the mobile notebook-overlay create path (applyNotebookPicked -> createItemInFolder) safely.
+        await focusNewItemEditor(isTodo)
+    }
     // On the store path the store already holds the note (applyLocalCreate above), so the row is drawn from there, with no overlay entry
     // and no ladder behind it (showOwnWrite); a view the new note does not belong to simply does not draw it.
     if (storePath && await showOwnWrite([newItem.id])){
@@ -1991,6 +2026,54 @@ async function runAppCommand(commandName, args?){
         console.warn(`Cockpit: the command ${commandName} could not be run`, error)
         await joplin.views.dialogs.showMessageBox(`Cockpit: "${commandName}" is not available here.`)
     }
+}
+
+/** openInNewWindowQuietly (2.8) ********************************************************************************************************************
+ * The new-window create's open: Joplin's openNoteInNewWindow, called directly rather than through runAppCommand, whose "is not available here" box  *
+ * is the wrong answer to a button press that has already created the note. An app without the command (an older desktop) gets the editor instead,  *
+ * in silence. Answers whether the window opened.                                                                                                    *
+ ***************************************************************************************************************************************************/
+async function openInNewWindowQuietly(noteID){
+    try {
+        await joplin.commands.execute('openNoteInNewWindow', noteID)
+        return true
+    } catch (error) {
+        console.warn("Cockpit: openNoteInNewWindow could not be run, so the new note opens in the editor", error)
+        return false
+    }
+}
+
+/** callJot (2.8) ***********************************************************************************************************************************
+ * One call of the Jot plugin's jot.open (docs/BRIEF-2.8-jot-integration.md section 2): { mode: "new", type, notebookId? } or { mode: "edit",       *
+ * noteId }, answering { id, ... } when the form saved and null on Cancel. Jot writes the note itself, so none of this is an own write: no           *
+ * startOwnWrite bracket, no applyLocalCreate. Jot's save reaches the note store through the change feed like any outside edit, so an answer drains  *
+ * the feed at once (pollStoreAfterAppWrite: the drain now, and the follow-up half a second on for a row written after the save returned), and the   *
+ * row appears or changes without waiting for the idle poll. Cancel does nothing at all.                                                            *
+ *                                                                                                                                                  *
+ * On an app without Jot, Joplin's CommandService throws "Command not found: jot.open ..." ("No such command" is the other wording Joplin uses).  *
+ * Only THOSE wordings mean absence: a data-API "Not Found" thrown out of Jot's own save (a note deleted while its form was open) is Jot's failure,  *
+ * not Jot's absence. The user is told ONCE per session - the box is a native modal on desktop, too heavy to repeat on every press - and the caller  *
+ * falls back ("absent"). Any other failure is Jot's own: logged, nothing else.                                                                     *
+ ***************************************************************************************************************************************************/
+var jotMissingTold = false
+
+async function callJot(args){
+    var answer
+    try {
+        answer = await joplin.commands.execute('jot.open', args)
+    } catch (error) {
+        if (/command not found|no such command/i.test(String((error && error.message) || error))){
+            if (!jotMissingTold){
+                jotMissingTold = true
+                await joplin.views.dialogs.showMessageBox(`Cockpit: this needs the Jot plugin, which is not installed. Install "Jot" from Settings › Plugins, or change the "New note and New to-do" settings.`)
+            }
+            return "absent"
+        }
+        console.warn("Cockpit: the Jot plugin's jot.open failed", error)
+        return "failed"
+    }
+    if (answer) await pollStoreAfterAppWrite()
+    return answer ? "saved" : "cancelled"
 }
 
 /** tryAppCommandWithFallback ***********************************************************************************************************************
@@ -2238,6 +2321,11 @@ async function runNoteMenuAction(action, noteID){
     if (action == 'open'){
         await openTodo(noteID)
         return
+    } else if (action == 'quickEdit'){
+        // Jot's edit form (2.8, callJot): Jot writes, so there is no own-write bracket. Desktop only - the mobile menu does not draw the item.
+        if (await isMobile()) return
+        await callJot({ mode: "edit", noteId: noteID })
+        return
     } else if (action == 'toggleType'){
         storePath = await startOwnWrite([noteID])
         // The same fields the external reconcile reads - deleted_time included, since the row may be the stale
@@ -2323,7 +2411,8 @@ function forgetTrashedRow(record){
 /** runNoteMenuActionMulti **************************************************************************************************************************
  * The batch version of runNoteMenuAction: applies a context-menu action to EVERY selected note in one go, with a SINGLE post-mutation refresh for   *
  * the whole batch (the trio below runs once, after the loop, NOT once per note). Desktop only - the webview only posts this when several rows are    *
- * Ctrl/Shift-selected, which cannot happen on mobile - and the single-only 'open' never reaches here (it renders greyed in the menu).                *
+ * Ctrl/Shift-selected, which cannot happen on mobile - and the single-only 'open' and 'quickEdit' never reach here (they render greyed in the menu; *
+ * a stray one falls through to the final else and does nothing).                                                                                   *
  *                                                                                                                                                    *
  * The destructive per-id writes go through the data API so the batch is atomic per note, goes to the trash reversibly (delete), and is observable:   *
  *   - toggleType: each note flips its OWN type (a mixed note+to-do selection toggles each individually), one is_todo PUT per id.                      *

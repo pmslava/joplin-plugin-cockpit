@@ -3,10 +3,13 @@
  * webview. Kept in ONE pure module - the ordered item list, each item's multi-select label, and the button HTML - so the desktop menu (panelWebview  *
  * .js, via window.NoteMenu) and the Node test harness (require, module.exports below) build byte-identical markup.                                    *
  *                                                                                                                                                    *
- * SELECTION COUNT: menuHtml(count, extraItems) renders the menu for a selection of `count` rows. count === 1 is today's single-note menu, byte-for-  *
- * byte. count > 1 (only reachable on desktop, where Ctrl/Shift multi-select exists) GREYS OUT the single-only actions (Open) - disabled, never       *
+ * SELECTION COUNT: menuHtml(count, extraItems, options) renders the menu for a selection of `count` rows. count === 1 is the single-note menu.        *
+ * count > 1 (only reachable on desktop, where Ctrl/Shift multi-select exists) GREYS OUT the single-only actions (Open, Quick edit…) - disabled, never *
  * hidden, so the user still sees them - and gives every multi-capable action a label carrying the count ("Delete 6 notes"), so a mistaken batch is    *
  * visible before the click. `extraItems` (mobile's "Move to date…") are prepended verbatim and are always single-note (mobile has no multi-select).   *
+ *                                                                                                                                                    *
+ * PLATFORM (2.8): Quick edit… calls the Jot plugin's edit form, and Cockpit calls Jot on desktop only, so options.mobile leaves the item out. The     *
+ * mobile menu - with and without its "Move to date…" - is therefore byte-for-byte the menu before 2.8. options defaults to the desktop menu.          *
  *                                                                                                                                                    *
  * MIXED SELECTIONS: since 2.1.0 a selection may hold to-do rows AND regular note rows at once, and every action here already takes an id array of     *
  * either kind - Joplin has one note store, and a to-do IS a note with is_todo set. The wording needs no split either: "Delete 3 notes" is true of a   *
@@ -27,6 +30,7 @@
     // label; the multi-select label is derived in multiLabel below.
     var NOTE_MENU_ITEMS = [
         { action: 'open', label: 'Open' },
+        { action: 'quickEdit', label: 'Quick edit…' },
         { action: 'toggleType', label: 'Switch between note and to-do type' },
         { action: 'tags', label: 'Tags...' },
         { action: 'moveToFolder', label: 'Move to notebook...' },
@@ -38,7 +42,10 @@
 
     // Actions that can only ever act on ONE note, so with several rows selected they render disabled (greyed)
     // rather than acting on just one of them. Everything else applies to the whole selection.
-    var SINGLE_ONLY = { open: true }
+    var SINGLE_ONLY = { open: true, quickEdit: true }
+
+    // Actions the mobile menu leaves out: Quick edit… is a call into Jot, which Cockpit makes on desktop only (2.8).
+    var DESKTOP_ONLY = { quickEdit: true }
 
     function isSingleOnly(action){ return !!SINGLE_ONLY[action] }
 
@@ -75,9 +82,14 @@
 
     // The full menu innerHTML for a selection of `count` rows. `extraItems` (an optional array of { action,
     // label }) are prepended verbatim - mobile's single-note "Move to date…" entry - and take no count.
-    function menuHtml(count, extraItems){
+    // `options.mobile` leaves out the desktop-only items; without options the menu is the desktop one.
+    function menuHtml(count, extraItems, options){
         var n = (count > 1) ? count : 1
-        var items = (extraItems || []).concat(NOTE_MENU_ITEMS)
+        var mobile = !!(options && options.mobile)
+        var baseItems = mobile
+            ? NOTE_MENU_ITEMS.filter(function(item){ return !DESKTOP_ONLY[item.action] })
+            : NOTE_MENU_ITEMS
+        var items = (extraItems || []).concat(baseItems)
         return items.map(function(item){ return itemHtml(item, n) }).join('')
     }
 

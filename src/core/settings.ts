@@ -22,6 +22,9 @@ export const customCssSettingKey = "customCss"
 export const showToolbarButtonSettingKey = "showToolbarButton"
 export const hideDueDateOnBellSettingKey = "hideDueDateOnBell"
 export const bellOpensCockpitPickerSettingKey = "bellOpensCockpitPicker"
+/** What a click and a right-click on New note / New to-do do (2.8), per device and desktop only: see createButtonRoute below. */
+export const createButtonClickSettingKey = "createButtonClick"
+export const createButtonRightClickSettingKey = "createButtonRightClick"
 export const gestureTraceSettingKey = "gestureTrace"
 /** The gesture trace's ONE switch. A shipping build must never show the diagnostic strip, whatever a profile happens
  * to have stored, so every reader of gestureTraceSettingKey is gated on this constant and startup resets a stored
@@ -51,6 +54,13 @@ export const customContentBackgroundSettingKey = "customContentBackground"
 export const customCheckboxColorSettingKey = "customCheckboxColor"
 export const customProgressColorSettingKey = "customProgressColor"
 export const customDividerColorSettingKey = "customDividerColor"
+
+/** The three routes a create button can take (2.8), in the order Settings lists them. Both create-button settings offer the same three. */
+const createButtonRouteOptions = {
+	editor: "Create and open in the editor",
+	newWindow: "Create and open in a new window",
+	jot: "Jot",
+}
 
 /** The theme settings that, when changed, need the panel re-rendered. */
 const themeSettingKeys = [
@@ -150,6 +160,26 @@ export async function setupSettings(){
 			public: true,
 			section: 'section',
 		},
+		[createButtonClickSettingKey]: {
+			label: "New note and New to-do: click",
+			description: "What a click on the New note and New to-do buttons does. Jot is a separate plugin for quick capture: its small form creates the note without opening it. Desktop only.",
+			value: "editor",
+			type: SettingItemType.String,
+			isEnum: true,
+			options: createButtonRouteOptions,
+			public: true,
+			section: 'section',
+		},
+		[createButtonRightClickSettingKey]: {
+			label: "New note and New to-do: right-click",
+			description: "What a right-click on the New note and New to-do buttons does. Jot is a separate plugin for quick capture: its small form creates the note without opening it. Desktop only.",
+			value: "jot",
+			type: SettingItemType.String,
+			isEnum: true,
+			options: createButtonRouteOptions,
+			public: true,
+			section: 'section',
+		},
 		"panelSortField": {
 			label: "How the panel breaks ties between items sharing a due time: title, updated or created",
 			value: "title",
@@ -173,7 +203,7 @@ export async function setupSettings(){
 		},
 		[settingsNoteIdSettingKey]: {
 			label: "Settings note",
-			description: "Type Joplin Cockpit Plugin Settings here. Cockpit creates that note if it does not exist yet, or connects to it if it has already synced in from another device - so on a second device, sync first, then type the same title. A note id or link also works. Once connected, the field shows the note as Name (id), the brackets holding the note's full id: that is how Cockpit tells two notes of the same name apart. Leave empty to keep everything on this device. Synced: profiles, custom panel CSS, theme colours, completed-to-do style, day start time and excluded notebooks. Per device: font and circle sizes, refresh interval, toolbar button, title-bar options and which profile is selected.",
+			description: "Type Joplin Cockpit Plugin Settings here. Cockpit creates that note if it does not exist yet, or connects to it if it has already synced in from another device - so on a second device, sync first, then type the same title. A note id or link also works. Once connected, the field shows the note as Name (id), the brackets holding the note's full id: that is how Cockpit tells two notes of the same name apart. Leave empty to keep everything on this device. Synced: profiles, custom panel CSS, theme colours, completed-to-do style, day start time and excluded notebooks. Per device: font and circle sizes, refresh interval, toolbar button, title-bar options, the New note and New to-do buttons and which profile is selected.",
 			value: "",
 			type: SettingItemType.String,
 			public: true,
@@ -558,6 +588,24 @@ export async function isDueDateOnHoverEnabled(){
  ***************************************************************************************************************************************************/
 export async function isBellPickerEnabled(){
 	return await joplin.settings.value(bellOpensCockpitPickerSettingKey)
+}
+
+/** getCreateButtonClickRoute / getCreateButtonRightClickRoute (2.8) ********************************************************************************
+ * The route the per-device setting gives a click, or a right-click, on New note / New to-do: "editor", "newWindow" or "jot". Read by the desktop	*
+ * only: on mobile the click is always today's create and neither setting is asked (panel.ts runCreateButton).									*
+ ***************************************************************************************************************************************************/
+export async function getCreateButtonClickRoute(){
+	return createButtonRoute(await joplin.settings.value(createButtonClickSettingKey), "editor")
+}
+
+export async function getCreateButtonRightClickRoute(){
+	return createButtonRoute(await joplin.settings.value(createButtonRightClickSettingKey), "jot")
+}
+
+// A stored value outside the three - written by hand, or by a later build with a fourth - answers the setting's own default rather than nothing.
+function createButtonRoute(value, fallback){
+	var route = String(value)
+	return Object.prototype.hasOwnProperty.call(createButtonRouteOptions, route) ? route : fallback
 }
 
 /** setCustomCss ************************************************************************************************************************************
