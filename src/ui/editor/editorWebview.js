@@ -51,6 +51,10 @@ timeIs12HourCheckbox.addEventListener("change", saveProfileData)
 noDueDatesAtEndCheckbox.addEventListener("change", saveProfileData)
 weekStartsOnSelect.addEventListener("change", saveProfileData)
 maxDotsPerDayInput.addEventListener("change", saveProfileData)
+// The name also saves on every keystroke. Naming a new profile is typing and pressing Enter, and Enter in a text field
+// submits the dialog from the host's own keydown listener (Joplin's UserWebviewIndex.js), so the hidden field must not
+// depend on the change event to hold the typed name by the time the host reads the form.
+nameInput.addEventListener("input", saveProfileData)
 
 // Load Profile Data
 function loadProfileData() {
@@ -116,6 +120,15 @@ function saveProfileData(){
 
 loadProfileData()
 saveProfileData()
+// Create mode ("+ New profile…"): the form arrives filled with the view on screen (profileSeedFromCurrentView in
+// panel.ts), so naming it is all that is left to do. The name field takes the focus with its text selected, so typing
+// replaces "New Profile" at once. An edit focuses nothing, as it never has. openEditor writes the mode into the markup.
+// The host focuses the dialog's frame when the page reports ready, before this script has loaded, so the focus set
+// here is the one that stays.
+if (document.getElementById("editorScroll").getAttribute("data-mode") == "create"){
+    nameInput.focus()
+    nameInput.select()
+}
 // Fit the dialog: Joplin sizes the dialog frame from the wrapper element, but the frame the
 // webview actually gets can differ from the requested pixels (stale measurements, application
 // zoom). This nudges the wrapper until the visible viewport is the intended size, converging in

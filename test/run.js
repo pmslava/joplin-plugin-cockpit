@@ -14988,6 +14988,316 @@ async function main() {
         assert.ok(!reads.includes(JOT_CLICK_KEY) && !reads.includes(JOT_RIGHT_CLICK_KEY), 'and no setting read')
     })
 
+    // ============================================================ "+ New profile…" opens on the view on screen, and Create selects the copy
+    // Switching projects means setting up a view (notebook, search, sorting) and wanting to keep it as a profile. The create form therefore
+    // starts from the CURRENT profile with the header's live state on top - one function, profileSeedFromCurrentView in panel.ts, for both
+    // platforms - minus the id, with the name "New Profile" and no overview note id (an overview note belongs to one profile). Create then
+    // selects the new profile through the dropdown's own switch steps; Cancel leaves everything as it was. The desktop half is driven through
+    // the dialog stub (the seed travels base64 in the hidden form field, as an edit's profile always has); the mobile half through the
+    // getEditorInitial / profileSaved round-trips the in-panel overlay posts. The webview halves are pinned by source shape.
+    const viewWork = 'c7' + '0'.repeat(30)
+    const viewHome = 'c8' + '0'.repeat(30)
+    const viewOverview = 'c9' + '0'.repeat(30)
+    // An overview note the user gives the COPY in its form (the seed itself never carries one).
+    const viewCopyOverview = 'ca' + '0'.repeat(30)
+    const viewFolders = [{ id: viewWork, title: 'Work', parent_id: '' }, { id: viewHome, title: 'Home', parent_id: '' }]
+    // Every field away from its default, and the stored header state (Home, 'stored text', created/asc) away from the live one the checks drive
+    // (Work, 'milk', updated/desc), so a seed field read from the wrong source shows.
+    const viewSource = {
+        id: 1, name: 'Source', searchCriteria: 'tag:work', noteID: viewOverview,
+        showCompleted: false, showCompletedPast: false, showCompletedToday: true, showCompletedFuture: false, showCompletedNoDue: true,
+        showNoDue: false, showNotes: false, notesPosition: 'before',
+        notebook: viewHome, panelSearch: 'stored text', sortField: 'created', sortDirection: 'asc',
+        displayFormat: 'month', yearFormat: '2-digit', monthFormat: 'short', dayFormat: '2-digit', weekdayFormat: 'narrow',
+        timeIs12Hour: true, sortOrder: 5, noDueDatesAtEnd: false, weekStartsOn: 0, maxDotsPerDay: 7,
+    }
+    const viewOther = { ...viewSource, id: 2, name: 'Other', searchCriteria: '', noteID: '', notebook: '', panelSearch: '', displayFormat: 'interval', sortOrder: 9 }
+    let viewRunSeq = 0
+    const viewRun = (platform) => {
+        const n = viewRunSeq++
+        return run({
+            dataDir: path.join(tmp, `view-seed-${n}`),
+            installationDir: path.join(tmp, `view-seed-install-${n}`),
+            require: platform === 'mobile' ? mobileRequire : desktopRequire,
+            versionInfo: { version: '3.7.0', platform },
+            todos,
+            folders: viewFolders,
+            notes: {
+                [viewOverview]: { id: viewOverview, title: 'Overview', body: '' },
+                [viewCopyOverview]: { id: viewCopyOverview, title: 'Copy overview', body: '' },
+            },
+            initialSettings: { profileData: JSON.stringify({ nextID: 3, profiles: [viewSource, viewOther] }), currentProfileID: 1 },
+        })
+    }
+    // The view the checks set up in the header: a notebook, a committed search, a sort field and a flipped direction.
+    const driveViewHeader = async (state) => {
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        await state.panelMessageHandler(['searchFilterChanged', 'milk'])
+        await state.panelMessageHandler(['sortFieldSelected', 'updated'])
+        await state.panelMessageHandler(['sortDirectionClicked'])
+    }
+    const liveHeader = { notebook: viewWork, panelSearch: 'milk', sortField: 'updated', sortDirection: 'desc' }
+    const storedViewProfiles = (state) => JSON.parse(state.settings.profileData).profiles
+    // The seed every check expects: the stored source profile as the store normalised it, without its id, renamed, its overview note id
+    // cleared and the live header state on top.
+    const expectedSeed = (state) => {
+        const { id, ...rest } = storedViewProfiles(state).find(profile => profile.id === 1)
+        return { ...rest, name: 'New Profile', noteID: '', ...liveHeader }
+    }
+    // The desktop dialog's embedded profile: what openEditor put in the hidden form field, decoded as editorWebview.js decodes it.
+    const editorFormProfile = (state) => {
+        const html = String(state.dialogHtml['dialog-editor'] || '')
+        const value = (html.match(/id="profileDataInput" name="profileData" value="([^"]*)"/) || [])[1]
+        assert.ok(value && value !== '<<PROFILE_DATA>>', 'the form carries a profile')
+        return JSON.parse(decodeURI(atob(value)))
+    }
+    const encodeFormProfile = (profile) => btoa(encodeURI(JSON.stringify(profile)))
+    // What the panel's header says right now: the profile, notebook and sort field marked current, the search field's text, the direction.
+    const viewHeaderOf = (state) => {
+        const html = String(state.panelHtml['panel-panel'] || '')
+        const pick = (re) => (html.match(re) || [])[1]
+        return {
+            profile: pick(/class="dropdown-item -current" onclick="onDropdownItemClicked\(event, 'profilesDropdownChanged', '([^']*)'\)"/),
+            notebook: pick(/class="dropdown-item -current" data-notebook-row onclick="onDropdownItemClicked\(event, 'notebookFilterChanged', '([^']*)'\)"/) || '',
+            panelSearch: pick(/id="searchFilter"[^>]*?value="([^"]*)"/),
+            sortField: pick(/class="dropdown-item -current" onclick="onDropdownItemClicked\(event, 'sortFieldSelected', '([^']*)'\)"/),
+            sortDirection: html.includes('Sort direction: descending') ? 'desc' : 'asc',
+        }
+    }
+    const profileWrites = (state, mark) => state.settingWrites.slice(mark).filter(write => write.key === 'profileData' || write.key === 'currentProfileID')
+
+    // -- desktop ----------------------------------------------------------------------------------------------
+    await test('new profile from the view (desktop): the dialog opens on the current profile with the live header on top - no id, "New Profile", no overview note', async () => {
+        const state = await viewRun('desktop')
+        await driveViewHeader(state)
+        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', ...liveHeader }, 'the header shows the view the checks set up')
+        await state.panelMessageHandler(['createProfileClicked'])
+        const seed = editorFormProfile(state)
+        assert.ok(!('id' in seed), 'the seed is not a stored profile')
+        assert.strictEqual(seed.name, 'New Profile')
+        assert.strictEqual(seed.noteID, '', 'an overview note belongs to one profile, so its id is not copied')
+        assert.deepStrictEqual([seed.notebook, seed.panelSearch, seed.sortField, seed.sortDirection], [viewWork, 'milk', 'updated', 'desc'], 'the header state is the LIVE one, not the stored profile\'s')
+        assert.deepStrictEqual([seed.displayFormat, seed.showNotes, seed.searchCriteria, seed.sortOrder], ['month', false, 'tag:work', 5], 'the rest is the current profile\'s')
+        assert.deepStrictEqual(seed, expectedSeed(state), 'every other field copied as stored')
+        const html = state.dialogHtml['dialog-editor']
+        assert.ok(html.includes('<div id="editorScroll" data-mode="create">'), 'the markup tells the webview it is a create')
+        assert.ok(!html.includes('<<EDITOR_MODE>>') && !html.includes('<<PROFILE_DATA>>') && !html.includes('<<NOTEBOOK_OPTIONS>>'), 'no placeholder is left')
+        assert.ok(html.includes(`<option value="${viewWork}">Work</option>`), 'the notebook the seed names is offered')
+        assert.deepStrictEqual(state.dialogButtons['dialog-editor'], [{ title: 'Cancel', id: 'cancel' }, { title: 'Create', id: 'ok' }], 'still the Create/Cancel buttons')
+        const stored = storedViewProfiles(state).find(profile => profile.id === 1)
+        assert.deepStrictEqual([stored.name, stored.noteID, stored.notebook, stored.panelSearch], ['Source', viewOverview, viewHome, 'stored text'], 'building the seed leaves the stored profile alone')
+    })
+
+    await test('new profile from the view (desktop): Cancel creates nothing and changes nothing - no write, the same profile, the same header', async () => {
+        const state = await viewRun('desktop')
+        await driveViewHeader(state)
+        const writes = state.settingWrites.length
+        const opens = state.dialogOpens.length
+        await state.panelMessageHandler(['createProfileClicked'])
+        assert.strictEqual(state.dialogOpens.length, opens + 1, 'the dialog was opened')
+        assert.deepStrictEqual(profileWrites(state, writes), [], 'no profile and no current-profile write')
+        assert.strictEqual(storedViewProfiles(state).length, 2, 'no profile created')
+        assert.strictEqual(state.settings.currentProfileID, 1, 'the current profile is unchanged')
+        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', ...liveHeader }, 'and so is the header')
+        await state.panelMessageHandler(['createProfileClicked'])
+        assert.deepStrictEqual(editorFormProfile(state), expectedSeed(state), 'a second open still starts from the same view')
+    })
+
+    await test('new profile from the view (desktop): Create stores the form and selects the new profile, the header still showing the view it was made from', async () => {
+        const state = await viewRun('desktop')
+        await driveViewHeader(state)
+        await state.panelMessageHandler(['createProfileClicked'])
+        const seed = editorFormProfile(state)
+        state.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...seed, name: 'Saved view' }) } } }
+        try {
+            await state.panelMessageHandler(['createProfileClicked'])
+        } finally {
+            state.dialogResult = null
+        }
+        const profiles = storedViewProfiles(state)
+        assert.strictEqual(profiles.length, 3, 'one profile created')
+        const created = profiles.find(profile => profile.name === 'Saved view')
+        assert.ok(created, 'under the name typed')
+        assert.strictEqual(created.id, 3)
+        const { id, ...createdFields } = created
+        assert.deepStrictEqual(createdFields, { ...expectedSeed(state), name: 'Saved view' }, 'holding the view it was made from')
+        assert.strictEqual(state.settings.currentProfileID, 3, 'the new profile is the current one')
+        assert.deepStrictEqual(viewHeaderOf(state), { profile: '3', ...liveHeader }, 'the dropdown names it, and the header still shows the same view')
+        assert.strictEqual(profiles.find(profile => profile.id === 1).noteID, viewOverview, 'the source keeps its overview note')
+    })
+
+    await test('new profile from the view (desktop): Create runs the dropdown\'s own switch steps - one shared helper, the new profile\'s calendar back at today', async () => {
+        const state = await viewRun('desktop')
+        await driveViewHeader(state)
+        // Navigate the month calendar away from today; a switch starts the new profile's calendar at today again.
+        const todayTitle = (String(state.panelHtml['panel-panel']).match(/class="calendar-title"[^>]*>([^<]*)</) || [])[1]
+        await state.panelMessageHandler(['calendarNavigate', 1])
+        await state.panelMessageHandler(['calendarNavigate', 1])
+        const awayTitle = (String(state.panelHtml['panel-panel']).match(/class="calendar-title"[^>]*>([^<]*)</) || [])[1]
+        assert.ok(todayTitle && awayTitle && todayTitle !== awayTitle, `the calendar moved (${todayTitle} -> ${awayTitle})`)
+        await state.panelMessageHandler(['createProfileClicked'])
+        state.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...editorFormProfile(state), name: 'Month copy' }) } } }
+        try {
+            await state.panelMessageHandler(['createProfileClicked'])
+        } finally {
+            state.dialogResult = null
+        }
+        const nowTitle = (String(state.panelHtml['panel-panel']).match(/class="calendar-title"[^>]*>([^<]*)</) || [])[1]
+        assert.strictEqual(nowTitle, todayTitle, 'the new profile\'s calendar starts at today')
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const branch = (name, next) => panelSource.slice(panelSource.indexOf(`message[0] == '${name}'`), panelSource.indexOf(`message[0] == '${next}'`))
+        assert.ok(branch('profilesDropdownChanged', 'notebookFilterChanged').includes('await switchToProfile(message[1])'), 'the dropdown switches through the shared helper')
+        assert.ok(branch('createProfileClicked', 'editProfileClicked').includes('await switchToProfile(createdID)'), 'and so does the desktop create')
+        assert.ok(branch('profileSaved', 'profileDeleteRequested').includes('await switchToProfile(createdProfileID)'), 'and the mobile create')
+        const helper = panelSource.slice(panelSource.indexOf('async function switchToProfile('), panelSource.indexOf('\n}', panelSource.indexOf('async function switchToProfile(')))
+        const steps = ['await setCurrentProfileID(profileID)', 'resetCalendarViewState()', 'clearReveal()', 'await applyProfileHeaderState(',
+            'await refreshPanelFastThenFill({ optimistic: true })', 'await catchUpNoteStore()', 'await refreshPanelData()']
+        for (const step of steps) assert.ok(helper.includes(step), `the helper holds ${step}`)
+        assert.deepStrictEqual(steps.map(step => helper.indexOf(step)), steps.map(step => helper.indexOf(step)).slice().sort((a, b) => a - b),
+            'in the dropdown\'s order: the state, the fast paint, then the store drain and the one truth refresh')
+    })
+
+    await test('new profile from the view (desktop): an edit is unchanged - the stored profile with its id, the edit buttons, no create mode, no switch', async () => {
+        const state = await viewRun('desktop')
+        await driveViewHeader(state)
+        await state.panelMessageHandler(['editProfileClicked', 2])
+        const html = state.dialogHtml['dialog-editor']
+        assert.ok(html.includes('<div id="editorScroll" data-mode="edit">'), 'the markup says edit')
+        assert.deepStrictEqual(editorFormProfile(state), storedViewProfiles(state).find(profile => profile.id === 2), 'the form carries the stored profile, id and all')
+        assert.deepStrictEqual(state.dialogButtons['dialog-editor'].map(button => button.id), ['cancel', 'delete', 'ok'], 'the edit buttons')
+        const other = storedViewProfiles(state).find(profile => profile.id === 2)
+        state.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...other, name: 'Other renamed' }) } } }
+        try {
+            await state.panelMessageHandler(['editProfileClicked', 2])
+        } finally {
+            state.dialogResult = null
+        }
+        assert.strictEqual(storedViewProfiles(state).length, 2, 'a save creates nothing')
+        assert.strictEqual(storedViewProfiles(state).find(profile => profile.id === 2).name, 'Other renamed', 'it saves the edited profile')
+        assert.strictEqual(state.settings.currentProfileID, 1, 'and does not switch to it')
+        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', ...liveHeader }, 'the header is left as it was')
+    })
+
+    // -- mobile -----------------------------------------------------------------------------------------------
+    await test('new profile from the view (mobile): getEditorInitial with no id answers create with the same seed, and asking changes nothing', async () => {
+        const state = await viewRun('mobile')
+        await driveViewHeader(state)
+        const writes = state.settingWrites.length
+        const paints = state.setHtmlCalls
+        const init = await state.panelMessageHandler(['getEditorInitial', null])
+        assert.strictEqual(init.mode, 'create')
+        assert.ok(!('id' in init.profile), 'no id')
+        assert.deepStrictEqual([init.profile.name, init.profile.noteID], ['New Profile', ''])
+        assert.deepStrictEqual([init.profile.notebook, init.profile.panelSearch, init.profile.sortField, init.profile.sortDirection], [viewWork, 'milk', 'updated', 'desc'], 'the live header state')
+        assert.deepStrictEqual([init.profile.displayFormat, init.profile.showNotes, init.profile.searchCriteria, init.profile.sortOrder], ['month', false, 'tag:work', 5], 'the current profile\'s settings')
+        assert.deepStrictEqual(init.profile, expectedSeed(state), 'the seed the desktop dialog opens with')
+        assert.deepStrictEqual(await state.panelMessageHandler(['getEditorInitial']), init, 'an absent id is a create too')
+        assert.deepStrictEqual(profileWrites(state, writes), [], 'asking writes nothing - a cancelled create leaves no trace')
+        assert.strictEqual(state.setHtmlCalls, paints, 'and paints nothing')
+        assert.strictEqual(storedViewProfiles(state).length, 2)
+        assert.strictEqual(state.settings.currentProfileID, 1)
+    })
+
+    await test('new profile from the view (mobile): profileSaved with no id creates the profile and selects it; an edit\'s getEditorInitial is unchanged', async () => {
+        const state = await viewRun('mobile')
+        await driveViewHeader(state)
+        const edit = await state.panelMessageHandler(['getEditorInitial', 1])
+        assert.deepStrictEqual(edit, { mode: 'edit', profile: storedViewProfiles(state).find(profile => profile.id === 1) }, 'an edit gets the stored profile, id and overview note included')
+        const init = await state.panelMessageHandler(['getEditorInitial', null])
+        await state.panelMessageHandler(['profileSaved', null, { ...init.profile, name: 'Phone view' }])
+        const profiles = storedViewProfiles(state)
+        assert.strictEqual(profiles.length, 3, 'one profile created')
+        const { id, ...createdFields } = profiles.find(profile => profile.name === 'Phone view')
+        assert.strictEqual(id, 3)
+        assert.deepStrictEqual(createdFields, { ...expectedSeed(state), name: 'Phone view' }, 'holding the view it was made from')
+        assert.strictEqual(state.settings.currentProfileID, 3, 'and it is the current profile')
+        assert.strictEqual(viewHeaderOf(state).profile, '3', 'the dropdown names it')
+        const after = await state.panelMessageHandler(['getEditorInitial', null])
+        assert.deepStrictEqual([after.profile.notebook, after.profile.panelSearch, after.profile.sortField, after.profile.sortDirection], [viewWork, 'milk', 'updated', 'desc'], 'the header still shows the view it was made from')
+        // A save (an id) is today's path: it stores the edit and switches nothing.
+        await state.panelMessageHandler(['profileSaved', 2, { ...profiles.find(profile => profile.id === 2), name: 'Other renamed' }])
+        assert.strictEqual(storedViewProfiles(state).length, 3, 'a save creates nothing')
+        assert.strictEqual(state.settings.currentProfileID, 3, 'and selects nothing')
+    })
+
+    // The overview lane's debounce (OVERVIEW_DEBOUNCE above) is the only timer scheduleOverview arms, and a pass reads each overview note it
+    // regenerates (getNoteContent in markdown.ts) - so firing that one timer and watching which overview notes are read shows the pass's scope.
+    const overviewNoteReads = (state, noteID, mark) => state.gets.slice(mark).filter(g => g.path[0] === 'notes' && g.path.length === 2 && g.path[1] === noteID).length
+    const fireOverviewPass = async (state, timeoutMark) => {
+        const armed = state.timeouts.slice(timeoutMark).filter(t => t.ms === OVERVIEW_DEBOUNCE && !t.cleared)
+        assert.strictEqual(armed.length, 1, 'one overview pass is armed')
+        const getsMark = state.gets.length
+        await state.fireTimeout(armed[0])
+        return getsMark
+    }
+    await test('new profile from the view (both): each create schedules the overview pass for the created profile alone', async () => {
+        for (const platform of ['desktop', 'mobile']){
+            const state = await viewRun(platform)
+            await driveViewHeader(state)
+            const putsMark = state.notePuts.length
+            const timeoutMark = state.timeouts.length
+            if (platform === 'desktop'){
+                await state.panelMessageHandler(['createProfileClicked'])
+                state.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...editorFormProfile(state), name: 'Copy', noteID: viewCopyOverview }) } } }
+                try {
+                    await state.panelMessageHandler(['createProfileClicked'])
+                } finally {
+                    state.dialogResult = null
+                }
+            } else {
+                const init = await state.panelMessageHandler(['getEditorInitial', null])
+                await state.panelMessageHandler(['profileSaved', null, { ...init.profile, name: 'Copy', noteID: viewCopyOverview }])
+            }
+            assert.strictEqual(state.settings.currentProfileID, 3, `${platform}: the copy was created and selected`)
+            const getsMark = await fireOverviewPass(state, timeoutMark)
+            assert.ok(overviewNoteReads(state, viewCopyOverview, getsMark) >= 1, `${platform}: the pass regenerates the copy's overview note`)
+            assert.ok(state.notePuts.slice(putsMark).some(put => put.id === viewCopyOverview), `${platform}: and writes it`)
+            assert.strictEqual(overviewNoteReads(state, viewOverview, getsMark), 0, `${platform}: and leaves the source profile's note alone - the pass is scoped to the created id, not every profile`)
+        }
+    })
+
+    await test('new profile from the view (webviews): the mobile overlay posts its descriptor only after the prefill, fills only the form that asked, and selects the untouched name on focus without focusing it', async () => {
+        const overlaySource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panelWebview.js'), 'utf8')
+        const start = overlaySource.indexOf('function openEditorOverlay(')
+        const body = overlaySource.slice(start, overlaySource.indexOf('\n}\n', start))
+        assert.ok(!body.includes('if (!isEdit){ pushOverlayState(); return }'), 'create no longer posts its template defaults at once')
+        const roundTrip = body.indexOf("webviewApi.postMessage(['getEditorInitial', isEdit ? profileID : null]).then(function(init){")
+        assert.ok(roundTrip > 0, 'the round-trip is made in both modes')
+        const between = body.slice(body.indexOf('if (restore){'), roundTrip)
+        assert.ok(!/\breturn\b/.test(between.slice(between.indexOf('return\n    }') + 'return\n    }'.length)), 'nothing between the restore branch and the round-trip skips it')
+        const pushes = body.split('pushOverlayState()').length - 1
+        assert.strictEqual(pushes, 2, 'the descriptor is posted in two places only: a restore, and after the prefill')
+        const after = body.slice(roundTrip)
+        assert.ok(after.indexOf('populateEditorForm(init.profile)') < after.indexOf('pushOverlayState()'), 'after the prefill is applied')
+        const arming = body.indexOf('if (!isEdit) selectDefaultNameOnFocus()')
+        assert.ok(arming > 0, 'a create overlay selects its default name on focus')
+        assert.ok(arming > body.indexOf('return\n    }') && arming < roundTrip, 'armed only on a fresh open, after the restore branch has returned: a form rebuilt after a reload may hold a half-typed name')
+        assert.strictEqual(body.split('selectDefaultNameOnFocus').length - 1, 1, 'and nowhere else')
+        const selector = overlaySource.slice(overlaySource.indexOf('function selectDefaultNameOnFocus('), overlaySource.indexOf('\n}\n', overlaySource.indexOf('function selectDefaultNameOnFocus(')))
+        assert.ok(selector.includes("var isDefault = function(){ return name.value === 'New Profile' }"), 'it knows the untouched default')
+        assert.ok(selector.includes("name.addEventListener('focus', function(){\n        if (!isDefault()) return\n        name.select()"), 'and selects on focus only while the name is still that default')
+        assert.ok(selector.includes('if (document.activeElement === name && isDefault()) name.select()'), 'the re-select after the tap too')
+        assert.ok(!selector.includes('.focus()') && !body.includes('.focus()'), 'and never focuses it itself: the keyboard stays down until the user asks')
+        // A late reply must land in the form that asked, not in whichever editor overlay is open by then (cancel a create, open an edit).
+        assert.ok(body.includes('var askingContext = overlayContext\n    webviewApi.postMessage([\'getEditorInitial\''), 'the asking overlay is captured right before the round-trip')
+        assert.ok(after.includes('if (!overlayOpen || overlayContext !== askingContext) return'), 'and a reply for an overlay since closed or replaced is dropped, in both modes')
+        assert.ok(after.indexOf('overlayContext !== askingContext') < after.indexOf('populateEditorForm(init.profile)'), 'before it fills anything')
+    })
+
+    await test('new profile from the view (webviews): the desktop editor focuses and selects the name in a create only, and saves the name on every keystroke', async () => {
+        const editorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'editor', 'editorWebview.js'), 'utf8')
+        const guard = 'if (document.getElementById("editorScroll").getAttribute("data-mode") == "create"){\n    nameInput.focus()\n    nameInput.select()\n}'
+        assert.ok(editorSource.includes(guard), 'focus and select, inside the create guard')
+        assert.strictEqual(editorSource.split('.focus()').length - 1, 1, 'and nowhere else: an edit focuses nothing')
+        assert.ok(editorSource.indexOf(guard) > editorSource.indexOf('\nloadProfileData()\n'), 'after the form is filled, so the selection covers the seeded name')
+        assert.ok(editorSource.includes('nameInput.addEventListener("input", saveProfileData)'), 'Enter submits from the host before a change event is guaranteed')
+        const templateSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'editor', 'editorTemplate.ts'), 'utf8')
+        assert.ok(templateSource.includes('<div id="editorScroll" data-mode="<<EDITOR_MODE>>">'), 'the template carries the mode placeholder')
+        for (const id of ['nameInput', 'notebookSelect', 'panelSearchInput', 'sortFieldSelect', 'sortDirectionSelect', 'noteIDInput', 'profileDataInput']){
+            assert.ok(templateSource.includes(`id="${id}"`), `the form keeps #${id}`)
+        }
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

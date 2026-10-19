@@ -172,6 +172,7 @@ A profile stores the display format, the search criteria, which completed to-dos
 - Four independent switches decide whether completed to-dos from the past, from today, from the future and with no due date are shown, so a profile can keep today's ticked-off work visible while hiding last month's.
 - A profile also chooses whether undated to-dos are listed at all and whether they are pushed to the end; whether the week starts on Monday or Sunday, which also sets where "This Week" ends; how many dots a calendar day shows before it collapses into "+N", from 1 to 10; and the date, weekday and 12-versus-24-hour formats.
 - The dropdown lists every profile with its own always-visible edit and delete buttons and a "+ New profile…" entry — no hover needed, so it works by tap on mobile too. A numeric sort order decides the order, ties falling back to the name.
+- "+ New profile…" opens on the view you are looking at: the current profile's settings plus the notebook, search and sorting in the header right now. The name is selected, so saving the view is typing a name and pressing Create (on mobile the keyboard stays down until you tap the name, which selects it). The overview-note id is not copied, since an overview note belongs to one profile. Create switches to the new profile.
 - A fresh install starts with an "All todo and notes" profile showing everything, and the last remaining profile cannot be deleted.
 
 ## Notebooks and notes

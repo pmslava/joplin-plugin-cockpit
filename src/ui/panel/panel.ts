@@ -452,6 +452,68 @@ async function applyProfileHeaderState(profile){
     sortDirection = profile.sortDirection === "desc" ? "desc" : "asc"
 }
 
+/** profileSeedFromCurrentView **********************************************************************************************************************
+ * What "+ New profile…" opens with: the view on screen, so that saving it as a profile is a matter of giving it a name. That view is the current   *
+ * profile's stored settings with the header's live state on top - the notebook filter, the committed search and the sorting, which the header      *
+ * controls override for the session without writing them back (applyProfileHeaderState) - so those four are read from the variables above rather   *
+ * than from the profile. Both platforms build their create form from this one function: the desktop editor dialog (openEditor) and the mobile      *
+ * overlay's getEditorInitial round-trip.                                                                                                           *
+ *                                                                                                                                                  *
+ * Everything else is copied, with three exceptions. The id is dropped: the seed is not a stored profile, and Create gives the copy an id of its    *
+ * own. The name is "New Profile", the default the editor has always opened with and the one its comments and the e2e helpers speak of. The         *
+ * overview note id is cleared, because an overview note belongs to ONE profile: markdown.ts rewrites each profile's noteID note with that          *
+ * profile's list, so two profiles naming the same note would overwrite each other on every pass. The sort order is kept, so the copy lands beside  *
+ * its source in the dropdown. The stored profile is copied, never handed out, since getProfile returns the store's own object.                     *
+ ***************************************************************************************************************************************************/
+async function profileSeedFromCurrentView(){
+    var seed = { ...(await getProfile(await getCurrentProfileID())) }
+    delete seed.id
+    seed.name = "New Profile"
+    seed.noteID = ""
+    // notebookFilter is a listed notebook or "" by construction (every writer goes through resolveCreatableNotebookID),
+    // so the copy can never start out pointed at a notebook the panel will not list.
+    seed.notebook = notebookFilter
+    seed.panelSearch = searchFilter
+    seed.sortField = sortField
+    seed.sortDirection = sortDirection
+    return seed
+}
+
+/** switchToProfile *********************************************************************************************************************************
+ * Makes a profile the current one and paints its view: the steps a pick from the profile dropdown runs, shared with Create on both platforms (the  *
+ * desktop dialog's createProfileClicked, the mobile overlay's profileSaved with no id). A created profile is selected because "+ New profile…" is  *
+ * "save as" for the view on screen - staying on the old profile would leave the dropdown naming a profile whose view is no longer the one shown.   *
+ ***************************************************************************************************************************************************/
+async function switchToProfile(profileID){
+    lastScrollTop = 0
+    await setCurrentProfileID(profileID)
+    // Another profile may show a different calendar, so start it at today rather than wherever the previous one was scrolled to.
+    resetCalendarViewState()
+    // A switched-to profile is a different view entirely, so a note pinned by a reveal into the previous
+    // one does not carry over (nor does its pending flash).
+    clearReveal()
+    // The profile carries its own header state: notebook filter, search and sorting.
+    await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+    // Paint the switched-to view immediately, then fill the rings from note bodies in the background.
+    // optimistic reuses the switched-to profile's cached result set, so a previously viewed profile paints
+    // with ZERO searches (with the host-held override map still layered on); a first visit does one search
+    // and no body fetches. Either way the whole list is on screen before any body GET. A profile just created
+    // from the view on screen asks, unless its form was changed, the very query that view asked, so it paints
+    // from that view's cached answer.
+    await refreshPanelFastThenFill({ optimistic: true })
+    // Then ONE background truth refresh: a single search-based refreshPanelData so external edits made
+    // while this profile was not current (and which its cached result set therefore predates) show now,
+    // instead of staying invisible until the periodic backstop. It is a lone refresh - no overview regen,
+    // no reconcile job - so it does not reintroduce the multi-lane cascade a mutation arms (a switch still
+    // mutates no note). refreshPanelData's generation guard discards it if a newer refresh supersedes it,
+    // and its equality guard makes it a no-op paint when the cached view was already the truth. This also
+    // narrows the window in which a stale cross-view optimistic entry could be observed after a switch.
+    // On a store-served view (2.7) "external edits" means what the store has not heard of yet - a REST or another plugin's write fires no
+    // onNoteChange - so the store drains once first (one events call; see catchUpNoteStore in timer.ts).
+    await catchUpNoteStore()
+    await refreshPanelData()
+}
+
 /** onProfilesReplaced ******************************************************************************************************************************
  * The panel-side half of a settings-note apply: the profile store has just been replaced wholesale with another device's (src/core/settingsSync.ts), *
  * so everything this file holds ABOUT the current profile is stale. It is exactly the state a profile switch resets, for the same reason - the view  *
@@ -575,31 +637,7 @@ async function eventHandler(message){
         await applyTodoChecked(String(message[1] || ""), !!message[2])
     } else if (message[0] == 'profilesDropdownChanged'){
         // The last entries of the dropdown are actions rather than profiles
-        lastScrollTop = 0
-        await setCurrentProfileID(message[1])
-        // Another profile may show a different calendar, so start it at today rather than wherever the previous one was scrolled to.
-        resetCalendarViewState()
-        // A switched-to profile is a different view entirely, so a note pinned by a reveal into the previous
-        // one does not carry over (nor does its pending flash).
-        clearReveal()
-        // The profile carries its own header state: notebook filter, search and sorting.
-        await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
-        // Paint the switched-to view immediately, then fill the rings from note bodies in the background.
-        // optimistic reuses the switched-to profile's cached result set, so a previously viewed profile paints
-        // with ZERO searches (with the host-held override map still layered on); a first visit does one search
-        // and no body fetches. Either way the whole list is on screen before any body GET.
-        await refreshPanelFastThenFill({ optimistic: true })
-        // Then ONE background truth refresh: a single search-based refreshPanelData so external edits made
-        // while this profile was not current (and which its cached result set therefore predates) show now,
-        // instead of staying invisible until the periodic backstop. It is a lone refresh - no overview regen,
-        // no reconcile job - so it does not reintroduce the multi-lane cascade a mutation arms (a switch still
-        // mutates no note). refreshPanelData's generation guard discards it if a newer refresh supersedes it,
-        // and its equality guard makes it a no-op paint when the cached view was already the truth. This also
-        // narrows the window in which a stale cross-view optimistic entry could be observed after a switch.
-        // On a store-served view (2.7) "external edits" means what the store has not heard of yet - a REST or another plugin's write fires no
-        // onNoteChange - so the store drains once first (one events call; see catchUpNoteStore in timer.ts).
-        await catchUpNoteStore()
-        await refreshPanelData()
+        await switchToProfile(message[1])
     } else if (message[0] == 'notebookFilterChanged'){
         // The dropdown and cockpit.filterByNotebook share ONE state write (see setNotebookFilter), so the
         // command a sibling plugin calls can never drift from what the panel's own control does.
@@ -665,14 +703,16 @@ async function eventHandler(message){
         await refreshPanelData()
     } else if (message[0] == 'createProfileClicked'){
         // Desktop only: on mobile the create-profile button opens the in-panel editor overlay (which posts
-        // profileSaved) rather than this native-dialog flow. Fast off-screen paint so the panel holds fresh
-        // content immediately, then the background fill fetches the rings and the overview lane writes the new
-        // profile's overview note. No reconcile: creating a profile mutates no note, so there is no index to
-        // catch up to.
-        await openEditor()
+        // getEditorInitial, then profileSaved) rather than this native-dialog flow. The dialog opens filled with the
+        // view on screen (profileSeedFromCurrentView). Cancel creates nothing and changes nothing, so there is
+        // nothing to repaint. Create selects the new profile through the dropdown's own steps (switchToProfile,
+        // which paints fast), and the overview lane writes its overview note, should the form have been given one.
+        // No reconcile: creating a profile mutates no note, so there is no index to catch up to.
+        var createdID = await openEditor(undefined, await profileSeedFromCurrentView())
+        if (createdID == null) return
         lastRenderedHtml = null
-        await refreshPanelFastThenFill()
-        scheduleOverview()
+        await switchToProfile(createdID)
+        scheduleOverview([createdID])
     } else if (message[0] == 'editProfileClicked'){
         var id = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
         await openEditor(id)
@@ -787,22 +827,33 @@ async function eventHandler(message){
         // Result of the in-panel alarm overlay's "Clear alarm".
         await applyAlarmCleared(Array.isArray(message[1]) ? message[1] : [])
     } else if (message[0] == 'getEditorInitial'){
-        // Round-trip: the in-panel profile editor overlay awaits this to prefill its fields. For create it
-        // returns a null profile (the overlay keeps the template defaults); for edit it returns the profile
-        // as a plain object. Mirrors the desktop openEditor's base64 prefill without the encoding.
-        return await getEditorInitial(message[1] != null ? Number(message[1]) : undefined)
+        // Round-trip: the in-panel profile editor overlay awaits this to prefill its fields, in both modes. For
+        // edit it returns the profile; for create (no id) the view on screen, the same seed the desktop dialog
+        // opens with (profileSeedFromCurrentView). Either way a plain object: the desktop openEditor's base64
+        // prefill without the encoding. Asking changes nothing - a create cancelled after it leaves no trace.
+        var initialID = message[1] != null ? Number(message[1]) : undefined
+        return await getEditorInitial(initialID, initialID === undefined ? await profileSeedFromCurrentView() : undefined)
     } else if (message[0] == 'profileSaved'){
         // Result of the in-panel profile editor overlay's Create/Save. message[1] is the profile id (null on
-        // create), message[2] the profile object. Same DB CRUD the desktop editor uses, then the same
+        // create), message[2] the profile object. Same DB CRUD the desktop editor uses. A create then selects
+        // the new profile exactly as the desktop createProfileClicked branch does; a save gets the same
         // post-editor refresh as the editProfileClicked branch.
-        var savedID = message[1] == null ? await createProfile() : Number(message[1])
+        if (message[1] == null){
+            var createdProfileID = await createProfile()
+            await updateProfile(createdProfileID, message[2])
+            lastRenderedHtml = null
+            await switchToProfile(createdProfileID)
+            scheduleOverview([createdProfileID])
+            return
+        }
+        var savedID = Number(message[1])
         await updateProfile(savedID, message[2])
         if (savedID == await getCurrentProfileID()) await applyProfileHeaderState(await getProfile(savedID))
         lastRenderedHtml = null
         // Mobile-only path (the editor overlay is never opened on desktop, so this never runs there). Paint
         // fast and defer just THIS profile's overview-note rewrite to the overview lane, mirroring the
         // switch/create handlers, instead of the heavy inline refreshInterfaces the round meant to remove from
-        // the interactive create/save path. Editing may change which to-dos show, so a full (fast) paint is
+        // the interactive save path. Editing may change which to-dos show, so a full (fast) paint is
         // still issued - the search runs; only the ring body-fetches are deferred to the fill. No reconcile:
         // saving a profile mutates no note. The overview scope is the saved profile alone.
         await refreshPanelFastThenFill()

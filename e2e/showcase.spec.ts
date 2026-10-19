@@ -761,8 +761,9 @@ test.describe('README screenshots', () => {
     // Three profiles, same criteria, one per display format - so the picker reads a different name in
     // every shot and the three views are one dataset seen three ways.
     await editCurrentProfile(win, { name: 'Everything', displayFormat: 'interval' });
-    // A profile created from the "+ New profile..." dialog does NOT inherit profileDefaults: the editor
-    // opens with no profile data, so every checkbox starts clear. Without these the Month grid loses its
+    // The "+ New profile..." dialog opens on the view on screen, so these already arrive from the profile
+    // being copied ('Everything', then 'Month', since Create selects the new profile). They stay spelled out
+    // so the shots do not depend on what that profile holds: without them the Month grid loses its
     // completed to-do (and with it the green done dot and the +1 overflow) and both views lose the
     // undated section.
     const inherited = { showCompleted: true, showNoDue: true, noDueDatesAtEnd: true };

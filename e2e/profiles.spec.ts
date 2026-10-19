@@ -1,11 +1,14 @@
 import { test, expect } from '@playwright/test';
 import { launchJoplin, closeJoplin, createProfile as createJoplinProfile, JoplinInstance } from './launch';
 import {
+  agendaPanel,
   createNotebook,
   createProfile,
   createTodo,
   editCurrentProfile,
+  openNewProfileEditor,
   panelTodoTitles,
+  PANEL_REFRESH_TIMEOUT,
   profileControlsVisible,
   profileNames,
   selectProfile,
@@ -28,12 +31,13 @@ test.describe('Profiles', () => {
   let profileDir: string;
   const alphaTitle = 'Alpha task';
   const betaTitle = 'Beta task';
+  const notebookName = 'Agenda E2E';
 
   test.beforeAll(async () => {
     profileDir = createJoplinProfile(true);
     joplin = await launchJoplin({ profileDir });
     const { win } = joplin;
-    await createNotebook(win, 'Agenda E2E');
+    await createNotebook(win, notebookName);
 
     await createTodo(win, alphaTitle);
     await setAlarm(win, new Date(Date.now() + 2 * 3600 * 1000));
@@ -105,5 +109,76 @@ test.describe('Profiles', () => {
     // menus, and synthetic key presses do not fire their accelerators, so the toggle itself is
     // covered by the harness suite (npm test) instead.
     expect(await profileControlsVisible(joplin.win)).toBe(true);
+  });
+
+  /**
+   * "+ New profile..." is "save as" for the view on screen: the editor opens on the current profile with the
+   * header's notebook, search and sorting on top, the name focused and selected so typing replaces it, and
+   * Create selects the new profile - so the dropdown names the view the panel is still showing.
+   */
+  test('a new profile opens on the current view, and Create selects it with the view unchanged', async () => {
+    const { win } = joplin;
+    const savedName = 'Alpha in Agenda E2E';
+    await selectProfile(win, 'All todo and notes');
+    const panel = await agendaPanel(win);
+
+    // The notebook filter, from the panel's own dropdown. The row's id is what the editor's select holds.
+    const notebookRow = panel.locator('#notebookMenu .dropdown-item[data-notebook-row]', { hasText: notebookName });
+    await expect.poll(async () => notebookRow.count(), { timeout: PANEL_REFRESH_TIMEOUT }).toBeGreaterThan(0);
+    const notebookId = ((await notebookRow.first().getAttribute('onclick')) || '').match(/'notebookFilterChanged', '([^']+)'/)?.[1] || '';
+    expect(notebookId).not.toBe('');
+    await panel.locator('.dropdown-toggle[onclick*="notebookMenu"]').click();
+    await expect(panel.locator('#notebookMenu')).toBeVisible();
+    await notebookRow.locator('.dropdown-label').first().click();
+    await expect(panel.locator('.dropdown-toggle[onclick*="notebookMenu"] .dropdown-toggle-label')).toHaveText(notebookName, { timeout: 20_000 });
+
+    // A committed search matching one of the two to-dos.
+    const search = panel.locator('#searchFilter');
+    await search.click();
+    await search.fill(alphaTitle);
+    await search.press('Enter');
+    await waitForPanelTodoGone(win, betaTitle);
+    await waitForPanelTodo(win, alphaTitle);
+
+    // The sorting, both halves away from the defaults the template would show.
+    await panel.locator('.dropdown-toggle[onclick*="sortMenu"]').click();
+    await expect(panel.locator('#sortMenu')).toBeVisible();
+    await panel.locator(`#sortMenu .dropdown-item[onclick*="'sortFieldSelected', 'updated'"]`).click();
+    await expect(panel.locator('.dropdown-toggle[onclick*="sortMenu"] .dropdown-toggle-label')).toHaveText('Updated', { timeout: 20_000 });
+    await panel.locator('button[onclick="onSortDirectionClicked()"]').click();
+    await expect(panel.locator('button[onclick="onSortDirectionClicked()"]')).toHaveAttribute('title', 'Sort direction: descending', { timeout: 20_000 });
+
+    const editor = await openNewProfileEditor(win);
+    await expect(editor.locator('#notebookSelect')).toHaveValue(notebookId);
+    await expect(editor.locator('#panelSearchInput')).toHaveValue(alphaTitle);
+    await expect(editor.locator('#sortFieldSelect')).toHaveValue('updated');
+    await expect(editor.locator('#sortDirectionSelect')).toHaveValue('desc');
+    await expect(editor.locator('#nameInput')).toHaveValue('New Profile');
+    // The name has the focus with all of its text selected, so typing replaces it.
+    await expect
+      .poll(
+        () =>
+          editor.evaluate(() => {
+            const active = document.activeElement as HTMLInputElement | null;
+            return active && active.id === 'nameInput'
+              ? { start: active.selectionStart, end: active.selectionEnd, length: active.value.length }
+              : { active: active ? active.id || active.tagName : null };
+          }),
+        { timeout: 10_000 }
+      )
+      .toEqual({ start: 0, end: 'New Profile'.length, length: 'New Profile'.length });
+
+    await win.keyboard.type(savedName);
+    await expect(editor.locator('#nameInput')).toHaveValue(savedName);
+    await win.locator('button:has-text("Create")').last().click();
+
+    await expect.poll(() => profileNames(win), { timeout: 30_000 }).toContain(savedName);
+    await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe(savedName);
+    // The view is the one it was made from: still filtered to the notebook and the search.
+    const panelAfter = await agendaPanel(win);
+    await expect(panelAfter.locator('#searchFilter')).toHaveValue(alphaTitle);
+    await expect(panelAfter.locator('.dropdown-toggle[onclick*="notebookMenu"] .dropdown-toggle-label')).toHaveText(notebookName);
+    await waitForPanelTodo(win, alphaTitle);
+    expect(await panelTodoTitles(win)).not.toContain(betaTitle);
   });
 });

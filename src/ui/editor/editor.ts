@@ -1,5 +1,6 @@
 /** README ******************************************************************************************************************************************
- * The profile editor dialog allows the user to edit the profile settings and customizations as well as to delete the profile                       *
+ * The profile editor dialog allows the user to edit the profile settings and customizations as well as to delete the profile, and to create a      *
+ * profile, starting from the view on screen                                                                                                        *
  ***************************************************************************************************************************************************/
 
 /** Imports ****************************************************************************************************************************************/
@@ -25,38 +26,52 @@ export async function setupEditor(){
 }
 
 /** openEditor **************************************************************************************************************************************
- * Opens the profile editor dialog for the given profile ID. If Save is clicked, the changes are saved to the database. IF delete is clicked, the   *
- * delete confirmation dialog is opened. DESKTOP ONLY: on mobile the profile editor is an in-panel overlay (openEditorOverlay in the panel webview,  *
- * with getEditorInitial / profileSaved / profileDeleteRequested round-trips), so the create/edit-profile webview buttons never reach this handler.  *
+ * Opens the profile editor dialog. With a profile ID it edits that profile: Save writes the changes to the database, Delete opens the delete       *
+ * confirmation dialog. Without one it creates a profile, and seed is what the form starts from - the view on screen, built by                      *
+ * profileSeedFromCurrentView in panel.ts - prefilled through the same <<PROFILE_DATA>> route an edit uses, under the Create/Cancel buttons. The    *
+ * markup also says which mode it is (<<EDITOR_MODE>>), so that editorWebview.js focuses the name field with its text selected in a create, and     *
+ * focuses nothing in an edit.                                                                                                                      *
+ *                                                                                                                                                  *
+ * Returns the id of the profile a Create made, so the caller can select it, and null for everything else: a Save, a Delete, a Cancel. DESKTOP      *
+ * ONLY: on mobile the profile editor is an in-panel overlay (openEditorOverlay in the panel webview, with getEditorInitial / profileSaved /        *
+ * profileDeleteRequested round-trips), so the create/edit-profile webview buttons never reach this handler.                                        *
  ***************************************************************************************************************************************************/
-export async function openEditor(profileID?){
-    var profileData = profileID == null ? null : btoa(encodeURI(JSON.stringify(await getProfile(profileID))))
-    var formattedHtml = profileData == null ? editorTemplate : editorTemplate.replace("<<PROFILE_DATA>>", () => profileData)
+export async function openEditor(profileID?, seed?){
+    var isCreate = profileID == null
+    // An edit encodes whatever the store holds for the id, exactly as it always has; a create encodes its seed, and a
+    // create without one keeps the placeholder, which the webview leaves at the template defaults.
+    var formProfile = isCreate ? seed : await getProfile(profileID)
+    var profileData = isCreate && formProfile == null ? null : btoa(encodeURI(JSON.stringify(formProfile)))
+    var formattedHtml = editorTemplate.replace("<<EDITOR_MODE>>", isCreate ? "create" : "edit")
+    if (profileData != null) formattedHtml = formattedHtml.replace("<<PROFILE_DATA>>", () => profileData)
     var notebooks = [...(await getNotebookMap()).values()].sort((first, second) => String(first.path).localeCompare(String(second.path)))
     var notebookOptions = `<option value="">All notebooks</option>` + notebooks.map(notebook => `<option value="${escapeHtml(notebook.id)}">${escapeHtml(notebook.path)}</option>`).join("")
     formattedHtml = formattedHtml.replace("<<NOTEBOOK_OPTIONS>>", () => notebookOptions)
-    var dialogButtons = profileID == null ? createButtons : editButtons
+    var dialogButtons = isCreate ? createButtons : editButtons
     await joplin.views.dialogs.setButtons(dialog, dialogButtons)
     await joplin.views.dialogs.setHtml(dialog, formattedHtml);
     var formResult = await openPluginDialog(dialog)
     if (formResult.id == 'ok') {
         var profile = JSON.parse(decodeURI(atob(formResult.formData["profileDataForm"]["profileData"])))
-        if (profileID == null){
-            profileID = await createProfile()
+        if (isCreate){
+            var createdID = await createProfile()
+            await updateProfile(createdID, profile)
+            return createdID
         }
         await updateProfile(profileID, profile)
     } else if (formResult.id == "delete") {
         await openDeleteDialog(profileID)
     }
+    return null
 }
 
 /** getEditorInitial ********************************************************************************************************************************
- * Prefill round-trip for the mobile in-panel editor overlay (mirrors getAlarmInitialFields). Returns the mode plus, when editing, the profile as a  *
- * plain object the overlay populates its fields from directly (no base64). For create it returns a null profile so the overlay keeps the template    *
- * defaults.                                                                                                                                          *
+ * Prefill round-trip for the mobile in-panel editor overlay (mirrors getAlarmInitialFields). Returns the mode plus the profile the overlay         *
+ * populates its fields from directly, as a plain object (no base64): the stored profile when editing, and for a create the seed the panel passes   *
+ * in - the view on screen, the same one the desktop dialog opens with (profileSeedFromCurrentView in panel.ts).                                    *
  ***************************************************************************************************************************************************/
-export async function getEditorInitial(profileID?){
-    if (profileID == null) return { mode: "create", profile: null }
+export async function getEditorInitial(profileID?, seed?){
+    if (profileID == null) return { mode: "create", profile: seed == null ? null : seed }
     return { mode: "edit", profile: await getProfile(profileID) }
 }
 

@@ -103,7 +103,7 @@ export var editorTemplate = `
         td { padding: 2px 4px 2px 0; }
         td select { width: 100%; }
     </style>
-    <div id="editorScroll">
+    <div id="editorScroll" data-mode="<<EDITOR_MODE>>">
     <fieldset>
         <legend>Name</legend>
         <input type="text" id="nameInput" name="name" value="New Profile">

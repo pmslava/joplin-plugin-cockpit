@@ -284,8 +284,9 @@ async function editorFrame(win: Page): Promise<Frame> {
 /**
  * Fill the profile editor form.
  *
- * Gotcha: the dialog's script only copies the field values into the hidden form field that Joplin
- * submits when a `change` event fires, so every field is explicitly given one.
+ * Gotcha: the dialog's script copies the field values into the hidden form field that Joplin submits
+ * when a `change` event fires (the name field also on every `input`, so a typed name survives Enter);
+ * `fill` does not fire `change`, so every field is explicitly given one.
  */
 async function fillProfileForm(frame: Frame, fields: ProfileFields): Promise<void> {
   const setText = async (selector: string, value: string) => {
@@ -336,19 +337,34 @@ async function openProfileMenu(win: Page): Promise<Frame> {
 }
 
 /**
+ * Open the profile editor from the profile dropdown's "+ New profile..." action and return its frame.
+ * The form opens on the view on screen: the current profile's settings with the header's notebook,
+ * search and sorting on top, named "New Profile" with the name focused and selected.
+ */
+export async function openNewProfileEditor(win: Page): Promise<Frame> {
+  const frame = await openProfileMenu(win);
+  // Target the action by its handler, not its label, so it is never confused with a profile that
+  // happens to be named "New Profile" (the editor's default name for a fresh profile).
+  await frame.locator('#profileMenu .dropdown-item[onclick*="createProfileClicked"]').click();
+  return editorFrame(win);
+}
+
+/**
  * Create a profile using the profile dropdown's "+ New profile..." action, fill the form and confirm.
+ * Fields left out keep what the form opened with - the view on screen, not the template defaults -
+ * and Create selects the new profile.
  *
  * The editor is a Joplin dialog: its fields live in an iframe, but its Cancel/Create buttons are
  * rendered by Joplin in the main window, outside the iframe.
  */
 export async function createProfile(win: Page, fields: ProfileFields): Promise<void> {
-  const frame = await openProfileMenu(win);
-  // Target the action by its handler, not its label, so it is never confused with a profile that
-  // happens to be named "New Profile" (the editor's default name for a fresh profile).
-  await frame.locator('#profileMenu .dropdown-item[onclick*="createProfileClicked"]').click();
-  const editor = await editorFrame(win);
+  const editor = await openNewProfileEditor(win);
   await fillProfileForm(editor, fields);
   await win.locator('button:has-text("Create")').last().click();
+  // Create runs a whole profile switch, so wait until the dropdown names the new profile rather than
+  // trusting a fixed delay, then let the switch's background fill settle as before.
+  const name = fields.name ?? 'New Profile';
+  await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe(name);
   await win.waitForTimeout(SETTLE);
 }
 

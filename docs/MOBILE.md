@@ -69,10 +69,14 @@ the profile editor joins the pickers — the dismiss-first native-dialog flow is
   if the `getAlarmInitial` prefill round-trip rejects (e.g. a selected note was just deleted), then
   redrawn from the prefilled values.
 - **Profile editor** (`openEditorOverlay`): the full ~25-field form ported into the overlay body
-  (`EDITOR_FORM_HTML`, scoped `.cockpit-editor-overlay` CSS), replacing the old native dialog. Create
-  starts at the template defaults; edit prefills via a `getEditorInitial` round-trip (mode + the
-  profile as a plain object, no base64). Footer is Cancel / Create, or Cancel / Delete / Save; Save
-  posts `['profileSaved', id, obj]`, Delete posts `['profileDeleteRequested', id]` — whose host handler
+  (`EDITOR_FORM_HTML`, scoped `.cockpit-editor-overlay` CSS), replacing the old native dialog. Both
+  modes prefill via a `getEditorInitial` round-trip (mode + a profile as a plain object, no base64):
+  edit gets the profile, create gets the view on screen — the current profile with the header's
+  notebook, search and sorting on top, no overview-note id, named "New Profile" — the same seed the
+  desktop dialog opens with (`profileSeedFromCurrentView`). Create leaves the name unfocused (no
+  keyboard over the list) and selects its text on the first tap. Footer is Cancel / Create, or
+  Cancel / Delete / Save; Create/Save post `['profileSaved', id, obj]` (a null id for a create, which
+  the host then selects), Delete posts `['profileDeleteRequested', id]` — whose host handler
   **keeps the native "Delete <name>?" confirm message box and the ">1 profile must exist" guard**
   unchanged (a native message box draws correctly above the panel). Desktop still opens the native
   editor dialog untouched.
@@ -106,14 +110,15 @@ Fix, mirroring the scroll-persistence pattern: the **host owns** an `openOverlay
 - The host **clears** the descriptor synchronously on the `dialogGuard(false)` close path (the webview
   posts no separate `overlayState:null`, to avoid a close/refresh ordering race), so a post-close
   render can never resurrect a just-dismissed overlay.
-- **Prefill-window safety**: the tag / alarm / edit-mode-editor overlays post their descriptor **only
+- **Prefill-window safety**: the tag / alarm / profile-editor overlays post their descriptor **only
   after** their prefill round-trip resolves, never from the empty/default fields beforehand. A reload
   landing in that sub-second window would otherwise leave the host holding a *defaults* descriptor
-  (empty tags, empty alarm, or an edit form full of create-defaults) and a reconstruct would resurrect
-  a wrong overlay whose commit resets the profile / clears the note's tags. Not posting until real
-  values are in hand means a reload strictly inside the window loses the overlay (safe — nothing to
-  commit) while it stays reload-survivable for the rest of its life. (Create mode has no round-trip and
-  posts its correct defaults immediately.)
+  (empty tags, empty alarm, or an editor form full of template defaults) and a reconstruct would
+  resurrect a wrong overlay whose commit resets the profile / clears the note's tags / creates a
+  profile that is not the view being saved. Not posting until real values are in hand means a reload
+  strictly inside the window loses the overlay (safe — nothing to commit) while it stays
+  reload-survivable for the rest of its life. (The editor's create mode used to skip the round-trip
+  and post its defaults at once; since it opens on the view on screen, it waits like edit mode.)
 - **Known gap (accepted):** a *second* renderer kill within one overlay session can reconstruct from
   the first served-document snapshot rather than the host's fresher `openOverlayState`, losing edits
   made after the first reconstruct. Requires two kills in one overlay session, is non-looping and
@@ -301,17 +306,21 @@ before the user saw anything. Two mobile-gated trims make the switch feel instan
 byte-identical.
 
 - **Defer the overview-note rewrite.** Profile switch (`profilesDropdownChanged`), create
-  (`createProfileClicked`) and the overlay Save/Create (`profileSaved`, mobile-only) now call
-  `refreshPanelData({ fast: true })` + `scheduleRefresh()` instead of `refreshInterfaces()`. The
-  interactive path does **one** search + one reload; the all-profiles overview notes reconcile in the
-  background schedule (a switch/create changes no to-do data, so they write nothing new anyway). On
-  desktop `fast` resolves to `false`, so the paint is unchanged — only the (no-op) overview write moves
-  a beat later, an intentional, invisible timing change.
+  (`createProfileClicked`) and the overlay Save/Create (`profileSaved`, mobile-only) no longer call
+  `refreshInterfaces()`. As the code stands now, a switch and both creates (the desktop dialog's
+  `createProfileClicked`, the overlay's `profileSaved` with a null id) run one shared helper,
+  `switchToProfile`: the state reset, a fast paint plus ring fill from the cached result set
+  (`refreshPanelFastThenFill({ optimistic: true })`), one store drain and one truth refresh. A create,
+  which selects the new profile, then arms the overview lane for that profile alone
+  (`scheduleOverview([newID])`); an overlay Save (an id) paints fast and arms the lane for the saved
+  profile alone. The interactive path never waits on an overview note; the debounced lane writes it in
+  the background. (The original 5a trim called `refreshPanelData({ fast: true })` +
+  `scheduleRefresh()` here; both were since replaced as described.)
 - **Fast first paint — rings from cache.** `refreshPanelData({ fast: true })` (gated `mobile && fast`)
   threads a `fastCheckboxCounts` flag through `getFormatter → getTodos → attachCheckboxCounts` so the
   first paint renders checkbox rings from **already-cached** counts only, issuing **no** note-body GETs
-  (up to 300, serial-chunked). The paired `scheduleRefresh` then fetches the bodies and repaints with
-  the real rings. Desktop always renders full counts (skipping them would flash empty rings).
+  (up to 300, serial-chunked). The paired fill render (the second half of `refreshPanelFastThenFill`)
+  then fetches the bodies and repaints with the real rings. Desktop always renders full counts (skipping them would flash empty rings).
 
 ### 6. Command fallbacks + responsive alarm dialog
 
@@ -815,16 +824,22 @@ success vs failure looks like. The build to install is
 14. **Profile editor overlay (create / edit / delete).** From the profile dropdown open **+ New
     profile…**, then **Edit profile** on an existing one.
     - Success: each opens as an **in-panel overlay on top of** the list (no native dialog, nothing
-      behind the panel); create shows the template defaults, edit prefills the profile's real values
-      within a moment; Save/Create persists and the list updates; Cancel / outside-tap / Android-back
-      discard. On **Delete**, the native "Delete <name>?" confirm still appears, and the last-profile
-      guard still blocks deleting the only profile.
-    - Failure: a native editor dialog opens (mobile should use the overlay), edit shows create-defaults
-      instead of the profile's values, Delete skips the confirmation, or Save on an edit resets fields.
+      behind the panel); create prefills the view on screen within a moment (the current profile's
+      settings with the header's notebook, search and sorting, named "New Profile", the keyboard not
+      raised; the first tap on the name selects it), edit prefills the profile's real values; Create
+      persists and selects the new profile, Save persists and the list updates; Cancel / outside-tap /
+      Android-back discard and leave the current profile and header as they were. On **Delete**, the
+      native "Delete <name>?" confirm still appears, and the last-profile guard still blocks deleting
+      the only profile.
+    - Failure: a native editor dialog opens (mobile should use the overlay), create shows template
+      defaults instead of the view on screen, edit shows template defaults instead of the profile's
+      values, Delete skips the confirmation, or Save on an edit resets fields.
 
-15. **Overlay survives a mid-overlay reload.** With the tag or edit-profile overlay open and edited (a
-    few keystrokes), force a panel reload — background the app during a sync, or otherwise provoke the
-    Android renderer to reload the panel — then return.
+15. **Overlay survives a mid-overlay reload.** With the tag, edit-profile or new-profile overlay open
+    and edited (a few keystrokes), force a panel reload — background the app during a sync, or
+    otherwise provoke the Android renderer to reload the panel — then return. For the new-profile
+    overlay, type part of a name before the reload; afterwards a tap at its end must not select (and
+    the next keystroke must not wipe) what you had typed.
     - Success: the overlay **reappears** reconstructed with the values you had typed (not the empty /
       default form); committing it applies those values. If instead it reappears empty right after
       opening (before prefill finished), it should simply have **closed** rather than come back empty.

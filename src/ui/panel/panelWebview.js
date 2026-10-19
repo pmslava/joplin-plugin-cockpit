@@ -4584,11 +4584,12 @@ function openAlarmOverlay(ids, restore){
 }
 
 /** Profile editor overlay **************************************************************************************************************************
- * The profile editor ported from the native editor dialog (editorTemplate.ts / editorWebview.js) into an in-panel overlay - only ever shown on       *
- * mobile, where a native dialog opens behind the panel. The full ~25-field form is scrolled inside the overlay body. getEditorInitial prefills it     *
- * (mode + profile object, no base64); Create/Save post ['profileSaved', id, obj], Delete posts ['profileDeleteRequested', id] (the host keeps the     *
- * native delete confirmation), Cancel/Escape/backdrop just close. The descriptor carries the serialized form so a host-initiated reload mid-edit       *
- * reconstructs every field. Desktop keeps the native editor dialog untouched.                                                                          *
+ * The profile editor ported from the native editor dialog (editorTemplate.ts / editorWebview.js) into an in-panel overlay - only ever shown on     *
+ * mobile, where a native dialog opens behind the panel. The full ~25-field form is scrolled inside the overlay body. getEditorInitial prefills it  *
+ * in both modes (mode + profile object, no base64): the profile being edited, or for a create the view on screen. Create/Save post                 *
+ * ['profileSaved', id, obj] (a null id for a create, which the host then selects), Delete posts ['profileDeleteRequested', id] (the host keeps the *
+ * native delete confirmation), Cancel/Escape/backdrop just close. The descriptor carries the serialized form so a host-initiated reload mid-edit   *
+ * reconstructs every field. Desktop keeps the native editor dialog.                                                                                *
  ***************************************************************************************************************************************************/
 
 // The editor form markup, copied verbatim from editorTemplate.ts's fieldset tree minus the dialog-only
@@ -4854,6 +4855,26 @@ function wireEditorInputs(){
     }
 }
 
+// A freshly opened create form only: while the name is still the untouched "New Profile", a tap on it (any focus)
+// selects the whole text, so typing replaces it at once. Never a focus of its own on open: on a phone that raises the
+// keyboard over the list before it was asked for, which is why every overlay leaves its fields unfocused. Two guards
+// keep it from eating a name the user has started: openEditorOverlay arms it only on a fresh open, never on a form
+// rebuilt after a reload (which may hold a half-typed name the user taps back into to finish), and it selects only
+// while the value is still "New Profile" (a name typed, left and tapped again is not wiped by the next keystroke).
+// The selection is made on the focus and made again just after it, because the tap that focused the field places
+// the caret where the finger landed once the focus handlers have run, which would otherwise collapse a selection
+// made inside the focus event alone.
+function selectDefaultNameOnFocus(){
+    var name = editorField('nameInput')
+    if (!name) return
+    var isDefault = function(){ return name.value === 'New Profile' }
+    name.addEventListener('focus', function(){
+        if (!isDefault()) return
+        name.select()
+        setTimeout(function(){ if (document.activeElement === name && isDefault()) name.select() }, 0)
+    })
+}
+
 function openEditorOverlay(profileID, restore){
     var isEdit = profileID != null
     overlayContext = { kind: 'editor', profileID: isEdit ? profileID : null }
@@ -4881,22 +4902,30 @@ function openEditorOverlay(profileID, restore){
     wireEditorInputs()
 
     if (restore){
-        // Reconstruct: restore the field values the user had before the reload; skip the round-trip.
+        // Reconstruct: restore the field values the user had before the reload; skip the round-trip. A rebuilt
+        // create form does not select its name on focus: it may hold a half-typed name the user taps to finish.
         populateEditorForm(restore.values)
         pushOverlayState()
         return
     }
+    if (!isEdit) selectDefaultNameOnFocus()
 
-    // The form starts at the template defaults (usable immediately). In CREATE mode those defaults ARE the
-    // intended values, so post the descriptor now (there is no round-trip). In EDIT mode the defaults are
-    // placeholder junk until the profile arrives, so DO NOT post them: a reload inside the sub-second prefill
-    // window would otherwise leave the host holding a defaults descriptor with the real profileID and the
-    // edit footer, and a reconstruct would resurrect an edit form full of create-defaults whose Save would
-    // reset the profile. Posting only after the profile is filled means a reload strictly inside that window
-    // loses the overlay (safe) rather than resurrecting a committable wrong one.
-    if (!isEdit){ pushOverlayState(); return }
-    webviewApi.postMessage(['getEditorInitial', profileID]).then(function(init){
-        if (!overlayOpen) return   // closed while awaiting
+    // The form starts at the template defaults, which are placeholder junk in BOTH modes until the round-trip
+    // lands: in EDIT mode the profile being edited, in CREATE mode the view on screen (the host's
+    // profileSeedFromCurrentView, the same seed the desktop dialog opens with). So DO NOT post the descriptor
+    // yet: a reload inside the sub-second prefill window would otherwise leave the host holding a defaults
+    // descriptor, and a reconstruct would resurrect a form full of template defaults - an edit form whose Save
+    // would reset the profile, or a create form whose Create would save a profile that is not the view the user
+    // meant to keep. Posting only after the prefill means a reload strictly inside that window loses the overlay
+    // (safe) rather than resurrecting a committable wrong one.
+    // The reply must land in THIS form. overlayOpen alone only says that SOME overlay is open, and a create's
+    // seed can take a moment (it reads the current profile id, which may be a settings round-trip): open
+    // "+ New profile…", cancel, open Edit profile at once, and a late seed would otherwise fill the edit form,
+    // whose Save would write it into that profile. Every open makes a new context object, so identity says
+    // whether the overlay that asked is still the one on screen.
+    var askingContext = overlayContext
+    webviewApi.postMessage(['getEditorInitial', isEdit ? profileID : null]).then(function(init){
+        if (!overlayOpen || overlayContext !== askingContext) return   // closed, or replaced, while awaiting
         init = init || {}
         if (init.profile) populateEditorForm(init.profile)
         pushOverlayState()

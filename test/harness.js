@@ -38,6 +38,9 @@ function makeJoplin(options) {
         // The markup each dialog was last given, by handle. The notebook picker rewrites its whole list on every
         // open, so this is where a check reads its rows, its filter box and its hidden input.
         dialogHtml: {},
+        // The buttons each dialog was last given, by handle (views.dialogs.setButtons): the profile editor's create opens
+        // under Create/Cancel and its edit under Cancel/Delete/Save, from the same dialog handle.
+        dialogButtons: {},
         // Every views.dialogs.addScript, as { handle, script }, in order: which files a dialog loads, and in which
         // order (the picker's pure model must arrive before the glue that calls it).
         dialogScripts: [],
@@ -318,7 +321,7 @@ function makeJoplin(options) {
                 create: async (id) => { state.dialogs.push(id); return `dialog-${id}` },
                 addScript: async (handle, script) => { state.dialogScripts.push({ handle, script }) },
                 setHtml: async (handle, html) => { state.dialogHtml[handle] = html },
-                setButtons: async () => {},
+                setButtons: async (handle, buttons) => { state.dialogButtons[handle] = buttons },
                 open: async (handle) => { state.dialogOpens.push(handle); return state.dialogResult || { id: 'cancel' } },
                 showMessageBox: async (message) => { state.messageBoxes.push(message); return 0 },
             },
