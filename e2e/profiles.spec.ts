@@ -12,6 +12,7 @@ import {
   profileControlsVisible,
   profileNames,
   selectProfile,
+  selectedProfileIsModified,
   selectedProfileName,
   setAlarm,
   waitForPanelTodo,
@@ -180,5 +181,43 @@ test.describe('Profiles', () => {
     await expect(panelAfter.locator('.dropdown-toggle[onclick*="notebookMenu"] .dropdown-toggle-label')).toHaveText(notebookName);
     await waitForPanelTodo(win, alphaTitle);
     expect(await panelTodoTitles(win)).not.toContain(betaTitle);
+    // Made from the view on screen, so the new profile's name carries no "view changed" asterisk.
+    expect(await selectedProfileIsModified(win)).toBe(false);
+  });
+
+  /**
+   * A header change the profile does not hold marks the picker's name with an asterisk - on the toggle only, the
+   * rows keep the stored names - and picking the profile again returns to its saved view and drops the mark.
+   */
+  test('changing the view marks the profile name with an asterisk, and picking it again restores its saved view', async () => {
+    const { win } = joplin;
+    const profileName = 'All todo and notes';
+    await selectProfile(win, profileName);
+    await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe(profileName);
+    const panel = await agendaPanel(win);
+    const notebookLabel = panel.locator('.dropdown-toggle[onclick*="notebookMenu"] .dropdown-toggle-label');
+    await expect(notebookLabel).toHaveText('All notebooks', { timeout: 20_000 });
+    await waitForPanelTodo(win, betaTitle);
+
+    // Filter to the notebook from the panel's own dropdown: the view no longer matches the saved profile.
+    await panel.locator('.dropdown-toggle[onclick*="notebookMenu"]').click();
+    await expect(panel.locator('#notebookMenu')).toBeVisible();
+    await panel
+      .locator('#notebookMenu .dropdown-item[data-notebook-row]', { hasText: notebookName })
+      .locator('.dropdown-label')
+      .first()
+      .click();
+    await expect(notebookLabel).toHaveText(notebookName, { timeout: 20_000 });
+    await expect.poll(() => selectedProfileName(win), { timeout: 20_000 }).toBe(`${profileName}*`);
+    expect(await selectedProfileIsModified(win)).toBe(true);
+    expect(await profileNames(win)).toContain(profileName);
+    expect((await profileNames(win)).some((name) => name.endsWith('*'))).toBe(false);
+
+    // Picking it again returns to its saved view: the plain name, and the list unfiltered.
+    await selectProfile(win, profileName);
+    await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe(profileName);
+    await expect(notebookLabel).toHaveText('All notebooks', { timeout: 20_000 });
+    await waitForPanelTodo(win, alphaTitle);
+    await waitForPanelTodo(win, betaTitle);
   });
 });

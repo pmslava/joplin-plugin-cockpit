@@ -450,6 +450,43 @@ async function applyProfileHeaderState(profile){
     searchFilter = String(profile.panelSearch || "")
     sortField = sortFieldCycle.includes(profile.sortField) ? profile.sortField : "title"
     sortDirection = profile.sortDirection === "desc" ? "desc" : "asc"
+    // What was just applied - the RESOLVED notebook included - is the view the picker's name stands for.
+    headerBaseline = { notebook: notebookFilter, search: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection }
+}
+
+/** headerBaseline / headerDiffersFromProfile (2.9) *************************************************************************************************
+ * The header state the current profile was last applied with, and whether the view on screen has moved away from it since. The header controls     *
+ * (notebook, search, sorting, and the commands another plugin calls) change the view for the session without writing it back, so the picker would  *
+ * otherwise name a profile whose view is no longer the one shown; while they differ its toggle carries an asterisk ("Lab*",                        *
+ * getProfileDropdownHTML). The automatic return to "All notebooks" when the filtered notebook is excluded or deleted marks it too: the view did    *
+ * change under the user.                                                                                                                           *
+ *                                                                                                                                                  *
+ * The baseline is what applyProfileHeaderState APPLIED, not what the profile stores: a saved notebook that has since been deleted or excluded      *
+ * resolves to "All notebooks" there, and comparing against the stored id would mark the profile the moment it was picked. The search is compared   *
+ * trimmed on both sides, because a stored search may carry spaces a committed one never does. It is a comparison rather than a flag set by the     *
+ * controls, so putting a field back by hand clears the mark, and nothing outside these four values (the calendar's month, a reveal's pin) can set  *
+ * it. Every path that re-applies the profile - a switch or re-pick from the dropdown, a Save of the current profile, Create from the view, a       *
+ * delete of the current profile, a settings-note replace - resets the baseline and the live state together, which is what clears it. A Cancel of   *
+ * an edit, and a delete of another profile, re-apply nothing (applyHeaderIfCurrentProfileChanged), so the view and its mark stay as they were.     *
+ ***************************************************************************************************************************************************/
+var headerBaseline = { notebook: "", search: "", sortField: "title", sortDirection: "asc" }
+
+function headerDiffersFromProfile(){
+    return notebookFilter !== headerBaseline.notebook
+        || searchFilter.trim() !== headerBaseline.search
+        || sortField !== headerBaseline.sortField
+        || sortDirection !== headerBaseline.sortDirection
+}
+
+/** applyHeaderIfCurrentProfileChanged (2.9) ********************************************************************************************************
+ * After a profile delete - from the dropdown's row button, the desktop edit dialog's Delete or the mobile overlay's - re-applies the header only   *
+ * when the current profile is no longer the one it was: the deleted profile was current, so another has become current (getCurrentProfileID falls  *
+ * back to the first one) and its saved notebook, search and sorting apply. Deleting any other profile leaves the view the user had - their         *
+ * notebook, search and sorting, and the picker's asterisk with them. currentBefore is the id read before the delete.                               *
+ ***************************************************************************************************************************************************/
+async function applyHeaderIfCurrentProfileChanged(currentBefore){
+    var currentAfter = await getCurrentProfileID()
+    if (currentAfter != currentBefore) await applyProfileHeaderState(await getProfile(currentAfter))
 }
 
 /** profileSeedFromCurrentView **********************************************************************************************************************
@@ -715,9 +752,14 @@ async function eventHandler(message){
         scheduleOverview([createdID])
     } else if (message[0] == 'editProfileClicked'){
         var id = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
-        await openEditor(id)
-        // Editing the current profile may change its header state, so re-apply it
-        if (id == await getCurrentProfileID()) await applyProfileHeaderState(await getProfile(id))
+        var currentBeforeEdit = await getCurrentProfileID()
+        var editSavedID = await openEditor(id)
+        // A Save of the current profile may change its header state, so it is re-applied - and only a Save (openEditor
+        // answers the id for one, null for a Cancel or a Delete): a Cancel leaves the view the user had, their notebook,
+        // search and sorting and the picker's asterisk with them. The dialog's Delete can remove the current profile,
+        // in which case another has become current and its header applies.
+        if (editSavedID != null && editSavedID == await getCurrentProfileID()) await applyProfileHeaderState(await getProfile(editSavedID))
+        else await applyHeaderIfCurrentProfileChanged(currentBeforeEdit)
         lastRenderedHtml = null
         // A profile edit changes no note data, only which to-dos this profile shows, so paint (fast) and
         // regenerate only THIS profile's overview note - not every profile's - on the overview lane.
@@ -725,9 +767,10 @@ async function eventHandler(message){
         scheduleOverview([id])
     } else if (message[0] == 'deleteProfileClicked'){
         var deleteID = message[1] != null ? Number(message[1]) : await getCurrentProfileID()
+        var currentBeforeDelete = await getCurrentProfileID()
         await openDeleteDialog(deleteID)
-        // The deleted profile may have been the current one, in which case another becomes current
-        await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+        // Only a delete of the current profile changes the view: another becomes current, and its header applies.
+        await applyHeaderIfCurrentProfileChanged(currentBeforeDelete)
         lastRenderedHtml = null
         await refreshInterfaces()
     } else if (message[0] == 'synchronizeClicked'){
@@ -861,9 +904,11 @@ async function eventHandler(message){
     } else if (message[0] == 'profileDeleteRequested'){
         // Result of the in-panel profile editor overlay's Delete. openDeleteDialog keeps its native confirm
         // message box (which shows correctly above the panel on mobile) and the ">1 profile must exist"
-        // guard, unchanged. Then refresh as the deleteProfileClicked branch does.
+        // guard, unchanged. Then refresh as the deleteProfileClicked branch does, the header included: re-applied
+        // only when the deleted profile was the current one.
+        var currentBeforeOverlayDelete = await getCurrentProfileID()
         await openDeleteDialog(Number(message[1]))
-        await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
+        await applyHeaderIfCurrentProfileChanged(currentBeforeOverlayDelete)
         lastRenderedHtml = null
         await refreshInterfaces()
     }
@@ -1699,10 +1744,11 @@ async function getControlsHTML(currentProfileID){
  ***************************************************************************************************************************************************/
 function getProfileDropdownHTML(profiles, currentProfileID){
     var currentName = "Profiles"
+    var currentFound = false
     var itemsHtml = ""
     for (var profile of profiles){
         var isCurrent = currentProfileID && currentProfileID == profile.id
-        if (isCurrent) currentName = profile.name
+        if (isCurrent){ currentName = profile.name; currentFound = true }
         itemsHtml += `
             <div class="dropdown-item${isCurrent ? " -current" : ""}" onclick="onDropdownItemClicked(event, 'profilesDropdownChanged', '${profile.id}')">
                 <span class="dropdown-label">${escapeHtml(profile.name)}</span>
@@ -1717,7 +1763,12 @@ function getProfileDropdownHTML(profiles, currentProfileID){
             <span class="dropdown-label">+ New profile...</span>
         </div>
     `
-    return dropdownHTML("profileMenu", currentName, itemsHtml)
+    // While the header has moved away from the profile's applied state (headerDiffersFromProfile), the toggle - and only the
+    // toggle; the rows name stored profiles - says so with an asterisk after the name, and its tooltip says what that means.
+    // The plain toggle keeps no title, as before.
+    if (!currentFound || !headerDiffersFromProfile()) return dropdownHTML("profileMenu", currentName, itemsHtml)
+    var modifiedTitle = `${escapeHtml(currentName)}*&#10;The notebook, search or sorting changed since the profile was selected&#10;Pick it again to drop the changes`
+    return dropdownHTML("profileMenu", currentName, itemsHtml, "*", modifiedTitle)
 }
 
 /** getNotebookDropdownHTML *************************************************************************************************************************
@@ -1783,12 +1834,18 @@ function getSortDropdownHTML(){
     `
 }
 
-/** dropdownHTML ************************************************************************************************************************************/
-function dropdownHTML(menuID, toggleLabel, itemsHtml){
+/** dropdownHTML ************************************************************************************************************************************
+ * A header dropdown: the toggle (its label, then the caret) and the hidden menu. toggleMark is a short suffix drawn right after the label but as   *
+ * an element of its own, so a label long enough to be cut off with an ellipsis never takes the mark with it (the profile picker's "*", 2.9);       *
+ * toggleTitle is the toggle's tooltip, already escaped by the caller. Both are left out when empty, which is what every other dropdown passes.     *
+ ***************************************************************************************************************************************************/
+function dropdownHTML(menuID, toggleLabel, itemsHtml, toggleMark = "", toggleTitle = ""){
+    var titleAttribute = toggleTitle ? ` title="${toggleTitle}"` : ""
+    var markHtml = toggleMark ? `<span class="dropdown-toggle-mark">${escapeHtml(toggleMark)}</span>` : ""
     return `
         <div class="dropdown">
-            <button type="button" class="dropdown-toggle" onclick="onDropdownToggle(event, '${menuID}')">
-                <span class="dropdown-toggle-label">${escapeHtml(toggleLabel)}</span>
+            <button type="button" class="dropdown-toggle"${titleAttribute} onclick="onDropdownToggle(event, '${menuID}')">
+                <span class="dropdown-toggle-label">${escapeHtml(toggleLabel)}</span>${markHtml}
                 <span class="dropdown-caret">&#9662;</span>
             </button>
             <div class="dropdown-menu" id="${menuID}" hidden>${itemsHtml}</div>

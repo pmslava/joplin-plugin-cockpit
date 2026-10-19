@@ -351,6 +351,15 @@ option {
     white-space: nowrap;
 }
 
+/* The profile picker's "view changed" asterisk (2.9): an element of its own beside the label, so a name long
+ * enough to be ellipsized keeps it. The negative margin cancels the toggle's gap, so it reads "Lab*"; the
+ * auto right margin keeps the caret at the far end, as space-between does when there is no mark. */
+.dropdown-toggle-mark {
+    flex: none;
+    margin-left: -6px;
+    margin-right: auto;
+}
+
 /* The compact variant, used by the sort picker: a small labelled button whose menu opens
  * right-aligned so it stays inside the panel */
 .dropdown.-compact {

@@ -15298,6 +15298,321 @@ async function main() {
         }
     })
 
+    // ============================================================ 2.9: the picker marks a view that has left its profile ("Lab*")
+    // The header controls change the view for the session without writing it back, so once the notebook, the search or the sorting has
+    // moved away from what the current profile was applied with, the picker's toggle reads "Lab*" (the rows keep the stored names) and
+    // its tooltip says why. The comparison is against what applyProfileHeaderState APPLIED - a stored notebook that resolves to "All
+    // notebooks" is not a change - with the search trimmed on both sides; every path that re-applies the profile clears it.
+    const markGone = 'cb' + '0'.repeat(30)   // a notebook id no folder carries: deleted since the profile saved it
+    const markLab = {
+        ...viewSource, id: 1, name: 'Lab', noteID: '', sortOrder: 0,
+        notebook: viewHome, panelSearch: '  milk  ', sortField: 'title', sortDirection: 'asc',
+    }
+    const markOther = { ...viewSource, id: 2, name: 'Other', noteID: '', sortOrder: 1, notebook: '', panelSearch: '', sortField: 'title', sortDirection: 'asc', displayFormat: 'interval' }
+    const markGoneProfile = { ...markOther, id: 3, name: 'Gone', sortOrder: 2, notebook: markGone }
+    let markRunSeq = 0
+    // extra: currentProfileID to start on, folders (a fresh array a check may change, which the folder poll then reads), notes.
+    const markRun = (platform, extra) => {
+        const n = markRunSeq++
+        const options = extra || {}
+        return run({
+            dataDir: path.join(tmp, `view-mark-${n}`),
+            installationDir: path.join(tmp, `view-mark-install-${n}`),
+            require: platform === 'mobile' ? mobileRequire : desktopRequire,
+            versionInfo: { version: '3.7.0', platform: platform || 'desktop' },
+            todos,
+            folders: options.folders || viewFolders,
+            notes: options.notes,
+            initialSettings: {
+                profileData: JSON.stringify({ nextID: 4, profiles: [markLab, markOther, markGoneProfile] }),
+                currentProfileID: options.currentProfileID || 1,
+            },
+        })
+    }
+    const MARK_TOOLTIP_TAIL = '*&#10;The notebook, search or sorting changed since the profile was selected&#10;Pick it again to drop the changes'
+    // The profile picker as drawn: the toggle's label, its mark, its title (null when it has none), and the rows' labels.
+    const profilePickerOf = (state) => {
+        const html = String(state.panelHtml['panel-panel'] || '')
+        const menuAt = html.indexOf('<div class="dropdown-menu" id="profileMenu"')
+        assert.ok(menuAt > 0, 'the panel draws the profile picker')
+        const toggle = html.slice(html.lastIndexOf('<button type="button" class="dropdown-toggle"', menuAt), menuAt)
+        return {
+            label: (toggle.match(/<span class="dropdown-toggle-label">([^<]*)<\/span>/) || [])[1],
+            mark: (toggle.match(/<span class="dropdown-toggle-mark">([^<]*)<\/span>/) || [])[1] || '',
+            title: (toggle.match(/^<button type="button" class="dropdown-toggle" title="([^"]*)"/) || [])[1] || null,
+            rows: [...html.slice(menuAt).matchAll(/'profilesDropdownChanged', '\d+'\)">\s*<span class="dropdown-label">([^<]*)<\/span>/g)].map(match => match[1]),
+        }
+    }
+    const pickerShows = (state) => { const picker = profilePickerOf(state); return picker.label + picker.mark }
+
+    await test('view mark: each of the four header changes marks the toggle "Lab*" with its tooltip, the rows keep the plain names, and a re-pick clears it', async () => {
+        const state = await markRun('desktop')
+        assert.deepStrictEqual(profilePickerOf(state), { label: 'Lab', mark: '', title: null, rows: ['Lab', 'Other', 'Gone'] }, 'the profile as applied: plain, and no title')
+        const changes = [
+            ['the notebook', ['notebookFilterChanged', viewWork]],
+            ['the search', ['searchFilterChanged', 'bread']],
+            ['the sort field', ['sortFieldSelected', 'updated']],
+            ['the sort direction', ['sortDirectionClicked']],
+        ]
+        for (const [what, message] of changes){
+            await state.panelMessageHandler(message)
+            assert.deepStrictEqual(profilePickerOf(state), { label: 'Lab', mark: '*', title: 'Lab' + MARK_TOOLTIP_TAIL, rows: ['Lab', 'Other', 'Gone'] },
+                `${what} marks the toggle, says why, and leaves the rows alone`)
+            await state.panelMessageHandler(['profilesDropdownChanged', 1])
+            assert.deepStrictEqual(profilePickerOf(state), { label: 'Lab', mark: '', title: null, rows: ['Lab', 'Other', 'Gone'] }, `re-picking Lab after ${what} clears it`)
+        }
+    })
+
+    await test('view mark: putting a field back by hand clears it - a comparison, not a flag', async () => {
+        const state = await markRun('desktop')
+        const backAndForth = [
+            [['notebookFilterChanged', viewWork], ['notebookFilterChanged', viewHome]],
+            [['searchFilterChanged', 'bread'], ['searchFilterChanged', 'milk']],
+            [['sortFieldSelected', 'created'], ['sortFieldSelected', 'title']],
+            [['sortDirectionClicked'], ['sortDirectionClicked']],
+        ]
+        for (const [away, back] of backAndForth){
+            await state.panelMessageHandler(away)
+            assert.strictEqual(pickerShows(state), 'Lab*', `${away[0]} marks it`)
+            await state.panelMessageHandler(back)
+            assert.strictEqual(pickerShows(state), 'Lab', `${back[0]} back to the profile's value clears it`)
+        }
+        // Two changes, one put back: still marked until the second is put back too.
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        await state.panelMessageHandler(['notebookFilterChanged', viewHome])
+        assert.strictEqual(pickerShows(state), 'Lab*', 'one field still differs')
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(pickerShows(state), 'Lab', 'none does')
+    })
+
+    await test('view mark: a stored search with spaces around it, committed again without them, is the same view', async () => {
+        const state = await markRun('desktop')
+        assert.strictEqual(pickerShows(state), 'Lab', 'the stored "  milk  " applied: plain')
+        await state.panelMessageHandler(['searchFilterChanged', 'milk'])
+        assert.strictEqual(pickerShows(state), 'Lab', 'committing "milk" is no change')
+        await state.panelMessageHandler(['searchFilterChanged', ''])
+        assert.strictEqual(pickerShows(state), 'Lab*', 'emptying it is one')
+    })
+
+    await test('view mark: switching to another profile clears it, and coming back finds that profile as it was saved', async () => {
+        const state = await markRun('desktop')
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(pickerShows(state), 'Lab*')
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.strictEqual(pickerShows(state), 'Other', 'the switched-to profile is unmarked')
+        await state.panelMessageHandler(['profilesDropdownChanged', 1])
+        assert.strictEqual(pickerShows(state), 'Lab', 'and Lab comes back as saved')
+    })
+
+    await test('view mark: a stored notebook that resolves to "All notebooks" on the switch (deleted since) is not a change', async () => {
+        const state = await markRun('desktop')
+        await state.panelMessageHandler(['profilesDropdownChanged', 3])
+        assert.strictEqual(pickerShows(state), 'Gone', 'picked: plain, although the stored notebook is not what the header shows')
+        const html = String(state.panelHtml['panel-panel'])
+        assert.ok(html.includes(`class="dropdown-item -current" data-notebook-all`), 'the header shows All notebooks')
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        assert.strictEqual(pickerShows(state), 'Gone*', 'a real change still marks it')
+        await state.panelMessageHandler(['notebookFilterChanged', ''])
+        assert.strictEqual(pickerShows(state), 'Gone', 'and "All notebooks" again is the applied view')
+    })
+
+    await test('view mark: cancelling an edit of the current profile keeps the view and the mark; a Save re-applies it and clears the mark', async () => {
+        const state = await markRun('desktop')
+        await state.panelMessageHandler(['searchFilterChanged', 'bread'])
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        assert.strictEqual(pickerShows(state), 'Lab*')
+        await state.panelMessageHandler(['editProfileClicked', 1])   // the stub's default answer is Cancel
+        assert.strictEqual(pickerShows(state), 'Lab*', 'a Cancel re-applies nothing: still marked')
+        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: 'bread', sortField: 'title', sortDirection: 'asc' }, 'and the live view is the one the user had')
+        state.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...editorFormProfile(state), name: 'Lab edited' }) } } }
+        try {
+            await state.panelMessageHandler(['editProfileClicked', 1])
+        } finally {
+            state.dialogResult = null
+        }
+        assert.strictEqual(pickerShows(state), 'Lab edited', 'the saved profile, applied again: unmarked')
+        assert.strictEqual(profilePickerOf(state).title, null, 'and no tooltip')
+        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewHome, panelSearch: '  milk  ', sortField: 'title', sortDirection: 'asc' }, 'the header is the saved one again')
+    })
+
+    await test('view mark: saving ANOTHER profile from the edit dialog keeps the view and the mark', async () => {
+        const state = await markRun('desktop')
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        await state.panelMessageHandler(['sortFieldSelected', 'created'])
+        assert.strictEqual(pickerShows(state), 'Lab*')
+        await state.panelMessageHandler(['editProfileClicked', 2])
+        state.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...editorFormProfile(state), name: 'Other renamed' }) } } }
+        try {
+            await state.panelMessageHandler(['editProfileClicked', 2])
+        } finally {
+            state.dialogResult = null
+        }
+        assert.ok(profilePickerOf(state).rows.includes('Other renamed'), 'the other profile was saved')
+        assert.strictEqual(pickerShows(state), 'Lab*', 'Lab is still marked')
+        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: '  milk  ', sortField: 'created', sortDirection: 'asc' }, 'and the live view is untouched')
+    })
+
+    await test('view mark: deleting another profile keeps the view and the mark; deleting the current one switches and clears it', async () => {
+        for (const platform of ['desktop', 'mobile']){
+            const state = await markRun(platform)
+            const deleteOf = (id) => platform === 'desktop' ? ['deleteProfileClicked', id] : ['profileDeleteRequested', id]
+            await state.panelMessageHandler(['sortDirectionClicked'])
+            await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+            assert.strictEqual(pickerShows(state), 'Lab*')
+            await state.panelMessageHandler(deleteOf(3))   // the stub's message box answers OK
+            assert.deepStrictEqual(profilePickerOf(state).rows, ['Lab', 'Other'], `${platform}: Gone was deleted`)
+            assert.strictEqual(pickerShows(state), 'Lab*', `${platform}: deleting another profile leaves the mark`)
+            assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: '  milk  ', sortField: 'title', sortDirection: 'desc' }, `${platform}: and the live view`)
+            await state.panelMessageHandler(deleteOf(1))
+            assert.strictEqual(state.settings.currentProfileID, 2, `${platform}: deleting the current profile makes another current`)
+            assert.strictEqual(pickerShows(state), 'Other', `${platform}: whose saved view applies, unmarked`)
+            assert.deepStrictEqual(viewHeaderOf(state), { profile: '2', notebook: '', panelSearch: '', sortField: 'title', sortDirection: 'asc' }, `${platform}: the header is Other's`)
+        }
+        // The desktop edit dialog's own Delete takes the same rule: deleting another profile from it keeps the view and the mark, and
+        // deleting the one being edited, when it is the current one, applies the next.
+        const state = await markRun('desktop')
+        await state.panelMessageHandler(['searchFilterChanged', 'bread'])
+        const editDelete = async (id) => {
+            state.dialogResult = { id: 'delete' }
+            try {
+                await state.panelMessageHandler(['editProfileClicked', id])
+            } finally {
+                state.dialogResult = null
+            }
+        }
+        await editDelete(3)
+        assert.deepStrictEqual(profilePickerOf(state).rows, ['Lab', 'Other'], 'the edit dialog deleted Gone')
+        assert.deepStrictEqual([pickerShows(state), viewHeaderOf(state).panelSearch], ['Lab*', 'bread'], 'Lab keeps its mark and the live search')
+        await editDelete(1)
+        assert.strictEqual(state.settings.currentProfileID, 2, 'the edit dialog deleted the current profile')
+        assert.deepStrictEqual([pickerShows(state), viewHeaderOf(state).panelSearch], ['Other', ''], 'and the new current profile applies, unmarked')
+    })
+
+    await test('view mark: Create from a marked view selects the new profile unmarked - it IS that view', async () => {
+        const state = await markRun('desktop')
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        await state.panelMessageHandler(['sortFieldSelected', 'updated'])
+        assert.strictEqual(pickerShows(state), 'Lab*')
+        await state.panelMessageHandler(['createProfileClicked'])
+        state.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...editorFormProfile(state), name: 'Lab work' }) } } }
+        try {
+            await state.panelMessageHandler(['createProfileClicked'])
+        } finally {
+            state.dialogResult = null
+        }
+        assert.strictEqual(state.settings.currentProfileID, 4, 'the new profile is current')
+        assert.strictEqual(pickerShows(state), 'Lab work', 'and unmarked')
+        assert.deepStrictEqual(profilePickerOf(state).rows, ['Lab', 'Lab work', 'Other', 'Gone'], 'the rows plain, the copy beside its source')
+    })
+
+    await test('view mark: cockpit.filterByNotebook marks it; calendar navigation never does', async () => {
+        const state = await markRun('desktop')
+        // Lab is a month calendar: moving through it, back to today and selecting a day are not profile state.
+        await state.panelMessageHandler(['calendarNavigate', 1])
+        await state.panelMessageHandler(['calendarNavigate', -1])
+        await state.panelMessageHandler(['calendarNavigate', -1])
+        await state.panelMessageHandler(['calendarDaySelected', toISODateLocal(new Date())])
+        await state.panelMessageHandler(['calendarToday'])
+        assert.strictEqual(pickerShows(state), 'Lab', 'calendar navigation leaves it plain')
+        await state.withTimers(() => executeCommand(state, 'cockpit.filterByNotebook', viewWork))
+        assert.strictEqual(pickerShows(state), 'Lab*', 'another plugin\'s notebook filter marks it')
+        await state.withTimers(() => executeCommand(state, 'cockpit.filterByNotebook', viewHome))
+        assert.strictEqual(pickerShows(state), 'Lab', 'and pointing it back clears it')
+    })
+
+    await test('view mark: mobile draws the same mark (one shared picker)', async () => {
+        const state = await markRun('mobile')
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.deepStrictEqual(profilePickerOf(state), { label: 'Lab', mark: '*', title: 'Lab' + MARK_TOOLTIP_TAIL, rows: ['Lab', 'Other', 'Gone'] })
+        await state.panelMessageHandler(['profilesDropdownChanged', 1])
+        assert.strictEqual(pickerShows(state), 'Lab')
+    })
+
+    await test('view mark (mobile): the overlay\'s Save of another profile keeps the mark, of the current one clears it, and Create from a marked view is unmarked', async () => {
+        const state = await markRun('mobile')
+        const stored = (id) => JSON.parse(state.settings.profileData).profiles.find(profile => profile.id === id)
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        assert.strictEqual(pickerShows(state), 'Lab*')
+        await state.panelMessageHandler(['profileSaved', 2, { ...stored(2), name: 'Other renamed' }])
+        assert.strictEqual(pickerShows(state), 'Lab*', 'saving another profile keeps it')
+        assert.strictEqual(viewHeaderOf(state).notebook, viewWork, 'and the live notebook')
+        await state.panelMessageHandler(['profileSaved', 1, { ...stored(1), name: 'Lab saved' }])
+        assert.strictEqual(pickerShows(state), 'Lab saved', 'saving the current profile re-applies it: unmarked')
+        assert.strictEqual(viewHeaderOf(state).notebook, viewHome, 'with its saved notebook')
+        await state.panelMessageHandler(['searchFilterChanged', 'bread'])
+        assert.strictEqual(pickerShows(state), 'Lab saved*')
+        const init = await state.panelMessageHandler(['getEditorInitial', null])
+        await state.panelMessageHandler(['profileSaved', null, { ...init.profile, name: 'Lab phone' }])
+        assert.strictEqual(state.settings.currentProfileID, 4, 'the copy is current')
+        assert.strictEqual(pickerShows(state), 'Lab phone', 'and unmarked: it is the view on screen')
+    })
+
+    await test('view mark: cockpit.revealNote marks it - it points the filter at the note\'s notebook and drops the search', async () => {
+        const hiddenTodo = 'cc' + '0'.repeat(30)
+        const state = await markRun('desktop', { notes: { [hiddenTodo]: { id: hiddenTodo, parent_id: viewWork, is_todo: 1, todo_completed: 0, title: 'Hidden in Work' } } })
+        assert.strictEqual(pickerShows(state), 'Lab')
+        await state.withTimers(() => executeCommand(state, 'cockpit.revealNote', hiddenTodo))
+        assert.deepStrictEqual([viewHeaderOf(state).notebook, viewHeaderOf(state).panelSearch], [viewWork, ''], 'the reveal moved the header')
+        assert.strictEqual(pickerShows(state), 'Lab*', 'and the picker says the view is no longer Lab\'s')
+    })
+
+    await test('view mark: the automatic return to "All notebooks" marks it - an exclusion, the folder poll, the panel\'s own notebook delete', async () => {
+        // Lab is applied on Home, so each of these takes the filter away from what Lab was applied with.
+        const excluded = await markRun('desktop')
+        assert.strictEqual(pickerShows(excluded), 'Lab')
+        await excluded.withTimers(() => excluded.setSetting('excludedNotebooks', 'Home'))
+        assert.strictEqual(viewHeaderOf(excluded).notebook, '', 'excluding Home returned the filter to All notebooks')
+        assert.strictEqual(pickerShows(excluded), 'Lab*', 'an exclusion marks it')
+
+        const pollFolders = viewFolders.slice()
+        const polled = await markRun('desktop', { folders: pollFolders })
+        const poll = polled.intervals.find(entry => entry.ms === 3000)
+        assert.ok(poll, 'the folder poll is armed')
+        await poll.fn()                                                       // the baseline signature
+        pollFolders.splice(pollFolders.findIndex(folder => folder.id === viewHome), 1)
+        await polled.withTimers(() => poll.fn())                              // Home is gone
+        assert.strictEqual(viewHeaderOf(polled).notebook, '', 'the poll returned the filter to All notebooks')
+        assert.strictEqual(pickerShows(polled), 'Lab*', 'a notebook deleted elsewhere marks it')
+
+        const deleted = await markRun('desktop')
+        await deleted.panelMessageHandler(['deleteNotebookClicked', viewHome])   // the stub's message box answers OK
+        assert.ok(deleted.dataDeletes.some(parts => parts[0] === 'folders' && parts[1] === viewHome), 'the panel deleted Home')
+        assert.strictEqual(viewHeaderOf(deleted).notebook, '', 'and returned the filter to All notebooks')
+        assert.strictEqual(pickerShows(deleted), 'Lab*', 'which marks it too')
+    })
+
+    await test('view mark: a run that STARTS on a profile whose saved notebook no longer exists is unmarked', async () => {
+        const state = await markRun('desktop', { currentProfileID: 3 })
+        assert.strictEqual(viewHeaderOf(state).notebook, '', 'Gone\'s missing notebook resolved to All notebooks at startup')
+        assert.deepStrictEqual(profilePickerOf(state), { label: 'Gone', mark: '', title: null, rows: ['Lab', 'Other', 'Gone'] }, 'and the picker is plain')
+    })
+
+    await test('view mark: a settings-note replace re-applies the current profile and clears the mark', async () => {
+        const state = await runSync('view-mark', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Lab')]), syncSettings())) },
+            initialSettings: { settingsNoteId: SYNC_NOTE_ID, profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Lab')])), currentProfileID: 1 },
+        })
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(pickerShows(state), 'Lab*', 'marked before the replace')
+        state.notes[SYNC_NOTE_ID].body = syncBody(syncStore(2, [syncProfile(1, 'Lab from the phone')]), syncSettings(), '2026-09-12T10:00:00.000Z')
+        state.notes[SYNC_NOTE_ID].updated_time = 99
+        await state.withTimers(() => state.syncCompleteHandler({}))
+        assert.deepStrictEqual(syncProfileNames(state), ['Lab from the phone'], 'the incoming store was applied')
+        assert.strictEqual(pickerShows(state), 'Lab from the phone', 'and the replaced profile is applied again: unmarked')
+    })
+
+    await test('view mark: the mark is computed against the applied baseline, set at the end of applyProfileHeaderState', async () => {
+        const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
+        const apply = panelSource.slice(panelSource.indexOf('async function applyProfileHeaderState('), panelSource.indexOf('\n}', panelSource.indexOf('async function applyProfileHeaderState(')))
+        assert.ok(apply.trimEnd().endsWith('headerBaseline = { notebook: notebookFilter, search: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection }'),
+            'the baseline is the RESOLVED values just applied, taken last')
+        const differs = panelSource.slice(panelSource.indexOf('function headerDiffersFromProfile('), panelSource.indexOf('\n}', panelSource.indexOf('function headerDiffersFromProfile(')))
+        assert.ok(differs.includes('searchFilter.trim() !== headerBaseline.search'), 'the search trimmed on both sides')
+        assert.ok(!/profile\./.test(differs), 'never against the stored profile')
+    })
+
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')
     process.exit(failures ? 1 : 0)

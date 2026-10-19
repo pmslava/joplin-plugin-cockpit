@@ -390,10 +390,24 @@ export async function profileNames(win: Page): Promise<string[]> {
   return labels.map((l) => l.trim());
 }
 
-/** The name of the profile currently selected, shown on the dropdown's toggle. */
+/**
+ * The name of the profile currently selected, as the dropdown's toggle shows it: the name, plus the
+ * trailing "*" while the header's notebook, search or sorting differ from the profile's (2.9). The
+ * asterisk is a span of its own beside the label, so a long name's ellipsis never hides it; it is read
+ * back here so the answer is what the user sees.
+ */
 export async function selectedProfileName(win: Page): Promise<string> {
   const frame = await agendaPanel(win);
-  return (await frame.locator('#profileControls .dropdown-toggle-label').first().innerText()).trim();
+  const toggle = frame.locator('#profileControls .dropdown-toggle').first();
+  const label = (await toggle.locator('.dropdown-toggle-label').innerText()).trim();
+  const mark = (await toggle.locator('.dropdown-toggle-mark').allTextContents()).join('').trim();
+  return label + mark;
+}
+
+/** Whether the profile toggle carries the "view changed" asterisk (see selectedProfileName). */
+export async function selectedProfileIsModified(win: Page): Promise<boolean> {
+  const frame = await agendaPanel(win);
+  return (await frame.locator('#profileControls .dropdown-toggle .dropdown-toggle-mark').count()) > 0;
 }
 
 /** Select a profile by name in the panel dropdown. */

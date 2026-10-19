@@ -32,9 +32,10 @@ export async function setupEditor(){
  * markup also says which mode it is (<<EDITOR_MODE>>), so that editorWebview.js focuses the name field with its text selected in a create, and     *
  * focuses nothing in an edit.                                                                                                                      *
  *                                                                                                                                                  *
- * Returns the id of the profile a Create made, so the caller can select it, and null for everything else: a Save, a Delete, a Cancel. DESKTOP      *
- * ONLY: on mobile the profile editor is an in-panel overlay (openEditorOverlay in the panel webview, with getEditorInitial / profileSaved /        *
- * profileDeleteRequested round-trips), so the create/edit-profile webview buttons never reach this handler.                                        *
+ * Returns the id of the profile the dialog saved - the new one a Create made, so the caller can select it, or the edited one a Save wrote, so the  *
+ * caller can re-apply its header when it is the current profile - and null for a Cancel or a Delete. DESKTOP ONLY: on mobile the profile editor is *
+ * an in-panel overlay (openEditorOverlay in the panel webview, with getEditorInitial / profileSaved / profileDeleteRequested round-trips), so the  *
+ * create/edit-profile webview buttons never reach this handler.                                                                                    *
  ***************************************************************************************************************************************************/
 export async function openEditor(profileID?, seed?){
     var isCreate = profileID == null
@@ -59,6 +60,7 @@ export async function openEditor(profileID?, seed?){
             return createdID
         }
         await updateProfile(profileID, profile)
+        return profileID
     } else if (formResult.id == "delete") {
         await openDeleteDialog(profileID)
     }
