@@ -15329,7 +15329,7 @@ async function main() {
             },
         })
     }
-    const MARK_TOOLTIP_TAIL = '*&#10;The notebook, search or sorting changed since the profile was selected&#10;Pick it again to drop the changes'
+    const MARK_TOOLTIP_TAIL = '*&#10;The notebook, search or sorting changed since the profile was selected&#10;Pick it again to drop the changes, or save the view into it'
     // The profile picker as drawn: the toggle's label, its mark, its title (null when it has none), and the rows' labels.
     const profilePickerOf = (state) => {
         const html = String(state.panelHtml['panel-panel'] || '')
@@ -15611,6 +15611,123 @@ async function main() {
         const differs = panelSource.slice(panelSource.indexOf('function headerDiffersFromProfile('), panelSource.indexOf('\n}', panelSource.indexOf('function headerDiffersFromProfile(')))
         assert.ok(differs.includes('searchFilter.trim() !== headerBaseline.search'), 'the search trimmed on both sides')
         assert.ok(!/profile\./.test(differs), 'never against the stored profile')
+    })
+
+
+    // ============================================================ "Save view into <name>": the marked view written into the current profile
+    // While the picker is marked, its menu offers a third way out beside a re-pick (drop the changes) and "+ New profile…" (keep the view
+    // as a profile of its own): write the header's notebook, search and sorting into the current profile itself. Exactly those four
+    // fields; the profile is then applied again, so the mark clears and the view stays as it is. No overview pass and no own write.
+    // The entry as drawn: its label, or null when the menu does not offer it, and whether it sits right above "+ New profile…".
+    const saveViewEntryOf = (state) => {
+        const html = String(state.panelHtml['panel-panel'] || '')
+        const menuAt = html.indexOf('<div class="dropdown-menu" id="profileMenu"')
+        const menu = html.slice(menuAt, html.indexOf("'createProfileClicked', null)", menuAt) + 1)
+        const at = menu.indexOf('data-save-view')
+        if (at < 0) return null
+        const label = (menu.slice(at).match(/<span class="dropdown-label">([^<]*)<\/span>/) || [])[1]
+        const beforeIt = menu.slice(0, at)
+        const afterIt = menu.slice(at)
+        return {
+            label,
+            afterSeparator: beforeIt.lastIndexOf('dropdown-separator') > beforeIt.lastIndexOf("'profilesDropdownChanged'"),
+            // From the entry's own marker on, the only other item before the menu's end is "+ New profile…".
+            rightAboveCreate: (afterIt.match(/class="dropdown-item/g) || []).length === 1,
+            message: /onclick="onDropdownItemClicked\(event, 'saveViewIntoProfileClicked', null\)"/.test(afterIt.slice(0, 200)),
+        }
+    }
+    const storedProfileOf = (state, id) => JSON.parse(state.settings.profileData).profiles.find(profile => profile.id === id)
+
+    await test('save view: offered only while the view is marked, named after the current profile (escaped), right above "+ New profile…", on desktop and mobile', async () => {
+        for (const platform of ['desktop', 'mobile']){
+            const state = await markRun(platform)
+            assert.strictEqual(saveViewEntryOf(state), null, `${platform}: not offered while the view is the profile's`)
+            await state.panelMessageHandler(['sortDirectionClicked'])
+            assert.deepStrictEqual(saveViewEntryOf(state), { label: 'Save view into Lab', afterSeparator: true, rightAboveCreate: true, message: true }, `${platform}: offered once marked`)
+            await state.panelMessageHandler(['sortDirectionClicked'])
+            assert.strictEqual(saveViewEntryOf(state), null, `${platform}: and gone again with the mark`)
+        }
+        const state = await markRun('mobile')
+        await state.panelMessageHandler(['profileSaved', 1, { ...storedProfileOf(state, 1), name: 'R&D <lab>' }])
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(saveViewEntryOf(state).label, 'Save view into R&amp;D &lt;lab&gt;', 'the name is escaped')
+        const webviewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panelWebview.js'), 'utf8')
+        assert.ok(!webviewSource.includes('saveViewIntoProfileClicked'), 'the webview posts it like any dropdown item, with no overlay of its own on either platform')
+    })
+
+    await test('save view: writes exactly the notebook, the search (trimmed) and the sorting, clears the mark, keeps the view, and arms no overview pass and no own write', async () => {
+        for (const platform of ['desktop', 'mobile']){
+            const state = await markRun(platform)
+            // Lab was applied with the stored search "  milk  ", which stays in the header untrimmed until a commit replaces it.
+            await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+            await state.panelMessageHandler(['sortFieldSelected', 'updated'])
+            await state.panelMessageHandler(['sortDirectionClicked'])
+            assert.strictEqual(pickerShows(state), 'Lab*')
+            const before = storedProfileOf(state, 1)
+            const otherBefore = storedProfileOf(state, 2)
+            const timeoutMark = state.timeouts.length
+            const writes = [state.notePuts.length, state.dataPosts.length, state.dataDeletes.length]
+            await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+            const after = storedProfileOf(state, 1)
+            assert.deepStrictEqual(after, { ...before, notebook: viewWork, panelSearch: 'milk', sortField: 'updated', sortDirection: 'desc' }, `${platform}: the four header fields and nothing else`)
+            assert.deepStrictEqual([after.name, after.noteID, after.searchCriteria, after.sortOrder, after.displayFormat], [before.name, before.noteID, before.searchCriteria, before.sortOrder, before.displayFormat], `${platform}: name, overview note, criteria, sort order and display untouched`)
+            assert.strictEqual(after.panelSearch, 'milk', `${platform}: the search stored trimmed`)
+            assert.deepStrictEqual(storedProfileOf(state, 2), otherBefore, `${platform}: no other profile touched`)
+            assert.strictEqual(pickerShows(state), 'Lab', `${platform}: the mark is cleared`)
+            assert.strictEqual(saveViewEntryOf(state), null, `${platform}: and the entry gone`)
+            assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: 'milk', sortField: 'updated', sortDirection: 'desc' }, `${platform}: the view on screen is the one saved`)
+            const armed = state.timeouts.slice(timeoutMark).filter(t => RECONCILE_OFFSETS.includes(t.ms) || t.ms === OVERVIEW_DEBOUNCE)
+            assert.deepStrictEqual(armed.map(t => t.ms), [], `${platform}: no overview pass and no reconcile job`)
+            assert.deepStrictEqual([state.notePuts.length, state.dataPosts.length, state.dataDeletes.length], writes, `${platform}: no note written`)
+        }
+    })
+
+    await test('save view: a press answered after the view stopped being marked (a stale menu) writes nothing', async () => {
+        const state = await markRun('desktop')
+        const before = state.settings.profileData
+        const writes = state.settingWrites.length
+        await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+        assert.strictEqual(state.settings.profileData, before, 'the stored profiles are unchanged')
+        assert.deepStrictEqual(state.settingWrites.slice(writes).filter(write => write.key === 'profileData'), [], 'and not even rewritten')
+    })
+
+    await test('save view: a switch away and back finds the saved view', async () => {
+        const state = await markRun('desktop')
+        await state.panelMessageHandler(['notebookFilterChanged', viewWork])
+        await state.panelMessageHandler(['searchFilterChanged', 'bread'])
+        await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.deepStrictEqual([pickerShows(state), viewHeaderOf(state).notebook], ['Other', ''], 'away on Other')
+        await state.panelMessageHandler(['profilesDropdownChanged', 1])
+        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: 'bread', sortField: 'title', sortDirection: 'asc' }, 'back on Lab: the saved view')
+        assert.strictEqual(pickerShows(state), 'Lab', 'unmarked')
+    })
+
+    await test('save view: after the automatic return to "All notebooks" it saves "All notebooks" - what the user chose to keep', async () => {
+        const state = await markRun('desktop')
+        await state.withTimers(() => state.setSetting('excludedNotebooks', 'Home'))
+        assert.strictEqual(pickerShows(state), 'Lab*')
+        await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+        assert.strictEqual(storedProfileOf(state, 1).notebook, '', 'the excluded notebook is replaced by All notebooks in the profile')
+        assert.strictEqual(pickerShows(state), 'Lab', 'and the mark is gone')
+    })
+
+    await test('save view: a connected settings note receives the saved view in one debounced write', async () => {
+        const state = await runSync('save-view', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Lab')]), syncSettings())) },
+            initialSettings: { settingsNoteId: SYNC_NOTE_ID, profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Lab')])), currentProfileID: 1 },
+        })
+        // Drain whatever write startup left pending, so the one this save arms is its own.
+        for (const pending of state.timeouts.filter(t => t.ms === 3000 && !t.cleared && !t.fired)) await state.fireTimeout(pending)
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        const mark = state.timeouts.length
+        const puts = state.notePuts.length
+        await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+        const armed = armedSyncWrite(state, mark)
+        await state.fireTimeout(armed)
+        const written = state.notePuts.slice(puts).filter(put => put.id === SYNC_NOTE_ID)
+        assert.strictEqual(written.length, 1, 'one write to the settings note')
+        assert.strictEqual(parseSettingsNoteBody(written[0].body).profiles.profiles[0].sortDirection, 'desc', 'carrying the saved sorting')
     })
 
     await fs.remove(tmp)

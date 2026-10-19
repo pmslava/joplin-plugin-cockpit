@@ -465,9 +465,10 @@ async function applyProfileHeaderState(profile){
  * resolves to "All notebooks" there, and comparing against the stored id would mark the profile the moment it was picked. The search is compared   *
  * trimmed on both sides, because a stored search may carry spaces a committed one never does. It is a comparison rather than a flag set by the     *
  * controls, so putting a field back by hand clears the mark, and nothing outside these four values (the calendar's month, a reveal's pin) can set  *
- * it. Every path that re-applies the profile - a switch or re-pick from the dropdown, a Save of the current profile, Create from the view, a       *
- * delete of the current profile, a settings-note replace - resets the baseline and the live state together, which is what clears it. A Cancel of   *
- * an edit, and a delete of another profile, re-apply nothing (applyHeaderIfCurrentProfileChanged), so the view and its mark stay as they were.     *
+ * it. Every path that re-applies the profile - a switch or re-pick from the dropdown, a Save of the current profile, "Save view into" it           *
+ * (saveViewIntoCurrentProfile), Create from the view, a delete of the current profile, a settings-note replace - resets the baseline and the live  *
+ * state together, which is what clears it. A Cancel of an edit, and a delete of another profile, re-apply nothing                                  *
+ * (applyHeaderIfCurrentProfileChanged), so the view and its mark stay as they were.                                                                *
  ***************************************************************************************************************************************************/
 var headerBaseline = { notebook: "", search: "", sortField: "title", sortDirection: "asc" }
 
@@ -487,6 +488,28 @@ function headerDiffersFromProfile(){
 async function applyHeaderIfCurrentProfileChanged(currentBefore){
     var currentAfter = await getCurrentProfileID()
     if (currentAfter != currentBefore) await applyProfileHeaderState(await getProfile(currentAfter))
+}
+
+/** saveViewIntoCurrentProfile **********************************************************************************************************************
+ * "Save view into <name>", the profile dropdown's entry while the view is marked: writes the header's live state into the CURRENT profile - the    *
+ * notebook filter, the committed search (trimmed, as the comparison reads it), the sort field and direction - and nothing else. The name, the      *
+ * overview note, the search criteria, the sort order and every display setting stay as stored. The header is then applied again from what was      *
+ * saved, which resets the baseline (headerBaseline) and so clears the asterisk, and the panel repaints fast.                                       *
+ *                                                                                                                                                  *
+ * A notebook the automatic return to "All notebooks" took away (excluded, or deleted) is saved as "", deliberately: "All notebooks" is the view    *
+ * the user is looking at and chose to keep. No overview pass follows, because the overview note is drawn from the profile's search criteria and    *
+ * display settings, which this does not touch; no reconcile, because no note changed. The settings note, when one is connected, hears of the save  *
+ * through the profile store's own listener. Pressed from a menu drawn while the view was marked but answered after it stopped being (a stale       *
+ * menu), it writes nothing.                                                                                                                        *
+ ***************************************************************************************************************************************************/
+async function saveViewIntoCurrentProfile(){
+    var profileID = await getCurrentProfileID()
+    var profile = await getProfile(profileID)
+    if (!profile || !headerDiffersFromProfile()) return
+    await updateProfile(profileID, { ...profile, notebook: notebookFilter, panelSearch: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection })
+    await applyProfileHeaderState(await getProfile(profileID))
+    lastRenderedHtml = null
+    await refreshPanelFastThenFill()
 }
 
 /** profileSeedFromCurrentView **********************************************************************************************************************
@@ -738,6 +761,9 @@ async function eventHandler(message){
         // Selecting the day that is already selected closes the list again.
         calendarViewState.selectedDate = calendarViewState.selectedDate === message[1] ? null : message[1]
         await refreshPanelData()
+    } else if (message[0] == 'saveViewIntoProfileClicked'){
+        // The dropdown's "Save view into <name>", shown while the view is marked; the same post on both platforms.
+        await saveViewIntoCurrentProfile()
     } else if (message[0] == 'createProfileClicked'){
         // Desktop only: on mobile the create-profile button opens the in-panel editor overlay (which posts
         // getEditorInitial, then profileSaved) rather than this native-dialog flow. The dialog opens filled with the
@@ -1757,17 +1783,26 @@ function getProfileDropdownHTML(profiles, currentProfileID){
             </div>
         `
     }
+    // While the header has moved away from the profile's applied state (headerDiffersFromProfile), the toggle - and only the
+    // toggle; the rows name stored profiles - says so with an asterisk after the name, and its tooltip says what that means.
+    // The plain toggle keeps no title, as before. The menu then also offers to write the view into the profile
+    // (saveViewIntoCurrentProfile), right above "+ New profile...", the other way to keep it.
+    var modified = currentFound && headerDiffersFromProfile()
     itemsHtml += `
         <div class="dropdown-separator"></div>
+    `
+    if (modified) itemsHtml += `
+        <div class="dropdown-item" data-save-view onclick="onDropdownItemClicked(event, 'saveViewIntoProfileClicked', null)">
+            <span class="dropdown-label">Save view into ${escapeHtml(currentName)}</span>
+        </div>
+    `
+    itemsHtml += `
         <div class="dropdown-item" onclick="onDropdownItemClicked(event, 'createProfileClicked', null)">
             <span class="dropdown-label">+ New profile...</span>
         </div>
     `
-    // While the header has moved away from the profile's applied state (headerDiffersFromProfile), the toggle - and only the
-    // toggle; the rows name stored profiles - says so with an asterisk after the name, and its tooltip says what that means.
-    // The plain toggle keeps no title, as before.
-    if (!currentFound || !headerDiffersFromProfile()) return dropdownHTML("profileMenu", currentName, itemsHtml)
-    var modifiedTitle = `${escapeHtml(currentName)}*&#10;The notebook, search or sorting changed since the profile was selected&#10;Pick it again to drop the changes`
+    if (!modified) return dropdownHTML("profileMenu", currentName, itemsHtml)
+    var modifiedTitle = `${escapeHtml(currentName)}*&#10;The notebook, search or sorting changed since the profile was selected&#10;Pick it again to drop the changes, or save the view into it`
     return dropdownHTML("profileMenu", currentName, itemsHtml, "*", modifiedTitle)
 }
 

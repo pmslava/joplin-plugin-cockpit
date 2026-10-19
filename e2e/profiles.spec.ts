@@ -11,6 +11,8 @@ import {
   PANEL_REFRESH_TIMEOUT,
   profileControlsVisible,
   profileNames,
+  saveViewEntryLabel,
+  saveViewIntoCurrentProfile,
   selectProfile,
   selectedProfileIsModified,
   selectedProfileName,
@@ -219,5 +221,44 @@ test.describe('Profiles', () => {
     await expect(notebookLabel).toHaveText('All notebooks', { timeout: 20_000 });
     await waitForPanelTodo(win, alphaTitle);
     await waitForPanelTodo(win, betaTitle);
+  });
+
+  /**
+   * The third way out of a marked view: "Save view into <name>" in the profile menu writes the header's notebook,
+   * search and sorting into the current profile. Offered only while the view is marked; afterwards the name is plain,
+   * the view stays, and a switch away and back finds it saved.
+   */
+  test('"Save view into" writes the marked view into the current profile', async () => {
+    const { win } = joplin;
+    const profileName = 'All todo and notes';
+    await selectProfile(win, profileName);
+    await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe(profileName);
+    expect(await saveViewEntryLabel(win)).toBeNull();
+
+    const panel = await agendaPanel(win);
+    const notebookLabel = panel.locator('.dropdown-toggle[onclick*="notebookMenu"] .dropdown-toggle-label');
+    await panel.locator('.dropdown-toggle[onclick*="notebookMenu"]').click();
+    await expect(panel.locator('#notebookMenu')).toBeVisible();
+    await panel
+      .locator('#notebookMenu .dropdown-item[data-notebook-row]', { hasText: notebookName })
+      .locator('.dropdown-label')
+      .first()
+      .click();
+    await expect(notebookLabel).toHaveText(notebookName, { timeout: 20_000 });
+    await expect.poll(() => selectedProfileName(win), { timeout: 20_000 }).toBe(`${profileName}*`);
+    await expect.poll(() => saveViewEntryLabel(win), { timeout: 20_000 }).toBe(`Save view into ${profileName}`);
+
+    await saveViewIntoCurrentProfile(win);
+    await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe(profileName);
+    expect(await saveViewEntryLabel(win)).toBeNull();
+    await expect(notebookLabel).toHaveText(notebookName);
+    await waitForPanelTodo(win, alphaTitle);
+
+    // Away and back: the profile now carries the notebook.
+    await selectProfile(win, 'Beta only');
+    await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe('Beta only');
+    await selectProfile(win, profileName);
+    await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe(profileName);
+    await expect(notebookLabel).toHaveText(notebookName, { timeout: 20_000 });
   });
 });

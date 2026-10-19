@@ -404,6 +404,24 @@ export async function selectedProfileName(win: Page): Promise<string> {
   return label + mark;
 }
 
+/**
+ * The label of the profile menu's "Save view into <name>" entry, or null when the menu does not offer it (it is
+ * only offered while the view is marked). Read from the always-in-DOM menu, so the menu need not be open.
+ */
+export async function saveViewEntryLabel(win: Page): Promise<string | null> {
+  const frame = await agendaPanel(win);
+  const entry = frame.locator('#profileMenu .dropdown-item[data-save-view] .dropdown-label');
+  if (!(await entry.count())) return null;
+  return ((await entry.first().textContent()) || '').trim();
+}
+
+/** Write the marked view into the current profile through the profile menu's "Save view into <name>" entry. */
+export async function saveViewIntoCurrentProfile(win: Page): Promise<void> {
+  const frame = await openProfileMenu(win);
+  await frame.locator('#profileMenu .dropdown-item[data-save-view]').click();
+  await win.waitForTimeout(SETTLE);
+}
+
 /** Whether the profile toggle carries the "view changed" asterisk (see selectedProfileName). */
 export async function selectedProfileIsModified(win: Page): Promise<boolean> {
   const frame = await agendaPanel(win);
