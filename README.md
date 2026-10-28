@@ -25,9 +25,7 @@ Cockpit is a single [Joplin](https://joplinapp.org) panel built to replace the n
      "Grayed out". Capture midweek, early in the month and not in December: a period whose remaining
      days are already covered by the groups above it is replaced by the next one, and the headings then
      read Next Week / Next Month / Next Year - and in December the year slot is ALWAYS Next Year, whose
-     slice runs to the next December 31st, so nothing is left over for a Future group at all.
-     The image in the repo predates 2.10 and still shows the sort picker and its arrow where the
-     quick filters now sit; the caption holds for both, so only the image needs retaking. -->
+     slice runs to the next December 31st, so nothing is left over for a Future group at all. -->
 
 One screen gives you the whole picture. A profile is a whole saved view — its format, filters, search and sorting — so switching profiles switches everything in one step. Narrow the list by notebook, or by anything Joplin's own search understands. Reschedule by dragging a to-do onto a day, or open the date picker for an exact time. The same file runs on Android.
 
@@ -160,9 +158,7 @@ Right-clicking a row opens Cockpit's own menu: Open, Quick edit…, Switch betwe
      panel so nothing is clipped. The menu must legibly read: Open (greyed), Quick edit… (greyed),
      "Switch type of 3 items", "Tags for 3 notes...", "Move 3 to notebook...", "Duplicate 3 notes",
      "Copy 3 Markdown links", "Copy 3 note IDs", "Delete 3 notes" (in red). The three selected rows
-     must be visibly highlighted behind it. Joplin Dark + Match Joplin. The image in the repo
-     predates 2.8 and has no Quick edit… entry; the caption holds for both, so only the image
-     needs retaking. -->
+     must be visibly highlighted behind it. Joplin Dark + Match Joplin. -->
 
 Right-click inside a multi-row selection and every capable entry is retitled with the count — "Delete 6 notes", "Switch type of 3 items", "Copy 4 Markdown links" — so a mistaken batch is visible before the click; the single-only Open and Quick edit… grey out rather than disappearing. Dragging a mixed selection onto a date, dropping it between rows or setting an alarm on it applies to the to-dos in it, in selection order; the notes ride along and are left out of anything time-based.
 
