@@ -358,7 +358,7 @@ async function listRecentNotes(limit, keep){
         if (fillCounts){
             // The fast paint cached these with empty rings; fetch the bodies now (viewport first) and
             // refresh the cache so the follow-up render and any later optimistic paint show real counts.
-            await attachCheckboxCounts(allTodos, false, priorityStart, ringsChangedOnly, undrawn)
+            await attachCheckboxCounts(allTodos, false, priorityStart, ringsChangedOnly, undrawn, bodyFetchBudget(opts), scanIsCurrent(opts), scanPassOf(opts))
             cacheResult(todosResultCache, cacheKey, allTodos)
         }
     } else if (fromStore){
@@ -366,7 +366,7 @@ async function listRecentNotes(limit, keep){
         allTodos = readStoreTodos(showCompleted, showNoDue, excluded.set, storeNotebooks)
         // An optimistic repaint lands here whenever the revision moved (every own write moves it), and it must paint before any body is read, as it
         // does on the search path, where it is served from the cache: its rings come from the cache, and the fill or the next full render reads them.
-        await attachCheckboxCounts(allTodos, fast || !!useCache, priorityStart, ringsChangedOnly, undrawn)
+        await attachCheckboxCounts(allTodos, fast || !!useCache, priorityStart, ringsChangedOnly, undrawn, bodyFetchBudget(opts), scanIsCurrent(opts), scanPassOf(opts))
         cacheResult(todosResultCache, cacheKey, allTodos)
     } else {
         // An unfiltered view (see isUnfilteredQuery) is answered by the search while the to-do set is small, and by the live
@@ -426,7 +426,7 @@ async function listRecentNotes(limit, keep){
         // Excluded rows are dropped BEFORE the checkbox-body fetch, so an excluded note never costs a body
         // GET, and BEFORE the cache is written, so the cache holds only kept rows.
         allTodos = filterExcluded(allTodos, excluded.set)
-        await attachCheckboxCounts(allTodos, fast, priorityStart, null, undrawn)
+        await attachCheckboxCounts(allTodos, fast, priorityStart, null, undrawn, bodyFetchBudget(opts), scanIsCurrent(opts), scanPassOf(opts))
         cacheResult(todosResultCache, cacheKey, allTodos)
     }
     // Fold in the host-held optimistic layer: created/newly-matching to-dos the index has not returned
@@ -536,13 +536,20 @@ export async function searchTitleSuggestions(partial){
 }
 
 /** getNotes ****************************************************************************************************************************************
- * Returns the regular (non to-do) notes matching the given search criteria, sorted by title, each with its checkbox counts. Used when a profile     *
+ * Returns the regular (non to-do) notes matching the given search criteria, sorted by title, each with its checkbox counts. Used when a profile    *
  * shows notes alongside the to-dos.                                                                                                                *
  *                                                                                                                                                  *
- * opts.limit caps how many notes are read (absent or 0: all of them). Under a cap the most recently updated notes are the ones kept, read newest    *
+ * opts.limit caps how many notes are read (absent or 0: all of them). Under a cap the most recently updated notes are the ones kept, read newest   *
  * first so a large collection is never walked to the end: an unfiltered view reads the live listing (see isUnfilteredQuery), anything else pages   *
  * the search - and once the note store (2.7) is ready, an unfiltered view reads the mirror instead (see readStoreNotes), capped the same way.      *
  * Returns { notes, more }, where more says whether the cap left a matching note out.                                                               *
+ *                                                                                                                                                  *
+ * opts.scan (2.10, a checkbox filter released; opts.scanFilters are the panel's quick filters): the cap moves behind the filter, which the caller  *
+ * applies once the counts are read, so the rows handed back are the candidates rather than the newest `limit` - every one from the store and the   *
+ * listing, and from the search as many pages as checkboxFilterSearchPageFactor allows - their rings read under the scan's time budget              *
+ * (opts.scanPass, shared with the to-dos), and no further once opts.scanIsCurrent answers false. `more` then says only that the search was cut     *
+ * short; the caller adds what its own cap leaves out. opts.undrawn (2.10) is a skip list for the ring reads, given only when the checkbox filters  *
+ * can show nothing: every row.                                                                                                                     *
  ***************************************************************************************************************************************************/
 export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var excluded = await excludedContext()
@@ -557,6 +564,11 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     // source and the exclusion state it was narrowed with; the cap is part of every key, since a capped set is a different set.
     var cacheKey = unfiltered ? `listing|x${excluded.clauses}` : anyMode ? `any|x${excluded.clauses}|${query}` : query
     if (limit) cacheKey += `|n${limit}`
+    // A scan reads a different set under the same limit (the candidates, not the newest `limit`), so it keys apart - and a search's walk by the
+    // filters it was cut by too (scanKeySuffix).
+    var scan = !!(opts && opts.scan)
+    var scanFilters = scan ? opts.scanFilters : null
+    cacheKey += scanKeySuffix(opts)
     // opts.listingNotebooks narrows the listing path to one notebook and its sub-notebooks (see renderNotesSection), so it keys it too.
     var listingNotebooks = unfiltered && opts && opts.listingNotebooks ? opts.listingNotebooks : null
     if (listingNotebooks) cacheKey += `|nb${listingNotebooks.key}`
@@ -574,7 +586,7 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     if (fromStore){
         var revision = getStoreModel().revision
         dropStaleStoreEntries(revision)
-        cacheKey = storeCacheKey(revision, `x${excluded.clauses}|nb${storeNotebooks ? storeNotebooks.key : ""}|n${limit}`)
+        cacheKey = storeCacheKey(revision, `x${excluded.clauses}|nb${storeNotebooks ? storeNotebooks.key : ""}|n${limit}${scanKeySuffix(opts)}`)
     }
     var allNotes;
     var more = false
@@ -582,24 +594,33 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
         allNotes = cloneItems(notesResultCache.get(cacheKey))
         more = !!notesMoreByKey.get(cacheKey)
         if (fillCounts){
-            await attachCheckboxCounts(allNotes, false, priorityStart, ringsChangedOnly)
+            await attachCheckboxCounts(allNotes, false, priorityStart, ringsChangedOnly, noteSkips(opts), bodyFetchBudget(opts), scanIsCurrent(opts), scanPassOf(opts))
             cacheResult(notesResultCache, cacheKey, allNotes)
         }
     } else {
         if (fromStore){
             // The mirror, newest first and capped exactly as the listing would be (see readStoreNotes): no data call, "show more" included.
-            var stored = readStoreNotes(limit, excluded.set, storeNotebooks)
+            // A scan takes every candidate; the caller caps what passes the filter.
+            var stored = readStoreNotes(scan ? 0 : limit, excluded.set, storeNotebooks)
             allNotes = stored.items
             more = stored.more
         } else if (unfiltered){
+            // A scan wants every note, which is the walk the note store's build makes: with the store available and not yet ready it is built
+            // now and read instead, as getTodos does for its own walk.
+            if (scan && isStoreAvailable() && !isStoreReady() && await ensureStoreBuilt() && storeServes(storeView ? storeView.criteria : searchCriteria)){
+                return getNotes(searchCriteria, fast, useCache, opts)
+            }
             // The listing carries every note's current is_todo, so there is no index lag to keep mistyped rows for.
-            var recent = await listRecentNotes(limit || Infinity, item =>
+            var recent = await listRecentNotes(scan ? Infinity : (limit || Infinity), item =>
                 !(excluded.set && excluded.set.has(item.parent_id)) && (!listingNotebooks || listingNotebooks.ids.has(item.parent_id)))
             allNotes = recent.items
             more = recent.more
         } else {
             allNotes = [];
             let pageNum = 1;
+            // A scan's search: the bound, and how many of the rows so far are KNOWN to pass the filter (see checkboxFilterSearchPageFactor).
+            var scanPageBound = scan && limit ? Math.ceil(limit / 100) * checkboxFilterSearchPageFactor : Infinity
+            var knownShown = 0
             do {
                 countData('search')
                 var response = await joplin.data.get(['search'], {
@@ -619,8 +640,18 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
                 if (!keepMistypedRows) kept = kept.filter(item => !item.is_todo)
                 kept = filterExcluded(kept, excluded.set)
                 allNotes = allNotes.concat(kept)
-                // Narrowed page by page, so the cap counts rows that will be shown; one kept row past it is the proof that more exist.
-                if (limit && allNotes.length > limit){
+                if (scan){
+                    for (var keptRow of kept){
+                        var keptCounts = checkboxCounts.get(keptRow.id)
+                        if (keptCounts && checkboxCategoryShown(scanFilters, keptCounts)) knownShown++
+                    }
+                    // More rows than the limit are known to pass, or the bound is reached: what lies further can only be "more".
+                    if (response.has_more && ((limit && knownShown > limit) || pageNum > scanPageBound)){
+                        more = true
+                        break
+                    }
+                } else if (limit && allNotes.length > limit){
+                    // Narrowed page by page, so the cap counts rows that will be shown; one kept row past it is the proof that more exist.
                     more = true
                     allNotes = allNotes.slice(0, limit)
                     break
@@ -628,7 +659,7 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
             } while (response.has_more)
         }
         // The store's optimistic repaints fetch no body, for the reason given in getTodos; the other two paths are unchanged.
-        await attachCheckboxCounts(allNotes, fast || (fromStore && !!useCache), priorityStart, ringsChangedOnly)
+        await attachCheckboxCounts(allNotes, fast || (fromStore && !!useCache), priorityStart, ringsChangedOnly, noteSkips(opts), bodyFetchBudget(opts), scanIsCurrent(opts), scanPassOf(opts))
         cacheResult(notesResultCache, cacheKey, allNotes)
         notesMoreByKey.set(cacheKey, more)
         for (var key of Array.from(notesMoreByKey.keys())) if (!notesResultCache.has(key)) notesMoreByKey.delete(key)
@@ -779,6 +810,102 @@ export function ringBodiesDeferred(){
     return deferredRingBodies
 }
 
+/** The checkbox filters' scan (2.10) ***************************************************************************************************************
+ * With a quick filter on the checkboxes inside an item released (panel.ts), the panel can only decide which rows to draw once it knows the counts  *
+ * of EVERY candidate row - an unread row cannot be judged - so the reads are no longer the rings of the drawn rows but a scan of the whole         *
+ * candidate set. The callers say so with opts.scan, and four things change for that render only: the per-refresh body cap of                       *
+ * maxBodyFetchesPerRefresh is lifted and a time budget (checkboxScanPassMs) bounds the reads instead, the rows the drawing cap leaves out are no   *
+ * longer skipped (the caller's skip callback answers the rows the narrowing drops instead, since the cap cannot be computed before the filter),    *
+ * and the reads stop between chunks once opts.scanIsCurrent says a newer render has superseded this one (scanIsCurrent in panel.ts). The panel     *
+ * paints after each pass and schedules the next one itself (continueCheckboxScan in panel.ts) while unread rows remain.                            *
+ *                                                                                                                                                  *
+ * checkboxScanPassMs is how long one pass goes on reading, in chunks of 20 like every other read, before its render paints: it reads until no row  *
+ * is left, its render is superseded, or this long has passed since its first chunk - one chunk always, and no count ceiling. One budget is shared  *
+ * by the to-dos and the Notes section of a render (opts.scanPass, one per render), so a render never waits on more than one budget of reads. It is *
+ * a time rather than a count because the cost that has to be bounded is not the reading but the repaint that follows each pass: the status line's  *
+ * count moves with every pass, so the equality guard never skips one, and at 20,000 notes the render and repaint of the whole panel cost 1.5 to 2  *
+ * s a pass. The 20k perf run read 19,000 bodies once each in 20 passes of 1,000 and took 41 to 48 s, most of it those repaints; two seconds of     *
+ * reads there is about 4,000 to 5,000 bodies, so the scan takes four or five passes. On mobile a repaint is a webview reload and a body read costs *
+ * more over the bridge, and the same budget simply reads fewer bodies per pass, so the panel stays as responsive as on desktop.                    *
+ *                                                                                                                                                  *
+ * Without a released checkbox filter nothing here is asked: every caller passes no opts.scan, and the reads are byte-for-byte the ones above.      *
+ ***************************************************************************************************************************************************/
+const checkboxScanPassMs = 2000
+
+/** checkboxFilterSearchPageFactor (2.10) ***********************************************************************************************************
+ * How far the Notes section pages a SEARCH while a checkbox filter is released: at most this many times the pages it reads without one (ten for    *
+ * its first 1,000 notes, so thirty). The filter has to come before the section's limit - "show the 1,000 most recent notes with open checkboxes",  *
+ * not "the open-checkbox notes among the 1,000 most recent" - and an unread row cannot be judged, so the section reads candidates past its limit.  *
+ * The store and the listing hand over every candidate cheaply; the search cannot, since Joplin re-runs the whole query for every page (see the     *
+ * listing note above getTodos), so a criteria matching 20,000 notes must not page to its end. The walk stops sooner once more rows than the limit  *
+ * are KNOWN to match - every refresh after the scan has read them - and a walk cut by the bound reports more notes, which "show more" reaches by   *
+ * raising the limit, and with it the bound.                                                                                                        *
+ ***************************************************************************************************************************************************/
+const checkboxFilterSearchPageFactor = 3
+
+/** knownCheckboxCounts / checkboxCategoryShown (2.10) **********************************************************************************************
+ * The counts the ring cache holds for an item - read before, stale or not - or null when its body was never read. A stale entry is judged by what  *
+ * it holds: it is re-read in the same pass (its stamp moved), and the next paint judges it again, so a row is never hidden in between.             *
+ *                                                                                                                                                  *
+ * The three categories are the ring's own: open (at least one unticked checkbox: a partly filled ring), done (checkboxes, all ticked: a full       *
+ * ring), none (no checkbox: a plain disc). Every item is in exactly one, so with the three filters pressed nothing is filtered at all.             *
+ ***************************************************************************************************************************************************/
+export function knownCheckboxCounts(id){
+    var known = checkboxCounts.get(id)
+    return known ? known : null
+}
+
+export function checkboxCategoryShown(filters, counts){
+    var total = Number(counts && counts.total) || 0
+    var done = Number(counts && counts.done) || 0
+    if (total === 0) return !!filters.noCheckboxes
+    if (total - done > 0) return !!filters.openCheckboxes
+    return !!filters.doneCheckboxes
+}
+
+/** readCheckboxCounts (2.10) ***********************************************************************************************************************
+ * Reads one item's checkbox counts into the ring cache now, through the path every ring read takes - one body GET - unless they are known for the  *
+ * version the record names (its user_updated_time). revealNote (panel.ts) asks it for the note it looks for while a checkbox filter is released, so *
+ * that a row the scan has not reached yet is judged as the scan would judge it rather than taken for "not listed".                                 *
+ ***************************************************************************************************************************************************/
+export async function readCheckboxCounts(record){
+    if (!record || !record.id) return
+    await attachCheckboxCounts([{ id: record.id, user_updated_time: record.user_updated_time }], false, 0, null, undefined, 1)
+}
+
+// The body cap a read is under: none while a checkbox filter is released, whose pass is bounded by time instead (scanPassOf), the rings' cap
+// otherwise.
+function bodyFetchBudget(opts){
+    return opts && opts.scan ? Infinity : maxBodyFetchesPerRefresh
+}
+
+// The scan pass a read belongs to (checkboxScanPassMs): { deadline }, one object per render, handed down by the panel through the view state so
+// that both sections of a render share one budget; a scan without one (no caller does that today) gets a pass of its own. Null off the scan.
+function scanPassOf(opts){
+    if (!(opts && opts.scan)) return null
+    return opts.scanPass && typeof opts.scanPass === "object" ? opts.scanPass : { deadline: 0 }
+}
+
+// A scan's check that its render is still the current one (scanIsCurrent in panel.ts): once it answers false the reads stop between chunks, since
+// that render's paint will be discarded. Only a scan carries one; every other read runs to its cap as it always did.
+function scanIsCurrent(opts){
+    return opts && opts.scan && typeof opts.scanIsCurrent === "function" ? opts.scanIsCurrent : null
+}
+
+// The Notes section's skip list, given only by a render whose checkbox filters can show nothing (checkboxFilterShowsNothing in formats.ts): every
+// row, so no body is read for a view that draws none. Otherwise none, as before 2.10.
+function noteSkips(opts){
+    return opts && typeof opts.undrawn === "function" ? opts.undrawn : undefined
+}
+
+// What a scan's Notes walk is keyed by besides its query: the three checkbox filters, since a search's walk stops by how many known rows pass them
+// (knownShown in getNotes), so the same query under other filters is a different walk.
+function scanKeySuffix(opts){
+    if (!(opts && opts.scan)) return ""
+    var filters = opts.scanFilters || {}
+    return `|scan${filters.openCheckboxes ? 1 : 0}${filters.doneCheckboxes ? 1 : 0}${filters.noCheckboxes ? 1 : 0}`
+}
+
 /** viewportRank ************************************************************************************************************************************
  * Orders a row for the background body-fetch pass by its distance from the viewport: rows at or below the estimated first-visible row rank first     *
  * (nearest first), then the rows above it (nearest-above next). So when the per-refresh cap truncates a large set, the on-screen rings fill before    *
@@ -788,7 +915,7 @@ function viewportRank(idx, start, total){
     return idx >= start ? idx - start : total + (start - idx)
 }
 
-async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: Set<string>, undrawn?: (items) => Set<string>){
+async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: Set<string>, undrawn?: (items) => Set<string>, budget = maxBodyFetchesPerRefresh, isCurrent?: () => boolean, pass?: { deadline: number }){
     if (!fast){
         // The rows the panel's drawing cap leaves out of this render (2.7.1) have no ring on screen: none is read and none is owed (a render is
         // complete without them), and they take no place in the viewport index, which counts the drawn rows only - priorityStart is estimated from
@@ -817,9 +944,20 @@ async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: 
             var total = drawnCount
             staleEntries.sort((first, second) => viewportRank(first.idx, priorityStart, total) - viewportRank(second.idx, priorityStart, total))
         }
-        var stale = staleEntries.slice(0, maxBodyFetchesPerRefresh).map(entry => entry.item)
+        var stale = staleEntries.slice(0, budget).map(entry => entry.item)
         deferredRingBodies += staleEntries.length - stale.length
         for (var index = 0; index < stale.length; index += bodyFetchChunk){
+            // A scan whose render a newer one has superseded stops here, between chunks (2.10, scanIsCurrent): the rows left are the newer render's.
+            if (isCurrent && !isCurrent()) break
+            // A scan's pass reads for checkboxScanPassMs from its first chunk, whichever section that is in, and the rows left are the next pass's,
+            // owed like the rows past a cap (2.10).
+            if (pass){
+                if (!pass.deadline) pass.deadline = Date.now() + checkboxScanPassMs
+                else if (Date.now() >= pass.deadline){
+                    deferredRingBodies += stale.length - index
+                    break
+                }
+            }
             await Promise.all(stale.slice(index, index + bodyFetchChunk).map(async item => {
                 try {
                     countData('bodies')

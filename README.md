@@ -18,13 +18,16 @@ Cockpit is a single [Joplin](https://joplinapp.org) panel built to replace the n
      replaces them), Cockpit docked on the left, a to-do open in the editor. The panel shows the interval
      view with Overdue / Today / Tomorrow / This Week / This Month / This Year / Future / No Due
      Date / Notes groups, the three header rows (profile picker + New note/New to-do, notebook
-     filter + sort + sync, search field), notebook pills on rows, one greyed completed to-do, and
-     partly-filled progress rings including on the row whose note is open in the editor — with that
-     note's checkboxes visible beside it so the ring and the ticks match. Completed to-dos setting:
+     filter + the four quick-filter buttons, all pressed + sync, search field), notebook pills on
+     rows, one greyed completed to-do, and partly-filled progress rings including on the row whose
+     note is open in the editor — with that note's checkboxes visible beside it so the ring and the
+     ticks match. Completed to-dos setting:
      "Grayed out". Capture midweek, early in the month and not in December: a period whose remaining
      days are already covered by the groups above it is replaced by the next one, and the headings then
      read Next Week / Next Month / Next Year - and in December the year slot is ALWAYS Next Year, whose
-     slice runs to the next December 31st, so nothing is left over for a Future group at all. -->
+     slice runs to the next December 31st, so nothing is left over for a Future group at all.
+     The image in the repo predates 2.10 and still shows the sort picker and its arrow where the
+     quick filters now sit; the caption holds for both, so only the image needs retaking. -->
 
 One screen gives you the whole picture. A profile is a whole saved view — its format, filters, search and sorting — so switching profiles switches everything in one step. Narrow the list by notebook, or by anything Joplin's own search understands. Reschedule by dragging a to-do onto a day, or open the date picker for an exact time. The same file runs on Android.
 
@@ -138,7 +141,9 @@ An excluded notebook can never become the panel's notebook filter, by any route:
 
 The notebook dropdown lists every notebook by its full path, with a filter box pinned at the top; typing narrows it and Enter picks the first match. It offers every notebook, not only the ones the current to-dos live in. Every row also carries the notebook it lives in: click that pill to filter to it, right-click it to move the note somewhere else, hover it for the full path.
 
-A sort picker decides how items sharing a due time — and the Notes group — are ordered: by title (natural, case-insensitive), by updated or by created date, ascending or descending. Each profile saves its own choice; changing it here changes the view, not the profile, and the profile's name on the picker shows an asterisk while the two differ.
+Beside the notebook dropdown sit four one-press filters. The first shows or hides completed to-dos; the other three go by the checkboxes inside an item, to-dos and notes alike: at least one still open (a partly filled ring), all of them ticked (a full ring), or none at all (a plain disc). All four start pressed, and releasing one hides what it names; release all three checkbox filters and the list is empty. Pressed, the completed button shows what the profile's four completed switches allow, or every completed to-do when the profile has them all off. Like the notebook and the search, the filters change the view, not the profile, and the profile's name on the picker shows an asterisk while the two differ. A checkbox filter needs the checkboxes of every item it could show, so the first time one is released on a large collection Cockpit reads them in batches, with a line above the list saying how many are left; each note is read once per session, so pressing again later is instant and only a note edited since is read again (the counts are not kept across restarts, so a filter released at startup reads them again). The overview notes are never filtered by them.
+
+How items sharing a due time — and the Notes group — are ordered is a profile setting, set in the profile editor: by title (natural, case-insensitive), by updated or by created date, ascending or descending.
 
 ## Selecting rows, and the row menu
 
@@ -167,13 +172,14 @@ Any click on a row opens the note in the main editor; double-clicking its title 
 
 ## Profiles
 
-A profile stores the display format, the search criteria, which completed to-dos count, whether notes are listed and where, the notebook filter, the panel search text and the sorting — so switching profiles switches the whole view in one step.
+A profile stores the display format, the search criteria, which completed to-dos count, which items show by the checkboxes inside them, whether notes are listed and where, the notebook filter, the panel search text and the sorting — so switching profiles switches the whole view in one step.
 
 - Four independent switches decide whether completed to-dos from the past, from today, from the future and with no due date are shown, so a profile can keep today's ticked-off work visible while hiding last month's.
+- Three more, under "Checkboxes inside", decide whether items with open checkboxes, items whose checkboxes are all done and items without checkboxes are shown — the three quick-filter buttons the profile starts with. All three are on unless you turn one off, so a profile from an earlier version shows what it always did.
 - A profile also chooses whether undated to-dos are listed at all and whether they are pushed to the end; whether the week starts on Monday or Sunday, which also sets where "This Week" ends; how many dots a calendar day shows before it collapses into "+N", from 1 to 10; and the date, weekday and 12-versus-24-hour formats.
 - The dropdown lists every profile with its own always-visible edit and delete buttons and a "+ New profile…" entry — no hover needed, so it works by tap on mobile too. A numeric sort order decides the order, ties falling back to the name.
-- "+ New profile…" opens on the view you are looking at: the current profile's settings plus the notebook, search and sorting in the header right now. The name is selected, so saving the view is typing a name and pressing Create (on mobile the keyboard stays down until you tap the name, which selects it). The overview-note id is not copied, since an overview note belongs to one profile. Create switches to the new profile.
-- An asterisk after the name on the picker ("Lab*") means the notebook, search or sorting has changed since the profile was selected. Pick the profile again to drop the changes and go back to as much of its saved view as it can show (a saved notebook since excluded or deleted stays at "All notebooks"), use "+ New profile…" to keep the view as a profile of its own, or pick "Save view into Lab" in the dropdown to write the notebook, search and sorting into the profile. The list keeps the plain names.
+- "+ New profile…" opens on the view you are looking at: the current profile's settings plus the notebook, search and quick filters in the header right now. The name is selected, so saving the view is typing a name and pressing Create (on mobile the keyboard stays down until you tap the name, which selects it). The overview-note id is not copied, since an overview note belongs to one profile. Create switches to the new profile.
+- An asterisk after the name on the picker ("Lab*") means the notebook, search or filters have changed since the profile was selected. Pick the profile again to drop the changes and go back to as much of its saved view as it can show (a saved notebook since excluded or deleted stays at "All notebooks"), use "+ New profile…" to keep the view as a profile of its own, or pick "Save view into Lab" in the dropdown to write the notebook, search and filters into the profile. The list keeps the plain names.
 - A fresh install starts with an "All todo and notes" profile showing everything, and the last remaining profile cannot be deleted.
 
 ## Notebooks and notes

@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, notebookWithDescendants, openTodo, ringBodiesDeferred, searchTitleSuggestions, setTodoCompleted, setTodoDueDates, setTodoDuesPerId } from "../../core/joplin";
+import { checkboxCategoryShown, focusNewItemEditor, getAllTags, getExcludedNotebookIdSet, getNotebookMap, invalidateNotebookMap, invalidateTagsCache, knownCheckboxCounts, notebookWithDescendants, openTodo, readCheckboxCounts, ringBodiesDeferred, searchTitleSuggestions, setTodoCompleted, setTodoDueDates, setTodoDuesPerId } from "../../core/joplin";
 import { clearOptimisticItem, clearTodoCompletionOverride, finalizeOverlay, hasPendingItemOverlay, removeOptimisticItem, revalidateOptimisticInserts, setTodoCompletionOverride, upsertOptimisticItem, viewKeyFor } from "../../core/optimistic";
 import { EXCLUDED_NOTEBOOKS_KEY, EXCLUDED_NOTEBOOK_IDS_KEY, canonicalTextFromIds, parseExcludedIds } from "../../core/exclusion";
 import { countPaint, countRender, logRefresh, snapshot } from "../../core/instrument";
@@ -15,7 +15,7 @@ import { applyLocalCreate, applyLocalRemoval, applyLocalWrite, isReady as isStor
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
-import { TODO_DRAW_BUDGET, TODO_SECTION_BATCH, escapeHtml, getFormatter, isCalendarFormat, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
+import { TODO_DRAW_BUDGET, TODO_SECTION_BATCH, checkboxFilterActive, completedSwitches, escapeHtml, getFormatter, isCalendarFormat, renderCheckboxScanLine, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
 import { forgetCurrentProfileID, getCreateButtonClickRoute, getCreateButtonRightClickRoute, getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
@@ -37,7 +37,7 @@ var lastRenderedHtml = null;
  * RELOAD that destroys that module state, so the plugin holds the position instead: the webview posts it (throttled) as scrollChanged, and every render *
  * embeds it as data-scroll-top so the reloaded webview can restore it. renderNonce tags each render; a scrollChanged carrying an old nonce (a late post *
  * from the outgoing webview) is dropped, which is what keeps the deliberate resets below robust. Deliberate view changes (profile, notebook, search,    *
- * sort, calendar) set lastScrollTop = 0 before their refresh, so both platforms start those at the top.                                                *
+ * sort, quick filter, calendar) set lastScrollTop = 0 before their refresh, so both platforms start those at the top.                                  *
  ***************************************************************************************************************************************************/
 var lastScrollTop = 0
 var renderNonce = 0
@@ -243,12 +243,55 @@ function clearReveal(){
 }
 
 /** Sort state **************************************************************************************************************************************
- * How items sharing a due time (and the notes group) are ordered. Kept in settings so it survives restarts, mirrored here for rendering.            *
+ * How items sharing a due time (and the notes group) are ordered. Applied from the profile (applyProfileHeaderState), which since 2.10 is the only *
+ * place it is set: the header no longer carries a sort picker. The sortFieldSelected and sortDirectionClicked messages are still answered as they  *
+ * always were (the harness and the e2e specs post them as a benign re-render), but no control posts them any more.                                 *
  ***************************************************************************************************************************************************/
 var sortField = "title"
 var sortDirection = "asc"
 const sortFieldCycle = ["title", "updated", "created"]
-const sortFieldLabels = { title: "Title", updated: "Updated", created: "Created" }
+
+/** quickFilters (2.10) *****************************************************************************************************************************
+ * The header's four one-press filters, true while a button is pressed: completed to-dos, and items by the checkboxes inside them - open (at least  *
+ * one unticked), all done, none. Session state applied from the profile exactly as the notebook and the search are (applyProfileHeaderState): the  *
+ * three checkbox buttons from the profile's showOpenCheckboxes / showDoneCheckboxes / showNoCheckboxes, and the completed one DERIVED from the     *
+ * profile's four period switches - pressed when any of them is on. What the completed button means for the narrowing is completedSwitches' answer  *
+ * (formats.ts), which every reader asks instead of the profile. A press changes the view, not the profile, and marks it                            *
+ * (headerDiffersFromProfile).                                                                                                                      *
+ *                                                                                                                                                  *
+ * QUICK_FILTERS is the group as the header draws it, in order: the data-filter name, the accessible label the tooltip starts with, the icon.       *
+ ***************************************************************************************************************************************************/
+var quickFilters = { completedTodos: true, openCheckboxes: true, doneCheckboxes: true, noCheckboxes: true }
+const QUICK_FILTERS = [
+    { name: "completedTodos", label: "Completed to-dos", icon: "todoCompleted" },
+    { name: "openCheckboxes", label: "Items with open checkboxes", icon: "checkboxOpen" },
+    { name: "doneCheckboxes", label: "Items with all checkboxes done", icon: "checkboxDone" },
+    { name: "noCheckboxes", label: "Items without checkboxes", icon: "checkboxNone" },
+]
+
+// The quick filters a profile starts its view with. The checkbox fields default to true in profileDefaults, so only an explicit false releases one.
+function profileQuickFilters(profile){
+    return {
+        completedTodos: !!(profile.showCompletedPast || profile.showCompletedToday || profile.showCompletedFuture || profile.showCompletedNoDue),
+        openCheckboxes: profile.showOpenCheckboxes !== false,
+        doneCheckboxes: profile.showDoneCheckboxes !== false,
+        noCheckboxes: profile.showNoCheckboxes !== false,
+    }
+}
+
+// The profile fields the view's quick filters stand for: the three checkbox switches and the completed switches the narrowing reads (completedSwitches).
+function quickFilterProfileFields(profile){
+    var switches = completedSwitches(profile, quickFilters)
+    return {
+        showOpenCheckboxes: quickFilters.openCheckboxes,
+        showDoneCheckboxes: quickFilters.doneCheckboxes,
+        showNoCheckboxes: quickFilters.noCheckboxes,
+        showCompletedPast: switches.past,
+        showCompletedToday: switches.today,
+        showCompletedFuture: switches.future,
+        showCompletedNoDue: switches.nodue,
+    }
+}
 
 /** Notes section size ********************************************************************************************************************************
  * How many notes the Notes section reads and draws: the most recently updated ones, NOTES_BATCH more each time its "show more" button is clicked.   *
@@ -436,8 +479,8 @@ async function reconcileExcludedNotebookText(){
 }
 
 /** applyProfileHeaderState *************************************************************************************************************************
- * Applies a profile's stored header state - notebook filter, search text and sorting - so that switching profiles switches the whole view. Header    *
- * controls used afterwards override it for the session without being written back to the profile.                                                   *
+ * Applies a profile's stored header state - notebook filter, search text, sorting and quick filters - so that switching profiles switches the      *
+ * whole view. Header controls used afterwards override it for the session without being written back to the profile.                               *
  ***************************************************************************************************************************************************/
 async function applyProfileHeaderState(profile){
     if (!profile) return
@@ -450,40 +493,42 @@ async function applyProfileHeaderState(profile){
     searchFilter = String(profile.panelSearch || "")
     sortField = sortFieldCycle.includes(profile.sortField) ? profile.sortField : "title"
     sortDirection = profile.sortDirection === "desc" ? "desc" : "asc"
+    quickFilters = profileQuickFilters(profile)
     // What was just applied - the RESOLVED notebook included - is the view the picker's name stands for.
-    headerBaseline = { notebook: notebookFilter, search: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection }
+    headerBaseline = { notebook: notebookFilter, search: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection, filters: { ...quickFilters } }
 }
 
 /** headerBaseline / headerDiffersFromProfile (2.9) *************************************************************************************************
  * The header state the current profile was last applied with, and whether the view on screen has moved away from it since. The header controls     *
- * (notebook, search, sorting, and the commands another plugin calls) change the view for the session without writing it back, so the picker would  *
- * otherwise name a profile whose view is no longer the one shown; while they differ its toggle carries an asterisk ("Lab*",                        *
- * getProfileDropdownHTML). The automatic return to "All notebooks" when the filtered notebook is excluded or deleted marks it too: the view did    *
- * change under the user.                                                                                                                           *
+ * (notebook, search, the quick filters of 2.10, and the commands another plugin calls) change the view for the session without writing it back, as *
+ * do the two sorting messages no control posts any more, so the picker would otherwise name a profile whose view is no longer the one shown; while *
+ * they differ its toggle carries an asterisk ("Lab*", getProfileDropdownHTML). The automatic return to "All notebooks" when the filtered notebook  *
+ * is excluded or deleted marks it too: the view did change under the user.                                                                         *
  *                                                                                                                                                  *
  * The baseline is what applyProfileHeaderState APPLIED, not what the profile stores: a saved notebook that has since been deleted or excluded      *
  * resolves to "All notebooks" there, and comparing against the stored id would mark the profile the moment it was picked. The search is compared   *
  * trimmed on both sides, because a stored search may carry spaces a committed one never does. It is a comparison rather than a flag set by the     *
- * controls, so putting a field back by hand clears the mark, and nothing outside these four values (the calendar's month, a reveal's pin) can set  *
+ * controls, so putting a field back by hand clears the mark, and nothing outside these values (the calendar's month, a reveal's pin) can set       *
  * it. Every path that re-applies the profile - a switch or re-pick from the dropdown, a Save of the current profile, "Save view into" it           *
  * (saveViewIntoCurrentProfile), Create from the view, a delete of the current profile, a settings-note replace - resets the baseline and the live  *
  * state together, which is what clears it. A Cancel of an edit, and a delete of another profile, re-apply nothing                                  *
  * (applyHeaderIfCurrentProfileChanged), so the view and its mark stay as they were.                                                                *
  ***************************************************************************************************************************************************/
-var headerBaseline = { notebook: "", search: "", sortField: "title", sortDirection: "asc" }
+var headerBaseline = { notebook: "", search: "", sortField: "title", sortDirection: "asc", filters: { ...quickFilters } }
 
 function headerDiffersFromProfile(){
     return notebookFilter !== headerBaseline.notebook
         || searchFilter.trim() !== headerBaseline.search
         || sortField !== headerBaseline.sortField
         || sortDirection !== headerBaseline.sortDirection
+        || QUICK_FILTERS.some(filter => quickFilters[filter.name] !== headerBaseline.filters[filter.name])
 }
 
 /** applyHeaderIfCurrentProfileChanged (2.9) ********************************************************************************************************
  * After a profile delete - from the dropdown's row button, the desktop edit dialog's Delete or the mobile overlay's - re-applies the header only   *
  * when the current profile is no longer the one it was: the deleted profile was current, so another has become current (getCurrentProfileID falls  *
- * back to the first one) and its saved notebook, search and sorting apply. Deleting any other profile leaves the view the user had - their         *
- * notebook, search and sorting, and the picker's asterisk with them. currentBefore is the id read before the delete.                               *
+ * back to the first one) and its saved notebook, search, sorting and filters apply. Deleting any other profile leaves the view the user had -      *
+ * their notebook, search, sorting and filters, and the picker's asterisk with them. currentBefore is the id read before the delete.                *
  ***************************************************************************************************************************************************/
 async function applyHeaderIfCurrentProfileChanged(currentBefore){
     var currentAfter = await getCurrentProfileID()
@@ -492,9 +537,11 @@ async function applyHeaderIfCurrentProfileChanged(currentBefore){
 
 /** saveViewIntoCurrentProfile **********************************************************************************************************************
  * "Save view into <name>", the profile dropdown's entry while the view is marked: writes the header's live state into the CURRENT profile - the    *
- * notebook filter, the committed search (trimmed, as the comparison reads it), the sort field and direction - and nothing else. The name, the      *
- * overview note, the search criteria, the sort order and every display setting stay as stored. The header is then applied again from what was      *
- * saved, which resets the baseline (headerBaseline) and so clears the asterisk, and the panel repaints fast.                                       *
+ * notebook filter, the committed search (trimmed, as the comparison reads it), the sort field and direction, and the quick filters (2.10): the     *
+ * three checkbox switches, and the four completed switches the view narrows by (completedSwitches, so a released completed button saves all four   *
+ * off, and one pressed on a profile with none on saves all four on) - and nothing else. The name, the overview note, the search criteria, the sort *
+ * order and every display setting stay as stored. The header is then applied again from what was saved, which resets the baseline                  *
+ * (headerBaseline) and so clears the asterisk, and the panel repaints fast.                                                                        *
  *                                                                                                                                                  *
  * A notebook the automatic return to "All notebooks" took away (excluded, or deleted) is saved as "", deliberately: "All notebooks" is the view    *
  * the user is looking at and chose to keep. No overview pass follows, because the overview note is drawn from the profile's search criteria and    *
@@ -506,7 +553,7 @@ async function saveViewIntoCurrentProfile(){
     var profileID = await getCurrentProfileID()
     var profile = await getProfile(profileID)
     if (!profile || !headerDiffersFromProfile()) return
-    await updateProfile(profileID, { ...profile, notebook: notebookFilter, panelSearch: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection })
+    await updateProfile(profileID, { ...profile, notebook: notebookFilter, panelSearch: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection, ...quickFilterProfileFields(profile) })
     await applyProfileHeaderState(await getProfile(profileID))
     lastRenderedHtml = null
     await refreshPanelFastThenFill()
@@ -514,10 +561,10 @@ async function saveViewIntoCurrentProfile(){
 
 /** profileSeedFromCurrentView **********************************************************************************************************************
  * What "+ New profile…" opens with: the view on screen, so that saving it as a profile is a matter of giving it a name. That view is the current   *
- * profile's stored settings with the header's live state on top - the notebook filter, the committed search and the sorting, which the header      *
- * controls override for the session without writing them back (applyProfileHeaderState) - so those four are read from the variables above rather   *
- * than from the profile. Both platforms build their create form from this one function: the desktop editor dialog (openEditor) and the mobile      *
- * overlay's getEditorInitial round-trip.                                                                                                           *
+ * profile's stored settings with the header's live state on top - the notebook filter, the committed search, the sorting and the quick filters     *
+ * (the fields "Save view into" writes for them), which the header overrides for the session without writing them back (applyProfileHeaderState) -  *
+ * so those are read from the variables above rather than from the profile. Both platforms build their create form from this one function: the      *
+ * desktop editor dialog (openEditor) and the mobile overlay's getEditorInitial round-trip.                                                         *
  *                                                                                                                                                  *
  * Everything else is copied, with three exceptions. The id is dropped: the seed is not a stored profile, and Create gives the copy an id of its    *
  * own. The name is "New Profile", the default the editor has always opened with and the one its comments and the e2e helpers speak of. The         *
@@ -536,6 +583,7 @@ async function profileSeedFromCurrentView(){
     seed.panelSearch = searchFilter
     seed.sortField = sortField
     seed.sortDirection = sortDirection
+    Object.assign(seed, quickFilterProfileFields(seed))
     return seed
 }
 
@@ -552,26 +600,29 @@ async function switchToProfile(profileID){
     // A switched-to profile is a different view entirely, so a note pinned by a reveal into the previous
     // one does not carry over (nor does its pending flash).
     clearReveal()
-    // The profile carries its own header state: notebook filter, search and sorting.
+    // The profile carries its own header state: notebook filter, search, sorting and quick filters.
     await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
     // Paint the switched-to view immediately, then fill the rings from note bodies in the background.
     // optimistic reuses the switched-to profile's cached result set, so a previously viewed profile paints
     // with ZERO searches (with the host-held override map still layered on); a first visit does one search
     // and no body fetches. Either way the whole list is on screen before any body GET. A profile just created
     // from the view on screen asks, unless its form was changed, the very query that view asked, so it paints
-    // from that view's cached answer.
-    await refreshPanelFastThenFill({ optimistic: true })
-    // Then ONE background truth refresh: a single search-based refreshPanelData so external edits made
-    // while this profile was not current (and which its cached result set therefore predates) show now,
-    // instead of staying invisible until the periodic backstop. It is a lone refresh - no overview regen,
-    // no reconcile job - so it does not reintroduce the multi-lane cascade a mutation arms (a switch still
-    // mutates no note). refreshPanelData's generation guard discards it if a newer refresh supersedes it,
-    // and its equality guard makes it a no-op paint when the cached view was already the truth. This also
-    // narrows the window in which a stale cross-view optimistic entry could be observed after a switch.
-    // On a store-served view (2.7) "external edits" means what the store has not heard of yet - a REST or another plugin's write fires no
-    // onNoteChange - so the store drains once first (one events call; see catchUpNoteStore in timer.ts).
-    await catchUpNoteStore()
-    await refreshPanelData()
+    // from that view's cached answer. The three renders are one to the checkbox scan (2.10, asOneRender): a pass one of them owes waits for the
+    // truth refresh, which decides for the view it draws, rather than reading beside it or superseding it with the older cached list.
+    await asOneRender(async () => {
+        await refreshPanelFastThenFill({ optimistic: true })
+        // Then ONE background truth refresh: a single search-based refreshPanelData so external edits made
+        // while this profile was not current (and which its cached result set therefore predates) show now,
+        // instead of staying invisible until the periodic backstop. It is a lone refresh - no overview regen,
+        // no reconcile job - so it does not reintroduce the multi-lane cascade a mutation arms (a switch still
+        // mutates no note). refreshPanelData's generation guard discards it if a newer refresh supersedes it,
+        // and its equality guard makes it a no-op paint when the cached view was already the truth. This also
+        // narrows the window in which a stale cross-view optimistic entry could be observed after a switch.
+        // On a store-served view (2.7) "external edits" means what the store has not heard of yet - a REST or another plugin's write fires no
+        // onNoteChange - so the store drains once first (one events call; see catchUpNoteStore in timer.ts).
+        await catchUpNoteStore()
+        await refreshPanelData()
+    })
 }
 
 /** onProfilesReplaced ******************************************************************************************************************************
@@ -587,7 +638,7 @@ export async function onProfilesReplaced(){
     lastScrollTop = 0
     // A note pinned by a reveal belongs to the view that is being replaced (nor does its pending flash carry over).
     clearReveal()
-    // The current profile carries its own header state: notebook filter, search and sorting. getCurrentProfileID falls back
+    // The current profile carries its own header state: notebook filter, search, sorting and quick filters. getCurrentProfileID falls back
     // to the first profile when the id this device held no longer exists in the incoming store.
     await applyProfileHeaderState(await getProfile(await getCurrentProfileID()))
     // The rendered markup is compared with the last one to decide whether a paint is needed; the incoming profiles can
@@ -669,6 +720,17 @@ async function eventHandler(message){
         sortDirection = sortDirection === "asc" ? "desc" : "asc"
         lastScrollTop = 0
         await refreshPanelData()
+    } else if (message[0] == 'quickFilterToggled'){
+        // A press on one of the header's quick filters (2.10): the session state flips, the view starts at the top like every other change of
+        // view, and it paints at once from the counts already known - the pressed button, the rows those counts decide and the status line -
+        // before a single body is read; the fill then reads the scan's first pass and schedules the rest (continueCheckboxScan). The fast paint
+        // still runs the search, so a press of the completed button, which changes the query, draws the right rows at once. An unknown name
+        // changes nothing and draws nothing.
+        var toggledFilter = String(message[1] || "")
+        if (!QUICK_FILTERS.some(filter => filter.name === toggledFilter)) return
+        quickFilters = { ...quickFilters, [toggledFilter]: !quickFilters[toggledFilter] }
+        lastScrollTop = 0
+        await refreshPanelFastThenFill()
     } else if (message[0] == 'renameNotebookClicked'){
         await runNotebookAction('rename', String(message[1] || ""))
     } else if (message[0] == 'moveNotebookClicked'){
@@ -782,7 +844,7 @@ async function eventHandler(message){
         var editSavedID = await openEditor(id)
         // A Save of the current profile may change its header state, so it is re-applied - and only a Save (openEditor
         // answers the id for one, null for a Cancel or a Delete): a Cancel leaves the view the user had, their notebook,
-        // search and sorting and the picker's asterisk with them. The dialog's Delete can remove the current profile,
+        // search, sorting and filters and the picker's asterisk with them. The dialog's Delete can remove the current profile,
         // in which case another has become current and its header applies.
         if (editSavedID != null && editSavedID == await getCurrentProfileID()) await applyProfileHeaderState(await getProfile(editSavedID))
         else await applyHeaderIfCurrentProfileChanged(currentBeforeEdit)
@@ -991,11 +1053,14 @@ async function applyBetweenDrop(todoIDs, prevID, nextID, groupDate, groupEndDate
  ***************************************************************************************************************************************************/
 async function showOwnWrite(ids){
     if (!(await storeServesAction())) return false
-    await refreshPanelData({ fast: true })
-    // Gone during the fast render: the fill would read the lagging search with nothing held over it, so the caller's repaint comes first.
-    if (!(await storeServesAction())) return false
-    await refreshPanelData({ fillCounts: true, ringsChangedOnly: new Set(ids) })
-    return await storeServesAction()
+    // The two passes are one render to the checkbox scan (2.10, asOneRender), as in refreshPanelFastThenFill.
+    return asOneRender(async () => {
+        await refreshPanelData({ fast: true })
+        // Gone during the fast render: the fill would read the lagging search with nothing held over it, so the caller's repaint comes first.
+        if (!(await storeServesAction())) return false
+        await refreshPanelData({ fillCounts: true, ringsChangedOnly: new Set(ids) })
+        return await storeServesAction()
+    })
 }
 
 /** applyTodoChecked ********************************************************************************************************************************
@@ -1038,7 +1103,7 @@ async function applyTodoChecked(todoID, checked){
 
 /** completedBucketOf *******************************************************************************************************************************
  * Which completed-period switch governs a to-do (mirrors BaseFormat.getCompletedBucket), used to decide whether a completed to-do is visible in the   *
- * active profile when evaluating an optimistic insert locally.                                                                                       *
+ * active view when evaluating an optimistic insert locally. Its answer names a key of completedSwitches' answer (formats.ts).                      *
  ***************************************************************************************************************************************************/
 function completedBucketOf(record){
     if (!record.todo_due || record.todo_due <= 0) return "nodue"
@@ -1067,8 +1132,12 @@ function isLocallyEvaluableView(profile){
  * decides membership for a view it has already keyed an overlay entry with (viewKeyFor(profileID, filter)), and each of them awaits at least one host  *
  * round-trip in between. Reading the live global here would let a notebook chip clicked during that await judge one view's entries by another view's    *
  * filter - deleting an insert the keyed view legitimately shows. The snapshot the caller keyed with is therefore the only correct answer.              *
+ *                                                                                                                                                  *
+ * viewFilters are the quick filters (2.10), snapshotted by the caller for the same reason. The completed switches are completedSwitches' answer, and   *
+ * with a checkbox filter released an item is judged by the counts the ring cache holds for it: one whose body was never read is NOT decided here - it   *
+ * answers false, so no entry puts it on screen unjudged, and the reconcile lane brings it in once the scan has read it.                                *
  ***************************************************************************************************************************************************/
-function noteMatchesView(record, profile, notebooks, excludedSet, filter){
+function noteMatchesView(record, profile, notebooks, excludedSet, filter, viewFilters){
     // An excluded notebook's notes must never surface, not even optimistically, so a create/change inside one
     // is treated as not belonging to the view (which suppresses it, matching the search-side filtering).
     if (excludedSet && excludedSet.has(record.parent_id)) return false
@@ -1076,19 +1145,39 @@ function noteMatchesView(record, profile, notebooks, excludedSet, filter){
         var allowed = notebookWithDescendants(notebooks, filter)
         if (!allowed.has(record.parent_id)) return false
     }
+    if (checkboxFilterActive(viewFilters)){
+        var known = knownCheckboxCounts(record.id)
+        if (!known || !checkboxCategoryShown(viewFilters, known)) return false
+    }
     if (record.is_todo){
         if ((!record.todo_due || record.todo_due <= 0) && !profile.showNoDue) return false
-        if (record.todo_completed && record.todo_completed > 0){
-            var bucket = completedBucketOf(record)
-            if (bucket === "nodue") return !!profile.showCompletedNoDue
-            if (bucket === "past") return !!profile.showCompletedPast
-            if (bucket === "today") return !!profile.showCompletedToday
-            return !!profile.showCompletedFuture
-        }
+        if (record.todo_completed && record.todo_completed > 0) return !!completedSwitches(profile, viewFilters)[completedBucketOf(record)]
         return true
     }
     // A regular note appears only when the profile shows notes alongside the to-dos.
     return !!profile.showNotes
+}
+
+/** checkboxCountsUnknown / withoutCheckboxFilter (2.10) ********************************************************************************************
+ * Whether a checkbox filter is released and the counts the ring cache holds for the record cannot judge it: its body has never been read, or it    *
+ * was read for another version of the note (the stamp is the user_updated_time the counts were read at, and the record carries the note's current  *
+ * one - an external change is usually an edit, and an edit may have added or ticked the checkboxes). A create is then simply not inserted           *
+ * (noteMatchesView answers false); an external change or a type flip that leaves the item in the view by everything else writes no entry either    *
+ * way - neither an insert nor a suppress, which would splice the row out by its old counts until the reconcile lane's next rung - and leaves the    *
+ * item to the search, whose render reads its body.                                                                                                 *
+ *                                                                                                                                                  *
+ * withoutCheckboxFilter is the same view with the three checkbox buttons pressed: what the other constraints alone decide. An item it does not      *
+ * match (moved out of the notebook, flipped to a note in a to-dos-only profile) is out of the view whatever its checkboxes say, and is suppressed   *
+ * at once, as before 2.10.                                                                                                                         *
+ ***************************************************************************************************************************************************/
+function checkboxCountsUnknown(record, viewFilters){
+    if (!checkboxFilterActive(viewFilters)) return false
+    var known = knownCheckboxCounts(record.id)
+    return !known || known.stamp !== record.user_updated_time
+}
+
+function withoutCheckboxFilter(viewFilters){
+    return viewFilters ? { ...viewFilters, openCheckboxes: true, doneCheckboxes: true, noCheckboxes: true } : viewFilters
 }
 
 /** insertCreatedItemOptimistically *****************************************************************************************************************
@@ -1104,6 +1193,7 @@ async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
         // One snapshot of the notebook filter for the whole judgement, so the view this is decided for is the
         // view the entry is keyed with even if a chip is clicked during the awaits below.
         var viewFilter = notebookFilter
+        var viewQuickFilters = quickFilters
         var profile = await getProfile(profileID)
         if (!profile || !isLocallyEvaluableView(profile)) return false
         var record = {
@@ -1117,7 +1207,7 @@ async function insertCreatedItemOptimistically(newItem, isTodo, folderID){
             user_created_time: Date.now(),
         }
         var notebooks = await getNotebookMap()
-        if (!noteMatchesView(record, profile, notebooks, await getExcludedNotebookIdSet(), viewFilter)) return false
+        if (!noteMatchesView(record, profile, notebooks, await getExcludedNotebookIdSet(), viewFilter, viewQuickFilters)) return false
         // Scope the entry to the view it was evaluated against, so it shows in THIS profile/notebook view
         // only and never leaks into another profile's panel or overview note.
         upsertOptimisticItem(record, viewKeyFor(profileID, viewFilter))
@@ -1144,6 +1234,7 @@ export async function reconcileExternalNoteChange(noteID){
     // this profile never suppresses or inserts the note in another profile's panel or overview note.
     var profileID = await getCurrentProfileID()
     var viewFilter = notebookFilter
+    var viewQuickFilters = quickFilters
     var viewKey = viewKeyFor(profileID, viewFilter)
     try {
         var profile = await getProfile(profileID)
@@ -1171,7 +1262,12 @@ export async function reconcileExternalNoteChange(noteID){
             // Gone, not merely out of view: the record is deliberately NOT carried, since noteMatchesView cannot
             // see a trash flag and re-judging the entry by it would put the trashed row back on screen.
             removeOptimisticItem(noteID, !!note.is_todo, viewKey)
-        } else if (!noteMatchesView(note, profile, notebooks, await getExcludedNotebookIdSet(), viewFilter)){
+        } else if (checkboxCountsUnknown(note, viewQuickFilters) && noteMatchesView(note, profile, notebooks, await getExcludedNotebookIdSet(), viewFilter, withoutCheckboxFilter(viewQuickFilters))){
+            // In the view by everything but its checkboxes, which are not known for this version (2.10): not judged here - as on a view that
+            // needs a search, any stale entry goes and the search rules.
+            clearOptimisticItem(noteID)
+            return false
+        } else if (!noteMatchesView(note, profile, notebooks, await getExcludedNotebookIdSet(), viewFilter, viewQuickFilters)){
             removeOptimisticItem(noteID, !!note.is_todo, viewKey, note)
         } else {
             upsertOptimisticItem(note, viewKey)
@@ -1210,6 +1306,7 @@ async function applyTypeFlipOptimistically(record){
     try {
         var profileID = await getCurrentProfileID()
         var viewFilter = notebookFilter
+        var viewQuickFilters = quickFilters
         var viewKey = viewKeyFor(profileID, viewFilter)
         var profile = await getProfile(profileID)
         if (!profile || !isLocallyEvaluableView(profile)) return false
@@ -1217,7 +1314,11 @@ async function applyTypeFlipOptimistically(record){
             // The row was the stale row of an already-trashed note: suppress it (with no record to re-judge by,
             // for the reason given in removeOptimisticItem) rather than pinning a trashed note in the panel.
             removeOptimisticItem(record.id, !!record.is_todo, viewKey)
-        } else if (noteMatchesView(record, profile, await getNotebookMap(), await getExcludedNotebookIdSet(), viewFilter)){
+        } else if (checkboxCountsUnknown(record, viewQuickFilters) && noteMatchesView(record, profile, await getNotebookMap(), await getExcludedNotebookIdSet(), viewFilter, withoutCheckboxFilter(viewQuickFilters))){
+            // In the view by everything but its checkboxes, which are not known for this version (2.10): not judged here - no entry, so the
+            // caller's ordinary repaint and the search decide.
+            return false
+        } else if (noteMatchesView(record, profile, await getNotebookMap(), await getExcludedNotebookIdSet(), viewFilter, viewQuickFilters)){
             upsertOptimisticItem(record, viewKey)
         } else {
             // The item's new type puts it outside this view (a note in a to-dos-only profile, an undated to-do
@@ -1385,10 +1486,11 @@ export async function revealNote(noteID){
     }
     // Read the note BEFORE anything is shown or changed, so an id that does not resolve leaves the panel exactly
     // as it was. The field list is the whole of what the reveal needs: where the note lives (the filter switch),
-    // which kind of row it would be and whether it is completed (the pinned peek row), and its title.
+    // which kind of row it would be and whether it is completed (the pinned peek row), and its title - and the version of it (user_updated_time),
+    // which the checkbox filters need (below).
     var note = null
     try {
-        note = await joplin.data.get(['notes', id], { fields: ['id', 'parent_id', 'is_todo', 'todo_completed', 'title'] })
+        note = await joplin.data.get(['notes', id], { fields: ['id', 'parent_id', 'is_todo', 'todo_completed', 'title', 'user_updated_time'] })
     } catch (error) {
         note = null
     }
@@ -1396,6 +1498,10 @@ export async function revealNote(noteID){
         console.warn("Cockpit: revealNote was given a note id that does not exist", id)
         return
     }
+    // With a checkbox filter released (2.10) a row is drawn only once its counts are known, and a scan still under way may not have reached this
+    // note: the steps below would take it for "not listed" and move the view, or pin it, for a row the scan was about to list. Its counts are read
+    // now, one body through the ring cache (nothing when they are known for this version), so each step judges it as the scan would.
+    if (checkboxFilterActive(quickFilters)) await readCheckboxCounts(note)
     // This reveal supersedes any earlier one, pin and flash alike.
     clearReveal()
     revealSeq++
@@ -1430,10 +1536,17 @@ export async function revealNote(noteID){
 }
 
 /** refreshPanelData ********************************************************************************************************************************
- * Displays all todos in the panel, according to the formatting specified by the profile and format. The panel is only updated when the markup has   *
+ * Displays all todos in the panel, according to the formatting specified by the profile and format. The panel is only updated when the markup has  *
  * actually changed, as replacing it resets the scroll position and any in progress interaction.                                                    *
+ *                                                                                                                                                  *
+ * Each render counts as one in flight from its entry to its end, early returns included (asOneRender, 2.10), so the checkbox scan's next pass      *
+ * never reads beside it; renderPanelData below is the render itself.                                                                               *
  ***************************************************************************************************************************************************/
- export async function refreshPanelData(options?){
+export async function refreshPanelData(options?){
+    return asOneRender(() => renderPanelData(options))
+}
+
+async function renderPanelData(options?){
     if (!panel) return
     // Instrumentation: bracket this refresh so the API calls it makes (search / GET / PUT / bodies) and its
     // wall time can be logged, gated behind instrument.ts's DEBUG (a no-op when off). The snapshot is taken
@@ -1496,6 +1609,11 @@ export async function revealNote(noteID){
     // guard rather than clobbering the newer paint. Claimed after the early no-paint returns above so those
     // do not needlessly supersede an in-flight run.
     var myGeneration = ++refreshGeneration
+    // Whether this render is still the current one (2.10): a scan's reads stop between chunks once a newer render has claimed a generation, since
+    // this one's paint would be discarded at the guard below (see the checkbox scan's continuation). Handed only to a render that scans.
+    var scanIsCurrent = () => myGeneration === refreshGeneration
+    // This render's scan pass (2.10): one time budget for the reads of both its sections, started by its first chunk (checkboxScanPassMs).
+    var scanPass = { deadline: 0 }
     // The redraw stamp (2.7): what this render is drawn from, taken before any of it is read, so a change that lands while it runs leaves the
     // stamp older than the markup and the next tick draws again - never the other way round. Taken only for a render that can finish complete:
     // not a fast paint (rings from the cache), not an optimistic one (the cached answer and the overlay). A render under way means the panel is
@@ -1525,12 +1643,16 @@ export async function revealNote(noteID){
     // it. Read live, they could disagree - the excluded-notebook read alone is a host round-trip a chip click can
     // land inside - and an entry keyed for this view would be judged by the next view's filter and dropped.
     var viewNotebookFilter = notebookFilter
+    // The quick filters (2.10), snapshotted with the notebook filter for the same reason, and whether this render runs the checkbox scan: with a
+    // checkbox filter released, the sections report the rows they could not judge yet into checkboxScan (see continueCheckboxScan).
+    var viewQuickFilters = quickFilters
+    var checkboxScan = checkboxFilterActive(viewQuickFilters) ? { unread: 0 } : null
     if (hasPendingItemOverlay()){
         var revalidationKey = viewKeyFor(profileID, viewNotebookFilter)
         if (locallyEvaluable){
             var revalidationNotebooks = await getNotebookMap()
             var revalidationExcluded = await getExcludedNotebookIdSet()
-            revalidateOptimisticInserts(revalidationKey, record => noteMatchesView(record, profile, revalidationNotebooks, revalidationExcluded, viewNotebookFilter))
+            revalidateOptimisticInserts(revalidationKey, record => noteMatchesView(record, profile, revalidationNotebooks, revalidationExcluded, viewNotebookFilter, viewQuickFilters))
         } else {
             revalidateOptimisticInserts(revalidationKey, () => false)
         }
@@ -1543,7 +1665,7 @@ export async function revealNote(noteID){
     // the row from BOTH sections for the whole index lag (the user's own type flip would look like a delete).
     // Such a view therefore keeps the row where the index still files it, exactly as before the re-check existed;
     // the two lists can never both hold it, since the index answers type:todo and type:note from one stale value.
-    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit, todoLimits: new Map(todoSectionLimits), todoBudget: todoDrawBudget, ringsChangedOnly: ringsChangedOnly }
+    var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit, todoLimits: new Map(todoSectionLimits), todoBudget: todoDrawBudget, ringsChangedOnly: ringsChangedOnly, quickFilters: viewQuickFilters, checkboxScan: checkboxScan, scanIsCurrent: checkboxScan ? scanIsCurrent : null, scanPass: checkboxScan ? scanPass : null }
     var formatter = getFormatter(profile, 'html', panelViewState)
     var todosHtml = await formatter.renderHtml()
     var notesHtml = ""
@@ -1551,6 +1673,8 @@ export async function revealNote(noteID){
         notesHtml = await renderNotesSection(profile, panelViewState)
         todosHtml = profile.notesPosition === "before" ? notesHtml + todosHtml : todosHtml + notesHtml
     }
+    // While the scan has rows left to read, one line above the list says how many are still being read (they are left out until they are).
+    if (checkboxScan && checkboxScan.unread) todosHtml = renderCheckboxScanLine(checkboxScan.unread) + todosHtml
     // Both of the view's lists have now consulted the overlay, so a suppress can be judged against the pair of
     // them and retired once neither returns the id (a single merge only ever sees half the answer). The profile's
     // own showNotes is passed on: with no notes section there is no second merge, and nothing that list could
@@ -1565,8 +1689,9 @@ export async function revealNote(noteID){
     // search run (renderOutsideResultsSection); with any visible row, or an empty search box, nothing extra runs
     // and the markup stays byte-for-byte as before. This is a pure read - no profile, notebook-picker or setting
     // is touched - and it honours the fast option, which is carried in panelViewState for the checkbox rings.
+    // A view the scan is still reading is not empty yet (2.10): the peek waits for the scan to say so.
     var outsideSearchText = String(searchFilter || "").trim()
-    var filteredViewIsEmpty = formatter.getRenderedTodoCount() === 0 && notesHtml === ""
+    var filteredViewIsEmpty = formatter.getRenderedTodoCount() === 0 && notesHtml === "" && !(checkboxScan && checkboxScan.unread)
     if (outsideSearchText && filteredViewIsEmpty){
         todosHtml += await renderOutsideResultsSection(profile, panelViewState, outsideSearchText)
     }
@@ -1634,6 +1759,13 @@ export async function revealNote(noteID){
     // taken (neither fast nor optimistic), and no ring was left unread (the per-refresh body cap, or a changed-only fill). Only then may the
     // periodic tick take it as current until one of its inputs moves.
     recordPanelRedraw(redrawnFrom && ringBodiesDeferred() === ringsDeferredBefore ? redrawnFrom : null)
+    // The checkbox scan's next batch (2.10), owed while rows are left unread - by a render that read some (the batch ran out), or by one that
+    // reads none by design (a fast paint, an optimistic repaint, a store drain's changed-only fill). A render that could read and read nothing
+    // with rows still unread has nothing it can read for them (an overlay row, which the search brings in), so it does not loop. Asked of the
+    // render that is still current, before the equality guard, so an unchanged repaint goes on scanning too. Any other current render ends
+    // whatever pass an older one left pending: its view has nothing more to read, or is not scanning at all.
+    if (checkboxScan && checkboxScan.unread && (snapshot().bodies > instrumentBefore.bodies || fast || optimistic || !!ringsChangedOnly)) scheduleCheckboxScan(myGeneration)
+    else cancelCheckboxScan()
     // The equality guard compares content only: the scroll-top and render-nonce placeholders are still
     // present here and are filled in below. Comparing before they are stamped keeps the guard working -
     // otherwise the ever-incrementing nonce would defeat it, forcing a setHtml (a full webview reload on
@@ -1661,8 +1793,88 @@ export async function revealNote(noteID){
  ***************************************************************************************************************************************************/
 async function refreshPanelFastThenFill(options?){
     var base = options || {}
-    await refreshPanelData({ ...base, fast: true })
-    await refreshPanelData({ ...base, fillCounts: true })
+    // One render as far as the checkbox scan is concerned (asOneRender): a pass the fast paint owes waits for the fill, which reads that batch itself.
+    await asOneRender(async () => {
+        await refreshPanelData({ ...base, fast: true })
+        await refreshPanelData({ ...base, fillCounts: true })
+    })
+}
+
+/** The checkbox scan's continuation (2.10) *********************************************************************************************************
+ * With a checkbox filter released, a row can only be drawn once its body has been read, and a render reads bodies for at most one pass's time      *
+ * budget before it paints (checkboxScanPassMs in joplin.ts, shared by its two sections through scanPass in the view state). The rest is read by    *
+ * continuation passes the host schedules itself, one after another, each a fill render: it reuses the list the render before it fetched (no        *
+ * search, no listing), reads for the next budget, and repaints - which the equality guard turns into nothing when the pass changed nothing on      *
+ * screen. The periodic tick would get there too, but only once per refresh interval (60 s by default).                                             *
+ *                                                                                                                                                  *
+ * A pass is scheduled on a zero timer by the render that left rows unread (refreshPanelData decides when one is owed), and it carries that         *
+ * render's refreshGeneration: by the time it fires, any newer render - a profile switch, a notebook or search change, a filter toggle, a tick -    *
+ * has claimed a newer one, and the pass is dropped. That newer render schedules a pass of its own if its view still has rows to read, so the scan  *
+ * follows the view it is for and never outlives it. One timer at most is pending (a new one replaces it). Nothing is scheduled, held or listened   *
+ * to while no checkbox filter is released, and the scan ends when no unread row is left.                                                           *
+ *                                                                                                                                                  *
+ * A pass never reads beside a render. The timer is armed before the render that armed it paints, and in Joplin a zero timer fires during any host  *
+ * round-trip - that render's setHtml, the panels.visible of the fill that follows a fast paint - before the next render has claimed its            *
+ * generation, so the generation alone cannot keep the two from reading the same rows. So every render is counted from its entry to its end         *
+ * (panelRendersInFlight, through asOneRender), and so is a sequence of renders that belong together: a fast paint and its fill                     *
+ * (refreshPanelFastThenFill, renderStoreChange, showOwnWrite), the startup's fast paint, overview pass and fill (refreshInterfaces), a profile     *
+ * switch's paints and its truth refresh (switchToProfile). A pass that fires while any is in flight leaves itself owed, and the last one out       *
+ * re-arms it if its generation is still current; otherwise the render that superseded it has decided for itself. And a pass already reading when a *
+ * newer render starts stops between chunks of 20 (scanIsCurrent, handed to attachCheckboxCounts in joplin.ts through the view state), since its    *
+ * paint would be discarded: at most the chunk in flight is read after the view changed.                                                            *
+ ***************************************************************************************************************************************************/
+var checkboxScanTimer = null
+var checkboxScanOwed = 0
+var panelRendersInFlight = 0
+
+/** asOneRender (2.10) ******************************************************************************************************************************
+ * Runs work - one render, or a sequence of them that belongs together - as one render in flight for the checkbox scan (see above), and re-arms the  *
+ * pass owed meanwhile once nothing is in flight any more. Returns what work returns.                                                               *
+ ***************************************************************************************************************************************************/
+export async function asOneRender(work){
+    panelRendersInFlight++
+    try {
+        return await work()
+    } finally {
+        panelRendersInFlight--
+        if (!panelRendersInFlight) rearmOwedCheckboxScan()
+    }
+}
+
+function cancelCheckboxScan(){
+    checkboxScanOwed = 0
+    if (!checkboxScanTimer) return
+    clearTimeout(checkboxScanTimer)
+    checkboxScanTimer = null
+}
+
+function scheduleCheckboxScan(generation){
+    cancelCheckboxScan()
+    // The callback returns the promise so the pass is awaitable (harnessable); setTimeout ignores it.
+    checkboxScanTimer = setTimeout(() => {
+        checkboxScanTimer = null
+        return continueCheckboxScan(generation)
+    }, 0)
+}
+
+async function continueCheckboxScan(generation){
+    if (generation !== refreshGeneration) return
+    if (panelRendersInFlight){
+        checkboxScanOwed = generation
+        return
+    }
+    try {
+        await refreshPanelData({ fillCounts: true })
+    } catch (error) {
+        console.warn("Cockpit: could not read the checkboxes of the next batch", error)
+    }
+}
+
+// The last render out: a pass owed while renders were in flight runs now, on a zero timer of its own, unless a newer render has claimed the view.
+function rearmOwedCheckboxScan(){
+    var owed = checkboxScanOwed
+    checkboxScanOwed = 0
+    if (owed && owed === refreshGeneration) scheduleCheckboxScan(owed)
 }
 
 /** syncButtonTooltip *******************************************************************************************************************************
@@ -1684,8 +1896,8 @@ function syncButtonTooltip(sync){
 }
 
 /** getControlsHTML *********************************************************************************************************************************
- * The three control rows at the top of the panel: the profile picker with the create buttons, the notebook filter with the sort and synchronize      *
- * buttons, and the search field. Profile management lives inside the profile dropdown as its last entries.                                          *
+ * The three control rows at the top of the panel: the profile picker with the create buttons, the notebook filter with the quick filters and the   *
+ * synchronize button, and the search field. Profile management lives inside the profile dropdown as its last entries.                              *
  ***************************************************************************************************************************************************/
 async function getControlsHTML(currentProfileID){
     // The notebook filter offers every notebook, not only the ones the current to-dos live in, so a
@@ -1748,8 +1960,7 @@ async function getControlsHTML(currentProfileID){
         </section>
         <section id="filterRow">
             ${getNotebookDropdownHTML(notebooks)}
-            ${getSortDropdownHTML()}
-            ${iconButton(sortDirection === "desc" ? "arrowDown" : "arrowUp", `Sort direction: ${sortDirection === "desc" ? "descending" : "ascending"}`, "onSortDirectionClicked()")}
+            ${getQuickFiltersHTML()}
             ${syncButton}
         </section>
         <section id="searchRow">
@@ -1802,7 +2013,7 @@ function getProfileDropdownHTML(profiles, currentProfileID){
         </div>
     `
     if (!modified) return dropdownHTML("profileMenu", currentName, itemsHtml)
-    var modifiedTitle = `${escapeHtml(currentName)}*&#10;The notebook, search or sorting changed since the profile was selected&#10;Pick it again to drop the changes, or save the view into it`
+    var modifiedTitle = `${escapeHtml(currentName)}*&#10;The notebook, search or filters changed since the profile was selected&#10;Pick it again to drop the changes, or save the view into it`
     return dropdownHTML("profileMenu", currentName, itemsHtml, "*", modifiedTitle)
 }
 
@@ -1847,24 +2058,23 @@ function getNotebookDropdownHTML(notebooks){
     return dropdownHTML("notebookMenu", currentLabel, itemsHtml)
 }
 
-/** getSortDropdownHTML *****************************************************************************************************************************
- * The sorting picker: its face shows the current sort field, and pressing it lists the choices with the current one highlighted                     *
+/** getQuickFiltersHTML (2.10) **********************************************************************************************************************
+ * The quick-filter group that took the sort picker's place in the second header row: a segmented control of four square buttons (panel.css draws   *
+ * the pill and the hairlines), one per QUICK_FILTERS entry. aria-pressed carries the state, and the tooltip is two lines in the rows' &#10; shape: *
+ * what the button governs and whether it is shown, then what a click does. A press posts quickFilterToggled with the button's name                 *
+ * (onQuickFilterClicked in panelWebview.js). Static labels only, so nothing here needs escaping.                                                   *
  ***************************************************************************************************************************************************/
-function getSortDropdownHTML(){
-    var itemsHtml = ""
-    for (var field of sortFieldCycle){
-        itemsHtml += `
-            <div class="dropdown-item${field === sortField ? " -current" : ""}" onclick="onDropdownItemClicked(event, 'sortFieldSelected', '${field}')">
-                <span class="dropdown-label">${sortFieldLabels[field]}</span>
-            </div>
-        `
-    }
+function getQuickFiltersHTML(){
+    var buttons = QUICK_FILTERS.map(filter => {
+        var pressed = !!quickFilters[filter.name]
+        var title = `${filter.label}: ${pressed ? "shown" : "hidden"}&#10;Click to ${pressed ? "hide" : "show"} them`
+        return `
+                <button type="button" class="quick-filter" data-filter="${filter.name}" aria-pressed="${pressed ? "true" : "false"}"
+                    aria-label="${filter.label}" title="${title}"
+                    onclick="onQuickFilterClicked('${filter.name}')">${icons[filter.icon]}</button>`
+    }).join("")
     return `
-        <div class="dropdown -compact">
-            <button type="button" class="dropdown-toggle" title="How items sharing a due time are sorted" onclick="onDropdownToggle(event, 'sortMenu')">
-                ${icons["sort"]}<span class="dropdown-toggle-label">${sortFieldLabels[sortField] || "Title"}</span>
-            </button>
-            <div class="dropdown-menu" id="sortMenu" hidden>${itemsHtml}</div>
+        <div id="quickFilters" class="quick-filters" role="group" aria-label="Quick filters">${buttons}
         </div>
     `
 }

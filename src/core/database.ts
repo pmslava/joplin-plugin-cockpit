@@ -39,6 +39,11 @@ const profileDefaults = {
     showCompletedToday: true,
     showCompletedFuture: true,
     showCompletedNoDue: true,
+    // The quick filters on the checkboxes inside an item (2.10): items with open checkboxes, items whose checkboxes are all done, items
+    // without any. All three shown is "not filtered", so a profile stored before they existed gets them as true and behaves as it did.
+    showOpenCheckboxes: true,
+    showDoneCheckboxes: true,
+    showNoCheckboxes: true,
     showNoDue: true,
     // Regular notes can be listed alongside the to-dos, in their own group before or after them
     showNotes: true,

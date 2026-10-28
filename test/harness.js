@@ -435,6 +435,13 @@ function makeJoplin(options) {
                         // test can flip what the simulated index returns between renders - the index lag a type
                         // change lives in.
                         const noteItems = typeof options.searchNotes === 'function' ? (options.searchNotes(q) || []) : (options.searchNotes || [])
+                        // `noteSearchPageSize` pages the answer the way the real route does (in the fixture's own order, which a test gives newest
+                        // first), so a check can count how far the Notes section pages a search (the checkbox filters' bound, 2.10).
+                        if (options.noteSearchPageSize) {
+                            const size = options.noteSearchPageSize
+                            const notePage = Math.max(1, Number((query && query.page) || 1))
+                            return { items: typedItems(noteItems.slice((notePage - 1) * size, notePage * size), false), has_more: notePage * size < noteItems.length }
+                        }
                         return { items: typedItems(noteItems, false), has_more: false }
                     }
                     // An any:1 search is ALSO type-less: the plugin deliberately keeps its own type:/iscompleted:/

@@ -5,7 +5,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getTodos, getNotes, getExcludedNotebookIdSet, getNotebookMap, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks, viewCriteria } from "./joplin";
+import { checkboxCategoryShown, getTodos, getNotes, getExcludedNotebookIdSet, getNotebookMap, knownCheckboxCounts, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks, viewCriteria } from "./joplin";
 import { viewKeyFor } from "./optimistic";
 import { countGroupingPass } from "./instrument";
 import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
@@ -86,6 +86,94 @@ function sameItems(first, second){
  ***************************************************************************************************************************************************/
 function formatCount(value){
     return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+}
+
+/** Quick filters (2.10) ****************************************************************************************************************************
+ * The header's four one-press filters (panel.ts holds them, applied from the profile), as the view state carries them: { completedTodos,           *
+ * openCheckboxes, doneCheckboxes, noCheckboxes }, each true while its button is pressed. The overview notes carry none (null): they are drawn from *
+ * the profile alone.                                                                                                                               *
+ *                                                                                                                                                  *
+ * completedSwitches is the ONE place the completed-to-do narrowing reads its four period switches from - fetchTodos, narrowTodos and the           *
+ * optimistic layer's noteMatchesView in panel.ts - never the raw profile. With the completed button released all four are off; pressed, they are   *
+ * the profile's own, or all four on when the profile has none on (the button is drawn pressed when any is, so pressing it on such a profile means  *
+ * "show them"). Without quick filters (the overview notes) they are the profile's own.                                                             *
+ *                                                                                                                                                  *
+ * checkboxFilterActive says whether any of the three checkbox buttons is released. Every item is in exactly one of the three categories, so with   *
+ * all three pressed nothing is filtered, no body is read for the filter, and the render takes exactly the path it took before 2.10.                *
+ ***************************************************************************************************************************************************/
+export function completedSwitches(profile, quickFilters?){
+    var own = { past: !!profile.showCompletedPast, today: !!profile.showCompletedToday, future: !!profile.showCompletedFuture, nodue: !!profile.showCompletedNoDue }
+    if (!quickFilters) return own
+    if (!quickFilters.completedTodos) return { past: false, today: false, future: false, nodue: false }
+    if (own.past || own.today || own.future || own.nodue) return own
+    return { past: true, today: true, future: true, nodue: true }
+}
+
+export function checkboxFilterActive(quickFilters){
+    return !!quickFilters && !(quickFilters.openCheckboxes && quickFilters.doneCheckboxes && quickFilters.noCheckboxes)
+}
+
+/** checkboxFilterShowsNothing / scanOptions (2.10) *************************************************************************************************
+ * checkboxFilterShowsNothing: all three checkbox buttons released. No item is in none of the three categories, so the view is empty whatever the   *
+ * bodies say, and nothing is read for it: the sections still run their query (the overlay's two merges must see both lists, see finalizeOverlay in *
+ * optimistic.ts), but as an ordinary render rather than a scan, with every row skipped, and they draw nothing and leave nothing unread.            *
+ *                                                                                                                                                  *
+ * scanOptions: what a section hands getTodos / getNotes about the scan - whether this render runs one (a checkbox filter released that can show    *
+ * something), the check that stops its reads between chunks once a newer render has superseded it (scanIsCurrent in panel.ts, in the view state),  *
+ * and the render's pass (scanPass, likewise), whose one time budget both sections read under (checkboxScanPassMs in joplin.ts). Without a checkbox *
+ * filter all three are off and the reads are the ones they were before 2.10.                                                                       *
+ ***************************************************************************************************************************************************/
+export function checkboxFilterShowsNothing(quickFilters){
+    return !!quickFilters && !quickFilters.openCheckboxes && !quickFilters.doneCheckboxes && !quickFilters.noCheckboxes
+}
+
+function scanOptions(viewState, quickFilters){
+    var scan = checkboxFilterActive(quickFilters) && !checkboxFilterShowsNothing(quickFilters)
+    return {
+        scan: scan,
+        scanIsCurrent: scan && viewState && typeof viewState.scanIsCurrent === "function" ? viewState.scanIsCurrent : null,
+        scanPass: scan && viewState && viewState.scanPass ? viewState.scanPass : null,
+    }
+}
+
+// The skip list of a render that can show nothing: every row.
+function everyRowId(items){
+    return new Set(items.map(item => item.id))
+}
+
+/** judgeCheckboxRows (2.10) ************************************************************************************************************************
+ * The checkbox filter itself, applied to a narrowed list once its counts are attached and before any drawing cap: the rows whose category is       *
+ * shown, and how many rows are UNREAD - never counted, so they cannot be judged. An unread row is left out of the paint and counted, and the scan  *
+ * reads it (see continueCheckboxScan in panel.ts). The counts are taken from the ring cache rather than from the row, so a row served from a       *
+ * result cached before its body was read is judged - and its ring drawn - by what is known now.                                                    *
+ ***************************************************************************************************************************************************/
+function judgeCheckboxRows(items, quickFilters){
+    var shown = []
+    var unread = 0
+    for (var item of items){
+        var known = knownCheckboxCounts(item.id)
+        if (!known){
+            unread++
+            continue
+        }
+        item.checkboxDone = known.done
+        item.checkboxTotal = known.total
+        if (checkboxCategoryShown(quickFilters, known)) shown.push(item)
+    }
+    return { shown: shown, unread: unread }
+}
+
+// What a section reports to the render that asked it (viewState.checkboxScan, set by panel.ts while a checkbox filter is released).
+function reportUnread(viewState, unread){
+    var scan = viewState ? viewState.checkboxScan : null
+    if (scan) scan.unread += unread
+}
+
+/** renderCheckboxScanLine (2.10) *******************************************************************************************************************
+ * The status line drawn above the list while a scan has rows left to read, in the footers' shape (p.notes-more-message), counted with formatCount. *
+ ***************************************************************************************************************************************************/
+export function renderCheckboxScanLine(unread){
+    return `<p class="notes-more-message" id="checkboxScan">Reading the checkboxes inside ${formatCount(unread)} note${unread === 1 ? "" : "s"}…</p>`
 }
 
 /** renderTodoCapFooter (2.7.1) *********************************************************************************************************************
@@ -494,12 +582,19 @@ abstract class BaseFormat {
         if (filterNotebook && filterNotebook.title && !filterNotebook.title.includes('"')){
             searchCriteria = `${searchCriteria} notebook:"${filterNotebook.title}"`
         }
-        var showAnyCompleted = this.profile.showCompletedPast || this.profile.showCompletedToday || this.profile.showCompletedFuture || this.profile.showCompletedNoDue
+        // The completed switches this render narrows by (completedSwitches: the quick filter over the profile's own), and the checkbox filter.
+        // The overview markdown carries no quick filters, so it reads the profile's switches and is never checkbox-filtered.
+        var isMarkdown = (this as any).outputFormat === 'markdown'
+        var quickFilters = !isMarkdown && this.viewState ? (this.viewState as any).quickFilters || null : null
+        var switches = completedSwitches(this.profile, quickFilters)
+        var showAnyCompleted = switches.past || switches.today || switches.future || switches.nodue
+        var checkboxFilter = checkboxFilterActive(quickFilters)
+        var showsNothing = checkboxFilterShowsNothing(quickFilters)
+        var scanning = scanOptions(this.viewState, quickFilters)
         // The overview-note markdown never renders checkbox rings (getTodoString emits a plain "- [ ] [title]"
         // list), so generating it must NOT fetch a single note body. Forcing fast here cuts that dependency:
         // the whole refreshNoteData pass - one search per profile with a noteID - fetches zero bodies. On the
         // panel (html) fast is driven by the view state instead, so the first paint skips the bodies too.
-        var isMarkdown = (this as any).outputFormat === 'markdown'
         var fast = isMarkdown ? true : (this.viewState ? !!(this.viewState as any).fastCheckboxCounts : false)
         // Optimistic re-render: reuse the last search for this query and layer the host-held overlay on top,
         // so a just-ticked / just-created item shows without another round-trip. Off for ordinary refreshes.
@@ -520,29 +615,51 @@ abstract class BaseFormat {
         // The rows the panel's drawing cap will leave out (2.7.1), asked by the ring fill of the list it is about to read bodies for: narrowed here as
         // below and grouped as the drawing groups it, so a ring nobody sees is neither read nor owed, and the viewport index counts drawn rows. The
         // markdown output draws nothing and reads no body, so it asks nothing.
-        var undrawn = isMarkdown ? null : (fetched) => this.undrawnTodoIds(this.narrowTodos(fetched, notebooks, notebookFilter, showAnyCompleted))
-        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows, storeView: storeView, ringsChangedOnly: ringsChangedOnly, undrawn: undrawn })
-        todos = this.narrowTodos(todos, notebooks, notebookFilter, showAnyCompleted)
+        // With a checkbox filter released (2.10) the cap cannot be computed before the filter, so nothing drawable is skipped: the scan reads every
+        // candidate, and the rows skipped are the ones the narrowing below drops before the filter is asked (a completed bucket switched off, a
+        // same-titled notebook the query's notebook: clause let through).
+        // All three checkbox buttons released (checkboxFilterShowsNothing): every row is skipped, so nothing is read.
+        var undrawn = isMarkdown ? null
+            : showsNothing ? everyRowId
+            : checkboxFilter ? (fetched) => this.nonCandidateTodoIds(fetched, notebooks, notebookFilter, switches)
+            : (fetched) => this.undrawnTodoIds(this.narrowTodos(fetched, notebooks, notebookFilter, switches))
+        var todos = await getTodos(showAnyCompleted, this.profile.showNoDue, searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: priorityStart, viewKey: viewKey, keepMistypedRows: keepMistypedRows, storeView: storeView, ringsChangedOnly: ringsChangedOnly, undrawn: undrawn, scan: scanning.scan, scanIsCurrent: scanning.scanIsCurrent, scanPass: scanning.scanPass })
+        todos = this.narrowTodos(todos, notebooks, notebookFilter, switches)
+        // The checkbox filter, after the counts are attached and before any drawing cap, so the cap, the footers and the calendars' "+N" count
+        // the filtered list. Every format draws the list this returns, the calendars included.
+        if (showsNothing){
+            todos = []
+        } else if (checkboxFilter){
+            var judged = judgeCheckboxRows(todos, quickFilters)
+            todos = judged.shown
+            reportUnread(this.viewState, judged.unread)
+        }
         // Record the fully-filtered set so the panel can detect an empty view (the outside-results trigger)
         // without re-running the query. Kept here, the single choke point every renderHtml path passes through.
         this.lastFetchedTodos = todos
         return todos
     }
 
+    /** nonCandidateTodoIds (2.10) ******************************************************************************************************************
+     * The scan's skip list: the ids of the fetched to-dos the narrowing drops before the checkbox filter is asked, so no body is read for a row    *
+     * that could not be drawn whatever its checkboxes say.                                                                                         *
+     ***********************************************************************************************************************************************/
+    private nonCandidateTodoIds(fetched, notebooks, notebookFilter, switches){
+        var kept = new Set(this.narrowTodos(fetched, notebooks, notebookFilter, switches).map(todo => todo.id))
+        return new Set(fetched.filter(todo => !kept.has(todo.id)).map(todo => todo.id))
+    }
+
     /** narrowTodos *********************************************************************************************************************************
      * What fetchTodos does to the list the fetch returns before anyone draws it: the completed switches by bucket, the notebook pill's title and   *
      * path, the notebook filter (sub-notebooks included) and the panel's sort. One function, so the ring fill's question about which rows the cap  *
-     * leaves out (undrawnTodoIds) is asked of the same list the drawing gets.                                                                      *
+     * leaves out (undrawnTodoIds) is asked of the same list the drawing gets. switches are completedSwitches' answer (2.10). The checkbox filter   *
+     * is not part of it: it needs the counts, so fetchTodos applies it afterwards.                                                                 *
      ***********************************************************************************************************************************************/
-    private narrowTodos(todos, notebooks, notebookFilter, showAnyCompleted){
-        if (showAnyCompleted){
+    private narrowTodos(todos, notebooks, notebookFilter, switches){
+        if (switches.past || switches.today || switches.future || switches.nodue){
             todos = todos.filter(todo => {
                 if (!todo.todo_completed) return true
-                var bucket = this.getCompletedBucket(todo)
-                if (bucket == "nodue") return this.profile.showCompletedNoDue
-                if (bucket == "past") return this.profile.showCompletedPast
-                if (bucket == "today") return this.profile.showCompletedToday
-                return this.profile.showCompletedFuture
+                return switches[this.getCompletedBucket(todo)]
             })
         }
         for (var todo of todos){
@@ -1061,8 +1178,8 @@ class WeekFormat extends DateFormat {
 }
 
 /** itemComparator **********************************************************************************************************************************
- * The comparator behind the panel's sort button. It orders items sharing a due time - and the notes group - by title, updated time or created time, *
- * ascending or descending.                                                                                                                         *
+ * The comparator behind the profile's sorting (set in the profile editor; the header's picker gave its place to the quick filters in 2.10). It     *
+ * orders items sharing a due time - and the notes group - by title, updated time or created time, ascending or descending.                         *
  ***************************************************************************************************************************************************/
 export function itemComparator(sort){
     var field = sort && sort.field ? sort.field : "title"
@@ -1111,7 +1228,14 @@ export async function renderNotesSection(profile, viewState){
     var listingNotebooks = viewState && viewState.notebookFilter && !(sectionFilterNotebook && sectionFilterNotebook.title && !sectionFilterNotebook.title.includes('"'))
         ? { key: viewState.notebookFilter, ids: notebookWithDescendants(notebooks, viewState.notebookFilter) }
         : null
-    var fetched = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks, storeView: storeView, ringsChangedOnly: viewState ? viewState.ringsChangedOnly || null : null })
+    // A checkbox filter released (2.10): the section reads its candidates rather than the newest notesLimit (see getNotes), and the filter is
+    // applied below, before the limit, so the limit and its footer count the notes that pass.
+    // All three released (checkboxFilterShowsNothing): an ordinary capped read with every row skipped, so nothing is read and nothing is drawn.
+    var quickFilters = viewState ? viewState.quickFilters || null : null
+    var checkboxFilter = checkboxFilterActive(quickFilters)
+    var showsNothing = checkboxFilterShowsNothing(quickFilters)
+    var scanning = scanOptions(viewState, quickFilters)
+    var fetched = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks, storeView: storeView, ringsChangedOnly: viewState ? viewState.ringsChangedOnly || null : null, scan: scanning.scan, scanFilters: scanning.scan ? quickFilters : null, scanIsCurrent: scanning.scanIsCurrent, scanPass: scanning.scanPass, undrawn: showsNothing ? everyRowId : null })
     var notes = fetched.notes
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
@@ -1123,19 +1247,41 @@ export async function renderNotesSection(profile, viewState){
         var allowedNotebooks = notebookWithDescendants(notebooks, notebookFilter)
         notes = notes.filter(note => allowedNotebooks.has(note.parent_id))
     }
+    var more = fetched.more
+    if (showsNothing){
+        notes = []
+        more = false
+    } else if (checkboxFilter){
+        var judged = judgeCheckboxRows(notes, quickFilters)
+        reportUnread(viewState, judged.unread)
+        // The limit keeps the most recently updated of the notes that pass, in the order the store and the listing keep them (newest first, then
+        // the id descending), and anything past it is "more" - as is whatever the search's bound left unread (fetched.more).
+        notes = judged.shown.sort((first, second) => (second.user_updated_time - first.user_updated_time) || (first.id < second.id ? 1 : first.id > second.id ? -1 : 0))
+        if (notesLimit && notes.length > notesLimit){
+            more = true
+            notes = notes.slice(0, notesLimit)
+        }
+    }
     if (viewState && viewState.sort){
         notes.sort(itemComparator(viewState.sort))
     }
-    if (!notes.length) return ""
+    // A search cut short by the scan's bound before any of its notes passed still has more to offer (2.10): the section is drawn with its footer
+    // alone, so "show more" can raise the bound, and the view is not empty to the "Results outside current filters" peek, which reads this "".
+    var footerOnly = !notes.length && checkboxFilter && more
+    if (!notes.length && !footerOnly) return ""
     // The row markup lives in the shared renderNoteRowHtml so the read-only "results outside current filters"
     // peek can reuse it for its note items. isMobile is carried in the view state (see panel.ts) and drops the
     // desktop-only hover action hints (a note's progress ring is display-only, so only its title and notebook
     // pill carry action lines); selectable stays true here so ordinary Notes-section rows are unchanged.
     var mobile = !!(viewState && viewState.isMobile)
     var rows = notes.map(note => renderNoteRowHtml(note, { mobile: mobile })).join("")
-    // A capped section says so, and offers the next batch; search and the notebook filter reach any note directly.
-    var moreFooter = fetched.more
-        ? `<p class="notes-more-message">Showing the ${formatCount(notesLimit)} most recently updated notes. Search or pick a notebook to find others, or
+    // A capped section says so, and offers the next batch; search and the notebook filter reach any note directly. Under a checkbox filter the
+    // count is what is shown: a search cut by its bound can leave fewer notes than the limit on screen.
+    var moreFooter = footerOnly
+        ? `<p class="notes-more-message">None of the most recently updated notes passes the filters. Search or pick a notebook to find others, or
+            <button type="button" class="notes-more-button" onclick="onShowMoreNotesClicked()">show more</button></p>`
+        : more
+        ? `<p class="notes-more-message">Showing the ${formatCount(checkboxFilter ? notes.length : notesLimit)} most recently updated notes. Search or pick a notebook to find others, or
             <button type="button" class="notes-more-button" onclick="onShowMoreNotesClicked()">show more</button></p>`
         : ""
     return `

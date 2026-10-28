@@ -5056,8 +5056,8 @@ async function main() {
             'finalizeOverlay must key off panelViewState.notebookFilter - the value the two merges used')
         // The judgement itself takes the filter as a parameter, so no caller can accidentally judge one view's
         // entries by another view's filter across an await.
-        assert.ok(panelSource.includes('function noteMatchesView(record, profile, notebooks, excludedSet, filter){'),
-            'noteMatchesView must take the notebook filter, not read the module-level one')
+        assert.ok(panelSource.includes('function noteMatchesView(record, profile, notebooks, excludedSet, filter, viewFilters){'),
+            'noteMatchesView must take the notebook filter (and, since 2.10, the quick filters), not read the module-level ones')
         assert.ok(!/^\s*if \(notebookFilter\)\{/m.test(panelSource),
             'and nothing in the judgement may read the live notebookFilter')
     })
@@ -7392,9 +7392,9 @@ async function main() {
     const panelOf = (state) => state.panelHtml['panel-panel']
     // Which notebook the panel's own dropdown says is current, as the id it would filter by ("" for the
     // "All notebooks" row). Read from the -current row of the notebook menu itself (the profile dropdown above it
-    // marks a -current row of its own, and the sort menu below it another).
+    // marks a -current row of its own), up to the quick-filter group that follows it in the row (2.10).
     const currentNotebookID = (html) => {
-        const menu = html.slice(html.indexOf('id="notebookMenu"'), html.indexOf('id="sortMenu"'))
+        const menu = html.slice(html.indexOf('id="notebookMenu"'), html.indexOf('id="quickFilters"'))
         const at = menu.indexOf('dropdown-item -current')
         if (at < 0) return null
         const row = menu.slice(at, menu.indexOf('</div>', at))
@@ -14469,7 +14469,9 @@ async function main() {
             assert.ok(!webviewSource.includes(name), `${name} is gone from panelWebview.js`)
         }
         const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
-        assert.ok(panelSource.includes("message[0] == 'sortFieldSelected'") && webviewSource.includes("'sortFieldSelected'"), 'the sort field is still chosen through its menu')
+        // 2.10 took the sort picker out of the header: the host still answers the message (a benign re-render the suites post), and no control posts it.
+        assert.ok(panelSource.includes("message[0] == 'sortFieldSelected'"), 'the host still answers sortFieldSelected')
+        assert.ok(!webviewSource.includes("'sortFieldSelected'") && !panelSource.includes("onDropdownItemClicked(event, 'sortFieldSelected'"), 'and nothing posts it any more')
         for (const message of ['createProfileClicked', 'editProfileClicked', 'deleteProfileClicked']){
             assert.ok(new RegExp(`onDropdown(?:Action|Item)Clicked\\(event, '${message}'`).test(panelSource), `${message} is still posted by the profile menu`)
             assert.ok(panelSource.includes(`message[0] == '${message}'`), `and still handled`)
@@ -15052,16 +15054,19 @@ async function main() {
         return JSON.parse(decodeURI(atob(value)))
     }
     const encodeFormProfile = (profile) => btoa(encodeURI(JSON.stringify(profile)))
-    // What the panel's header says right now: the profile, notebook and sort field marked current, the search field's text, the direction.
-    const viewHeaderOf = (state) => {
+    // What the panel's header says right now: the profile and notebook marked current and the search field's text. Since 2.10 the header no
+    // longer draws the sorting, so the sort field and direction the view is drawn with are read back from the one place the host still hands
+    // them out - the "+ New profile…" seed (getEditorInitial with no id, a read that changes nothing).
+    const viewHeaderOf = async (state) => {
         const html = String(state.panelHtml['panel-panel'] || '')
         const pick = (re) => (html.match(re) || [])[1]
+        const seed = (await state.panelMessageHandler(['getEditorInitial', null])).profile
         return {
             profile: pick(/class="dropdown-item -current" onclick="onDropdownItemClicked\(event, 'profilesDropdownChanged', '([^']*)'\)"/),
             notebook: pick(/class="dropdown-item -current" data-notebook-row onclick="onDropdownItemClicked\(event, 'notebookFilterChanged', '([^']*)'\)"/) || '',
             panelSearch: pick(/id="searchFilter"[^>]*?value="([^"]*)"/),
-            sortField: pick(/class="dropdown-item -current" onclick="onDropdownItemClicked\(event, 'sortFieldSelected', '([^']*)'\)"/),
-            sortDirection: html.includes('Sort direction: descending') ? 'desc' : 'asc',
+            sortField: seed.sortField,
+            sortDirection: seed.sortDirection,
         }
     }
     const profileWrites = (state, mark) => state.settingWrites.slice(mark).filter(write => write.key === 'profileData' || write.key === 'currentProfileID')
@@ -15070,7 +15075,7 @@ async function main() {
     await test('new profile from the view (desktop): the dialog opens on the current profile with the live header on top - no id, "New Profile", no overview note', async () => {
         const state = await viewRun('desktop')
         await driveViewHeader(state)
-        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', ...liveHeader }, 'the header shows the view the checks set up')
+        assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', ...liveHeader }, 'the header shows the view the checks set up')
         await state.panelMessageHandler(['createProfileClicked'])
         const seed = editorFormProfile(state)
         assert.ok(!('id' in seed), 'the seed is not a stored profile')
@@ -15098,7 +15103,7 @@ async function main() {
         assert.deepStrictEqual(profileWrites(state, writes), [], 'no profile and no current-profile write')
         assert.strictEqual(storedViewProfiles(state).length, 2, 'no profile created')
         assert.strictEqual(state.settings.currentProfileID, 1, 'the current profile is unchanged')
-        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', ...liveHeader }, 'and so is the header')
+        assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', ...liveHeader }, 'and so is the header')
         await state.panelMessageHandler(['createProfileClicked'])
         assert.deepStrictEqual(editorFormProfile(state), expectedSeed(state), 'a second open still starts from the same view')
     })
@@ -15122,7 +15127,7 @@ async function main() {
         const { id, ...createdFields } = created
         assert.deepStrictEqual(createdFields, { ...expectedSeed(state), name: 'Saved view' }, 'holding the view it was made from')
         assert.strictEqual(state.settings.currentProfileID, 3, 'the new profile is the current one')
-        assert.deepStrictEqual(viewHeaderOf(state), { profile: '3', ...liveHeader }, 'the dropdown names it, and the header still shows the same view')
+        assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '3', ...liveHeader }, 'the dropdown names it, and the header still shows the same view')
         assert.strictEqual(profiles.find(profile => profile.id === 1).noteID, viewOverview, 'the source keeps its overview note')
     })
 
@@ -15175,7 +15180,7 @@ async function main() {
         assert.strictEqual(storedViewProfiles(state).length, 2, 'a save creates nothing')
         assert.strictEqual(storedViewProfiles(state).find(profile => profile.id === 2).name, 'Other renamed', 'it saves the edited profile')
         assert.strictEqual(state.settings.currentProfileID, 1, 'and does not switch to it')
-        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', ...liveHeader }, 'the header is left as it was')
+        assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', ...liveHeader }, 'the header is left as it was')
     })
 
     // -- mobile -----------------------------------------------------------------------------------------------
@@ -15211,7 +15216,7 @@ async function main() {
         assert.strictEqual(id, 3)
         assert.deepStrictEqual(createdFields, { ...expectedSeed(state), name: 'Phone view' }, 'holding the view it was made from')
         assert.strictEqual(state.settings.currentProfileID, 3, 'and it is the current profile')
-        assert.strictEqual(viewHeaderOf(state).profile, '3', 'the dropdown names it')
+        assert.strictEqual((await viewHeaderOf(state)).profile, '3', 'the dropdown names it')
         const after = await state.panelMessageHandler(['getEditorInitial', null])
         assert.deepStrictEqual([after.profile.notebook, after.profile.panelSearch, after.profile.sortField, after.profile.sortDirection], [viewWork, 'milk', 'updated', 'desc'], 'the header still shows the view it was made from')
         // A save (an id) is today's path: it stores the edit and switches nothing.
@@ -15329,7 +15334,7 @@ async function main() {
             },
         })
     }
-    const MARK_TOOLTIP_TAIL = '*&#10;The notebook, search or sorting changed since the profile was selected&#10;Pick it again to drop the changes, or save the view into it'
+    const MARK_TOOLTIP_TAIL = '*&#10;The notebook, search or filters changed since the profile was selected&#10;Pick it again to drop the changes, or save the view into it'
     // The profile picker as drawn: the toggle's label, its mark, its title (null when it has none), and the rows' labels.
     const profilePickerOf = (state) => {
         const html = String(state.panelHtml['panel-panel'] || '')
@@ -15425,7 +15430,7 @@ async function main() {
         assert.strictEqual(pickerShows(state), 'Lab*')
         await state.panelMessageHandler(['editProfileClicked', 1])   // the stub's default answer is Cancel
         assert.strictEqual(pickerShows(state), 'Lab*', 'a Cancel re-applies nothing: still marked')
-        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: 'bread', sortField: 'title', sortDirection: 'asc' }, 'and the live view is the one the user had')
+        assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', notebook: viewWork, panelSearch: 'bread', sortField: 'title', sortDirection: 'asc' }, 'and the live view is the one the user had')
         state.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...editorFormProfile(state), name: 'Lab edited' }) } } }
         try {
             await state.panelMessageHandler(['editProfileClicked', 1])
@@ -15434,7 +15439,7 @@ async function main() {
         }
         assert.strictEqual(pickerShows(state), 'Lab edited', 'the saved profile, applied again: unmarked')
         assert.strictEqual(profilePickerOf(state).title, null, 'and no tooltip')
-        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewHome, panelSearch: '  milk  ', sortField: 'title', sortDirection: 'asc' }, 'the header is the saved one again')
+        assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', notebook: viewHome, panelSearch: '  milk  ', sortField: 'title', sortDirection: 'asc' }, 'the header is the saved one again')
     })
 
     await test('view mark: saving ANOTHER profile from the edit dialog keeps the view and the mark', async () => {
@@ -15451,7 +15456,7 @@ async function main() {
         }
         assert.ok(profilePickerOf(state).rows.includes('Other renamed'), 'the other profile was saved')
         assert.strictEqual(pickerShows(state), 'Lab*', 'Lab is still marked')
-        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: '  milk  ', sortField: 'created', sortDirection: 'asc' }, 'and the live view is untouched')
+        assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', notebook: viewWork, panelSearch: '  milk  ', sortField: 'created', sortDirection: 'asc' }, 'and the live view is untouched')
     })
 
     await test('view mark: deleting another profile keeps the view and the mark; deleting the current one switches and clears it', async () => {
@@ -15464,11 +15469,11 @@ async function main() {
             await state.panelMessageHandler(deleteOf(3))   // the stub's message box answers OK
             assert.deepStrictEqual(profilePickerOf(state).rows, ['Lab', 'Other'], `${platform}: Gone was deleted`)
             assert.strictEqual(pickerShows(state), 'Lab*', `${platform}: deleting another profile leaves the mark`)
-            assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: '  milk  ', sortField: 'title', sortDirection: 'desc' }, `${platform}: and the live view`)
+            assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', notebook: viewWork, panelSearch: '  milk  ', sortField: 'title', sortDirection: 'desc' }, `${platform}: and the live view`)
             await state.panelMessageHandler(deleteOf(1))
             assert.strictEqual(state.settings.currentProfileID, 2, `${platform}: deleting the current profile makes another current`)
             assert.strictEqual(pickerShows(state), 'Other', `${platform}: whose saved view applies, unmarked`)
-            assert.deepStrictEqual(viewHeaderOf(state), { profile: '2', notebook: '', panelSearch: '', sortField: 'title', sortDirection: 'asc' }, `${platform}: the header is Other's`)
+            assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '2', notebook: '', panelSearch: '', sortField: 'title', sortDirection: 'asc' }, `${platform}: the header is Other's`)
         }
         // The desktop edit dialog's own Delete takes the same rule: deleting another profile from it keeps the view and the mark, and
         // deleting the one being edited, when it is the current one, applies the next.
@@ -15484,10 +15489,10 @@ async function main() {
         }
         await editDelete(3)
         assert.deepStrictEqual(profilePickerOf(state).rows, ['Lab', 'Other'], 'the edit dialog deleted Gone')
-        assert.deepStrictEqual([pickerShows(state), viewHeaderOf(state).panelSearch], ['Lab*', 'bread'], 'Lab keeps its mark and the live search')
+        assert.deepStrictEqual([pickerShows(state), (await viewHeaderOf(state)).panelSearch], ['Lab*', 'bread'], 'Lab keeps its mark and the live search')
         await editDelete(1)
         assert.strictEqual(state.settings.currentProfileID, 2, 'the edit dialog deleted the current profile')
-        assert.deepStrictEqual([pickerShows(state), viewHeaderOf(state).panelSearch], ['Other', ''], 'and the new current profile applies, unmarked')
+        assert.deepStrictEqual([pickerShows(state), (await viewHeaderOf(state)).panelSearch], ['Other', ''], 'and the new current profile applies, unmarked')
     })
 
     await test('view mark: Create from a marked view selects the new profile unmarked - it IS that view', async () => {
@@ -15537,10 +15542,10 @@ async function main() {
         assert.strictEqual(pickerShows(state), 'Lab*')
         await state.panelMessageHandler(['profileSaved', 2, { ...stored(2), name: 'Other renamed' }])
         assert.strictEqual(pickerShows(state), 'Lab*', 'saving another profile keeps it')
-        assert.strictEqual(viewHeaderOf(state).notebook, viewWork, 'and the live notebook')
+        assert.strictEqual((await viewHeaderOf(state)).notebook, viewWork, 'and the live notebook')
         await state.panelMessageHandler(['profileSaved', 1, { ...stored(1), name: 'Lab saved' }])
         assert.strictEqual(pickerShows(state), 'Lab saved', 'saving the current profile re-applies it: unmarked')
-        assert.strictEqual(viewHeaderOf(state).notebook, viewHome, 'with its saved notebook')
+        assert.strictEqual((await viewHeaderOf(state)).notebook, viewHome, 'with its saved notebook')
         await state.panelMessageHandler(['searchFilterChanged', 'bread'])
         assert.strictEqual(pickerShows(state), 'Lab saved*')
         const init = await state.panelMessageHandler(['getEditorInitial', null])
@@ -15554,7 +15559,7 @@ async function main() {
         const state = await markRun('desktop', { notes: { [hiddenTodo]: { id: hiddenTodo, parent_id: viewWork, is_todo: 1, todo_completed: 0, title: 'Hidden in Work' } } })
         assert.strictEqual(pickerShows(state), 'Lab')
         await state.withTimers(() => executeCommand(state, 'cockpit.revealNote', hiddenTodo))
-        assert.deepStrictEqual([viewHeaderOf(state).notebook, viewHeaderOf(state).panelSearch], [viewWork, ''], 'the reveal moved the header')
+        assert.deepStrictEqual([(await viewHeaderOf(state)).notebook, (await viewHeaderOf(state)).panelSearch], [viewWork, ''], 'the reveal moved the header')
         assert.strictEqual(pickerShows(state), 'Lab*', 'and the picker says the view is no longer Lab\'s')
     })
 
@@ -15563,7 +15568,7 @@ async function main() {
         const excluded = await markRun('desktop')
         assert.strictEqual(pickerShows(excluded), 'Lab')
         await excluded.withTimers(() => excluded.setSetting('excludedNotebooks', 'Home'))
-        assert.strictEqual(viewHeaderOf(excluded).notebook, '', 'excluding Home returned the filter to All notebooks')
+        assert.strictEqual((await viewHeaderOf(excluded)).notebook, '', 'excluding Home returned the filter to All notebooks')
         assert.strictEqual(pickerShows(excluded), 'Lab*', 'an exclusion marks it')
 
         const pollFolders = viewFolders.slice()
@@ -15573,19 +15578,19 @@ async function main() {
         await poll.fn()                                                       // the baseline signature
         pollFolders.splice(pollFolders.findIndex(folder => folder.id === viewHome), 1)
         await polled.withTimers(() => poll.fn())                              // Home is gone
-        assert.strictEqual(viewHeaderOf(polled).notebook, '', 'the poll returned the filter to All notebooks')
+        assert.strictEqual((await viewHeaderOf(polled)).notebook, '', 'the poll returned the filter to All notebooks')
         assert.strictEqual(pickerShows(polled), 'Lab*', 'a notebook deleted elsewhere marks it')
 
         const deleted = await markRun('desktop')
         await deleted.panelMessageHandler(['deleteNotebookClicked', viewHome])   // the stub's message box answers OK
         assert.ok(deleted.dataDeletes.some(parts => parts[0] === 'folders' && parts[1] === viewHome), 'the panel deleted Home')
-        assert.strictEqual(viewHeaderOf(deleted).notebook, '', 'and returned the filter to All notebooks')
+        assert.strictEqual((await viewHeaderOf(deleted)).notebook, '', 'and returned the filter to All notebooks')
         assert.strictEqual(pickerShows(deleted), 'Lab*', 'which marks it too')
     })
 
     await test('view mark: a run that STARTS on a profile whose saved notebook no longer exists is unmarked', async () => {
         const state = await markRun('desktop', { currentProfileID: 3 })
-        assert.strictEqual(viewHeaderOf(state).notebook, '', 'Gone\'s missing notebook resolved to All notebooks at startup')
+        assert.strictEqual((await viewHeaderOf(state)).notebook, '', 'Gone\'s missing notebook resolved to All notebooks at startup')
         assert.deepStrictEqual(profilePickerOf(state), { label: 'Gone', mark: '', title: null, rows: ['Lab', 'Other', 'Gone'] }, 'and the picker is plain')
     })
 
@@ -15606,7 +15611,7 @@ async function main() {
     await test('view mark: the mark is computed against the applied baseline, set at the end of applyProfileHeaderState', async () => {
         const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panel.ts'), 'utf8')
         const apply = panelSource.slice(panelSource.indexOf('async function applyProfileHeaderState('), panelSource.indexOf('\n}', panelSource.indexOf('async function applyProfileHeaderState(')))
-        assert.ok(apply.trimEnd().endsWith('headerBaseline = { notebook: notebookFilter, search: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection }'),
+        assert.ok(apply.trimEnd().endsWith('headerBaseline = { notebook: notebookFilter, search: searchFilter.trim(), sortField: sortField, sortDirection: sortDirection, filters: { ...quickFilters } }'),
             'the baseline is the RESOLVED values just applied, taken last')
         const differs = panelSource.slice(panelSource.indexOf('function headerDiffersFromProfile('), panelSource.indexOf('\n}', panelSource.indexOf('function headerDiffersFromProfile(')))
         assert.ok(differs.includes('searchFilter.trim() !== headerBaseline.search'), 'the search trimmed on both sides')
@@ -15675,7 +15680,7 @@ async function main() {
             assert.deepStrictEqual(storedProfileOf(state, 2), otherBefore, `${platform}: no other profile touched`)
             assert.strictEqual(pickerShows(state), 'Lab', `${platform}: the mark is cleared`)
             assert.strictEqual(saveViewEntryOf(state), null, `${platform}: and the entry gone`)
-            assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: 'milk', sortField: 'updated', sortDirection: 'desc' }, `${platform}: the view on screen is the one saved`)
+            assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', notebook: viewWork, panelSearch: 'milk', sortField: 'updated', sortDirection: 'desc' }, `${platform}: the view on screen is the one saved`)
             const armed = state.timeouts.slice(timeoutMark).filter(t => RECONCILE_OFFSETS.includes(t.ms) || t.ms === OVERVIEW_DEBOUNCE)
             assert.deepStrictEqual(armed.map(t => t.ms), [], `${platform}: no overview pass and no reconcile job`)
             assert.deepStrictEqual([state.notePuts.length, state.dataPosts.length, state.dataDeletes.length], writes, `${platform}: no note written`)
@@ -15697,9 +15702,9 @@ async function main() {
         await state.panelMessageHandler(['searchFilterChanged', 'bread'])
         await state.panelMessageHandler(['saveViewIntoProfileClicked'])
         await state.panelMessageHandler(['profilesDropdownChanged', 2])
-        assert.deepStrictEqual([pickerShows(state), viewHeaderOf(state).notebook], ['Other', ''], 'away on Other')
+        assert.deepStrictEqual([pickerShows(state), (await viewHeaderOf(state)).notebook], ['Other', ''], 'away on Other')
         await state.panelMessageHandler(['profilesDropdownChanged', 1])
-        assert.deepStrictEqual(viewHeaderOf(state), { profile: '1', notebook: viewWork, panelSearch: 'bread', sortField: 'title', sortDirection: 'asc' }, 'back on Lab: the saved view')
+        assert.deepStrictEqual((await viewHeaderOf(state)), { profile: '1', notebook: viewWork, panelSearch: 'bread', sortField: 'title', sortDirection: 'asc' }, 'back on Lab: the saved view')
         assert.strictEqual(pickerShows(state), 'Lab', 'unmarked')
     })
 
@@ -15729,6 +15734,842 @@ async function main() {
         assert.strictEqual(written.length, 1, 'one write to the settings note')
         assert.strictEqual(parseSettingsNoteBody(written[0].body).profiles.profiles[0].sortDirection, 'desc', 'carrying the saved sorting')
     })
+
+    // ============================================================ 2.10 quick filters
+    // The second header row gave the sort picker and its direction arrow to four one-press filters (docs/BRIEF-2.10-quick-filters.md, issue 6):
+    // completed to-dos, and items by the checkboxes inside them - at least one open, all of them done, none - the ring's own three categories.
+    // Sorting is set in the profile editor only, now. The filters are session state applied from the profile like the notebook and the search:
+    // a released one marks the view ("Lab*"), and "Save view into" and "+ New profile…" keep it. With the three checkbox buttons pressed - the
+    // fresh install, and every profile stored before 2.10 - a render reads exactly what it read before; with one released, every candidate's
+    // counts are needed before the list can be drawn, so the host reads them in batches it schedules itself (continueCheckboxScan in panel.ts).
+    const qfFolder = 'd0' + '0'.repeat(30)
+    const qfId = (prefix, n) => prefix + String(n).padStart(32 - prefix.length, '0')
+    const QF_BODIES = { open: '- [ ] open\n- [x] done', done: '- [x] a\n- [x] b', none: 'plain text' }
+    const QF_FILTERS = [
+        ['completedTodos', 'Completed to-dos'],
+        ['openCheckboxes', 'Items with open checkboxes'],
+        ['doneCheckboxes', 'Items with all checkboxes done'],
+        ['noCheckboxes', 'Items without checkboxes'],
+    ]
+    const QF_DAY = 86400000
+    const qfItem = (id, title, isTodo, body, extra) => Object.assign({
+        id, title, is_todo: isTodo ? 1 : 0, todo_completed: 0, todo_due: 0, parent_id: qfFolder,
+        user_updated_time: 1000, user_created_time: 500, deleted_time: 0, is_conflict: 0, body,
+    }, extra || {})
+    const qfMap = (items) => Object.fromEntries(items.map(item => [item.id, item]))
+    // A stored profile on the search path (it has criteria), listing the notes after the to-dos: every field 2.9 stored, none of the three new ones.
+    const qfProfile = (id, name, extra) => Object.assign({
+        ...baseProfile, id, name, sortOrder: id, searchCriteria: 'tag:q', showNotes: true, notesPosition: 'after',
+        showCompleted: false, notebook: '', panelSearch: '', sortField: 'title', sortDirection: 'asc',
+    }, extra || {})
+    const qfStrip = ({ body, searchHidden, ...rest }) => rest
+    let qfRunSeq = 0
+    // A scan's pass is bounded by time (checkboxScanPassMs in joplin.ts: 2 s from its first chunk), and a stubbed read takes none, so this section
+    // drives the clock itself. Every qfRun freezes Date.now - which the bundle, running in this process, reads too - and each checkbox-body read
+    // moves it on by the run's msPerBody (2 ms unless a check says otherwise), so a pass reads 2,000 / (20 x 2) = 50 chunks, 1,000 bodies, however
+    // fast the machine is. Nothing else these checks do moves the clock: the completed buckets read new Date(), which stays real, and the run starts
+    // its clock at the real time. The real Date.now is put back at the end of the section.
+    const qfRealNow = Date.now
+    let qfNow = qfRealNow()
+    const qfClockedReads = (msPerBody, onNoteGet) => async (id, query) => {
+        if (query && Array.isArray(query.fields) && query.fields.length === 1 && query.fields[0] === 'body') qfNow += msPerBody
+        return onNoteGet ? onNoteGet(id, query) : undefined
+    }
+    // The search fixtures are read from the note map on every search, so a check that edits a note edits what the index answers too, and the to-do
+    // search honours iscompleted:0 and due:19700201 as the real one does. A note marked searchHidden is never a search hit (the overview note, a
+    // peek hit), and a query containing emptyFor finds nothing. extra: any run option, over these.
+    const qfRun = (options) => {
+        const n = qfRunSeq++
+        const notes = options.notes
+        qfNow = qfRealNow()
+        Date.now = () => qfNow
+        const extra = options.extra || {}
+        const hits = (q) => options.emptyFor && String(q).includes(options.emptyFor) ? [] : Object.values(notes).filter(item => !item.searchHidden && !(Number(item.deleted_time) > 0))
+        return run(Object.assign({
+            dataDir: path.join(tmp, `qf-${n}`),
+            installationDir: path.join(tmp, `qf-install-${n}`),
+            require: options.platform === 'mobile' ? mobileRequire : desktopRequire,
+            versionInfo: { version: '3.7.0', platform: options.platform || 'desktop' },
+            folders: [{ id: qfFolder, title: 'Q', parent_id: '' }],
+            notes,
+            todos: (q) => hits(q).filter(item => item.is_todo
+                && !(String(q).includes('iscompleted:0') && item.todo_completed)
+                && !(String(q).includes('due:19700201') && !(item.todo_due > 0))).map(qfStrip),
+            searchNotes: (q) => hits(q).filter(item => !item.is_todo).map(qfStrip),
+            initialSettings: options.profiles
+                ? { profileData: JSON.stringify({ nextID: options.profiles.length + 1, profiles: options.profiles }), currentProfileID: options.current || options.profiles[0].id }
+                : {},
+        }, extra, { onNoteGet: qfClockedReads(options.msPerBody || 2, extra.onNoteGet) }))
+    }
+    const qfHtml = (state) => String(state.panelHtml['panel-panel'] || '')
+    // The titles of the rows the panel draws (to-dos and the Notes section, and a peek's), sorted.
+    const qfShown = (state) => {
+        const ids = new Set([...qfHtml(state).matchAll(/data-(?:todo|note)-id="([0-9a-f]{32})"/g)].map(match => match[1]))
+        return [...ids].map(id => (state.notes[id] ? state.notes[id].title : id)).sort()
+    }
+    // Every checkbox-count body read so far, by note id, in order.
+    const qfBodyReads = (state) => state.gets.filter(g => g.path[0] === 'notes' && g.path.length === 2 && g.query && Array.isArray(g.query.fields)
+        && g.query.fields.length === 1 && g.query.fields[0] === 'body').map(g => g.path[1])
+    const qfScanLine = (state) => (qfHtml(state).match(/<p class="notes-more-message" id="checkboxScan">([^<]*)<\/p>/) || [])[1] || null
+    // The header's quick-filter group, button by button, as drawn.
+    const qfGroup = (state) => {
+        const html = qfHtml(state)
+        const at = html.indexOf('<div id="quickFilters"')
+        if (at < 0) return null
+        const group = html.slice(at, html.indexOf('</div>', at))
+        return [...group.matchAll(/<button type="button" class="quick-filter" data-filter="([^"]*)" aria-pressed="([^"]*)"\s+aria-label="([^"]*)" title="([^"]*)"\s+onclick="onQuickFilterClicked\('([^']*)'\)">(<svg[\s\S]*?<\/svg>)<\/button>/g)]
+            .map(match => ({ name: match[1], pressed: match[2], label: match[3], title: match[4], posts: match[5], svg: match[6] }))
+    }
+    const qfPressed = (state) => qfGroup(state).map(button => button.pressed)
+    // Fires every pending zero-delay timer - the scan's next pass, and the note store's own render when one is armed - round after round, and
+    // reports what each round read and the status line it left, until none is left.
+    const qfDrain = async (state) => {
+        const rounds = []
+        for (let round = 0; round < 50; round++){
+            const pending = state.pendingTimeouts(0)
+            if (!pending.length) break
+            const before = qfBodyReads(state).length
+            for (const timeout of pending) await state.fireTimeout(timeout)
+            rounds.push({ bodies: qfBodyReads(state).length - before, line: qfScanLine(state) })
+        }
+        return rounds
+    }
+    const qfTick = (state) => state.withTimers(() => state.intervals.find(interval => interval.ms === 60000 || interval.ms === 120000).fn())
+    const qfStored = (state, id) => JSON.parse(state.settings.profileData).profiles.find(profile => profile.id === id)
+    // One item of each category, to-dos and notes, and a completed to-do in each of the four period buckets (no checkboxes inside them).
+    const qfCategories = () => {
+        const now = Date.now()
+        const noon = new Date()
+        noon.setHours(12, 0, 0, 0)
+        return qfMap([
+            qfItem(qfId('e1', 1), 'Todo open', 1, QF_BODIES.open, { todo_due: now + 30 * QF_DAY }),
+            qfItem(qfId('e1', 2), 'Todo done', 1, QF_BODIES.done, { todo_due: now + 30 * QF_DAY }),
+            qfItem(qfId('e1', 3), 'Todo none', 1, QF_BODIES.none, { todo_due: now + 30 * QF_DAY }),
+            qfItem(qfId('e1', 4), 'Completed past', 1, QF_BODIES.none, { todo_due: now - 3 * QF_DAY, todo_completed: now - QF_DAY }),
+            qfItem(qfId('e1', 5), 'Completed today', 1, QF_BODIES.none, { todo_due: noon.getTime(), todo_completed: now }),
+            qfItem(qfId('e1', 6), 'Completed future', 1, QF_BODIES.none, { todo_due: now + 10 * QF_DAY, todo_completed: now }),
+            qfItem(qfId('e1', 7), 'Completed undated', 1, QF_BODIES.none, { todo_completed: now }),
+            qfItem(qfId('e2', 1), 'Note open', 0, QF_BODIES.open),
+            qfItem(qfId('e2', 2), 'Note done', 0, QF_BODIES.done),
+            qfItem(qfId('e2', 3), 'Note none', 0, QF_BODIES.none),
+        ])
+    }
+    const QF_ALL = ['Completed future', 'Completed past', 'Completed today', 'Completed undated', 'Note done', 'Note none', 'Note open', 'Todo done', 'Todo none', 'Todo open']
+    const QF_COMPLETED = ['Completed future', 'Completed past', 'Completed today', 'Completed undated']
+    // The 1,000-row fixture the cost pins were measured on (700 to-dos across the horizons, every seventh completed, then 300 notes; the bodies
+    // cycle open / done / none), and the profile they were measured with: criteria, notes shown, every completed to-do shown, the rest the
+    // store's defaults. The completed switches are spelled out because a stored profile without them is migrated from showCompleted (false).
+    const qfCostNotes = (todoCount, noteCount, undatedOnly) => {
+        const items = []
+        const now = Date.now()
+        const bodies = [QF_BODIES.open, QF_BODIES.done, QF_BODIES.none]
+        for (let i = 0; i < todoCount; i++){
+            const due = undatedOnly ? 0 : [now - 3 * QF_DAY, now + 3600000, now + 5 * QF_DAY, now + 40 * QF_DAY, 0][i % 5]
+            items.push(qfItem(qfId('a', i), `Todo ${i}`, 1, bodies[i % 3], { todo_due: due, todo_completed: i % 7 === 0 ? now - QF_DAY : 0, user_updated_time: 1000 + i, user_created_time: 500 + i }))
+        }
+        for (let i = 0; i < noteCount; i++){
+            items.push(qfItem(qfId('b', i), `Note ${i}`, 0, bodies[i % 3], { user_updated_time: 5000 + i, user_created_time: 500 + i }))
+        }
+        return qfMap(items)
+    }
+    const qfCostProfile = (id, name, extra) => Object.assign({ id, name, searchCriteria: 'tag:x', showNotes: true,
+        showCompletedPast: true, showCompletedToday: true, showCompletedFuture: true, showCompletedNoDue: true }, extra || {})
+
+    // -- the header ----------------------------------------------------------------------------------------------
+    await test('quick filters (header): the second row is the notebook dropdown, the four-button group and the sync button - the sort picker and the arrow are gone', async () => {
+        for (const platform of ['desktop', 'mobile']){
+            const state = await qfRun({ platform, notes: qfCategories(), profiles: [qfProfile(1, 'Lab')] })
+            const html = qfHtml(state)
+            const rowAt = html.indexOf('<section id="filterRow">')
+            const row = html.slice(rowAt, html.indexOf('</section>', rowAt))
+            const notebookAt = row.indexOf('id="notebookMenu"')
+            const groupAt = row.indexOf('<div id="quickFilters" class="quick-filters" role="group" aria-label="Quick filters">')
+            const syncAt = row.indexOf('onclick="onSynchronizeClicked()"')
+            assert.ok(notebookAt > 0 && groupAt > notebookAt && syncAt > groupAt, `${platform}: the notebook dropdown, then the group, then the sync button`)
+            const group = qfGroup(state)
+            assert.deepStrictEqual(group.map(button => [button.name, button.pressed, button.label, button.posts]),
+                QF_FILTERS.map(([name, label]) => [name, 'true', label, name]), `${platform}: four buttons, in order, all pressed on a fresh view, each posting its own name`)
+            assert.ok(group.every(button => button.svg.startsWith('<svg class="icon"') && button.svg.includes('<path d="')), `${platform}: each draws an inline icon`)
+            assert.strictEqual(new Set(group.map(button => button.svg)).size, 4, `${platform}: four different icons`)
+            for (const gone of ['sortMenu', 'onSortDirectionClicked', 'Sort direction', "'sortFieldSelected'", 'How items sharing a due time are sorted']){
+                assert.ok(!html.includes(gone), `${platform}: the panel draws no ${gone}`)
+            }
+        }
+    })
+
+    await test('quick filters (header): the tooltip says what a button governs and what a click does, in both states; aria-pressed follows; an unknown name draws nothing', async () => {
+        const state = await qfRun({ notes: qfCategories(), profiles: [qfProfile(1, 'Lab')] })
+        for (const [name, label] of QF_FILTERS){
+            assert.strictEqual(qfGroup(state).find(button => button.name === name).title, `${label}: shown&#10;Click to hide them`, `${name}: pressed`)
+            await state.panelMessageHandler(['quickFilterToggled', name])
+            const released = qfGroup(state).find(button => button.name === name)
+            assert.deepStrictEqual([released.pressed, released.title], ['false', `${label}: hidden&#10;Click to show them`], `${name}: released`)
+            assert.deepStrictEqual(qfGroup(state).filter(button => button.name !== name).map(button => button.pressed), ['true', 'true', 'true'], `${name}: the others untouched`)
+            await state.panelMessageHandler(['quickFilterToggled', name])
+            assert.strictEqual(qfGroup(state).find(button => button.name === name).pressed, 'true', `${name}: a second press presses it again`)
+        }
+        const paints = state.setHtmlCalls
+        const gets = state.gets.length
+        await state.panelMessageHandler(['quickFilterToggled', 'sortField'])
+        assert.deepStrictEqual([state.setHtmlCalls, state.gets.length], [paints, gets], 'an unknown name changes nothing and asks nothing')
+    })
+
+    await test('quick filters (webview): a press posts quickFilterToggled with the button\'s name and starts the list at the top; nothing posts the sorting any more', () => {
+        const webview = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panelWebview.js'), 'utf8')
+        const at = webview.indexOf('async function onQuickFilterClicked(filterName){')
+        assert.ok(at > 0, 'the handler the buttons call')
+        const body = webview.slice(at, webview.indexOf('\n}', at))
+        assert.ok(body.includes('savedTodosScrollTop = 0'), 'a change of view starts at the top, as a sort change did')
+        assert.ok(body.includes("webviewApi.postMessage(['quickFilterToggled', String(filterName || '')])"), 'and it posts the name')
+        assert.ok(!webview.includes('onSortDirectionClicked') && !webview.includes("'sortDirectionClicked'") && !webview.includes("'sortFieldSelected'"), 'the webview posts neither sorting message')
+    })
+
+    // -- the profile ---------------------------------------------------------------------------------------------
+    await test('quick filters (profile): the three fields default to true and survive normalizeProfile from strings, numbers and absence; the header applies them', async () => {
+        const fresh = await qfRun({ notes: qfCategories() })
+        const freshProfile = JSON.parse(fresh.settings.profileData).profiles[0]
+        assert.deepStrictEqual([freshProfile.showOpenCheckboxes, freshProfile.showDoneCheckboxes, freshProfile.showNoCheckboxes], [true, true, true], 'the fresh install shows all three')
+        assert.deepStrictEqual(qfPressed(fresh), ['true', 'true', 'true', 'true'], 'and starts with the four pressed')
+        const absent = qfProfile(1, 'Absent')
+        const strings = qfProfile(2, 'Strings', { showOpenCheckboxes: 'false', showDoneCheckboxes: 'true', showNoCheckboxes: '' })
+        const numbers = qfProfile(3, 'Numbers', { showOpenCheckboxes: 1, showDoneCheckboxes: 0, showNoCheckboxes: 1 })
+        assert.ok(!('showOpenCheckboxes' in absent), 'precondition: a profile stored before 2.10')
+        const state = await qfRun({ notes: qfCategories(), profiles: [absent, strings, numbers] })
+        const fields = (profile) => [profile.showOpenCheckboxes, profile.showDoneCheckboxes, profile.showNoCheckboxes]
+        assert.deepStrictEqual([1, 2, 3].map(id => fields(qfStored(state, id))), [[true, true, true], [false, true, false], [true, false, true]], 'booleans, whatever they were stored as')
+        assert.deepStrictEqual(qfPressed(state), ['true', 'true', 'true', 'true'], 'Absent applies the four pressed')
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.deepStrictEqual(qfPressed(state), ['true', 'false', 'true', 'false'], 'Strings applies its own')
+        await qfDrain(state)
+        await state.panelMessageHandler(['profilesDropdownChanged', 3])
+        assert.deepStrictEqual(qfPressed(state), ['true', 'true', 'false', 'true'], 'and Numbers its own')
+    })
+
+    await test('quick filters (profile): both profile editors carry the "Checkboxes inside" fieldset right after "Show Completed", in the same markup, and read and write the three fields', () => {
+        const template = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'editor', 'editorTemplate.ts'), 'utf8')
+        const desktopScript = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'editor', 'editorWebview.js'), 'utf8')
+        const webview = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel', 'panelWebview.js'), 'utf8')
+        const overlayAt = webview.indexOf('var EDITOR_FORM_HTML = `')
+        const overlay = webview.slice(overlayAt, webview.indexOf('`', overlayAt + 'var EDITOR_FORM_HTML = `'.length))
+        const fieldsetOf = (source, where) => {
+            const at = source.indexOf('<legend>Checkboxes inside</legend>')
+            assert.ok(at > 0, `${where}: the fieldset is there`)
+            const start = source.lastIndexOf('<fieldset>', at)
+            const legendAt = source.lastIndexOf('<legend>', start)
+            return { markup: source.slice(start, source.indexOf('</fieldset>', at)), after: source.slice(legendAt + '<legend>'.length, source.indexOf('</legend>', legendAt)) }
+        }
+        const desktop = fieldsetOf(template, 'desktop')
+        const mobile = fieldsetOf(overlay, 'mobile')
+        assert.deepStrictEqual([desktop.after, mobile.after], ['Show Completed', 'Show Completed'], 'right after "Show Completed" in both')
+        assert.strictEqual(mobile.markup, desktop.markup, 'the overlay copies the desktop markup verbatim')
+        const checkIds = (webview.match(/var EDITOR_CHECK_IDS = \[([^\]]*)\]/) || [])[1] || ''
+        for (const [field, label] of [['showOpenCheckboxes', 'Items with open checkboxes'], ['showDoneCheckboxes', 'Items with all checkboxes done'], ['showNoCheckboxes', 'Items without checkboxes']]){
+            const id = field + 'Checkbox'
+            assert.ok(desktop.markup.includes(`<input type="checkbox" id="${id}" name="${field}" checked>`) && desktop.markup.includes(`<label for="${id}">${label}</label>`), `${field}: its checkbox and label`)
+            assert.ok(desktopScript.includes(`${id}.checked = profileObject["${field}"] !== false`), `${field}: the desktop editor loads it (shown unless false)`)
+            assert.ok(desktopScript.includes(`"${field}": ${id}.checked`) && desktopScript.includes(`${id}.addEventListener("change", saveProfileData)`), `${field}: and saves it on every change`)
+            assert.ok(webview.includes(`editorField('${id}').checked = profile['${field}'] !== false`) && webview.includes(`'${field}': editorField('${id}')`), `${field}: the overlay fills and serialises it`)
+            assert.ok(checkIds.includes(`'${id}'`), `${field}: and wires it for reload-survival`)
+        }
+    })
+
+    await test('quick filters (profile): a Save from either editor stores the three fields, and saving the current profile applies them to the header', async () => {
+        const phone = await qfRun({ platform: 'mobile', notes: qfCategories(), profiles: [qfProfile(1, 'Lab')] })
+        await phone.panelMessageHandler(['profileSaved', 1, { ...qfStored(phone, 1), showOpenCheckboxes: false, showNoCheckboxes: false }])
+        const phoneStored = qfStored(phone, 1)
+        assert.deepStrictEqual([phoneStored.showOpenCheckboxes, phoneStored.showDoneCheckboxes, phoneStored.showNoCheckboxes], [false, true, false], 'mobile: stored')
+        assert.deepStrictEqual(qfPressed(phone), ['true', 'false', 'true', 'false'], 'mobile: and applied')
+        assert.deepStrictEqual(qfShown(phone), ['Note done', 'Todo done'], 'mobile: the view follows')
+        const desk = await qfRun({ notes: qfCategories(), profiles: [qfProfile(1, 'Lab')] })
+        desk.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: encodeFormProfile({ ...qfStored(desk, 1), showDoneCheckboxes: false }) } } }
+        await desk.panelMessageHandler(['editProfileClicked', 1])
+        assert.strictEqual(qfStored(desk, 1).showDoneCheckboxes, false, 'desktop: stored')
+        assert.deepStrictEqual(qfPressed(desk), ['true', 'true', 'false', 'true'], 'desktop: and applied')
+        desk.dialogResult = null
+        await desk.panelMessageHandler(['editProfileClicked', 1])
+        assert.strictEqual(editorFormProfile(desk).showDoneCheckboxes, false, 'desktop: the edit form opens with the stored value')
+    })
+
+    await test('quick filters (settings note): the synced payload is the whole profile, so the three fields travel with it', async () => {
+        const state = await runSync('quick-filters', {
+            notes: { [SYNC_NOTE_ID]: syncNoteFixture(syncBody(syncStore(2, [syncProfile(1, 'Lab')]), syncSettings())) },
+            initialSettings: { settingsNoteId: SYNC_NOTE_ID, profileData: JSON.stringify(syncStore(2, [syncProfile(1, 'Lab')])), currentProfileID: 1 },
+        })
+        for (const pending of state.timeouts.filter(t => t.ms === 3000 && !t.cleared && !t.fired)) await state.fireTimeout(pending)
+        await state.panelMessageHandler(['quickFilterToggled', 'doneCheckboxes'])
+        await qfDrain(state)
+        const mark = state.timeouts.length
+        const puts = state.notePuts.length
+        await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+        await state.fireTimeout(armedSyncWrite(state, mark))
+        const written = state.notePuts.slice(puts).filter(put => put.id === SYNC_NOTE_ID)
+        assert.strictEqual(written.length, 1, 'one write to the settings note')
+        const synced = parseSettingsNoteBody(written[0].body).profiles.profiles[0]
+        assert.deepStrictEqual([synced.showOpenCheckboxes, synced.showDoneCheckboxes, synced.showNoCheckboxes], [true, false, true], 'carrying the three fields')
+    })
+
+    // -- what each filter shows ------------------------------------------------------------------------------------
+    await test('quick filters (semantics): each checkbox filter hides exactly its category, to-dos and notes alike, and pressing it again brings them back', async () => {
+        const state = await qfRun({ notes: qfCategories(), profiles: [qfProfile(1, 'Lab')] })
+        assert.deepStrictEqual(qfShown(state), QF_ALL, 'all four pressed: everything')
+        const hides = {
+            openCheckboxes: ['Note open', 'Todo open'],
+            doneCheckboxes: ['Note done', 'Todo done'],
+            noCheckboxes: ['Completed future', 'Completed past', 'Completed today', 'Completed undated', 'Note none', 'Todo none'],
+        }
+        const writes = state.settingWrites.length
+        for (const [name, hidden] of Object.entries(hides)){
+            await state.panelMessageHandler(['quickFilterToggled', name])
+            assert.deepStrictEqual(qfShown(state), QF_ALL.filter(title => !hidden.includes(title)), `${name} released hides exactly its category`)
+            assert.strictEqual(qfScanLine(state), null, `${name}: every body was read, so no status line`)
+            await state.panelMessageHandler(['quickFilterToggled', name])
+            assert.deepStrictEqual(qfShown(state), QF_ALL, `${name} pressed again: everything`)
+        }
+        assert.deepStrictEqual(state.settingWrites.slice(writes).filter(write => write.key === 'profileData'), [], 'a press changes the view, never the profile')
+    })
+
+    await test('quick filters (semantics): the completed button released hides every completed to-do whatever the switches say; pressed on a profile with none on it shows all four buckets', async () => {
+        const some = qfProfile(1, 'Some', { showCompletedPast: false, showCompletedToday: true, showCompletedFuture: false, showCompletedNoDue: false })
+        const none = qfProfile(2, 'None', { showCompletedPast: false, showCompletedToday: false, showCompletedFuture: false, showCompletedNoDue: false })
+        const state = await qfRun({ notes: qfCategories(), profiles: [some, none] })
+        const completedShown = () => qfShown(state).filter(title => QF_COMPLETED.includes(title))
+        assert.deepStrictEqual([qfPressed(state)[0], completedShown()], ['true', ['Completed today']], 'Some: pressed, since a switch is on, showing its own bucket')
+        await state.panelMessageHandler(['quickFilterToggled', 'completedTodos'])
+        assert.deepStrictEqual(completedShown(), [], 'released: no completed to-do at all')
+        assert.deepStrictEqual(qfShown(state), QF_ALL.filter(title => !QF_COMPLETED.includes(title)), 'and nothing else moves')
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.deepStrictEqual([qfPressed(state)[0], completedShown()], ['false', []], 'None: released, since none of its switches is on')
+        await state.panelMessageHandler(['quickFilterToggled', 'completedTodos'])
+        assert.deepStrictEqual(completedShown(), QF_COMPLETED, 'pressed on None: all four buckets')
+        await state.panelMessageHandler(['quickFilterToggled', 'completedTodos'])
+        assert.deepStrictEqual(completedShown(), [], 'released again: none')
+    })
+
+    await test('quick filters (semantics): the three checkbox filters released together draw an empty view, with no status line and nothing left to read', async () => {
+        const state = await qfRun({ notes: qfCategories(), profiles: [qfProfile(1, 'Lab')] })
+        for (const name of ['openCheckboxes', 'doneCheckboxes', 'noCheckboxes']) await state.panelMessageHandler(['quickFilterToggled', name])
+        assert.deepStrictEqual(qfShown(state), [], 'no row')
+        assert.ok(!qfHtml(state).includes('<section class="notes-section">'), 'no Notes section')
+        assert.strictEqual(qfScanLine(state), null, 'no status line')
+        assert.strictEqual(state.pendingTimeouts(0).length, 0, 'nothing scheduled')
+        assert.strictEqual(pickerShows(state), 'Lab*', 'and a view the profile does not store is marked')
+    })
+
+    await test('quick filters (semantics): the overview note ignores them - every category, and the profile\'s own completed switches', async () => {
+        const overview = qfId('e9', 1)
+        const notes = { ...qfCategories(), [overview]: qfItem(overview, 'Overview', 0, '', { searchHidden: true }) }
+        const state = await qfRun({ notes, profiles: [qfProfile(1, 'Lab', { noteID: overview, showOpenCheckboxes: false, showNoCheckboxes: false })] })
+        assert.deepStrictEqual(qfShown(state), ['Note done', 'Todo done'], 'the panel shows the done ones only')
+        const listed = ['Todo open', 'Todo done', 'Todo none', 'Completed past', 'Completed today', 'Completed future', 'Completed undated']
+        assert.ok(listed.every(title => state.notes[overview].body.includes(title)), `the overview lists every to-do:\n${state.notes[overview].body}`)
+        await state.panelMessageHandler(['quickFilterToggled', 'completedTodos'])
+        const puts = state.notePuts.length
+        await qfTick(state)
+        assert.ok(state.notes[overview].body.includes('Completed past'), 'a released completed button leaves the note listing them')
+        assert.strictEqual(state.notePuts.slice(puts).filter(put => put.id === overview).length, 0, 'the next pass has nothing to rewrite')
+    })
+
+    await test('quick filters (semantics): the "Results outside current filters" peek is outside them - a hit is drawn whatever its checkboxes, and no scan runs for it', async () => {
+        const outside = qfId('ea', 1)
+        const notes = { ...qfCategories(), [outside]: qfItem(outside, 'Outside plain', 0, QF_BODIES.none, { searchHidden: true }) }
+        const state = await qfRun({ notes, profiles: [qfProfile(1, 'Lab')], extra: { outsideResults: [qfStrip(notes[outside])] } })
+        for (const name of ['openCheckboxes', 'doneCheckboxes', 'noCheckboxes']) await state.panelMessageHandler(['quickFilterToggled', name])
+        await state.panelMessageHandler(['searchFilterChanged', 'zzz'])
+        const html = qfHtml(state)
+        assert.ok(html.includes('Results outside current filters (1)'), 'the empty view gets its peek')
+        assert.deepStrictEqual(qfShown(state), ['Outside plain'], 'drawing a note without checkboxes, which the filters hide in the view')
+        assert.deepStrictEqual([qfScanLine(state), state.pendingTimeouts(0).length], [null, 0], 'and nothing is scanned for it')
+    })
+
+    await test('quick filters (optimistic): with a checkbox filter released a created item is not put on screen unjudged - the reconcile lane brings it in', async () => {
+        const state = await run({
+            dataDir: path.join(tmp, 'qf-create-data'),
+            installationDir: path.join(tmp, 'qf-create-install'),
+            require: mobileRequire,
+            versionInfo: { version: '3.7.0', platform: 'mobile' },
+            todos: [],
+            folders: createFolders,
+        })
+        await state.panelMessageHandler(['notebookFilterChanged', createFolders[0].id])
+        await state.panelMessageHandler(['quickFilterToggled', 'openCheckboxes'])
+        const mark = state.timeouts.length
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.ok(state.dataPosts.some(post => post.path[0] === 'notes' && post.path.length === 1), 'the to-do is created')
+        assert.ok(!qfHtml(state).includes('data-todo-id="created-1"'), 'its counts are unknown, so it is not inserted from the POST response')
+        assert.ok(state.timeouts.slice(mark).some(timeout => RECONCILE_OFFSETS.includes(timeout.ms)), 'the reconcile lane is armed to bring it in')
+    })
+
+    // -- the mark, Save view into, the seed ------------------------------------------------------------------------
+    await test('quick filters (mark): a released filter marks the profile "Lab*", pressing it again clears it, and a switch away and back restores the profile\'s own', async () => {
+        const state = await qfRun({ notes: qfCategories(), profiles: [qfProfile(1, 'Lab', { showDoneCheckboxes: false }), qfProfile(2, 'Other')] })
+        assert.deepStrictEqual([pickerShows(state), qfPressed(state)], ['Lab', ['true', 'true', 'false', 'true']], 'Lab applies its own filters, unmarked')
+        for (const [name] of QF_FILTERS){
+            await state.panelMessageHandler(['quickFilterToggled', name])
+            assert.deepStrictEqual([pickerShows(state), profilePickerOf(state).title], ['Lab*', 'Lab' + MARK_TOOLTIP_TAIL], `${name} marks it, and the tooltip names the filters`)
+            await state.panelMessageHandler(['quickFilterToggled', name])
+            assert.strictEqual(pickerShows(state), 'Lab', `${name} put back clears it`)
+        }
+        await state.panelMessageHandler(['quickFilterToggled', 'openCheckboxes'])
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.deepStrictEqual([pickerShows(state), qfPressed(state)], ['Other', ['true', 'true', 'true', 'true']], 'Other applies its own')
+        await state.panelMessageHandler(['profilesDropdownChanged', 1])
+        assert.deepStrictEqual([pickerShows(state), qfPressed(state)], ['Lab', ['true', 'true', 'false', 'true']], 'back on Lab: its own filters, unmarked')
+        assert.strictEqual(qfStored(state, 1).showOpenCheckboxes, true, 'the press was never written to the profile')
+    })
+
+    await test('quick filters (save view): "Save view into" writes the three checkbox fields and the completed switches the view narrows by, and nothing else new', async () => {
+        const lab = qfProfile(1, 'Lab', { showCompletedPast: false, showCompletedToday: true, showCompletedFuture: false, showCompletedNoDue: true })
+        const none = qfProfile(2, 'None', { showCompletedPast: false, showCompletedToday: false, showCompletedFuture: false, showCompletedNoDue: false })
+        const state = await qfRun({ notes: qfCategories(), profiles: [lab, none] })
+        let before = qfStored(state, 1)
+        await state.panelMessageHandler(['quickFilterToggled', 'openCheckboxes'])
+        await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+        assert.deepStrictEqual(qfStored(state, 1), { ...before, showOpenCheckboxes: false }, 'a checkbox filter: its field, the completed switches as they were')
+        assert.strictEqual(pickerShows(state), 'Lab', 'and the mark is cleared')
+        before = qfStored(state, 1)
+        await state.panelMessageHandler(['quickFilterToggled', 'completedTodos'])
+        await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+        assert.deepStrictEqual(qfStored(state, 1), { ...before, showCompletedPast: false, showCompletedToday: false, showCompletedFuture: false, showCompletedNoDue: false }, 'the completed button released: all four off')
+        assert.deepStrictEqual([pickerShows(state), qfPressed(state)[0]], ['Lab', 'false'], 'which applies as released, unmarked')
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        before = qfStored(state, 2)
+        await state.panelMessageHandler(['quickFilterToggled', 'completedTodos'])
+        await state.panelMessageHandler(['saveViewIntoProfileClicked'])
+        assert.deepStrictEqual(qfStored(state, 2), { ...before, showCompletedPast: true, showCompletedToday: true, showCompletedFuture: true, showCompletedNoDue: true }, 'pressed on a profile with none on: all four on')
+        assert.deepStrictEqual([pickerShows(state), qfPressed(state)[0]], ['None', 'true'], 'which applies as pressed, unmarked')
+    })
+
+    await test('quick filters (seed): "+ New profile…" opens on the filters on screen, on both platforms', async () => {
+        for (const platform of ['desktop', 'mobile']){
+            const state = await qfRun({ platform, notes: qfCategories(), profiles: [qfProfile(1, 'Lab', { showCompletedPast: false, showCompletedToday: true, showCompletedFuture: false, showCompletedNoDue: false })] })
+            const seedOf = async () => {
+                if (platform === 'mobile') return (await state.panelMessageHandler(['getEditorInitial', null])).profile
+                await state.panelMessageHandler(['createProfileClicked'])
+                return editorFormProfile(state)
+            }
+            const switchesOf = (profile) => [profile.showCompletedPast, profile.showCompletedToday, profile.showCompletedFuture, profile.showCompletedNoDue]
+            await state.panelMessageHandler(['quickFilterToggled', 'doneCheckboxes'])
+            await state.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+            const seed = await seedOf()
+            assert.deepStrictEqual([seed.showOpenCheckboxes, seed.showDoneCheckboxes, seed.showNoCheckboxes], [true, false, false], `${platform}: the checkbox filters on screen`)
+            assert.deepStrictEqual(switchesOf(seed), [false, true, false, false], `${platform}: and the completed switches the view narrows by`)
+            await state.panelMessageHandler(['quickFilterToggled', 'completedTodos'])
+            assert.deepStrictEqual(switchesOf(await seedOf()), [false, false, false, false], `${platform}: the completed button released`)
+            assert.strictEqual(JSON.parse(state.settings.profileData).profiles.length, 1, `${platform}: asking created nothing`)
+        }
+    })
+
+    // -- what it costs ---------------------------------------------------------------------------------------------
+    await test('quick filters (cost): with the three checkbox buttons pressed a 1,000-row view reads exactly the bodies it read before 2.10, and schedules nothing', async () => {
+        const state = await qfRun({ notes: qfCostNotes(700, 300), profiles: [qfCostProfile(1, 'S')] })
+        const reads = [qfBodyReads(state).length]
+        for (let render = 0; render < 4; render++){
+            const before = qfBodyReads(state).length
+            await state.panelMessageHandler(['sortDirectionClicked'])
+            reads.push(qfBodyReads(state).length - before)
+        }
+        const beforeTick = qfBodyReads(state).length
+        await qfTick(state)
+        reads.push(qfBodyReads(state).length - beforeTick)
+        // Measured on main at 2.9.1 (028c840) with this fixture and these steps, before any 2.10 change: startup (fast paint, overview pass, fill),
+        // four full renders, one tick. The 300-per-section cap fills the rings over three renders.
+        assert.deepStrictEqual(reads, [600, 300, 100, 0, 0, 0])
+        assert.deepStrictEqual([qfScanLine(state), state.pendingTimeouts(0).length], [null, 0], 'no status line, and nothing scheduled')
+    })
+
+    await test('quick filters (cost): with the three pressed the drawing cap still skips the rings nobody sees - 1,500 undated to-dos in one capped group read as before', async () => {
+        const state = await qfRun({ notes: qfCostNotes(1500, 0, true), extra: { listingFromNotes: true } })
+        const reads = [qfBodyReads(state).length]
+        for (let render = 0; render < 5; render++){
+            const before = qfBodyReads(state).length
+            await state.panelMessageHandler(['sortDirectionClicked'])
+            reads.push(qfBodyReads(state).length - before)
+        }
+        // Measured on main at 2.9.1 the same way: the group draws 1,000 of 1,500, and each direction flip draws (and reads) the other end of it.
+        assert.deepStrictEqual(reads, [300, 300, 300, 300, 0, 300])
+        assert.strictEqual(state.pendingTimeouts(0).length, 0, 'nothing scheduled')
+        assert.ok(qfHtml(state).includes('Showing the first 1,000 of 1,500 to-dos in this group.'), 'the group is capped')
+    })
+
+    await test('quick filters (cost): with a checkbox filter released the cap comes after the filter - the group footer counts the filtered list', async () => {
+        const state = await qfRun({ notes: qfCostNotes(1500, 0, true), extra: { listingFromNotes: true } })
+        await state.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        await qfDrain(state)
+        assert.strictEqual(qfShown(state).length, 1000, 'the open and the done thirds')
+        assert.ok(!qfHtml(state).includes('to-dos in this group.'), 'which fit under the cap: no footer')
+        await state.panelMessageHandler(['quickFilterToggled', 'doneCheckboxes'])
+        assert.strictEqual(qfShown(state).length, 500, 'the open third alone')
+        assert.strictEqual(new Set(qfBodyReads(state)).size, 1500, 'every row read, the ones the cap would have left out included')
+        assert.strictEqual(qfBodyReads(state).length, 1500, 'and each once')
+    })
+
+    await test('quick filters (cost): with one released every candidate body is read exactly once across the continuation passes, the status line showing until the last', async () => {
+        const state = await qfRun({ notes: qfCostNotes(2500, 1200), profiles: [qfCostProfile(1, 'S')] })
+        assert.strictEqual(qfBodyReads(state).length, 600, 'startup reads the rings of the first drawn rows, as ever')
+        await state.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        assert.strictEqual(qfBodyReads(state).length, 600 + 1000, 'the toggle paints, then its fill reads for one pass\'s budget: 1,000 bodies at 2 ms each, all of them to-dos, since the budget is the render\'s and not each section\'s')
+        assert.strictEqual(qfScanLine(state), 'Reading the checkboxes inside 2,100 notes…', 'the rows still unread are counted above the list')
+        assert.strictEqual(state.pendingTimeouts(0).length, 1, 'and the next pass is scheduled at once, on a zero timer')
+        const rounds = await qfDrain(state)
+        assert.deepStrictEqual(rounds, [
+            { bodies: 1000, line: 'Reading the checkboxes inside 1,100 notes…' },
+            { bodies: 1000, line: 'Reading the checkboxes inside 100 notes…' },
+            { bodies: 100, line: null },
+        ], 'three passes of one budget each - the second runs on from the last 200 to-dos into 800 notes - the line gone after the last, and nothing scheduled after it')
+        const reads = qfBodyReads(state)
+        assert.deepStrictEqual([reads.length, new Set(reads).size], [3700, 3700], 'every candidate read, none twice')
+        assert.deepStrictEqual([...new Set(reads)].sort(), Object.keys(state.notes).sort(), 'and the candidates are every to-do and note of the view')
+        const bodyOf = (id) => state.notes[id].body
+        const drawn = new Set([...qfHtml(state).matchAll(/data-(?:todo|note)-id="([0-9a-f]{32})"/g)].map(match => match[1]))
+        assert.ok([...drawn].every(id => bodyOf(id) !== QF_BODIES.none), 'no row without checkboxes is drawn')
+        assert.strictEqual(drawn.size, Object.values(state.notes).filter(item => item.body !== QF_BODIES.none).length, 'and every row with checkboxes is')
+        const mark = reads.length
+        await state.panelMessageHandler(['quickFilterToggled', 'doneCheckboxes'])
+        assert.deepStrictEqual([qfBodyReads(state).length - mark, state.pendingTimeouts(0).length], [0, 0], 'a second toggle after the scan reads nothing and schedules nothing')
+        await qfTick(state)
+        assert.strictEqual(qfBodyReads(state).length - mark, 0, 'nor does a tick')
+        const edited = qfId('b', 7)
+        state.notes[edited].user_updated_time += 1
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.deepStrictEqual(qfBodyReads(state).slice(mark), [edited], 'a note edited since is read again, once')
+    })
+
+    await test('quick filters (cost): a profile switch mid-scan ends it - nothing is read after the switch, and coming back reads only what is left', async () => {
+        const state = await qfRun({
+            notes: qfCostNotes(2500, 1200),
+            profiles: [qfCostProfile(1, 'Scan', { showNoCheckboxes: false }), qfCostProfile(2, 'Elsewhere', { searchCriteria: 'tag:elsewhere', showNotes: false })],
+            emptyFor: 'tag:elsewhere',
+        })
+        assert.ok(qfScanLine(state), 'startup began the scan')
+        assert.strictEqual(state.pendingTimeouts(0).length, 1, 'with its next batch scheduled')
+        const mark = qfBodyReads(state).length
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.deepStrictEqual([qfBodyReads(state).length - mark, state.pendingTimeouts(0).length], [0, 0], 'the switch reads nothing and leaves nothing scheduled')
+        assert.deepStrictEqual(await qfDrain(state), [], 'so nothing runs after it')
+        await state.panelMessageHandler(['profilesDropdownChanged', 1])
+        await qfDrain(state)
+        const reads = qfBodyReads(state)
+        assert.deepStrictEqual([reads.length, new Set(reads).size], [3700, 3700], 'back on Scan the scan resumes where it stopped: every body once')
+        assert.strictEqual(qfScanLine(state), null)
+    })
+
+    await test('quick filters (cost): on mobile the fast paint reads no body and the fill runs the scan', async () => {
+        const state = await qfRun({
+            platform: 'mobile',
+            notes: qfCostNotes(2500, 1200),
+            profiles: [qfCostProfile(1, 'Plain'), qfCostProfile(2, 'Scan', { searchCriteria: 'tag:y', showNoCheckboxes: false })],
+        })
+        const mark = state.callLog.length
+        const readMark = qfBodyReads(state).length
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        const seq = state.callLog.slice(mark)
+        assert.ok(seq.indexOf('setHtml') >= 0 && seq.indexOf('setHtml') < seq.indexOf('bodyFetch'), 'the switch paints before it reads a single body')
+        assert.ok(qfBodyReads(state).length > readMark, 'then the fill reads')
+        await qfDrain(state)
+        const reads = qfBodyReads(state)
+        assert.deepStrictEqual([reads.length, new Set(reads).size, qfScanLine(state)], [3700, 3700, null], 'and the scan runs to its end, every body once')
+    })
+
+    // -- the Notes section's limit ---------------------------------------------------------------------------------
+    // 3,500 notes in the index's order, newest first; one in ten has an open checkbox, the rest none. The section's limit is 1,000.
+    const qfPagedNotes = (openEvery) => qfMap(Array.from({ length: 3500 }, (_, i) =>
+        qfItem(qfId('c', i), `Paged ${i}`, 0, i % openEvery === 0 ? QF_BODIES.open : QF_BODIES.none, { user_updated_time: 100000 - i })))
+    const qfNotePages = (state) => state.gets.filter(g => g.path[0] === 'search' && String(g.query && g.query.query).includes('type:note')).length
+
+    await test('quick filters (notes): the filter comes before the Notes section\'s limit, and a search is paged no further than its bound', async () => {
+        const state = await qfRun({ notes: qfPagedNotes(10), profiles: [qfCostProfile(1, 'Notes')], extra: { noteSearchPageSize: 100 } })
+        assert.ok(qfHtml(state).includes('Showing the 1,000 most recently updated notes.'), 'pressed: the newest 1,000, as ever')
+        let pages = qfNotePages(state)
+        await state.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        assert.strictEqual(qfNotePages(state) - pages, 30, 'released: paged to its bound, three times the pages of the limit, and no further')
+        await qfDrain(state)
+        assert.strictEqual(qfShown(state).length, 300, 'every open-checkbox note within the bound - most of them past the first 1,000')
+        assert.ok(qfHtml(state).includes('Showing the 300 most recently updated notes.'), 'the footer counts what passes, and offers more past the bound')
+        await state.panelMessageHandler(['showMoreNotes'])
+        await qfDrain(state)
+        assert.strictEqual(qfShown(state).length, 350, 'show more raises the bound with the limit: all 35 pages')
+        assert.ok(!qfHtml(state).includes('most recently updated notes.'), 'and nothing is left over')
+    })
+
+    await test('quick filters (notes): once more notes than the limit are known to pass, a search pages only as far as it must', async () => {
+        const state = await qfRun({ notes: qfPagedNotes(1), profiles: [qfCostProfile(1, 'Notes')], extra: { noteSearchPageSize: 100 } })
+        await state.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        await qfDrain(state)
+        assert.strictEqual(qfShown(state).length, 1000, 'every note passes: the limit holds')
+        const pages = qfNotePages(state)
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.strictEqual(qfNotePages(state) - pages, 11, 'the next full render stops as soon as 1,001 known notes pass, as the pressed view does')
+        assert.ok(qfHtml(state).includes('Showing the 1,000 most recently updated notes.'), 'and says there are more')
+    })
+
+    // -- the scan beside the other renders (the 2.10 review) ----------------------------------------------------------
+    // In Joplin a zero timer fires during any host round-trip, so the scan's next pass - armed before the render that armed it paints - fires during
+    // that render's setHtml, or during the panels.visible of the render that follows it, before that one has claimed its generation. qfRacing makes
+    // the harness do the same: every due zero timer is fired, not awaited, from inside setHtml and panels.visible, and (given qfYieldingReads) every
+    // body GET yields a macrotask, so a pass really runs beside whatever render is in flight. A scenario using it runs inside ONE timer capture
+    // (state.withTimers), so a timer armed by a pass still running after a handler has returned is captured too, and settle() awaits every pass
+    // fired and fires every one they arm until none is left.
+    const qfMacrotask = () => new Promise(resolve => setImmediate(resolve))
+    const qfYieldingReads = { onNoteGet: () => qfMacrotask() }
+    const qfRacing = (state) => {
+        const inflight = []
+        const fireDue = () => {
+            for (const timeout of state.pendingTimeouts(0)){
+                timeout.fired = true
+                inflight.push(Promise.resolve(timeout.cb()))
+            }
+        }
+        const panels = global.joplin.views.panels
+        const setHtml = panels.setHtml
+        const visible = panels.visible
+        panels.setHtml = async (handle, html) => { await setHtml(handle, html); fireDue(); await qfMacrotask(); await qfMacrotask() }
+        panels.visible = async (handle) => { fireDue(); await qfMacrotask(); return visible(handle) }
+        return {
+            settle: async () => {
+                for (let round = 0; round < 500; round++){
+                    while (inflight.length) await inflight.shift()
+                    if (!state.pendingTimeouts(0).length) return
+                    fireDue()
+                }
+                throw new Error('the scan never settled')
+            },
+        }
+    }
+
+    await test('quick filters (race): a switch to a scanning profile reads every body once, though its passes fire inside the renders\' own host round-trips', async () => {
+        const state = await qfRun({
+            notes: qfCostNotes(2500, 1200),
+            profiles: [qfCostProfile(1, 'Plain'), qfCostProfile(2, 'Scan', { searchCriteria: 'tag:y', showNoCheckboxes: false })],
+            extra: qfYieldingReads,
+        })
+        const mark = qfBodyReads(state).length
+        await state.withTimers(async () => {
+            const racing = qfRacing(state)
+            await state.panelMessageHandler(['profilesDropdownChanged', 2])
+            await racing.settle()
+        })
+        const reads = qfBodyReads(state).slice(mark)
+        assert.deepStrictEqual([reads.length, new Set(reads).size], [3100, 3100], 'every body the startup had not read, each read once: no pass read beside the fast paint, the fill or the truth refresh')
+        assert.strictEqual(new Set(qfBodyReads(state)).size, 3700, 'and the passes owed meanwhile were re-armed: the scan reached its end')
+        assert.deepStrictEqual([qfScanLine(state), state.pendingTimeouts(0).length], [null, 0], 'with no status line and nothing left scheduled')
+    })
+
+    await test('quick filters (race): a pass already reading when the view changes stops at the chunk in flight, and coming back reads only what is left', async () => {
+        const state = await qfRun({
+            notes: qfCostNotes(2500, 1200),
+            profiles: [qfCostProfile(1, 'Scan', { showNoCheckboxes: false }), qfCostProfile(2, 'Elsewhere', { searchCriteria: 'tag:elsewhere', showNotes: false })],
+            emptyFor: 'tag:elsewhere',
+            extra: qfYieldingReads,
+        })
+        const pending = state.pendingTimeouts(0)
+        assert.strictEqual(pending.length, 1, 'precondition: startup left the scan\'s next pass scheduled')
+        let atSwitch = 0
+        let afterSwitch = 0
+        await state.withTimers(async () => {
+            pending[0].fired = true
+            const pass = Promise.resolve(pending[0].cb())
+            const atStart = qfBodyReads(state).length
+            for (let turn = 0; turn < 20000 && qfBodyReads(state).length < atStart + 60; turn++) await qfMacrotask()
+            atSwitch = qfBodyReads(state).length
+            assert.ok(atSwitch >= atStart + 60, 'precondition: the pass is reading its batch')
+            await state.panelMessageHandler(['profilesDropdownChanged', 2])
+            await pass
+            afterSwitch = qfBodyReads(state).length
+        })
+        assert.ok(afterSwitch - atSwitch <= 20, `at most the chunk in flight is read after the switch (read ${afterSwitch - atSwitch})`)
+        assert.strictEqual(state.pendingTimeouts(0).length, 0, 'and nothing is left scheduled')
+        await state.panelMessageHandler(['profilesDropdownChanged', 1])
+        await qfDrain(state)
+        const reads = qfBodyReads(state)
+        assert.deepStrictEqual([reads.length, new Set(reads).size, qfScanLine(state)], [3700, 3700, null], 'back on Scan: every body once, the stopped pass\'s included')
+    })
+
+    await test('quick filters (race): a pass armed for a view that has changed since reads nothing, even if its timer fires anyway', async () => {
+        const state = await qfRun({ notes: qfCostNotes(2500, 1200), profiles: [qfCostProfile(1, 'Scan', { showNoCheckboxes: false })] })
+        const stale = state.pendingTimeouts(0)[0]
+        await state.panelMessageHandler(['quickFilterToggled', 'doneCheckboxes'])
+        assert.ok(stale.cleared && state.pendingTimeouts(0).length === 1, 'precondition: the toggle took the old pass back and scheduled one of its own, with rows still unread')
+        const mark = qfBodyReads(state).length
+        await state.withTimers(() => stale.cb())
+        assert.strictEqual(qfBodyReads(state).length - mark, 0, 'the old pass is dropped by its generation: it reads nothing')
+    })
+
+    await test('quick filters (cost): a render that reads no body by design - a fast paint, an optimistic repaint - carries the scan on', async () => {
+        const fast = await qfRun({ notes: qfCostNotes(2500, 1200), profiles: [qfCostProfile(1, 'Scan', { showNoCheckboxes: false })] })
+        assert.ok(qfScanLine(fast), 'precondition: the scan is under way')
+        await fast.syncStartHandler()
+        assert.strictEqual(fast.pendingTimeouts(0).length, 1, 'a fast paint (a sync starting) leaves the next pass scheduled')
+        await qfDrain(fast)
+        assert.deepStrictEqual([new Set(qfBodyReads(fast)).size, qfScanLine(fast)], [3700, null], 'and the scan runs to its end')
+        const optimistic = await qfRun({ notes: qfCostNotes(2500, 1200), profiles: [qfCostProfile(1, 'Scan', { showNoCheckboxes: false })] })
+        const ticked = (qfHtml(optimistic).match(/data-todo-id="([0-9a-f]{32})"/) || [])[1]
+        await optimistic.panelMessageHandler(['todoChecked', ticked, true])
+        assert.ok(qfScanLine(optimistic), 'precondition: an optimistic repaint, rows still unread')
+        await qfDrain(optimistic)
+        assert.deepStrictEqual([new Set(qfBodyReads(optimistic)).size, qfScanLine(optimistic)], [3700, null], 'an optimistic repaint carries it on to its end too')
+    })
+
+    // -- what is judged, and by which counts ------------------------------------------------------------------------
+    await test('quick filters (stale): a row whose note changed since its counts were read is judged by them until it is read again - never hidden in between', async () => {
+        const state = await qfRun({ notes: qfCategories(), profiles: [qfProfile(1, 'Lab', { showNoCheckboxes: false })] })
+        const open = qfId('e2', 1)
+        assert.ok(qfShown(state).includes('Note open'), 'precondition: drawn, by counts read at startup')
+        state.notes[open].body = QF_BODIES.none
+        state.notes[open].user_updated_time += 1
+        const mark = qfBodyReads(state).length
+        await state.panelMessageHandler(['todoChecked', qfId('e1', 1), true])
+        assert.ok(qfShown(state).includes('Note open'), 'an optimistic repaint draws it by the counts it has')
+        await state.syncStartHandler()
+        assert.ok(qfShown(state).includes('Note open'), 'as does a fast paint, whose search sees the new version')
+        assert.strictEqual(qfBodyReads(state).length - mark, 0, 'neither reads a body')
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.deepStrictEqual(qfBodyReads(state).slice(mark), [open], 'the next full render reads it again, once')
+        assert.ok(!qfShown(state).includes('Note open'), 'and judges it by what it now holds')
+        await qfTick(state)
+        assert.deepStrictEqual(qfBodyReads(state).slice(mark), [open], 'after which nothing reads it again')
+    })
+
+    await test('quick filters (calendars): the month grid\'s day and its "+N", and the week\'s cards, count the filtered list', async () => {
+        const noon = new Date()
+        noon.setHours(12, 0, 0, 0)
+        const key = `${noon.getFullYear()}-${String(noon.getMonth() + 1).padStart(2, '0')}-${String(noon.getDate()).padStart(2, '0')}`
+        const notes = qfMap([0, 1, 2, 3, 4].map(i => qfItem(qfId('f1', i), `Day ${i}`, 1, i < 3 ? QF_BODIES.open : QF_BODIES.none, { todo_due: noon.getTime() + i * 60000 })))
+        const month = await qfRun({ notes, profiles: [qfProfile(1, 'Month', { displayFormat: 'month', maxDotsPerDay: 2, showNotes: false })] })
+        const dayOf = (state) => {
+            const html = qfHtml(state)
+            const at = html.indexOf(`onclick="onCalendarDaySelected('${key}')"`)
+            const cell = html.slice(html.lastIndexOf('<td', at), html.indexOf('</td>', at))
+            return { label: (cell.match(/, (\d+) to-dos?, \d+ outstanding"/) || [])[1], more: (cell.match(/<span class="calendar-more">\+(\d+)<\/span>/) || [])[1] || null }
+        }
+        assert.deepStrictEqual(dayOf(month), { label: '5', more: '3' }, 'pressed: five to-dos that day, two dots and "+3"')
+        await month.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        assert.deepStrictEqual(dayOf(month), { label: '3', more: '1' }, 'released: the three with checkboxes, two dots and "+1"')
+        const week = await qfRun({ notes, profiles: [qfProfile(1, 'Week', { displayFormat: 'week', showNotes: false })] })
+        const cards = (state) => new Set([...qfHtml(state).matchAll(/data-todo-id="([0-9a-f]{32})"/g)].map(match => match[1])).size
+        assert.strictEqual(cards(week), 5, 'pressed: five cards')
+        await week.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        assert.strictEqual(cards(week), 3, 'released: three')
+    })
+
+    await test('quick filters (semantics): all three checkbox filters released read nothing at all - from a cold start, and from a scan under way', async () => {
+        const cold = qfMap(Array.from({ length: 3000 }, (_, i) => qfItem(qfId('g1', i), `Cold ${i}`, 0, i % 2 ? QF_BODIES.open : QF_BODIES.none, { user_updated_time: 5000 + i })))
+        const state = await qfRun({ notes: cold, profiles: [qfProfile(1, 'Nothing', { showOpenCheckboxes: false, showDoneCheckboxes: false, showNoCheckboxes: false })] })
+        await qfDrain(state)
+        assert.deepStrictEqual([qfBodyReads(state).length, qfScanLine(state), state.pendingTimeouts(0).length, qfShown(state).length], [0, null, 0, 0], 'a cold start reads no body, draws no row, says nothing is being read and schedules nothing')
+        const scanning = await qfRun({ notes: cold, profiles: [qfProfile(1, 'Scan', { showNoCheckboxes: false })] })
+        await scanning.panelMessageHandler(['quickFilterToggled', 'openCheckboxes'])
+        assert.ok(qfScanLine(scanning), 'precondition: a scan under way')
+        const mark = qfBodyReads(scanning).length
+        await scanning.panelMessageHandler(['quickFilterToggled', 'doneCheckboxes'])
+        await qfDrain(scanning)
+        assert.deepStrictEqual([qfBodyReads(scanning).length - mark, qfScanLine(scanning), qfShown(scanning).length], [0, null, 0], 'releasing the last of the three ends it: nothing more is read, and nothing is drawn')
+    })
+
+    await test('quick filters (notes): a search whose bound leaves no passing note keeps its "show more", and its view is not empty to the peek', async () => {
+        const notes = qfMap(Array.from({ length: 3500 }, (_, i) =>
+            qfItem(qfId('c', i), `Paged ${i}`, 0, i >= 3450 ? QF_BODIES.open : QF_BODIES.none, { user_updated_time: 100000 - i })))
+        const outside = qfId('ea', 2)
+        const state = await qfRun({ notes, profiles: [qfCostProfile(1, 'Notes', { showNoCheckboxes: false })], extra: { noteSearchPageSize: 100, outsideResults: [qfStrip(qfItem(outside, 'Outside', 0, QF_BODIES.none))] } })
+        await qfDrain(state)
+        const section = () => { const html = qfHtml(state); const at = html.indexOf('<section class="notes-section">'); return at < 0 ? null : html.slice(at, html.indexOf('</section>', at)) }
+        assert.ok(section(), 'the Notes section is drawn though none of its 3,000 notes within the bound passes')
+        assert.ok(section().includes('onShowMoreNotesClicked()') && !/data-note-id=/.test(section()), 'with its footer and "show more" alone')
+        await state.panelMessageHandler(['searchFilterChanged', 'paged'])
+        await qfDrain(state)
+        assert.ok(section() && section().includes('onShowMoreNotesClicked()'), 'a typed search keeps it')
+        assert.ok(!qfHtml(state).includes('Results outside current filters'), 'and the view is not empty to the peek')
+        await state.panelMessageHandler(['showMoreNotes'])
+        await qfDrain(state)
+        assert.strictEqual(qfShown(state).length, 50, '"show more" raises the bound and reaches the fifty')
+    })
+
+    await test('quick filters (toggle): a press paints at once from the counts known - its pressed state, the rows and the status line - before it reads a body', async () => {
+        const state = await qfRun({ notes: qfCostNotes(2500, 1200), profiles: [qfCostProfile(1, 'S')] })
+        const paints = []
+        const panels = global.joplin.views.panels
+        const setHtml = panels.setHtml
+        panels.setHtml = async (handle, html) => { paints.push(html); return setHtml(handle, html) }
+        const mark = state.callLog.length
+        await state.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        const seq = state.callLog.slice(mark)
+        assert.ok(seq.indexOf('setHtml') >= 0 && seq.indexOf('setHtml') < seq.indexOf('bodyFetch'), 'the first paint comes before the first body is read')
+        assert.ok(paints[0].includes('data-filter="noCheckboxes" aria-pressed="false"'), 'and it shows the button released')
+        assert.ok(paints[0].includes('Reading the checkboxes inside 3,100 notes…'), 'with the rows not read yet counted above the list')
+        assert.strictEqual(qfScanLine(state), 'Reading the checkboxes inside 2,100 notes…', 'the fill then reads for the first pass\'s budget')
+        const none = await qfRun({ notes: qfCategories(), profiles: [qfProfile(1, 'None', { showCompletedPast: false, showCompletedToday: false, showCompletedFuture: false, showCompletedNoDue: false })] })
+        const nonePaints = []
+        const nonePanels = global.joplin.views.panels
+        const noneSetHtml = nonePanels.setHtml
+        nonePanels.setHtml = async (handle, html) => { nonePaints.push(html); return noneSetHtml(handle, html) }
+        await none.panelMessageHandler(['quickFilterToggled', 'completedTodos'])
+        const titlesIn = (html) => [...new Set([...html.matchAll(/data-(?:todo|note)-id="([0-9a-f]{32})"/g)].map(match => match[1]))].map(id => none.notes[id].title)
+        assert.deepStrictEqual(titlesIn(nonePaints[0]).filter(title => QF_COMPLETED.includes(title)).sort(), QF_COMPLETED, 'the completed button\'s fast paint runs the changed query: all four buckets at once')
+    })
+
+    // A view decided without a search (no criteria, no typed search, no note store), so a note change is judged on the host and may write an overlay
+    // entry - the one place a stale count could still decide a row (checkboxCountsUnknown in panel.ts).
+    const qfLocalRun = (extra) => qfRun({
+        notes: qfCategories(),
+        profiles: [qfProfile(1, 'Local', { searchCriteria: '', showNoCheckboxes: false }), qfProfile(2, 'To-dos', { searchCriteria: '', showNoCheckboxes: false, showNotes: false })],
+        extra: Object.assign({ eventsUnavailable: true }, extra || {}),
+    })
+    await test('quick filters (optimistic): an external change or a type flip judged on unknown or stale counts writes no entry, and the search brings the row in', async () => {
+        const state = await qfLocalRun()
+        const plain = qfId('e2', 3)
+        assert.ok(!qfShown(state).includes('Note none'), 'precondition: a note without checkboxes is hidden')
+        state.notes[plain].body = '- [ ] first'
+        state.notes[plain].user_updated_time += 1
+        await state.noteChangeHandler({ id: plain })
+        assert.strictEqual(state.triggers.optimisticHeld().itemOverlay, false, 'a first checkbox added: its old counts judge nothing, so no suppress is written')
+        await state.panelMessageHandler(['sortDirectionClicked'])
+        assert.ok(qfShown(state).includes('Note none'), 'and the next render, which reads it, draws it')
+        const created = qfId('e3', 1)
+        state.notes[created] = qfItem(created, 'Created elsewhere', 0, QF_BODIES.open, { user_updated_time: 7000 })
+        await state.noteChangeHandler({ id: created })
+        assert.strictEqual(state.triggers.optimisticHeld().itemOverlay, false, 'a note never read writes no entry either')
+        const flipped = qfId('e1', 1)
+        state.notes[flipped].user_updated_time += 1
+        await state.panelMessageHandler(['noteMenuAction', 'toggleType', flipped])
+        assert.strictEqual(state.triggers.optimisticHeld().itemOverlay, false, 'nor does a type flip of a to-do edited since its counts were read')
+        const elsewhere = await qfLocalRun()
+        await elsewhere.panelMessageHandler(['profilesDropdownChanged', 2])
+        const todo = qfId('e1', 1)
+        elsewhere.notes[todo].user_updated_time += 1
+        await elsewhere.panelMessageHandler(['noteMenuAction', 'toggleType', todo])
+        assert.strictEqual(elsewhere.triggers.optimisticHeld().itemOverlay, true, 'a flip out of the view by everything else is suppressed at once, whatever its counts')
+        assert.ok(!qfShown(elsewhere).includes('Todo open'), 'so a to-dos-only profile drops the note it became')
+    })
+
+    await test('quick filters (reveal): a note the scan has not reached yet is read first, so the reveal finds it where the scan would list it', async () => {
+        const notes = qfCostNotes(0, 4000)
+        const state = await qfRun({ notes, profiles: [qfCostProfile(1, 'Scan', { showNoCheckboxes: false })] })
+        const target = qfId('b', 3999)
+        assert.ok(qfScanLine(state) && !qfBodyReads(state).includes(target), 'precondition: a scan under way that has not read the newest note')
+        await state.withTimers(() => executeCommand(state, 'cockpit.revealNote', target))
+        const html = qfHtml(state)
+        assert.ok(listsRow(html, target), 'the row is listed')
+        assert.strictEqual(currentNotebookID(html), '', 'in the view as it was: no notebook switch')
+        assert.ok(!html.includes('Revealed - outside current filters'), 'and no pin')
+        assert.strictEqual(qfBodyReads(state).filter(id => id === target).length, 1, 'its body read once')
+    })
+
+    await test('quick filters (cost): a pass is bounded by time, not by a count - a slower bridge reads fewer bodies a pass, and a pass reads one chunk at least', async () => {
+        const slower = await qfRun({ notes: qfCostNotes(2500, 1200), profiles: [qfCostProfile(1, 'S')], msPerBody: 10 })
+        let mark = qfBodyReads(slower).length
+        await slower.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        assert.strictEqual(qfBodyReads(slower).length - mark, 200, 'five times slower a read: a fifth of the bodies a pass, ten chunks of 20')
+        const rounds = await qfDrain(slower)
+        assert.deepStrictEqual([rounds[0].bodies, new Set(qfBodyReads(slower)).size, qfScanLine(slower)], [200, 3700, null], 'pass after pass, and the scan still ends, every body once')
+        const slowest = await qfRun({ notes: qfCostNotes(2500, 1200), profiles: [qfCostProfile(1, 'S')], msPerBody: 1000 })
+        mark = qfBodyReads(slowest).length
+        await slowest.panelMessageHandler(['quickFilterToggled', 'noCheckboxes'])
+        assert.strictEqual(qfBodyReads(slowest).length - mark, 20, 'a chunk that takes longer than the whole budget is still read: one chunk a pass')
+        mark = qfBodyReads(slowest).length
+        await slowest.fireTimeout(slowest.pendingTimeouts(0)[0])
+        assert.strictEqual(qfBodyReads(slowest).length - mark, 20, 'and the next pass reads one more')
+    })
+
+    Date.now = qfRealNow
 
     await fs.remove(tmp)
     console.log(failures ? `\n${failures} failing check(s)` : '\nAll checks passed')

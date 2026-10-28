@@ -29,7 +29,7 @@
 
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
-import { getPanelSearchFilter, reconcileExternalNoteChange, refreshPanelData, trackEditorNoteSelection } from "../ui/panel/panel";
+import { asOneRender, getPanelSearchFilter, reconcileExternalNoteChange, refreshPanelData, trackEditorNoteSelection } from "../ui/panel/panel";
 import { getOverviewNoteIDs, refreshNoteData } from "./markdown";
 import { getCurrentProfileID, updateFrequencySettingKey } from "./settings";
 import { getAllProfiles, getProfile } from "./database";
@@ -66,19 +66,23 @@ export async function refreshInterfaces(){
     }
     refreshing = true
     try {
-        do {
-            refreshQueued = false
-            // Fast first paint: render the whole list from whatever counts are cached, fetching NO note
-            // bodies, so a cold start or any full refresh shows at once instead of stalling the paint on up
-            // to ~600 body GETs.
-            await refreshPanelData({ fast: true })
-            // The overview notes never render checkbox rings, so this refresh fetches zero note bodies
-            // (fetchTodos forces the fast path for markdown) and only writes a note whose content changed.
-            await regenerateOverviewNotes()
-            // Background count-fill: fetch the note bodies (nearest the viewport first) and repaint once with
-            // the real rings. A no-op via the equality guard whenever the cache is already warm.
-            await refreshPanelData({ fillCounts: true })
-        } while (refreshQueued)
+        // One render as far as the checkbox scan (2.10) is concerned, fast paint, overview pass and fill together (asOneRender in panel.ts): a
+        // pass the fast paint owes would otherwise run during the overview pass and read the batch the fill is about to read.
+        await asOneRender(async () => {
+            do {
+                refreshQueued = false
+                // Fast first paint: render the whole list from whatever counts are cached, fetching NO note
+                // bodies, so a cold start or any full refresh shows at once instead of stalling the paint on up
+                // to ~600 body GETs.
+                await refreshPanelData({ fast: true })
+                // The overview notes never render checkbox rings, so this refresh fetches zero note bodies
+                // (fetchTodos forces the fast path for markdown) and only writes a note whose content changed.
+                await regenerateOverviewNotes()
+                // Background count-fill: fetch the note bodies (nearest the viewport first) and repaint once with
+                // the real rings. A no-op via the equality guard whenever the cache is already warm.
+                await refreshPanelData({ fillCounts: true })
+            } while (refreshQueued)
+        })
     } catch (error) {
         console.error("Cockpit: could not refresh the to-do list", error)
     } finally {
@@ -272,8 +276,11 @@ async function renderStoreChange(fill){
     // The drain this render draws may have settled some of the optimistic layer (settleDrained below): merge nothing it let go of.
     await settling
     var complete = !!fill && await allConsumersStoreServed()
-    await refreshPanelData({ fast: true })
-    if (complete) await refreshPanelData({ fillCounts: true, ringsChangedOnly: fill.plain ? null : fill.fetched })
+    // The fast render and its fill are one render to the checkbox scan (2.10, asOneRender in panel.ts), as in refreshInterfaces.
+    await asOneRender(async () => {
+        await refreshPanelData({ fast: true })
+        if (complete) await refreshPanelData({ fillCounts: true, ringsChangedOnly: fill.plain ? null : fill.fetched })
+    })
 }
 
 /** dropStoreRender *********************************************************************************************************************************

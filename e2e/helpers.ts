@@ -339,7 +339,7 @@ async function openProfileMenu(win: Page): Promise<Frame> {
 /**
  * Open the profile editor from the profile dropdown's "+ New profile..." action and return its frame.
  * The form opens on the view on screen: the current profile's settings with the header's notebook,
- * search and sorting on top, named "New Profile" with the name focused and selected.
+ * search and quick filters on top, named "New Profile" with the name focused and selected.
  */
 export async function openNewProfileEditor(win: Page): Promise<Frame> {
   const frame = await openProfileMenu(win);
@@ -392,7 +392,7 @@ export async function profileNames(win: Page): Promise<string[]> {
 
 /**
  * The name of the profile currently selected, as the dropdown's toggle shows it: the name, plus the
- * trailing "*" while the header's notebook, search or sorting differ from the profile's (2.9). The
+ * trailing "*" while the header's notebook, search or filters differ from the profile's (2.9, 2.10). The
  * asterisk is a span of its own beside the label, so a long name's ellipsis never hides it; it is read
  * back here so the answer is what the user sees.
  */

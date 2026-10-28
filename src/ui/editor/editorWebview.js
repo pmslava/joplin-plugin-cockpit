@@ -8,6 +8,9 @@ let showCompletedPastCheckbox = document.getElementById("showCompletedPastCheckb
 let showCompletedTodayCheckbox = document.getElementById("showCompletedTodayCheckbox")
 let showCompletedFutureCheckbox = document.getElementById("showCompletedFutureCheckbox")
 let showCompletedNoDueCheckbox = document.getElementById("showCompletedNoDueCheckbox")
+let showOpenCheckboxesCheckbox = document.getElementById("showOpenCheckboxesCheckbox")
+let showDoneCheckboxesCheckbox = document.getElementById("showDoneCheckboxesCheckbox")
+let showNoCheckboxesCheckbox = document.getElementById("showNoCheckboxesCheckbox")
 let showNotesCheckbox = document.getElementById("showNotesCheckbox")
 let notesPositionSelect = document.getElementById("notesPositionSelect")
 let notebookSelect = document.getElementById("notebookSelect")
@@ -35,6 +38,9 @@ showCompletedPastCheckbox.addEventListener("change", saveProfileData)
 showCompletedTodayCheckbox.addEventListener("change", saveProfileData)
 showCompletedFutureCheckbox.addEventListener("change", saveProfileData)
 showCompletedNoDueCheckbox.addEventListener("change", saveProfileData)
+showOpenCheckboxesCheckbox.addEventListener("change", saveProfileData)
+showDoneCheckboxesCheckbox.addEventListener("change", saveProfileData)
+showNoCheckboxesCheckbox.addEventListener("change", saveProfileData)
 showNotesCheckbox.addEventListener("change", saveProfileData)
 notesPositionSelect.addEventListener("change", saveProfileData)
 notebookSelect.addEventListener("change", saveProfileData)
@@ -68,6 +74,10 @@ function loadProfileData() {
         showCompletedTodayCheckbox.checked = profileObject["showCompletedToday"]
         showCompletedFutureCheckbox.checked = profileObject["showCompletedFuture"]
         showCompletedNoDueCheckbox.checked = profileObject["showCompletedNoDue"]
+        // The checkbox filters (2.10) default to shown, so a profile object without them - one written before they existed - reads as shown.
+        showOpenCheckboxesCheckbox.checked = profileObject["showOpenCheckboxes"] !== false
+        showDoneCheckboxesCheckbox.checked = profileObject["showDoneCheckboxes"] !== false
+        showNoCheckboxesCheckbox.checked = profileObject["showNoCheckboxes"] !== false
         showNotesCheckbox.checked = profileObject["showNotes"]
         notesPositionSelect.value = profileObject["notesPosition"] || "after"
         notebookSelect.value = profileObject["notebook"] || ""
@@ -98,6 +108,9 @@ function saveProfileData(){
         "showCompletedToday": showCompletedTodayCheckbox.checked,
         "showCompletedFuture": showCompletedFutureCheckbox.checked,
         "showCompletedNoDue": showCompletedNoDueCheckbox.checked,
+        "showOpenCheckboxes": showOpenCheckboxesCheckbox.checked,
+        "showDoneCheckboxes": showDoneCheckboxesCheckbox.checked,
+        "showNoCheckboxes": showNoCheckboxesCheckbox.checked,
         "showNotes": showNotesCheckbox.checked,
         "notesPosition": notesPositionSelect.value,
         "notebook": notebookSelect.value,

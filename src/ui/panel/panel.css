@@ -360,38 +360,104 @@ option {
     margin-right: auto;
 }
 
-/* The compact variant, used by the sort picker: a small labelled button whose menu opens
- * right-aligned so it stays inside the panel */
-.dropdown.-compact {
+/* The quick-filter group (2.10), in the filter row between the notebook picker and the sync button: a
+ * segmented control of four one-press filters, aria-pressed carrying each state. One pill with the
+ * picker's own border, radius and 26px height, so it reads as part of the same row; the buttons inside
+ * have no border of their own, only a hairline between neighbours. No overflow:hidden on the pill - it
+ * would clip the mobile tap overlay below - so the end buttons round their own outer corners instead. */
+.quick-filters {
+    display: flex;
     flex: 0 0 auto;
+    align-items: stretch;
+    height: 26px;
+    border: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
+    border-radius: 3px;
 }
 
-.dropdown.-compact .dropdown-toggle {
-    gap: 4px;
-    width: auto;
-    padding: 2px 7px;
-    background: none;
-    border-color: transparent;
-    /* The compact face is transparent on the panel, unlike the scheme-4 picker face. */
-    color: var(--cockpit-color2, inherit);
-    opacity: 0.85;
+.quick-filter {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: auto;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    border: none;
+    border-radius: 0;
+    background-color: transparent;
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+    outline: none;
 }
 
-.dropdown.-compact .dropdown-toggle:hover {
-    opacity: 1;
-    background-color: var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18));
+.quick-filter + .quick-filter {
+    border-left: 1px solid var(--cockpit-divider-color, rgba(127, 127, 127, 0.4));
 }
 
-.dropdown.-compact .dropdown-toggle .icon {
+.quick-filter:first-child {
+    border-radius: 2px 0 0 2px;
+}
+
+.quick-filter:last-child {
+    border-radius: 0 2px 2px 0;
+}
+
+.quick-filter .icon {
     width: 1.1em;
     height: 1.1em;
+    display: block;
     flex-shrink: 0;
 }
 
-.dropdown.-compact .dropdown-menu {
-    left: auto;
-    right: 0;
-    min-width: 130px;
+/* Pressed (the default for all four): the picker face behind a full-strength glyph, the same colour pair
+ * as the notebook picker beside it, and a 2px accent line along the button's bottom edge in the link
+ * colour. The line is the cue that holds in every theme: in Match Joplin on Joplin's dark theme the picker
+ * face is within a few levels of the row, so without it the released well below was the only difference,
+ * and a dim glyph alone did not say "released" on a real panel (the 2.10 e2e screenshots). All four
+ * pressed read as one marked group; a released button breaks the line and dims. */
+.quick-filter[aria-pressed="true"] {
+    background-color: var(--cockpit-background-color4, transparent);
+    color: var(--cockpit-color, inherit);
+    box-shadow: inset 0 -2px 0 var(--cockpit-url-color, #2D6BDC);
+}
+
+/* Released: a dim glyph in a darkened, inset well, so it reads sunken. The glyph takes the panel's own text
+ * colour (the colour the sync button beside it uses), not --cockpit-color-faded: in the Light preset, and in
+ * Match Joplin on Joplin's light theme, the row sits on the dark sidebar (#313640) and the faded colour
+ * (#627184) drops to about 1.6:1 there once dimmed, so a released filter would all but vanish. The well (a
+ * faint black tint and inner shadow) is the cue for the presets whose picker face equals or nearly equals
+ * the row - Solarized Dark is identical, Dark / OLED Dark / Aritim Dark differ by a few levels - where the
+ * face alone cannot tell the states apart, and where Solarized Dark's bright panel text would otherwise put
+ * a released glyph level with its muted pressed one. The opacity sits on the glyph, not the button, so the
+ * hairlines and the well keep theirs. */
+.quick-filter[aria-pressed="false"] {
+    background-color: rgba(0, 0, 0, 0.2);
+    color: var(--cockpit-color2, var(--cockpit-color, inherit));
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.quick-filter[aria-pressed="false"] .icon {
+    opacity: 0.4;
+}
+
+/* Hover, in both states: the hover tint laid OVER the state's face (as an image, so a pressed button keeps
+ * its face under it and its dark glyph stays on a light face in the Light preset), and the glyph at full
+ * strength. */
+.quick-filter:hover {
+    background-image: linear-gradient(var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18)), var(--cockpit-background-color-hover-dim3, rgba(127, 127, 127, 0.18)));
+}
+
+.quick-filter:hover .icon {
+    opacity: 1;
+}
+
+/* Keyboard focus marks the one button, inside its own box so it never hides under a neighbour, in the
+ * colour .dropdown-toggle:focus uses for the picker's border. */
+.quick-filter:focus-visible {
+    outline: 1px solid var(--cockpit-focus-outline-color, var(--cockpit-url-color, #2D6BDC));
+    outline-offset: -1px;
 }
 
 .dropdown-caret {
@@ -427,7 +493,7 @@ option {
  * height, the list scrolling inside; a short list keeps its natural height. The menu is anchored just below
  * the two top control rows (~72px down), so 66vh clears the panel bottom with headroom; the calc() caps it
  * on an unusually short panel so the menu always stays fully visible. Scoped to the notebook menu - the
- * profile and sort menus keep the shared 320px cap above. */
+ * profile menu keeps the shared 320px cap above. */
 #notebookMenu {
     max-height: min(66vh, calc(100vh - 88px));
 }
@@ -1494,16 +1560,21 @@ table {
 .cockpit-mobile .row-action { position: relative; }
 .cockpit-mobile .row-action::after { content: ""; position: absolute; inset: -9px -2px; }
 
-/* Standalone icon buttons (sync, sort direction, mobile styler, calendar nav): 26 + 14 = 40 square. */
+/* Standalone icon buttons (sync, mobile styler, calendar nav): 26 + 14 = 40 square. */
 .cockpit-mobile .icon-button { position: relative; }
 .cockpit-mobile .icon-button::after { content: ""; position: absolute; inset: -7px; }
 
-/* The filter row packs the sort-direction, styler and sync icon buttons directly against each other
- * (and against the sort dropdown) with only a 4px gap, so the full -7px overlay above would overlap the
+/* The filter row packs the styler and sync icon buttons directly against each other (and against the
+ * quick-filter group) with only a 4px gap, so the full -7px overlay above would overlap the
  * neighbour by ~10px and, painted on top, occlude ~3px of its icon - taps in that band would hit the
  * wrong button. Constrain the growth to vertical only here, matching the .dropdown-toggle treatment in
  * the same flex row; the standalone calendar-nav arrows keep the full square overlay above. */
 .cockpit-mobile #filterRow .icon-button::after { inset: -7px 0; }
+
+/* The quick-filter buttons (2.10) sit edge to edge inside their pill, so like the filter row's icon buttons
+ * above they grow their tap area vertically only (24 inside the pill's border, + 14), never into a neighbour. */
+.cockpit-mobile .quick-filter { position: relative; }
+.cockpit-mobile .quick-filter::after { content: ""; position: absolute; inset: -7px 0; }
 
 /* The two icon-only create buttons in the profile row sit directly against each other (and the profile
  * dropdown) with only a 4px gap, so the full -7px square overlay would overlap the neighbour and occlude

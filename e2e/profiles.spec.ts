@@ -116,8 +116,9 @@ test.describe('Profiles', () => {
 
   /**
    * "+ New profile..." is "save as" for the view on screen: the editor opens on the current profile with the
-   * header's notebook, search and sorting on top, the name focused and selected so typing replaces it, and
-   * Create selects the new profile - so the dropdown names the view the panel is still showing.
+   * header's notebook, search and quick filters on top, the name focused and selected so typing replaces it, and
+   * Create selects the new profile - so the dropdown names the view the panel is still showing. Since 2.10 the
+   * sorting is no longer in the header (the quick filters took its place), so the form keeps the profile's own.
    */
   test('a new profile opens on the current view, and Create selects it with the view unchanged', async () => {
     const { win } = joplin;
@@ -143,19 +144,22 @@ test.describe('Profiles', () => {
     await waitForPanelTodoGone(win, betaTitle);
     await waitForPanelTodo(win, alphaTitle);
 
-    // The sorting, both halves away from the defaults the template would show.
-    await panel.locator('.dropdown-toggle[onclick*="sortMenu"]').click();
-    await expect(panel.locator('#sortMenu')).toBeVisible();
-    await panel.locator(`#sortMenu .dropdown-item[onclick*="'sortFieldSelected', 'updated'"]`).click();
-    await expect(panel.locator('.dropdown-toggle[onclick*="sortMenu"] .dropdown-toggle-label')).toHaveText('Updated', { timeout: 20_000 });
-    await panel.locator('button[onclick="onSortDirectionClicked()"]').click();
-    await expect(panel.locator('button[onclick="onSortDirectionClicked()"]')).toHaveAttribute('title', 'Sort direction: descending', { timeout: 20_000 });
+    // A quick filter released, away from the default the template would show. "All checkboxes done" hides neither
+    // to-do (they have no checkboxes inside), so the view keeps the row the checks below look for.
+    const doneFilter = panel.locator('#quickFilters .quick-filter[data-filter="doneCheckboxes"]');
+    await doneFilter.click();
+    await expect(doneFilter).toHaveAttribute('aria-pressed', 'false', { timeout: 20_000 });
+    await waitForPanelTodo(win, alphaTitle);
 
     const editor = await openNewProfileEditor(win);
     await expect(editor.locator('#notebookSelect')).toHaveValue(notebookId);
     await expect(editor.locator('#panelSearchInput')).toHaveValue(alphaTitle);
-    await expect(editor.locator('#sortFieldSelect')).toHaveValue('updated');
-    await expect(editor.locator('#sortDirectionSelect')).toHaveValue('desc');
+    await expect(editor.locator('#showDoneCheckboxesCheckbox')).not.toBeChecked();
+    await expect(editor.locator('#showOpenCheckboxesCheckbox')).toBeChecked();
+    await expect(editor.locator('#showNoCheckboxesCheckbox')).toBeChecked();
+    // The sorting is the profile's own: the header no longer changes it.
+    await expect(editor.locator('#sortFieldSelect')).toHaveValue('title');
+    await expect(editor.locator('#sortDirectionSelect')).toHaveValue('asc');
     await expect(editor.locator('#nameInput')).toHaveValue('New Profile');
     // The name has the focus with all of its text selected, so typing replaces it.
     await expect
@@ -177,10 +181,11 @@ test.describe('Profiles', () => {
 
     await expect.poll(() => profileNames(win), { timeout: 30_000 }).toContain(savedName);
     await expect.poll(() => selectedProfileName(win), { timeout: 30_000 }).toBe(savedName);
-    // The view is the one it was made from: still filtered to the notebook and the search.
+    // The view is the one it was made from: still filtered to the notebook, the search and the released filter.
     const panelAfter = await agendaPanel(win);
     await expect(panelAfter.locator('#searchFilter')).toHaveValue(alphaTitle);
     await expect(panelAfter.locator('.dropdown-toggle[onclick*="notebookMenu"] .dropdown-toggle-label')).toHaveText(notebookName);
+    await expect(panelAfter.locator('#quickFilters .quick-filter[data-filter="doneCheckboxes"]')).toHaveAttribute('aria-pressed', 'false');
     await waitForPanelTodo(win, alphaTitle);
     expect(await panelTodoTitles(win)).not.toContain(betaTitle);
     // Made from the view on screen, so the new profile's name carries no "view changed" asterisk.
@@ -225,7 +230,7 @@ test.describe('Profiles', () => {
 
   /**
    * The third way out of a marked view: "Save view into <name>" in the profile menu writes the header's notebook,
-   * search and sorting into the current profile. Offered only while the view is marked; afterwards the name is plain,
+   * search and quick filters into the current profile (and the sorting it was applied with). Offered only while the view is marked; afterwards the name is plain,
    * the view stays, and a switch away and back finds it saved.
    */
   test('"Save view into" writes the marked view into the current profile', async () => {

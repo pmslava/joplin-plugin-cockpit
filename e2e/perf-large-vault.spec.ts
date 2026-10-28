@@ -26,9 +26,19 @@ import { launchJoplin, closeJoplin, createProfile, JoplinInstance, E2E_PATHS, PL
  * store's first save (CockpitInstrument.snapshot().storeSave.count, read in the plugin's window), closes Joplin keeping that profile copy, launches
  * it again and measures the same window. The warm launch restores the store from the file before its first paint, and the report carries its first
  * paint and its storeRestore next to the cold one's, under "warm".
+ *
+ * PERF_FILTER=1 measures the checkbox filters' scan as well (2.10, docs/BRIEF-2.10-quick-filters.md): once the measured window of the launch with
+ * Cockpit is over - its first paint taken with the four quick filters pressed, as every profile starts - the spec releases "Items without
+ * checkboxes" in the panel and times what follows until the status line ("Reading the checkboxes inside N notes…") is gone: the toggle's own
+ * paint, the whole scan, the bodies it read (CockpitInstrument's counter) and how many status lines it showed on the way, under "checkboxScan".
+ * The press stands in for a profile stored with that switch off, which a template copy cannot be preset with: Cockpit's profiles live in
+ * Joplin's database. The press back, a second release (every count cached by then, so it reads nothing) and a last press are timed too,
+ * each with its renders, paints and the memory around it.
  */
 
 const NOTES = Number(process.env.PERF_NOTES || 20000);
+// PERF_PLUGIN_DIST=<dir> measures another build of Cockpit (an older release's dist/, built elsewhere) against the same template, for a baseline.
+const PLUGIN_DIST = process.env.PERF_PLUGIN_DIST || E2E_PATHS.PLUGIN_DIST;
 const TODOS_SET = !!process.env.PERF_TODOS;
 const TODOS = TODOS_SET ? Number(process.env.PERF_TODOS) : Math.round(NOTES * 0.05);
 const SEED_NAME = TODOS_SET ? `${NOTES}-t${TODOS}` : `${NOTES}`;
@@ -196,6 +206,146 @@ function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([promise.catch(() => fallback), new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
 }
 
+/**
+ * PERF_FILTER (2.10): release "Items without checkboxes" in the panel and time the checkbox scan it starts, then press it again, release it a
+ * second time (the counts are all cached by then, so this one reads nothing) and press it once more, timing each.
+ * Sampled every 250 ms: the toggle has painted once the button reads the new aria-pressed, and the scan is done once #checkboxScan is gone.
+ * Each press reports the bodies read, the renders and paints the plugin counted (CockpitInstrument), the distinct status lines seen, the rows
+ * drawn at the end, and the memory around it: the plugin's heap (process.memoryUsage in its window) and the whole process tree's RSS.
+ */
+async function measureCheckboxScan(joplin: JoplinInstance): Promise<Record<string, unknown> | null> {
+  const { win, child } = joplin;
+  if (!(await within(findPanel(win), 10_000, null))) return null;
+  // The template's bundled Backup plugin opens a modal on startup ("The Backup path ... does not exist!": its path names the seeding profile's
+  // directory, renamed into the template since), and a modal takes every pointer event, so the press below would wait forever behind it.
+  // Dismissed here, after the measured window, rather than fixed in the template: the window is measured exactly as before.
+  const dismissedDialogs = await dismissPluginDialogs(win);
+  const read = async () => {
+    const panel = await within(findPanel(win), 10_000, null);
+    if (!panel) return null;
+    return within(panel.evaluate(() => {
+      const button = document.querySelector('#quickFilters .quick-filter[data-filter="noCheckboxes"]');
+      const line = document.getElementById('checkboxScan');
+      return {
+        pressed: button ? button.getAttribute('aria-pressed') : null,
+        line: line ? (line.textContent || '').trim() : null,
+        rows: document.querySelectorAll('[data-todo-id], [data-note-id]').length,
+      };
+    }), 10_000, null);
+  };
+  const memory = async () => ({ pluginHeapMb: await pluginHeapMb(joplin), treeRssMb: processTreeRssMb(child.pid!) });
+  const press = async (wantPressed: string) => {
+    const before = await pluginTotals(joplin);
+    const memoryBefore = await memory();
+    const panel = await within(findPanel(win), 10_000, null);
+    if (!panel) return null;
+    const startedAt = Date.now();
+    await panel.locator('#quickFilters .quick-filter[data-filter="noCheckboxes"]').click({ timeout: 30_000 });
+    let paintMs = -1;
+    let doneMs = -1;
+    let rows = 0;
+    const lines: string[] = [];
+    const deadline = Date.now() + 20 * 60_000;
+    while (Date.now() < deadline) {
+      const state = await read();
+      if (state && state.pressed === wantPressed) {
+        if (paintMs < 0) paintMs = Date.now() - startedAt;
+        if (state.line) {
+          if (lines[lines.length - 1] !== state.line) lines.push(state.line);
+        } else {
+          doneMs = Date.now() - startedAt;
+          rows = state.rows;
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    // A last batch can still be in flight when the line is gone; let the plugin settle before the counters are read.
+    await new Promise((r) => setTimeout(r, 3000));
+    const after = await pluginTotals(joplin);
+    const delta = (key: string) => (before && after ? after[key] - before[key] : null);
+    return {
+      paintMs,
+      doneMs,
+      bodies: delta('bodies'),
+      renders: delta('renders'),
+      paints: delta('paints'),
+      searches: delta('search'),
+      listings: delta('listing'),
+      statusLines: lines.length,
+      firstStatusLine: lines[0] || null,
+      lastStatusLine: lines[lines.length - 1] || null,
+      rows,
+      memoryBefore,
+      memoryAfter: await memory(),
+    };
+  };
+  const released = await press('false');
+  const pressedAgain = await press('true');
+  const releasedAgain = await press('false');
+  const pressedFinally = await press('true');
+  return { dismissedDialogs, released, pressedAgain, releasedAgain, pressedFinally };
+}
+
+/** Close every plugin dialog open in the main window with its first button, and return the text each one showed. */
+async function dismissPluginDialogs(win: Page): Promise<string[]> {
+  const texts: string[] = [];
+  for (let round = 0; round < 5; round++) {
+    const dialog = win.locator('dialog[open].user-webview-dialog').first();
+    if (!(await dialog.count())) break;
+    const frame = await within(dialog.locator('iframe').elementHandle().then((handle) => handle && handle.contentFrame()), 5_000, null);
+    texts.push(frame ? ((await within(frame.evaluate(() => (document.body ? document.body.innerText : '').trim()), 5_000, '')) || '').replace(/\s+/g, ' ') : '');
+    await dialog.locator('.user-dialog-button-bar button').first().click({ timeout: 10_000 });
+    await win.waitForTimeout(500);
+  }
+  return texts;
+}
+
+/**
+ * PERF_RERENDER: post sortDirectionClicked twice from the panel (the host answers it with one full render of the same rows, the direction
+ * flipped and flipped back; every release since 2.6 does) and time each from the post to the plugin's paint counter moving, read every 100 ms.
+ */
+async function measureRerender(joplin: JoplinInstance): Promise<Array<Record<string, unknown>> | null> {
+  const { win } = joplin;
+  await dismissPluginDialogs(win);
+  const runs: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < 2; i++) {
+    const panel = await within(findPanel(win), 10_000, null);
+    const before = await pluginTotals(joplin);
+    if (!panel || !before) return null;
+    const startedAt = Date.now();
+    await panel.evaluate(() => (window as any).webviewApi.postMessage(['sortDirectionClicked']));
+    let paintMs = -1;
+    let after = before;
+    while (Date.now() - startedAt < 60_000) {
+      after = (await pluginTotals(joplin)) || after;
+      if (after.paints > before.paints) {
+        paintMs = Date.now() - startedAt;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    runs.push({ paintMs, renders: after.renders - before.renders, bodies: after.bodies - before.bodies, searches: after.search - before.search });
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return runs;
+}
+
+/** The plugin window's JS heap in MB (process.memoryUsage on desktop, else performance.memory), or null when no window holds Cockpit. */
+async function pluginHeapMb(joplin: JoplinInstance): Promise<number | null> {
+  for (const pg of joplin.browser.contexts().flatMap((ctx) => ctx.pages())) {
+    const used = await within(pg.evaluate(() => {
+      if (!(globalThis as any).CockpitInstrument) return null;
+      const proc = (globalThis as any).process;
+      if (proc && typeof proc.memoryUsage === 'function') return proc.memoryUsage().heapUsed;
+      const mem = (performance as any).memory;
+      return mem ? mem.usedJSHeapSize : null;
+    }), 5_000, null);
+    if (used != null) return Math.round(used / 104857.6) / 10;
+  }
+  return null;
+}
+
 /** Cockpit's instrument snapshot (src/core/instrument.ts), read in whichever window holds it; null when none answers. */
 async function pluginTotals(joplin: JoplinInstance): Promise<any> {
   for (const pg of joplin.browser.contexts().flatMap((ctx) => ctx.pages())) {
@@ -218,7 +368,7 @@ async function measure(withPlugin: boolean, opts: { keepFor?: 'warm'; warmFrom?:
     fs.cpSync(TEMPLATE, profileDir, { recursive: true });
     const settingsPath = path.join(profileDir, 'settings.json');
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    if (withPlugin) settings['plugins.devPluginPaths'] = E2E_PATHS.PLUGIN_DIST;
+    if (withPlugin) settings['plugins.devPluginPaths'] = PLUGIN_DIST;
     else delete settings['plugins.devPluginPaths'];
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   }
@@ -330,6 +480,10 @@ async function measure(withPlugin: boolean, opts: { keepFor?: 'warm'; warmFrom?:
       await new Promise((r) => setTimeout(r, 2000));
     }
     heartbeat = await within(win.evaluate(() => (window as any).__perfHb), 60_000, null);
+    // PERF_FILTER=1 (2.10): the checkbox scan, after the window and its heartbeat, so neither the first paint nor the lag figures include it.
+    // PERF_RERENDER=1: what one ordinary re-render of this view costs, the yardstick a filter toggle after the scan is read against.
+    const rerender = withPlugin && process.env.PERF_RERENDER ? await measureRerender(joplin) : null;
+    const checkboxScan = withPlugin && process.env.PERF_FILTER ? await measureCheckboxScan(joplin) : null;
     const processes = processBreakdown(child.pid!);
     // Every window and webview Joplin has open, so a renderer in the breakdown can be told apart (a plugin runs in its own window).
     const pages = joplin.browser.contexts().flatMap((ctx) => ctx.pages().map((pg) => pg.url().replace(/^file:\/\/.*\/(?=[^/]+$)/, '')));
@@ -409,6 +563,8 @@ async function measure(withPlugin: boolean, opts: { keepFor?: 'warm'; warmFrom?:
       storeMemory,
       storeRestore,
       storeSave,
+      rerender,
+      checkboxScan,
       keptFor: keep ? profileDir : null,
       processes,
       pages,

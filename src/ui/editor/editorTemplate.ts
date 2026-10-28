@@ -166,6 +166,21 @@ export var editorTemplate = `
         </section>
     </fieldset>
     <fieldset>
+        <legend>Checkboxes inside</legend>
+        <section>
+            <input type="checkbox" id="showOpenCheckboxesCheckbox" name="showOpenCheckboxes" checked>
+            <label for="showOpenCheckboxesCheckbox">Items with open checkboxes</label>
+        </section>
+        <section>
+            <input type="checkbox" id="showDoneCheckboxesCheckbox" name="showDoneCheckboxes" checked>
+            <label for="showDoneCheckboxesCheckbox">Items with all checkboxes done</label>
+        </section>
+        <section>
+            <input type="checkbox" id="showNoCheckboxesCheckbox" name="showNoCheckboxes" checked>
+            <label for="showNoCheckboxesCheckbox">Items without checkboxes</label>
+        </section>
+    </fieldset>
+    <fieldset>
         <legend>Notes</legend>
         <section>
             <input type="checkbox" id="showNotesCheckbox" name="showNotes">

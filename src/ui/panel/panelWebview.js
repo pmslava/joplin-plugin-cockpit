@@ -940,7 +940,7 @@ function dismissPanelPopups(){
     dismissingFromOutside = true
     try {
         hideNoteContextMenu()
-        // The panel's other transient popups - the profile / notebook / sort dropdowns and the search
+        // The panel's other transient popups - the profile and notebook dropdowns and the search
         // suggestion list they share their machinery with - close on the same signal, for the same reason:
         // they already close on any click INSIDE the panel, so a click outside it was the same blind spot.
         closeAllDropdowns()
@@ -2336,12 +2336,14 @@ async function onShowMoreTodoGroupsClicked(){
     await webviewApi.postMessage(['showMoreTodoGroups']);
 }
 
-/** onSortDirectionClicked **************************************************************************************************************************/
-async function onSortDirectionClicked(){
-    // Re-sorting reorders the whole list, so the old pixel offset points at arbitrary rows; start at
-    // the top like the other deliberate view changes rather than letting the scroll restore run.
+/** onQuickFilterClicked (2.10) *********************************************************************************************************************
+ * A press on one of the header's quick-filter buttons (getQuickFiltersHTML in panel.ts): asks the plugin to flip that filter. A filter changes     *
+ * which rows are listed, so the old pixel offset points at arbitrary rows; the list starts at the top like the other deliberate view changes       *
+ * rather than letting the scroll restore run. The plugin draws the new pressed state, so nothing is changed here.                                  *
+ ***************************************************************************************************************************************************/
+async function onQuickFilterClicked(filterName){
     savedTodosScrollTop = 0
-    await webviewApi.postMessage(['sortDirectionClicked']);
+    await webviewApi.postMessage(['quickFilterToggled', String(filterName || '')]);
 }
 
 /** Custom dropdowns ********************************************************************************************************************************
@@ -2350,7 +2352,7 @@ async function onSortDirectionClicked(){
  ***************************************************************************************************************************************************/
 function closeAllDropdowns(options){
     // keepSuggestions spares the search suggestion list (and with it a multi-select in progress) while still
-    // closing the profile / notebook / sort menus. Used for a click that lands INSIDE the search interaction -
+    // closing the profile / notebook menus. Used for a click that lands INSIDE the search interaction -
     // see the capturing click listener below. Every other caller passes nothing and closes everything, exactly
     // as before.
     var keepSuggestions = !!(options && options.keepSuggestions)
@@ -2375,7 +2377,7 @@ function onDropdownToggle(event, menuID){
         menu.removeAttribute('hidden')
         // The notebook menu carries an embedded filter box: start every open from a fresh, empty filter (all
         // rows shown), and on desktop focus it so typing filters at once. On mobile it is left unfocused so
-        // opening the menu does not pop the soft keyboard. Menus without a filter box (profile, sort) are
+        // opening the menu does not pop the soft keyboard. Menus without a filter box (the profile menu) are
         // unaffected - the querySelector simply finds nothing.
         var filterInput = menu.querySelector('.notebook-filter-input')
         if (filterInput){
@@ -2389,7 +2391,7 @@ function onDropdownToggle(event, menuID){
 function onDropdownItemClicked(event, messageName, value){
     // A deliberate profile or notebook-filter change starts the list at the top, like the other view
     // changes; the scroll position is otherwise restored across the re-render.
-    if (messageName === 'profilesDropdownChanged' || messageName === 'notebookFilterChanged' || messageName === 'sortFieldSelected') savedTodosScrollTop = 0
+    if (messageName === 'profilesDropdownChanged' || messageName === 'notebookFilterChanged') savedTodosScrollTop = 0
     closeAllDropdowns()
     // The profile editor is an in-panel overlay on mobile (a native dialog would open behind the panel);
     // desktop still posts createProfileClicked and gets the native editor dialog.
@@ -2431,7 +2433,7 @@ document.addEventListener('click', event => {
     closeAllDropdowns()
 }, true)
 
-// Escape closes an open custom dropdown (notebook / profile / sort all share this menu machinery). Scoped
+// Escape closes an open custom dropdown (notebook and profile share this menu machinery). Scoped
 // to "a dropdown is actually open" so it stays inert otherwise, and so it never fights the two other Escape
 // handlers: the search-suggestion Escape is swallowed by the search field itself (it stopPropagation()s),
 // and the mobile overlay Escape is swallowed in the capture phase before this bubble-phase listener runs.
@@ -4659,6 +4661,21 @@ var EDITOR_FORM_HTML = `
         </section>
     </fieldset>
     <fieldset>
+        <legend>Checkboxes inside</legend>
+        <section>
+            <input type="checkbox" id="showOpenCheckboxesCheckbox" name="showOpenCheckboxes" checked>
+            <label for="showOpenCheckboxesCheckbox">Items with open checkboxes</label>
+        </section>
+        <section>
+            <input type="checkbox" id="showDoneCheckboxesCheckbox" name="showDoneCheckboxes" checked>
+            <label for="showDoneCheckboxesCheckbox">Items with all checkboxes done</label>
+        </section>
+        <section>
+            <input type="checkbox" id="showNoCheckboxesCheckbox" name="showNoCheckboxes" checked>
+            <label for="showNoCheckboxesCheckbox">Items without checkboxes</label>
+        </section>
+    </fieldset>
+    <fieldset>
         <legend>Notes</legend>
         <section>
             <input type="checkbox" id="showNotesCheckbox" name="showNotes">
@@ -4759,7 +4776,7 @@ var EDITOR_FORM_HTML = `
 // Every editor field id, so the form can be wired and serialized without repeating the list.
 var EDITOR_TEXT_IDS = ['nameInput', 'sortOrderInput', 'searchCriteriaInput', 'noteIDInput', 'panelSearchInput', 'maxDotsPerDayInput']
 var EDITOR_SELECT_IDS = ['notesPositionSelect', 'notebookSelect', 'sortFieldSelect', 'sortDirectionSelect', 'displayFormatSelect', 'yearFormatSelect', 'monthFormatSelect', 'dayFormatSelect', 'weekdayFormatSelect', 'weekStartsOnSelect']
-var EDITOR_CHECK_IDS = ['showCompletedPastCheckbox', 'showCompletedTodayCheckbox', 'showCompletedFutureCheckbox', 'showCompletedNoDueCheckbox', 'showNotesCheckbox', 'showNoDueCheckbox', 'timeIs12HourCheckbox', 'noDueDatesAtEndCheckbox']
+var EDITOR_CHECK_IDS = ['showCompletedPastCheckbox', 'showCompletedTodayCheckbox', 'showCompletedFutureCheckbox', 'showCompletedNoDueCheckbox', 'showOpenCheckboxesCheckbox', 'showDoneCheckboxesCheckbox', 'showNoCheckboxesCheckbox', 'showNotesCheckbox', 'showNoDueCheckbox', 'timeIs12HourCheckbox', 'noDueDatesAtEndCheckbox']
 
 function editorField(id){ return document.getElementById(id) }
 
@@ -4797,6 +4814,10 @@ function populateEditorForm(profile){
     editorField('showCompletedTodayCheckbox').checked = profile['showCompletedToday']
     editorField('showCompletedFutureCheckbox').checked = profile['showCompletedFuture']
     editorField('showCompletedNoDueCheckbox').checked = profile['showCompletedNoDue']
+    // Shown unless the profile says otherwise, as editorWebview.js reads them (2.10).
+    editorField('showOpenCheckboxesCheckbox').checked = profile['showOpenCheckboxes'] !== false
+    editorField('showDoneCheckboxesCheckbox').checked = profile['showDoneCheckboxes'] !== false
+    editorField('showNoCheckboxesCheckbox').checked = profile['showNoCheckboxes'] !== false
     editorField('showNotesCheckbox').checked = profile['showNotes']
     editorField('notesPositionSelect').value = profile['notesPosition'] || 'after'
     editorField('notebookSelect').value = profile['notebook'] || ''
@@ -4827,6 +4848,9 @@ function serializeEditorForm(){
         'showCompletedToday': editorField('showCompletedTodayCheckbox') ? editorField('showCompletedTodayCheckbox').checked : false,
         'showCompletedFuture': editorField('showCompletedFutureCheckbox') ? editorField('showCompletedFutureCheckbox').checked : false,
         'showCompletedNoDue': editorField('showCompletedNoDueCheckbox') ? editorField('showCompletedNoDueCheckbox').checked : false,
+        'showOpenCheckboxes': editorField('showOpenCheckboxesCheckbox') ? editorField('showOpenCheckboxesCheckbox').checked : true,
+        'showDoneCheckboxes': editorField('showDoneCheckboxesCheckbox') ? editorField('showDoneCheckboxesCheckbox').checked : true,
+        'showNoCheckboxes': editorField('showNoCheckboxesCheckbox') ? editorField('showNoCheckboxesCheckbox').checked : true,
         'showNotes': editorField('showNotesCheckbox') ? editorField('showNotesCheckbox').checked : false,
         'notesPosition': editorField('notesPositionSelect') ? editorField('notesPositionSelect').value : 'after',
         'notebook': editorField('notebookSelect') ? editorField('notebookSelect').value : '',
