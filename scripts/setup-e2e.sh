@@ -15,7 +15,7 @@ CACHE_DIR="$REPO_ROOT/.e2e-cache"
 APPIMAGE="$CACHE_DIR/Joplin.AppImage"
 BINARY="$CACHE_DIR/squashfs-root/joplin"
 URL="https://github.com/laurent22/joplin/releases/download/v${JOPLIN_VERSION}/Joplin-${JOPLIN_VERSION}.AppImage"
-JOT_VERSION="${JOT_E2E_VERSION:-0.5.0}"
+JOT_VERSION="${JOT_E2E_VERSION:-0.6.0}"
 # The version is in the file name, so a bumped JOT_E2E_VERSION fetches its own archive rather than keeping the old one (e2e/launch.ts reads the same name).
 JOT_JPL="$CACHE_DIR/io.github.pmslava.jot-${JOT_VERSION}.jpl"
 JOT_URL="https://github.com/pmslava/joplin-plugin-jot/releases/download/v${JOT_VERSION}/io.github.pmslava.jot.jpl"
