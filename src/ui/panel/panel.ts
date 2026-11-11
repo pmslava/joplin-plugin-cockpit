@@ -16,8 +16,8 @@ import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
 import { TODO_DRAW_BUDGET, TODO_SECTION_BATCH, checkboxFilterActive, completedSwitches, escapeHtml, fetchSectionNotes, getFormatter, isCalendarFormat, notesOnDates, renderCheckboxScanLine, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
-import { toISODate } from "../../core/calendar";
-import { forgetCurrentProfileID, getCreateButtonClickRoute, getCreateButtonRightClickRoute, getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
+import { toISODate, fromISODate } from "../../core/calendar";
+import { forgetCurrentProfileID, getCreateButtonClickRoute, getCreateButtonRightClickRoute, getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey, isNewTodoDueOnSelectedDay } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
 import { appVersionAtLeast, isMobile } from "../../core/platform";
 import { isSettingsNoteConnected } from "../../core/settingsSync";
@@ -826,9 +826,13 @@ async function eventHandler(message){
         lastScrollTop = 0
         await refreshPanelData()
     } else if (message[0] == 'calendarDaySelected'){
-        // Selecting the day that is already selected closes the list again.
+        // Selecting the day that is already selected closes the list again. Since 2.11 a heading of the list and week views posts this too,
+        // with the selected-day setting on: the same toggle, the same state, so the month and the other views agree on the day being worked on.
         calendarViewState.selectedDate = calendarViewState.selectedDate === message[1] ? null : message[1]
         await refreshPanelData()
+    } else if (message[0] == 'headingNewTodoClicked'){
+        // The heading menu's "New to-do due <day>…" (2.11): a to-do due on the heading's day at the day start, whatever the setting says.
+        await runHeadingNewTodo(String(message[1] || ""))
     } else if (message[0] == 'saveViewIntoProfileClicked'){
         // The dropdown's "Save view into <name>", shown while the view is marked; the same post on both platforms.
         await saveViewIntoCurrentProfile()
@@ -1672,6 +1676,8 @@ async function renderPanelData(options?){
     // Such a view therefore keeps the row where the index still files it, exactly as before the re-check existed;
     // the two lists can never both hold it, since the index answers type:todo and type:note from one stale value.
     var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit, todoLimits: new Map(todoSectionLimits), todoBudget: todoDrawBudget, ringsChangedOnly: ringsChangedOnly, quickFilters: viewQuickFilters, checkboxScan: checkboxScan, scanIsCurrent: checkboxScan ? scanIsCurrent : null, scanPass: checkboxScan ? scanPass : null }
+    // The selected-day setting (2.11) makes the list and week views' day headings select a day on a click; the formats read it from here.
+    ;(panelViewState as any).selectableDays = await isNewTodoDueOnSelectedDay()
     // Notes on dates (2.11): a profile that shows its notes on the day they were created or last updated (notesOnDates) has the Notes section's
     // own set read once, here, by the section's fetch, and handed to the formatter in the view state, which draws each note on its day among the
     // to-dos; the Notes section is then not drawn. Every other profile takes the old path below, untouched.
@@ -2137,34 +2143,71 @@ function createButtonTooltip(name, clickRoute, rightClickRoute){
  * today's create and open, "newWindow" the same create opened in a window of its own, "jot" the Jot plugin's form (createWithJot). On mobile the    *
  * click is today's create whatever the setting holds - it is never even read - and a right-click message, which only the desktop markup can send,   *
  * does nothing.                                                                                                                                     *
+ * A to-do is due on the selected day (2.11) when the "New to-do: due on the selected day" setting is on (newTodoDue), on every route: in the POST   *
+ * of the create, or as Jot's `due` preset. A note never has a due, and with the setting off a to-do has none either, as before.                     *
  ***************************************************************************************************************************************************/
 async function runCreateButton(isTodo, rightClick){
+    var due = isTodo ? await newTodoDue() : 0
     if (await isMobile()){
-        if (!rightClick) await createItem(isTodo)
+        if (!rightClick) await createItem(isTodo, { due: due })
         return
     }
     var route = rightClick ? await getCreateButtonRightClickRoute() : await getCreateButtonClickRoute()
-    if (route === "jot") await createWithJot(isTodo)
-    else await createItem(isTodo, route === "newWindow")
+    if (route === "jot") await createWithJot(isTodo, due)
+    else await createItem(isTodo, { inNewWindow: route === "newWindow", due: due })
+}
+
+/** newTodoDue / dueOnDay (2.11) ********************************************************************************************************************
+ * The due a new to-do gets from the New to-do button: with the selected-day setting on, the day selected in the panel - the month's picked day, or   *
+ * the heading clicked in the list and week views (calendarViewState.selectedDate) - else today, at the day start time; with it off 0, no due at all.*
+ * dueOnDay is the day start of a YYYY-MM-DD day in local time, the time a to-do dropped onto a day without a time of its own gets (todosDropped).    *
+ ***************************************************************************************************************************************************/
+async function newTodoDue(){
+    if (!(await isNewTodoDueOnSelectedDay())) return 0
+    return await dueOnDay(calendarViewState.selectedDate || toISODate(new Date()))
+}
+
+async function dueOnDay(isoDate){
+    var dayStart = await getDayStartTime()
+    var date = fromISODate(isoDate)
+    date.setHours(dayStart.hours, dayStart.minutes, 0, 0)
+    return date.getTime()
+}
+
+/** runHeadingNewTodo (2.11) ************************************************************************************************************************
+ * The heading menu's "New to-do due <day>…": a right-click (desktop) or long press (mobile) on a heading that names a day, a week-day heading or a    *
+ * month day cell. The to-do is due on that day at the day start time, whatever the selected-day setting says - the menu named the day. On desktop it *
+ * is Jot's form, as the owner asked ("create a new todo in the Jot with this date selected"), falling back to today's create and open with the due  *
+ * when Jot is absent. On mobile it is the ordinary create in the filtered notebook; under All notebooks the webview asks with its notebook overlay   *
+ * first and the answer comes back through applyNotebookPicked, so this is only reached with a notebook filtered there.                             *
+ ***************************************************************************************************************************************************/
+async function runHeadingNewTodo(isoDate){
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return
+    var due = await dueOnDay(isoDate)
+    if (await isMobile()) await createItem(true, { due: due })
+    else await createWithJot(true, due)
 }
 
 /** createWithJot (2.8) *****************************************************************************************************************************
  * Opens Jot's create form with the button's type and the panel's notebook. The notebook is the filter as createItem checks it, and nothing more:    *
  * under "All notebooks" no notebookId is passed at all, so Jot's own default notebook applies - the picker is never asked, since Jot's form has a   *
  * notebook field of its own. Without Jot installed, today's create runs instead, every time (callJot tells the user once per session).             *
+ * `due` (2.11, ms) presets the form's date for a to-do; a Jot older than 0.5.0 ignores it and opens without one. The fallback create carries it.   *
  ***************************************************************************************************************************************************/
-async function createWithJot(isTodo){
+async function createWithJot(isTodo, due = 0){
     var folderID = await resolveCreatableNotebookID(notebookFilter)
     var args: any = { mode: "new", type: isTodo ? "todo" : "note" }
     if (folderID) args.notebookId = folderID
-    if ((await callJot(args)) === "absent") await createItem(isTodo)
+    if (isTodo && due) args.due = due
+    if ((await callJot(args)) === "absent") await createItem(isTodo, { due: due })
 }
 
 /** createItem **************************************************************************************************************************************
  * Creates a note or a to-do and opens it. It goes into the notebook the panel is filtered to; with "All notebooks" selected, a dialog asks where.   *
- * inNewWindow (2.8) opens it in a window of its own instead of the editor; see createItemInFolder.                                                 *
+ * The options (2.11): inNewWindow (2.8) opens it in a window of its own instead of the editor, and due (ms) makes a to-do due then; see          *
+ * createItemInFolder.                                                                                                                              *
  ***************************************************************************************************************************************************/
-async function createItem(isTodo, inNewWindow = false){
+async function createItem(isTodo, options: { inNewWindow?: boolean, due?: number } = {}){
     // The filter is re-checked here rather than trusted, whatever wrote it: creating silently into a notebook the
     // panel is not showing is the worst of the three symptoms this guards against, because it puts a note
     // somewhere the user cannot see and did not choose. A filter that does not survive the check is treated as no
@@ -2179,19 +2222,23 @@ async function createItem(isTodo, inNewWindow = false){
         folderID = await pickNotebook(isTodo ? "Create to-do in notebook" : "Create note in notebook")
     }
     if (!folderID) return
-    await createItemInFolder(isTodo, folderID, inNewWindow)
+    await createItemInFolder(isTodo, folderID, options)
 }
 
 /** createItemInFolder ******************************************************************************************************************************
  * Creates a note or to-do in the given notebook and opens it. Shared by createItem (desktop picker / active filter) and the mobile notebook overlay's *
  * createNote / createTodo result. With inNewWindow (2.8, desktop) the note opens in a new window (openInNewWindowQuietly) and the editor's focus     *
  * step is skipped, since the editor did not move; an app without that command gets the editor, focus and all.                                      *
+ * With options.due (2.11) a to-do is posted with that todo_due, so it is born on its day; without one the POST is exactly what it was.              *
  ***************************************************************************************************************************************************/
-async function createItemInFolder(isTodo, folderID, inNewWindow = false){
+async function createItemInFolder(isTodo, folderID, options: { inNewWindow?: boolean, due?: number } = {}){
     if (!folderID) return
+    var inNewWindow = !!options.inNewWindow
+    var fields: any = { parent_id: folderID, is_todo: isTodo ? 1 : 0, title: "" }
+    if (isTodo && options.due) fields.todo_due = options.due
     // Whether the create can rely on the note store (2.7 phase 5): asked before the POST, as every action asks it at its start.
     var storePath = await startOwnWrite([])
-    var newItem = await joplin.data.post(['notes'], null, { parent_id: folderID, is_todo: isTodo ? 1 : 0, title: "" })
+    var newItem = await joplin.data.post(['notes'], null, fields)
     // The note store (2.7) takes the saved note from the answer at once, like every write the panel makes through joplin.data (see the
     // "Cockpit's own writes" banner in joplin.ts): the feed's row lands after the save returns, and the follow-up poll this arms brings it.
     applyLocalCreate(newItem)
@@ -2246,7 +2293,11 @@ async function applyNotebookPicked(purpose, folderId, extra){
         }
         await afterOwnWrite(folderStorePath)
     } else if (purpose === 'createNote' || purpose === 'createTodo'){
-        await createItemInFolder(purpose === 'createTodo', folderId)
+        // A to-do's due (2.11): the heading menu's day when the overlay was opened from a heading (extra.dueDay), else the button's rule - the
+        // selected day or today with the setting on, none with it off. The setting is per device, so the host decides, as on desktop.
+        var dueDay = extra && typeof extra.dueDay === "string" ? extra.dueDay : ""
+        var due = purpose !== 'createTodo' ? 0 : (/^\d{4}-\d{2}-\d{2}$/.test(dueDay) ? await dueOnDay(dueDay) : await newTodoDue())
+        await createItemInFolder(purpose === 'createTodo', folderId, { due: due })
     }
 }
 

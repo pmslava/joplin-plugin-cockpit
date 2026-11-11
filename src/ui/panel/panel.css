@@ -791,6 +791,19 @@ h2 {
     padding-top: 2px;
 }
 
+/* The selected day (2.11). With "New to-do: due on the selected day" on, a heading that names a day selects it on a click
+ * (the onclick is there only then, so the pointer cursor is too), and the picked day's heading is drawn in the link colour
+ * with a heavier rule under it - an outline of the selection, never the filled look the month gives today, so the day
+ * being worked on and the calendar's today stay two different things. */
+h2[onclick] {
+    cursor: pointer;
+}
+
+h2.-selected {
+    color: var(--cockpit-url-color, #2D6BDC);
+    border-bottom: 2px solid var(--cockpit-url-color, #2D6BDC);
+}
+
 /* To-do rows ----------------------------------------------------------------------------------*/
 
 .todo {
@@ -1346,6 +1359,13 @@ table {
     border-color: var(--cockpit-url-color, #2D6BDC);
 }
 
+/* The week's selected day (2.11): an outline in the link colour outside the day's border, so a selected today shows
+ * both lines and a selected other day reads as picked rather than as today. */
+.week-day.-selected {
+    outline: 2px solid var(--cockpit-url-color, #2D6BDC);
+    outline-offset: 1px;
+}
+
 .week-day h2 {
     position: static;
     margin: 0 0 0.25em;
@@ -1426,6 +1446,14 @@ table {
  * already carry user-select:none; this adds the callout suppression and covers the group headings. */
 .cockpit-mobile .todo,
 .cockpit-mobile h2[data-todo-ids] {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* ...and every heading or month day cell that names a day (2.11), which a long press opens the heading menu on even
+ * when it holds no to-do. */
+.cockpit-mobile [data-day] {
     -webkit-touch-callout: none;
     -webkit-user-select: none;
     user-select: none;

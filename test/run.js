@@ -3521,6 +3521,210 @@ async function main() {
         assert.ok(step.includes('Math.min(rect.height / 2'), 'the band must be clamped to half the container height, so the two bands never overlap')
     })
 
+    // ============================================================ the selected day, New to-do due on it, and the heading menu (2.11)
+    // docs/BRIEF-2.11-dates-pins-drag.md section 3. A per-device setting, off by default, makes the New to-do button set a due - the day selected in
+    // the panel, else today, at the day start time - and lets the Interval, Date and Week views select a day by clicking a heading that names one
+    // (the month's day picker as before). With it off those headings are today's markup. The heading menu (right click / long press on a heading,
+    // a week-day heading or a month day cell) offers "New to-do due <day>…" - Jot's form on desktop, today's create with the due without Jot - and
+    // "Move N to-dos to a date…". The host half is driven through the compiled bundle; the webview half is pinned by source shape, as elsewhere.
+    const SD_KEY = 'newTodoDueOnSelectedDay'
+    const SD_FOLDER = 's1' + '0'.repeat(30)
+    const sdIso = date => { const p = n => String(n).padStart(2, '0'); return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}` }
+    const sdDayAt = (iso, hh, mm) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d, hh, mm, 0, 0).getTime() }
+    const sdToday = new Date()
+    const sdTodayKey = sdIso(sdToday)
+    const sdTomorrow = new Date(sdToday.getFullYear(), sdToday.getMonth(), sdToday.getDate() + 1, 12, 0, 0, 0)
+    const sdTomorrowKey = sdIso(sdTomorrow)
+    const sdTodos = [
+        { id: 'sa'.repeat(16), title: 'SD tomorrow', todo_completed: 0, todo_due: sdTomorrow.getTime(), parent_id: SD_FOLDER, user_updated_time: 1 },
+        { id: 'sb'.repeat(16), title: 'SD overdue', todo_completed: 0, todo_due: dueAt(2025, 1, 15, 9, 30), parent_id: SD_FOLDER, user_updated_time: 1 },
+    ]
+    let sdSeq = 0
+    const sdRun = (profile, extra, platform) => {
+        const n = ++sdSeq
+        return run(Object.assign({
+            dataDir: path.join(tmp, 'selected-day-' + n),
+            installationDir: path.join(tmp, 'selected-day-install-' + n),
+            require: platform === 'mobile' ? mobileRequire : desktopRequire,
+            versionInfo: { version: '3.7.0', platform: platform || 'desktop' },
+            todos: sdTodos,
+            folders: [{ id: SD_FOLDER, title: 'Inbox', parent_id: '', updated_time: 1 }],
+            initialSettings: Object.assign({
+                profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Selected day', ...(profile || {}) }] }),
+                currentProfileID: 1,
+            }, (extra && extra.settings) || {}),
+        }, extra || {}))
+    }
+    const sdHtml = state => state.panelHtml['panel-panel']
+    const sdNotePosts = (state, mark) => state.dataPosts.slice(mark || 0).filter(post => post.path[0] === 'notes' && post.path.length === 1)
+    const sdJotCalls = (state, mark) => state.commandCalls.slice(mark || 0).filter(call => call.name === 'jot.open')
+    // The opening tag of the h2 whose text is `text`, or of the week section holding the day `key`.
+    const sdHeadingTag = (html, text) => (new RegExp(`<h2[^>]*>${text}</h2>`).exec(html) || [''])[0]
+    const sdWeekSection = (html, key) => (new RegExp(`<section class="week-day[^"]*" data-drop="${key}"[^>]*>\\s*<h2[^>]*>`).exec(html) || [''])[0]
+
+    await test('selected day (setting): "New to-do: due on the selected day" is a public per-device Bool in Cockpit\'s section, off by default, and does not travel', async () => {
+        const state = await sdRun()
+        const def = state.registeredSettings[SD_KEY]
+        assert.ok(def, 'the setting is registered')
+        assert.strictEqual(def.label, 'New to-do: due on the selected day')
+        assert.strictEqual(def.description, "On: a to-do created from the New to-do button or from a heading's menu is due on the day selected in the panel, at the day start time; today when no day is selected. Every view except Basic then lets you select a day by clicking its heading (the Month view's day picker as before). Off: the button creates a to-do without a due date, and only the Month view has a selected day.")
+        assert.strictEqual(def.type, 3, 'SettingItemType.Bool (3)')
+        assert.strictEqual(def.value, false, 'off by default')
+        assert.strictEqual(def.public, true, 'shown in Settings > Cockpit')
+        assert.strictEqual(def.section, 'section', "in Cockpit's own section")
+        assert.ok(!require('../src/core/settingsNote.js').SYNCED_SETTING_KEYS.includes(SD_KEY), 'per device: not in the settings note')
+        // A change redraws the panel, since the headings' markup depends on it.
+        const paints = state.setHtmlCalls
+        await state.setSetting(SD_KEY, true)
+        assert.ok(state.setHtmlCalls > paints, 'turning it on redraws the panel')
+    })
+
+    await test('selected day (off): no heading of the Interval, Date or Week view takes a click or shows a selection, even with a day selected - today\'s markup; the month keeps its picker', async () => {
+        for (const displayFormat of ['interval', 'date', 'week']){
+            const state = await sdRun({ displayFormat })
+            await state.panelMessageHandler(['calendarDaySelected', sdTomorrowKey])
+            const html = sdHtml(state)
+            assert.ok(!/<h2[^>]*onclick=/.test(html), `${displayFormat}: no heading carries a click`)
+            assert.ok(!html.includes('-selected'), `${displayFormat}: and nothing is marked selected`)
+        }
+        const month = await sdRun({ displayFormat: 'month' })
+        assert.ok(sdHtml(month).includes(`onclick="onCalendarDaySelected('${sdTodayKey}')"`), 'the month\'s cells still select a day')
+        await month.panelMessageHandler(['calendarDaySelected', sdTomorrowKey])
+        assert.ok(/<td class="calendar-day [^"]*-selected"/.test(sdHtml(month)), 'and the picked cell is -selected, as before')
+    })
+
+    await test('selected day (on): a day heading of the Interval view posts calendarDaySelected with its day, the picked heading is -selected, the same click again clears it; Overdue and No Due Date name no day and take no click', async () => {
+        const state = await sdRun({ displayFormat: 'interval' }, { settings: { [SD_KEY]: true } })
+        const tomorrow = () => sdHeadingTag(sdHtml(state), 'Tomorrow')
+        assert.ok(tomorrow().includes(`onclick="onCalendarDaySelected('${sdTomorrowKey}')"`), 'Tomorrow selects its day')
+        assert.ok(!tomorrow().includes('-selected'), 'nothing is selected yet')
+        assert.ok(!sdHeadingTag(sdHtml(state), 'Overdue').includes('onclick='), 'Overdue names no day')
+        assert.ok(!sdHeadingTag(sdHtml(state), 'No Due Date').includes('onclick='), 'nor does No Due Date')
+        await state.panelMessageHandler(['calendarDaySelected', sdTomorrowKey])
+        assert.ok(tomorrow().startsWith('<h2 class="-selected"'), 'picked: -selected')
+        await state.panelMessageHandler(['calendarDaySelected', sdTomorrowKey])
+        assert.ok(!tomorrow().includes('-selected'), 'picked again: cleared, like the month')
+    })
+
+    await test('selected day (on): the Date view\'s day headings and the Week view\'s day sections select their day the same way, -selected beside -today', async () => {
+        const date = await sdRun({ displayFormat: 'date' }, { settings: { [SD_KEY]: true } })
+        const dayHeading = () => (new RegExp(`<h2[^>]*data-drop="${sdTomorrowKey}"[^>]*>`).exec(sdHtml(date)) || [''])[0]
+        assert.ok(dayHeading().includes(`onclick="onCalendarDaySelected('${sdTomorrowKey}')"`), 'a Date heading selects its day')
+        await date.panelMessageHandler(['calendarDaySelected', sdTomorrowKey])
+        assert.ok(dayHeading().startsWith('<h2 class="-selected"'), 'and is -selected when picked')
+        const week = await sdRun({ displayFormat: 'week' }, { settings: { [SD_KEY]: true } })
+        assert.ok(sdWeekSection(sdHtml(week), sdTodayKey).includes(`onclick="onCalendarDaySelected('${sdTodayKey}')"`), "today's heading selects today")
+        await week.panelMessageHandler(['calendarDaySelected', sdTodayKey])
+        assert.ok(sdWeekSection(sdHtml(week), sdTodayKey).startsWith('<section class="week-day -today -selected"'), 'a selected today is both')
+        assert.strictEqual((sdHtml(week).match(/ -selected/g) || []).length, 1, 'one day is selected')
+        await week.panelMessageHandler(['calendarDaySelected', sdTodayKey])
+        assert.ok(sdWeekSection(sdHtml(week), sdTodayKey).startsWith('<section class="week-day -today"'), 'picked again: today alone')
+    })
+
+    await test('selected day (due): New to-do posts todo_due at the day start - the selected day, today when none - and with the setting off no todo_due at all', async () => {
+        const state = await sdRun({ displayFormat: 'week' }, { settings: { [SD_KEY]: true, dayStartTime: '07:30' } })
+        await state.panelMessageHandler(['notebookFilterChanged', SD_FOLDER])
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.deepStrictEqual(sdNotePosts(state)[0].body, { parent_id: SD_FOLDER, is_todo: 1, title: '', todo_due: sdDayAt(sdTodayKey, 7, 30) }, 'no day selected: today at 07:30')
+        await state.panelMessageHandler(['calendarDaySelected', sdTomorrowKey])
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.strictEqual(sdNotePosts(state)[1].body.todo_due, sdDayAt(sdTomorrowKey, 7, 30), 'the selected day at 07:30')
+        await state.panelMessageHandler(['newNoteClicked'])
+        assert.ok(!('todo_due' in sdNotePosts(state)[2].body), 'a note never gets a due')
+        await state.setSetting(SD_KEY, false)
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.deepStrictEqual(sdNotePosts(state)[3].body, { parent_id: SD_FOLDER, is_todo: 1, title: '' }, 'off: the POST of before 2.11')
+    })
+
+    await test('selected day (mobile): the overlay\'s createTodo posts the selected day\'s due with the setting on, the heading\'s day when the overlay came from the heading menu, none with it off; with a notebook filtered the menu\'s message creates there', async () => {
+        const state = await sdRun({ displayFormat: 'week' }, { settings: { [SD_KEY]: true, dayStartTime: '06:00' } }, 'mobile')
+        await state.panelMessageHandler(['calendarDaySelected', sdTomorrowKey])
+        await state.panelMessageHandler(['notebookPicked', 'createTodo', SD_FOLDER, undefined])
+        assert.deepStrictEqual(sdNotePosts(state)[0].body, { parent_id: SD_FOLDER, is_todo: 1, title: '', todo_due: sdDayAt(sdTomorrowKey, 6, 0) }, 'the button\'s rule')
+        await state.panelMessageHandler(['notebookPicked', 'createTodo', SD_FOLDER, { dueDay: '2027-03-04' }])
+        assert.strictEqual(sdNotePosts(state)[1].body.todo_due, sdDayAt('2027-03-04', 6, 0), 'the heading\'s day')
+        await state.setSetting(SD_KEY, false)
+        await state.panelMessageHandler(['notebookPicked', 'createTodo', SD_FOLDER, undefined])
+        assert.ok(!('todo_due' in sdNotePosts(state)[2].body), 'off: no due from the button')
+        await state.panelMessageHandler(['notebookPicked', 'createTodo', SD_FOLDER, { dueDay: '2027-03-04' }])
+        assert.strictEqual(sdNotePosts(state)[3].body.todo_due, sdDayAt('2027-03-04', 6, 0), 'the heading menu does not depend on the setting')
+        await state.panelMessageHandler(['notebookFilterChanged', SD_FOLDER])
+        await state.panelMessageHandler(['headingNewTodoClicked', '2027-03-05'])
+        assert.deepStrictEqual(sdNotePosts(state)[4].body, { parent_id: SD_FOLDER, is_todo: 1, title: '', todo_due: sdDayAt('2027-03-05', 6, 0) }, 'filtered: the menu creates in the notebook, due that day')
+        assert.strictEqual(sdJotCalls(state).length, 0, 'and mobile never calls Jot')
+    })
+
+    await test('selected day (heading menu, desktop): New to-do opens Jot\'s form { mode: "new", type: "todo", notebookId, due } whatever the setting; without Jot, today\'s create and open with the due', async () => {
+        const state = await sdRun({ displayFormat: 'week' }, { appCommands: { 'jot.open': async () => null }, settings: { dayStartTime: '08:15' } })
+        await state.panelMessageHandler(['notebookFilterChanged', SD_FOLDER])
+        await state.panelMessageHandler(['headingNewTodoClicked', '2027-03-04'])
+        assert.deepStrictEqual(sdJotCalls(state).map(call => call.args), [[{ mode: 'new', type: 'todo', notebookId: SD_FOLDER, due: sdDayAt('2027-03-04', 8, 15) }]], 'Jot, with the day at 08:15')
+        assert.strictEqual(sdNotePosts(state).length, 0, 'Jot writes; Cockpit posts nothing')
+        const absent = await sdRun({ displayFormat: 'week' }, { absentCommands: ['jot.open'] })
+        await absent.panelMessageHandler(['notebookFilterChanged', SD_FOLDER])
+        await absent.panelMessageHandler(['headingNewTodoClicked', '2027-03-04'])
+        assert.deepStrictEqual(sdNotePosts(absent)[0].body, { parent_id: SD_FOLDER, is_todo: 1, title: '', todo_due: sdDayAt('2027-03-04', 9, 0) }, 'Jot absent: the create, due that day at the default 09:00')
+        assert.ok(absent.commandCalls.some(call => call.name === 'openNote' && call.args[0] === 'created-1'), 'and opened')
+        assert.strictEqual(absent.messageBoxes.length, 1, 'the user is told once that Jot is missing')
+        await absent.panelMessageHandler(['headingNewTodoClicked', 'not-a-day'])
+        assert.strictEqual(sdNotePosts(absent).length, 1, 'a message without a day creates nothing')
+    })
+
+    await test('selected day (Jot route): with the setting on, the New to-do button routed to Jot passes the selected day as `due`; New note and the setting off pass none', async () => {
+        const state = await sdRun({ displayFormat: 'week' }, { appCommands: { 'jot.open': async () => null }, settings: { [SD_KEY]: true, createButtonClick: 'jot' } })
+        await state.panelMessageHandler(['notebookFilterChanged', SD_FOLDER])
+        await state.panelMessageHandler(['calendarDaySelected', sdTomorrowKey])
+        await state.panelMessageHandler(['newTodoClicked'])
+        await state.panelMessageHandler(['newNoteClicked'])
+        await state.setSetting(SD_KEY, false)
+        await state.panelMessageHandler(['newTodoClicked'])
+        assert.deepStrictEqual(sdJotCalls(state).map(call => call.args[0]), [
+            { mode: 'new', type: 'todo', notebookId: SD_FOLDER, due: sdDayAt(sdTomorrowKey, 9, 0) },
+            { mode: 'new', type: 'note', notebookId: SD_FOLDER },
+            { mode: 'new', type: 'todo', notebookId: SD_FOLDER },
+        ])
+    })
+
+    await test('selected day (heading menu): its items in all three shapes - New to-do for a day, Move for to-dos, both in that order - and nothing at all for neither', () => {
+        const Menu = require('../src/ui/panel/noteMenu.js')
+        const label = Menu.headingDayLabel('2026-11-13')
+        assert.strictEqual(label, new Date(2026, 10, 13).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }), 'the day in the platform\'s short words, read as a local date')
+        const item = (action, text) => `<button type="button" class="context-menu-item" data-action="${action}">${text}</button>`
+        assert.strictEqual(Menu.headingMenuHtml(label, 0), item('newTodoDue', `New to-do due ${label}…`), 'an empty day: New to-do alone')
+        assert.strictEqual(Menu.headingMenuHtml('', 1), item('moveTodos', 'Move 1 to-do to a date…'), 'No Due Date with one to-do: Move alone, singular')
+        assert.strictEqual(Menu.headingMenuHtml(label, 3), item('newTodoDue', `New to-do due ${label}…`) + item('moveTodos', 'Move 3 to-dos to a date…'), 'a day with to-dos: both')
+        assert.strictEqual(Menu.headingMenuHtml('', 0), '', 'neither: no menu')
+        assert.strictEqual(Menu.headingDayLabel('clear'), '', 'a key that is not a day has no label')
+    })
+
+    await test('selected day (heading menu markup): day headings, week-day headings and month cells name their day (data-day) and open the menu even when empty; No Due Date keeps today\'s attributes', async () => {
+        const week = await sdRun({ displayFormat: 'week' })
+        const empty = sdWeekSection(sdHtml(week), sdTodayKey)
+        assert.ok(empty.endsWith(`<h2 data-day="${sdTodayKey}" oncontextmenu="onHeadingContextMenu(event)">`), 'an empty week day: its day and the menu, no ids')
+        const busy = sdWeekSection(sdHtml(week), sdTomorrowKey)
+        if (busy) assert.ok(busy.endsWith(`<h2 data-todo-ids="${'sa'.repeat(16)}" data-day="${sdTomorrowKey}" oncontextmenu="onHeadingContextMenu(event)">`), 'a day with a to-do: its ids and its day')
+        const month = await sdRun({ displayFormat: 'month' })
+        const cell = (new RegExp(`<td class="calendar-day[^"]*" data-drop="${sdTomorrowKey}"[^>]*>`).exec(sdHtml(month)) || [''])[0]
+        assert.ok(cell.endsWith(`data-todo-ids="${'sa'.repeat(16)}" data-day="${sdTomorrowKey}" oncontextmenu="onHeadingContextMenu(event)">`), 'a month cell: its to-dos and its day')
+        const interval = await sdRun({ displayFormat: 'interval' })
+        assert.strictEqual(sdHeadingTag(sdHtml(interval), 'Overdue'), `<h2 data-todo-ids="${'sb'.repeat(16)}" oncontextmenu="onHeadingContextMenu(event)">Overdue</h2>`, 'Overdue: the ids alone, as before')
+        assert.ok(sdHeadingTag(sdHtml(interval), 'Tomorrow').includes(`data-day="${sdTomorrowKey}"`), 'Tomorrow names its day')
+    })
+
+    await test('selected day (webview): the heading menu is built from NoteMenu.headingMenuHtml in the note menu\'s container; New to-do asks the overlay under All notebooks on mobile and posts headingNewTodoClicked otherwise; Move selects the group and opens the picker; a long press reaches every day heading and cell', () => {
+        const open = handlerBody('onHeadingContextMenu')
+        assert.ok(open.includes('event.preventDefault()') && open.includes('el.dataset.day') && open.includes('showHeadingContextMenu(event, day, ids)'), 'the right click reads the day and the ids and opens the menu')
+        const show = handlerBody('showHeadingContextMenu')
+        assert.ok(show.includes("if (touchDrag.active){ traceGesture('menu-blocked'); return }"), 'the live-gesture guard of the note menu')
+        assert.ok(show.includes("window.NoteMenu.headingMenuHtml(day ? window.NoteMenu.headingDayLabel(day) : '', ids.length)") && show.includes('if (!html) return'), 'built by the shared module, and nothing opens for nothing')
+        assert.ok(show.includes("menu.id = 'noteContextMenu'"), 'in the note menu\'s container, so it closes the same ways')
+        assert.ok(show.includes("if (createNeedsNotebookOverlay()) openNotebookOverlay('createTodo', { dueDay: day })") && show.includes("webviewApi.postMessage(['headingNewTodoClicked', day])"), 'New to-do: the overlay with the day under All notebooks on mobile, else the host')
+        const move = show.slice(show.indexOf("action === 'moveTodos'"))
+        assert.ok(move.indexOf('selectedRowIDs.add(id)') >= 0 && move.indexOf('paintTodoSelection()') < move.indexOf('requestAlarm(ids)'), 'Move: the group becomes the selection, then the picker')
+        assert.ok(handlerBody('openNotebookOverlay').includes("(purpose === 'createTodo' && opts.dueDay) ? { dueDay: String(opts.dueDay) }"), 'the overlay carries the day to the host')
+        assert.ok(webviewSource.includes("var heading = event.target.closest('h2[data-todo-ids], [data-day]')"), 'the long press opens it on a heading with ids or with a day, and on a month cell')
+    })
+
     // ============================================================ drag to reschedule on TOUCH (mobile)
     // Two layers, tested the two ways this harness can. The band and row-index arithmetic is a real module,
     // required and driven directly - it is the part that would be wrong on a device and invisible in review, so

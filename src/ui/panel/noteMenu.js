@@ -22,6 +22,11 @@
  * the target, since the phone pins into Cockpit's own section only.                                                                               *
  *                                                                                                                                                    *
  * The labels are static literals (no user text), so nothing here is HTML-escaped - matching the inline template this replaced.                        *
+ *                                                                                                                                                    *
+ * THE HEADING MENU (2.11): headingMenuHtml(dayLabel, count) is the menu a right click (desktop) or a long press (mobile) opens on a group heading, a   *
+ * week-day heading or a month day cell. Up to two items: "New to-do due <day>…" when the heading names a day (dayLabel, from headingDayLabel), and     *
+ * "Move N to-dos to a date…" when its group has to-dos - the set-date picker a heading's right click opened directly before 2.11. Neither: "" and no  *
+ * menu at all. The day label is the platform's locale text, so it alone is escaped.                                                                   *
  ***************************************************************************************************************************************************/
 ;(function(root, factory){
     var api = factory()
@@ -125,8 +130,33 @@
         }).join('')
     }
 
+    // The heading menu's day, in the words the item uses: "Wed, Nov 13" in an English locale. The YYYY-MM-DD key is read as a LOCAL date (a bare
+    // new Date('YYYY-MM-DD') would be UTC midnight, the day before west of Greenwich); a key that is not one gives "".
+    function headingDayLabel(isoDate){
+        var match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || ''))
+        if (!match) return ''
+        var date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+        return date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+    }
+
+    function escapeLabel(text){
+        return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    }
+
+    // The heading menu's innerHTML: the New to-do item when the heading names a day, the Move item when its group has to-dos, in that order, as
+    // the same buttons the note menu draws. "" when there is nothing to offer, and the caller opens no menu.
+    function headingMenuHtml(dayLabel, count){
+        var n = Number(count) > 0 ? Number(count) : 0
+        var items = []
+        if (dayLabel) items.push({ action: 'newTodoDue', label: 'New to-do due ' + escapeLabel(dayLabel) + '…' })
+        if (n) items.push({ action: 'moveTodos', label: n === 1 ? 'Move 1 to-do to a date…' : 'Move ' + n + ' to-dos to a date…' })
+        return items.map(function(item){ return itemHtml(item, 1) }).join('')
+    }
+
     return {
         NOTE_MENU_ITEMS: NOTE_MENU_ITEMS,
+        headingDayLabel: headingDayLabel,
+        headingMenuHtml: headingMenuHtml,
         isSingleOnly: isSingleOnly,
         multiLabel: multiLabel,
         itemHtml: itemHtml,

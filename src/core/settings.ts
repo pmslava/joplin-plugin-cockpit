@@ -28,6 +28,8 @@ export const createButtonRightClickSettingKey = "createButtonRightClick"
 /** Pin (2.11), both per device: what Pin in the row menu does, and Cockpit's own pins - see getPinTarget and getPinnedNoteIds below. */
 export const pinTargetSettingKey = "pinTarget"
 export const pinnedNoteIdsSettingKey = "pinnedNoteIds"
+/** Whether New to-do sets a due date (2.11): the day selected in the panel, else today, at the day start time. Per device; see isNewTodoDueOnSelectedDay. */
+export const newTodoDueOnSelectedDaySettingKey = "newTodoDueOnSelectedDay"
 export const gestureTraceSettingKey = "gestureTrace"
 /** The gesture trace's ONE switch. A shipping build must never show the diagnostic strip, whatever a profile happens
  * to have stored, so every reader of gestureTraceSettingKey is gated on this constant and startup resets a stored
@@ -209,6 +211,14 @@ export async function setupSettings(){
 			public: false,
 			section: 'section',
 		},
+		[newTodoDueOnSelectedDaySettingKey]: {
+			label: "New to-do: due on the selected day",
+			description: "On: a to-do created from the New to-do button or from a heading's menu is due on the day selected in the panel, at the day start time; today when no day is selected. Every view except Basic then lets you select a day by clicking its heading (the Month view's day picker as before). Off: the button creates a to-do without a due date, and only the Month view has a selected day.",
+			value: false,
+			type: SettingItemType.Bool,
+			public: true,
+			section: 'section',
+		},
 		"panelSortField": {
 			label: "How the panel breaks ties between items sharing a due time: title, updated or created",
 			value: "title",
@@ -387,6 +397,9 @@ export async function setupSettings(){
 		if (keys.includes(createButtonClickSettingKey) || keys.includes(createButtonRightClickSettingKey)) await refreshInterfaces()
 		// The panel's markup carries the pin target (2.11: the row menu's labels read it), so a change of it redraws the panel.
 		if (keys.includes(pinTargetSettingKey)) await refreshInterfaces()
+		// The selected-day switch (2.11) decides whether the headings of the list and week views take a click and show the selection, so a
+		// change redraws the panel.
+		if (keys.includes(newTodoDueOnSelectedDaySettingKey)) await refreshInterfaces()
 		// The user edited the visible "Excluded notebooks" names field: resolve the names to ids (the source
 		// of truth), rewrite the field to the canonical resolved titles, and re-render everything so the
 		// exclusion takes effect at once.
@@ -634,6 +647,14 @@ export async function getCreateButtonClickRoute(){
 
 export async function getCreateButtonRightClickRoute(){
 	return createButtonRoute(await joplin.settings.value(createButtonRightClickSettingKey), "jot")
+}
+
+/** isNewTodoDueOnSelectedDay (2.11) ****************************************************************************************************************
+ * Whether a to-do made by the New to-do button gets a due date - the day selected in the panel, else today - and whether the list and week views	*
+ * let a day be selected by clicking its heading. Per device and off by default: many to-dos are meant to have no date at all.					*
+ ***************************************************************************************************************************************************/
+export async function isNewTodoDueOnSelectedDay(){
+	return !!(await joplin.settings.value(newTodoDueOnSelectedDaySettingKey))
 }
 
 // A stored value outside the three - written by hand, or by a later build with a fourth - answers the setting's own default rather than nothing.

@@ -8,7 +8,7 @@ import joplin from "api";
 import { checkboxCategoryShown, getTodos, getNotes, getExcludedNotebookIdSet, getNotebookMap, knownCheckboxCounts, notebookWithDescendants, searchOutsideFilters, searchExcludedNotebooks, viewCriteria } from "./joplin";
 import { viewKeyFor } from "./optimistic";
 import { countGroupingPass } from "./instrument";
-import { escapeHtml, dropTargetAttributes, headingContextAttributes } from "./html";
+import { escapeHtml, dropTargetAttributes, headingContextAttributes, isDayKey, daySelectAttribute } from "./html";
 import {
     CalendarViewState,
     addDays,
@@ -807,19 +807,42 @@ abstract class BaseFormat {
 
     /** getHeadingString ****************************************************************************************************************************
      * This returns the given heading string with the proper output format(i.e html or markdown)                                                    *
+     * A heading whose drop target is one day (2.11) names that day to its context menu (data-day, for "New to-do due ..."), and with the selected- *
+     * day setting on it also selects that day on a click and shows the selection (-selected). Overdue, Future and No Due Date name no day.         *
      ***********************************************************************************************************************************************/
     private getHeadingString(headingString, dropTarget?, todoIDs?, dropEnd?){
         if (headingString){
             if (this.outputFormat == "markdown"){
                 return `## ${headingString}\n`
             } else if (this.outputFormat == "html") {
-                return `<h2${dropTargetAttributes(dropTarget, dropEnd)}${headingContextAttributes(todoIDs)}>${escapeHtml(headingString)}</h2>`;
+                var day = isDayKey(dropTarget) ? dropTarget : null
+                return `<h2${this.daySelectedClass(day)}${dropTargetAttributes(dropTarget, dropEnd)}${headingContextAttributes(todoIDs, day)}${this.daySelectClick(day)}>${escapeHtml(headingString)}</h2>`;
             }
         } else {
             return ""
         }
     }
     
+    /** Selectable days (2.11) *******************************************************************************************************************
+     * With the "New to-do: due on the selected day" setting on (the panel passes it as viewState.selectableDays), the Interval, Date and Week      *
+     * views let the user pick the day they are working on by clicking a heading that names one; the pick is the panel's selectedDate, which the   *
+     * month's day picker has always set, and New to-do is then due on it. daySelectClick is that click, daySelectedClass the -selected mark on the *
+     * heading of the picked day (" -selected" with a leading space for a class list that already has a class). With the setting off both are ""   *
+     * and the markup is what it was. The month never asks: its cells select a day in both states, as before.                                       *
+     ***********************************************************************************************************************************************/
+    protected selectableDay(day){
+        return !!(day && this.outputFormat === "html" && this.viewState && (this.viewState as any).selectableDays)
+    }
+
+    protected daySelectClick(day){
+        return this.selectableDay(day) ? daySelectAttribute(day) : ""
+    }
+
+    protected daySelectedClass(day, inList?){
+        if (!this.selectableDay(day) || day !== this.viewState.selectedDate) return ""
+        return inList ? " -selected" : ` class="-selected"`
+    }
+
     /** getTodoString *******************************************************************************************************************************
      * This returns the given todo as a string, with the proper output format (i.e html or markdown.)                                               *
      ***********************************************************************************************************************************************/
@@ -1109,6 +1132,8 @@ class MonthFormat extends DateFormat {
      * One day of the grid: its number, and a dot for each to-do due on it. The dots are capped so that a busy day cannot push the grid out of shape. *
      * A note drawn on the day (notes on dates, 2.11) adds a -note dot, counted under the same cap and placed before or after the to-dos' dots as   *
      * the profile places notes; the day's state class is still the to-dos' alone, since a note is neither due nor done.                            *
+     * The cell has the heading menu (2.11) as a heading naming its day does: a right click or a long press offers a to-do due that day, and moving  *
+     * the day's to-dos to another date when it has any. Its click is the day picker, as it always was.                                             *
      ***********************************************************************************************************************************************/
     private renderDayCell(day, byDate, anchor, todayKey, selectedKey, now, noteDays?){
         var key = toISODate(day)
@@ -1135,7 +1160,7 @@ class MonthFormat extends DateFormat {
         if (notes.length) label += `, ${notes.length} note${notes.length === 1 ? "" : "s"}`
 
         return `
-            <td class="${classes.join(" ")}"${dropTargetAttributes(key)}>
+            <td class="${classes.join(" ")}"${dropTargetAttributes(key)}${headingContextAttributes(todos.map(todo => todo.id), key)}>
                 <button type="button" class="calendar-day-button" aria-label="${escapeHtml(label)}" onclick="onCalendarDaySelected('${key}')">
                     <span class="calendar-day-number">${day.getDate()}</span>
                     <span class="calendar-dots">${dots}${overflow}</span>
@@ -1146,6 +1171,7 @@ class MonthFormat extends DateFormat {
 
     /** renderSelectedDay ***************************************************************************************************************************
      * The to-dos of the day the user picked, listed under the grid, with the notes drawn on that day (notes on dates, 2.11) before or after them.  *
+     * Its heading names that day to the heading menu (2.11).                                                                                       *
      ***********************************************************************************************************************************************/
     private renderSelectedDay(byDate, selectedKey, limits, noteDays?){
         if (!selectedKey) return ""
@@ -1160,7 +1186,7 @@ class MonthFormat extends DateFormat {
             : `<p class="calendar-empty">Nothing due</p>`
         return `
             <section class="calendar-selected">
-                <h2${headingContextAttributes(capped.drawn.map(todo => todo.id))}>${escapeHtml(this.getFullDateString(day))}</h2>
+                <h2${headingContextAttributes(capped.drawn.map(todo => todo.id), selectedKey)}>${escapeHtml(this.getFullDateString(day))}</h2>
                 ${rows}
             </section>
         `
@@ -1169,6 +1195,8 @@ class MonthFormat extends DateFormat {
 
 /** WeekFormat **************************************************************************************************************************************
  * A week planner: one section per day, each listing that day's to-dos so they can be read and ticked off in place.                                  *
+ * Each day's heading has the heading menu (2.11) and, with the selected-day setting on, selects its day on a click; the selected day's section is     *
+ * then -selected, beside -today, so the day being worked on and the calendar's today are told apart.                                                *
  ***************************************************************************************************************************************************/
 class WeekFormat extends DateFormat {
 
@@ -1193,8 +1221,8 @@ class WeekFormat extends DateFormat {
                 : `<p class="calendar-empty">Nothing due</p>`
             var heading = day.toLocaleDateString(undefined, { weekday: this.profile.weekdayFormat || "long", day: "numeric", month: "short" })
             return `
-                <section class="week-day${key === todayKey ? " -today" : ""}"${dropTargetAttributes(key)}>
-                    <h2${headingContextAttributes(todos.map(todo => todo.id))}>${escapeHtml(heading)}</h2>
+                <section class="week-day${key === todayKey ? " -today" : ""}${this.daySelectedClass(key, true)}"${dropTargetAttributes(key)}>
+                    <h2${headingContextAttributes(todos.map(todo => todo.id), key)}${this.daySelectClick(key)}>${escapeHtml(heading)}</h2>
                     ${rows}
                 </section>
             `

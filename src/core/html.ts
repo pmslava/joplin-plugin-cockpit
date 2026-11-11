@@ -30,10 +30,31 @@ export function dropTargetAttributes(target, endTarget?){
 }
 
 /** headingContextAttributes ************************************************************************************************************************
- * The attributes that make a group heading open the set alarm dialog for every to-do in its group on right click. Returns an empty string when the  *
- * group is empty, so it can be interpolated unconditionally.                                                                                       *
+ * The attributes that give a group heading - or a month day cell (2.11) - its context menu: a right click (desktop) or a long press (mobile) opens  *
+ * the panel's heading menu (headingMenuHtml in noteMenu.js), which offers to move the group's to-dos to a date and, when the heading names a day,   *
+ * to create a to-do due that day. `day` is that day as YYYY-MM-DD (data-day), and only a heading naming a single day passes one: an empty day still *
+ * has a menu then, for its New to-do item. Without a day the output is exactly what it was before 2.11 - nothing at all for an empty group - so it  *
+ * can still be interpolated unconditionally.                                                                                                       *
  ***************************************************************************************************************************************************/
-export function headingContextAttributes(todoIDs){
-    if (!todoIDs || !todoIDs.length) return ""
-    return ` data-todo-ids="${escapeHtml(todoIDs.join(","))}" oncontextmenu="onHeadingContextMenu(event)"`
+export function headingContextAttributes(todoIDs, day?){
+    var ids = todoIDs && todoIDs.length ? ` data-todo-ids="${escapeHtml(todoIDs.join(","))}"` : ""
+    var named = day ? ` data-day="${escapeHtml(day)}"` : ""
+    if (!ids && !named) return ""
+    return `${ids}${named} oncontextmenu="onHeadingContextMenu(event)"`
+}
+
+/** isDayKey (2.11) *********************************************************************************************************************************
+ * Whether a drop target names one day (YYYY-MM-DD) - as opposed to "clear" (No Due Date) or nothing at all (Overdue, Future). Only such a heading    *
+ * gets the heading menu's New to-do item and, with the selected-day setting on, a click that selects its day.                                      *
+ ***************************************************************************************************************************************************/
+export function isDayKey(value){
+    return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
+}
+
+/** daySelectAttribute (2.11) ***********************************************************************************************************************
+ * The click that selects a day from a heading of the list and week views, with the "New to-do: due on the selected day" setting on. It posts what  *
+ * the month's day cells post (onCalendarDaySelected), so the same day clicked again clears the selection there too.                               *
+ ***************************************************************************************************************************************************/
+export function daySelectAttribute(day){
+    return ` onclick="onCalendarDaySelected('${escapeHtml(day)}')"`
 }

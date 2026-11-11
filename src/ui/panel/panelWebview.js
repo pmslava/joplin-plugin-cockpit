@@ -986,16 +986,58 @@ function dismissPanelPopups(){
 })()
 
 /** onHeadingContextMenu ****************************************************************************************************************************
- * Right click on a group heading ("Today", "No Due Date", a week planner day...) opens the set alarm dialog for every to-do in that group.          *
+ * Right click (desktop) or long press (mobile) on a group heading ("Today", "No Due Date", a week planner day...) or a month day cell opens the      *
+ * heading menu (2.11): "New to-do due <day>…" when the heading names a day (data-day), and "Move N to-dos to a date…" for the to-dos of its group   *
+ * (data-todo-ids) - the set alarm dialog this right click opened directly before 2.11. A heading with neither, an empty No Due Date, opens nothing. *
  ***************************************************************************************************************************************************/
 function onHeadingContextMenu(event){
     event.preventDefault()
-    var ids = (event.currentTarget.dataset.todoIds || '').split(',').filter(Boolean)
-    if (!ids.length) return
-    selectedRowIDs.clear()
-    for (var id of ids) selectedRowIDs.add(id)
-    paintTodoSelection()
-    requestAlarm(ids)
+    var el = event.currentTarget
+    var ids = (el.dataset.todoIds || '').split(',').filter(Boolean)
+    var day = el.dataset.day || ''
+    showHeadingContextMenu(event, day, ids)
+}
+
+/** showHeadingContextMenu (2.11) *******************************************************************************************************************
+ * The heading menu, in the note menu's own container (#noteContextMenu), so every way that menu closes - a click elsewhere, Escape, a scroll, the    *
+ * panel losing focus - closes this one too, and only one of the two is ever open. The items come from the shared NoteMenu module (headingMenuHtml), *
+ * which the harness builds the same markup from. The live-gesture guard is the note menu's, for the note menu's reason.                             *
+ *   - New to-do: desktop asks the host, which opens Jot's form with the day as its due (today's create with the due when Jot is absent); mobile   *
+ *     under All notebooks asks for the notebook first with the in-panel overlay, which carries the day to the host, and otherwise asks the host,   *
+ *     which creates in the filtered notebook.                                                                                                     *
+ *   - Move: the group's to-dos become the selection, as the heading's right click made them before, and the set-date picker opens for them.        *
+ ***************************************************************************************************************************************************/
+function showHeadingContextMenu(event, day, ids){
+    if (touchDrag.active){ traceGesture('menu-blocked'); return }
+    var html = window.NoteMenu.headingMenuHtml(day ? window.NoteMenu.headingDayLabel(day) : '', ids.length)
+    if (!html) return
+    hideNoteContextMenu()
+    var menu = document.createElement('div')
+    menu.id = 'noteContextMenu'
+    menu.innerHTML = html
+    menu.addEventListener('click', clickEvent => {
+        var button = clickEvent.target.closest ? clickEvent.target.closest('.context-menu-item') : null
+        var action = button ? button.dataset.action : null
+        hideNoteContextMenu()
+        if (action === 'newTodoDue'){
+            if (createNeedsNotebookOverlay()) openNotebookOverlay('createTodo', { dueDay: day })
+            else void webviewApi.postMessage(['headingNewTodoClicked', day]);
+        } else if (action === 'moveTodos'){
+            selectedRowIDs.clear()
+            for (var id of ids) selectedRowIDs.add(id)
+            paintTodoSelection()
+            requestAlarm(ids)
+        }
+    })
+    document.body.appendChild(menu)
+    menu.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - menu.offsetWidth - 8))}px`
+    menu.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - menu.offsetHeight - 8))}px`
+    // Focus into the panel frame on desktop, so the outside dismissal has a blur to fire on (see showNoteContextMenu).
+    if (!IS_MOBILE){
+        menuReturnFocus = document.activeElement
+        menu.tabIndex = -1
+        try { menu.focus({ preventScroll: true }) } catch (error){ menu.focus() }
+    }
 }
 
 /** requestAlarm ************************************************************************************************************************************
@@ -1102,7 +1144,8 @@ document.addEventListener('pointerdown', function(event){
     if (event.target.closest('#cockpitOverlay')) return
     var todoRow = event.target.closest('.todo[data-todo-id]')
     var noteRow = event.target.closest('.todo[data-note-id]')
-    var heading = event.target.closest('h2[data-todo-ids]')
+    // A heading with to-dos, or any heading or month day cell that names a day (2.11): both open the heading menu.
+    var heading = event.target.closest('h2[data-todo-ids], [data-day]')
     var sync    = event.target.closest('.icon-button.-sync')
     var kind = null, el = null, id = null
     if (todoRow){ kind = 'todo'; el = todoRow; id = todoRow.dataset.todoId }
@@ -3830,7 +3873,8 @@ async function onCalendarToday(){
 }
 
 /** onCalendarDaySelected ***************************************************************************************************************************
- * Lists the to-dos of the given day under the month grid, or hides them again when that day is already selected                                     *
+ * Lists the to-dos of the given day under the month grid, or hides them again when that day is already selected. Since 2.11 a day heading of the     *
+ * list and week views calls it too, with the selected-day setting on: the host keeps one selected day for every view.                               *
  ***************************************************************************************************************************************************/
 async function onCalendarDaySelected(isoDate){
     await webviewApi.postMessage(['calendarDaySelected', isoDate]);
@@ -4089,8 +4133,10 @@ function openNotebookOverlay(purpose, opts, restore){
         { label: 'Cancel', onClick: function(){ closeOverlay() } },
         { label: 'OK', kind: 'primary', onClick: function(){
             if (overlayNotebookSelection === null) return
+            // A to-do created from the heading menu (2.11) carries that heading's day, which the host makes its due.
             var extra = purpose === 'moveNotes' ? (opts.noteIDs || [])
                       : purpose === 'moveNotebookUnder' ? String(opts.sourceFolderId || '')
+                      : (purpose === 'createTodo' && opts.dueDay) ? { dueDay: String(opts.dueDay) }
                       : undefined
             void webviewApi.postMessage(['notebookPicked', purpose, overlayNotebookSelection, extra]);
             closeOverlay()
