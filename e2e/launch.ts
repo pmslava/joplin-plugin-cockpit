@@ -34,7 +34,7 @@ const PLUGIN_DIST = path.join(REPO_ROOT, 'dist');
  */
 // The version is part of the file name (scripts/setup-e2e.sh writes the same name), so a bumped JOT_E2E_VERSION runs its own
 // archive rather than whichever one the cache already held.
-export const JOT_E2E_VERSION = process.env.JOT_E2E_VERSION ?? '0.2.2';
+export const JOT_E2E_VERSION = process.env.JOT_E2E_VERSION ?? '0.5.0';
 export const JOT_JPL = path.join(CACHE_DIR, `io.github.pmslava.jot-${JOT_E2E_VERSION}.jpl`);
 
 // The plugin id this fork ships under (see src/manifest.json). Joplin embeds it in the panel/
