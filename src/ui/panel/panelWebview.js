@@ -17,6 +17,12 @@ async function onTodoClicked(todoID){
  ***************************************************************************************************************************************************/
 var selectedRowIDs = new Set()
 var lastClickedRowID = null
+// WHICH COPY of lastClickedRowID anchors a Shift range, as { id, at }: `at` counts the rows carrying that id in the list's order (0 the
+// first). Since 2.11 one id can be drawn twice - a pinned row also sits in its own group, a note on dates is drawn on two days - and a range
+// measured from the first copy whichever was pressed swept rows the user never ranged over. Kept beside the id rather than in its place, so
+// the writers that set lastClickedRowID alone (the editor read-back, Escape, the tick-circle menu) simply fall back to the first copy: the
+// position is only used while its id is still the anchor's.
+var lastClickedRowAt = null
 // The row of the most recent press that SELECTED something: a plain press, a Ctrl+press that added a row, or
 // the far end of a Shift range. It is deliberately NOT the same thing as lastClickedRowID, which is the
 // Shift-range anchor and must stay put while a range is resized; this one always follows the last thing the
@@ -631,15 +637,18 @@ function onRowPressed(event, rowID){
     // state: bump the generation to discard its answer rather than let it drop this press's selection.
     editorNoteSeq++
     pickedNoteID = null
+    var rows = allSelectableRows()
     var next = window.RowSelection.pressSelection(
-        { selected: [...selectedRowIDs], lastClicked: lastClickedRowID, lastInteraction: lastSelectionInteractionID },
+        { selected: [...selectedRowIDs], lastClicked: lastClickedRowID, lastClickedAt: lastClickedOccurrence(), lastInteraction: lastSelectionInteractionID },
         rowID,
         { shift: !!event.shiftKey, ctrl: !!(event.ctrlKey || event.metaKey) },
-        allSelectableRows().map(rowIDOf)
+        rows.map(rowIDOf),
+        rowOccurrence(event.currentTarget, rows)
     )
     selectedRowIDs.clear()
     for (var id of next.selected) selectedRowIDs.add(id)
     lastClickedRowID = next.lastClicked
+    lastClickedRowAt = { id: next.lastClicked, at: next.lastClickedAt }
     lastSelectionInteractionID = next.lastInteraction
     paintTodoSelection()
     // On a phone this handler is reached ONLY through the browser's compatibility mouse events (a row carries
@@ -649,6 +658,27 @@ function onRowPressed(event, rowID){
     // strip is the only instrument that can say whether these ever run. Two codes, the count included, so a hold
     // followed by two taps reads as three lines with the size after each.
     if (IS_MOBILE) traceGesture('row-press:' + traceId(rowID) + ' n=' + selectedRowIDs.size)
+}
+
+/** rowOccurrence ***********************************************************************************************************************************
+ * Which copy of its id a row is among `rows` (0 the first), or null when it is not one of them - a press that did not come from a row's own        *
+ * handler, say. The Shift range is measured along the same list, so this is the position RowSelection needs to start from the copy the user        *
+ * actually pressed rather than the first one drawn (see lastClickedRowAt).                                                                          *
+ ***************************************************************************************************************************************************/
+function rowOccurrence(row, rows){
+    if (!row || !row.dataset) return null
+    var id = rowIDOf(row)
+    var seen = 0
+    for (var other of rows){
+        if (other === row) return seen
+        if (rowIDOf(other) === id) seen++
+    }
+    return null
+}
+
+// The anchor's copy, but only while it still describes the current anchor: any writer that moved lastClickedRowID on its own has made it stale.
+function lastClickedOccurrence(){
+    return (lastClickedRowAt && lastClickedRowAt.id === lastClickedRowID) ? lastClickedRowAt.at : null
 }
 
 function onTodoRowMouseDown(event, todoID){
@@ -691,11 +721,13 @@ function onRowClicked(event, rowID){
         void onTodoClicked(rowID)
         return
     }
-    var next = window.RowSelection.clickSelection({ selected: [...selectedRowIDs], lastClicked: lastClickedRowID }, rowID)
+    var next = window.RowSelection.clickSelection({ selected: [...selectedRowIDs], lastClicked: lastClickedRowID, lastClickedAt: lastClickedOccurrence() },
+        rowID, rowOccurrence(event && event.currentTarget, allSelectableRows()))
     if (next.changed){
         selectedRowIDs.clear()
         for (var id of next.selected) selectedRowIDs.add(id)
         lastClickedRowID = next.lastClicked
+        lastClickedRowAt = { id: next.lastClicked, at: next.lastClickedAt }
         paintTodoSelection()
     }
     if (IS_MOBILE) traceGesture('row-click:' + traceId(rowID) + ' n=' + selectedRowIDs.size)
@@ -1924,26 +1956,33 @@ function dropTargetLabel(el){
     return shortLabel(el.tagName === 'H2' ? el.textContent : el.getAttribute('data-drop'))
 }
 
+// What the touch drag indexes: every to-do row, and every regular-note row inside the list. A note row is never a between target, but it has to
+// be IN the index all the same, because rowAtY gives everything from one indexed row's top to the next one's to the row above: with the note
+// rows left out, a finger over a group's leading notes, or over a group that holds only notes (notes on dates draw them inside the to-do
+// groups since 2.11), resolved to the LAST to-do of the group above, its "after" side, and the drop wrote a due at the end of that group.
+var TOUCH_DRAG_ROWS = '.todo[data-todo-id], .todos .todo[data-note-id]'
+
 /** buildRowIndex ***********************************************************************************************************************************
  * The rows' live boxes, in document order, with the between-eligibility each one already resolves to (null for the No-Due group, for a week card and *
- * for anything outside the .todos list - see betweenGroupInfo). The read-only peek's rows are left out entirely: they are not a target of any kind.  *
- * Measured once at the arm; every later scroll SHIFTS it (see syncRowIndex) rather than re-measuring, because     *
- * the boxes move while the finger holds still.                                                                                                       *
+ * for anything outside the .todos list - see betweenGroupInfo - and null for every NOTE row, which resolves to 'no-info': the finger over a note, and *
+ * the gap below it up to the next indexed row, is inert, exactly as on the desktop, whose betweenTargetAt starts from closest('.todo[data-todo-id]').  *
+ * The read-only peek's rows are left out entirely: they are not a target of any kind. Measured once at the arm; every later scroll SHIFTS it (see     *
+ * syncRowIndex) rather than re-measuring, because the boxes move while the finger holds still.                                                       *
  ***************************************************************************************************************************************************/
 function buildRowIndex(){
     var rows = []
-    for (var row of allTodoRows()){
+    for (var row of document.querySelectorAll(TOUCH_DRAG_ROWS)){
         if (row.closest && row.closest('.outside-results')) continue
         var rect = row.getBoundingClientRect()
         if (!rect.height) continue
-        rows.push({ el: row, top: rect.top, bottom: rect.bottom, info: betweenGroupInfo(row) })
+        rows.push({ el: row, top: rect.top, bottom: rect.bottom, info: row.dataset.todoId ? betweenGroupInfo(row) : null })
     }
     touchDrag.index = rows
     var scroller = touchDragScroller()
     touchDrag.indexTop = scroller ? scroller.scrollTop : 0
     // Not rows.length: the peek's rows and any zero-height row are skipped above, so what is recorded is the LIVE
     // count this index was measured against - the one thing a no-candidate lookup can cheaply re-ask (rowEntryAtY).
-    touchDrag.indexRows = document.querySelectorAll('.todo[data-todo-id]').length
+    touchDrag.indexRows = document.querySelectorAll(TOUCH_DRAG_ROWS).length
 }
 
 /** rowEntryAtY *************************************************************************************************************************************
@@ -1969,7 +2008,7 @@ function rowEntryAtY(y){
 }
 
 function rowIndexIsStale(entry){
-    if (!entry) return document.querySelectorAll('.todo[data-todo-id]').length !== touchDrag.indexRows
+    if (!entry) return document.querySelectorAll(TOUCH_DRAG_ROWS).length !== touchDrag.indexRows
     if (!entry.el || !entry.el.isConnected) return true
     return Math.abs(entry.el.getBoundingClientRect().top - entry.top) > ROW_INDEX_TOLERANCE_PX
 }
@@ -3214,9 +3253,10 @@ document.addEventListener('click', function(event){
 //   - and no exemption may reach INSIDE an element that carries an inline oncontextmenu, whatever kind of control
 //     a row grows next: the exemption is for fields that stand on their own, never for a row's own controls.
 var CONTEXTMENU_TEXT_FIELD = 'input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable]'
-// Every element with an inline oncontextmenu: a to-do row and a note row (both .todo, formats.ts) and a group
-// heading (h2[data-todo-ids], html.ts). Doubles as the trace's zone vocabulary just below.
-var CONTEXTMENU_HANDLER_ZONE = '.todo, h2[data-todo-ids]'
+// Every element with an inline oncontextmenu: a to-do row and a note row (both .todo, formats.ts), a group
+// heading with ids on it (h2[data-todo-ids], html.ts), and since 2.11's heading menu anything naming a day
+// ([data-day]: a day heading with no to-dos, a month day cell). Doubles as the trace's zone vocabulary just below.
+var CONTEXTMENU_HANDLER_ZONE = '.todo, h2[data-todo-ids], [data-day]'
 document.addEventListener('contextmenu', function(event){
     if (!IS_MOBILE) return
     var el = event.target && event.target.closest ? event.target : null
@@ -3229,12 +3269,14 @@ document.addEventListener('contextmenu', function(event){
 // The zone word for the trace, in the adapter's own vocabulary rather than an approximation of it: 'row' is a
 // to-do row (.todo[data-todo-id], list row or week card), 'note' a note row (.todo[data-note-id], which opens a
 // different menu and is no drag source), 'heading' a group heading with ids on it (h2[data-todo-ids] - a bare h2
-// carries no handler). Anything else - the list, the body, the suggestion list - is 'other'.
+// carries no handler), 'day' anything else naming a day ([data-day]: a heading with no to-dos, a month day cell,
+// which open the same heading menu). Anything else - the list, the body, the suggestion list - is 'other'.
 function contextmenuZone(el){
     if (!el) return 'other'
     if (el.closest('.todo[data-todo-id]')) return 'row'
     if (el.closest('.todo[data-note-id]')) return 'note'
     if (el.closest('h2[data-todo-ids]')) return 'heading'
+    if (el.closest('[data-day]')) return 'day'
     return 'other'
 }
 

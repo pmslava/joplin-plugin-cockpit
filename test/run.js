@@ -4022,7 +4022,9 @@ async function main() {
         // a .todo is a to-do row OR a note row (.todo.-note, formats.ts), which open different menus. A strip read
         // literally on a device is worth only as much as the words on it.
         const zoneWord = handlerBody('contextmenuZone')
-        for (const [selector, word] of [['.todo[data-todo-id]', "'row'"], ['.todo[data-note-id]', "'note'"], ['h2[data-todo-ids]', "'heading'"]]){
+        assert.ok(zones.includes('[data-day]'),
+            '...and so does anything naming a day (2.11: a day heading with no to-dos, a month day cell - html.ts headingContextAttributes)')
+        for (const [selector, word] of [['.todo[data-todo-id]', "'row'"], ['.todo[data-note-id]', "'note'"], ['h2[data-todo-ids]', "'heading'"], ['[data-day]', "'day'"]]){
             assert.ok(zoneWord.includes(`closest('${selector}')`), `the zone word must be told apart by ${selector}`)
             assert.ok(zoneWord.includes(`return ${word}`), `...and must be able to read ${word}`)
         }
@@ -4338,11 +4340,61 @@ async function main() {
         // With no candidate there is no row to check, so the cheap question asked instead is whether the LIST is
         // still the one that was measured - which keeps a finger parked below the last row from rebuilding the
         // index on every frame, while a re-render that added or removed rows still forces the rebuild it needs.
-        assert.ok(/if \(!entry\) return document\.querySelectorAll\('\.todo\[data-todo-id\]'\)\.length !== touchDrag\.indexRows/.test(stale),
+        assert.ok(/if \(!entry\) return document\.querySelectorAll\(TOUCH_DRAG_ROWS\)\.length !== touchDrag\.indexRows/.test(stale),
             'a no-candidate lookup must re-ask the row COUNT, not rebuild blindly')
-        assert.ok(handlerBody('buildRowIndex').includes("touchDrag.indexRows = document.querySelectorAll('.todo[data-todo-id]').length"),
+        assert.ok(handlerBody('buildRowIndex').includes("touchDrag.indexRows = document.querySelectorAll(TOUCH_DRAG_ROWS).length"),
             'and the build must record the live count it was measured against')
         assert.ok(/var ROW_INDEX_TOLERANCE_PX = 2/.test(webviewSource), 'the tolerance must be a named, tunable constant')
+    })
+
+    await test('webview touch drag: a finger over a note row, or a group that holds only notes, is inert - never the last to-do of the group above (2.11 review)', () => {
+        // Notes on dates draws regular-note rows INSIDE the to-do groups. rowAtY gives everything from one indexed row's top to the next one's
+        // to the row above, so an index of the to-do rows alone handed a finger over a group's leading notes, or over a notes-only group, to the
+        // LAST to-do of the group above, 'after' band - and the drop wrote a between-due at the end of that group. The webview's own index, lookup
+        // and resolution run here against stand-in rows: T1, a note, T2 in one group; then T3, and a group holding only two notes; then T4.
+        const rowsSelector = (/var TOUCH_DRAG_ROWS = '([^']+)'/.exec(webviewSource) || [])[1]
+        const box = (top) => ({ top, bottom: top + 20, height: 20 })
+        const row = (kind, id, top) => ({ dataset: kind === 'todo' ? { todoId: id } : { noteId: id }, isConnected: true, kind, id,
+            getBoundingClientRect: () => box(top), closest: () => null })
+        const rows = [row('todo', 't1', 0), row('note', 'n1', 24), row('todo', 't2', 48), row('todo', 't3', 72),
+            row('note', 'n2', 120), row('note', 'n3', 144), row('todo', 't4', 200)]
+        const doc = {
+            querySelectorAll: (selector) => {
+                const parts = selector.split(',').map(part => part.trim())
+                return rows.filter(r => parts.includes(r.kind === 'todo' ? '.todo[data-todo-id]' : '.todos .todo[data-note-id]'))
+            },
+            elementFromPoint: () => ({ closest: () => null }),
+        }
+        const info = { groupDate: '2026-11-12', groupEndDate: '2026-11-12' }
+        const touchDrag = { x: 40, y: 0, ids: ['dragged'], index: null, indexTop: 0, indexRows: 0 }
+        const scroller = { scrollTop: 0, getBoundingClientRect: () => ({ top: 0, bottom: 1000 }) }
+        const names = ['dragTargetNone', 'buildRowIndex', 'rowEntryAtY', 'rowIndexIsStale', 'resolveDragTarget']
+        const make = new Function('document', 'window', 'touchDrag', 'touchDragScroller', 'betweenGroupInfo', 'betweenNeighboursAt', 'capFooterFollows',
+            'allTodoRows', 'ROW_INDEX_TOLERANCE_PX', 'TOUCH_DRAG_BAND', 'TOUCH_DRAG_ROWS',
+            names.map(handlerBody).join('\n}\n') + '\n}\nreturn { buildRowIndex, resolveDragTarget }')
+        const drag = make(doc, { TouchDrag }, touchDrag, () => scroller, (r) => (r.kind === 'todo' ? info : null),
+            () => ({ prevId: 'p', nextId: 'n' }), () => false, () => rows.filter(r => r.kind === 'todo'), 2, 0.5, rowsSelector)
+        drag.buildRowIndex()
+        const at = (y) => {
+            touchDrag.y = y
+            const target = drag.resolveDragTarget()
+            return target.kind === 'none' ? 'none:' + target.reason : `${target.kind}:${target.row.id}:${target.before ? 'before' : 'after'}`
+        }
+        assert.strictEqual(at(5), 'between:t1:before', 'a to-do row is still a target')
+        assert.strictEqual(at(15), 'between:t1:after', '...on both of its halves')
+        assert.strictEqual(at(30), 'none:no-info', 'a finger over a note row between two to-dos is inert, not "after T1"')
+        assert.strictEqual(at(46), 'none:no-info', 'and so is the gap below the note')
+        assert.strictEqual(at(50), 'between:t2:before', 'the next to-do is a target again')
+        assert.strictEqual(at(130), 'none:no-info', 'a group that holds only notes is inert, not "after T3" at the end of the group above')
+        assert.strictEqual(at(142), 'none:no-info', '...including the gap between two of its notes')
+        assert.strictEqual(at(150), 'none:no-info', '...and its last note')
+        assert.strictEqual(at(205), 'between:t4:before', 'and the to-do after it is a target')
+        assert.strictEqual(touchDrag.indexRows, rows.length, 'the live count the index is checked against counts the note rows too')
+        assert.strictEqual(touchDrag.index.length, rows.length, 'and the index holds them')
+        touchDrag.index = touchDrag.index.slice()
+        touchDrag.y = 500
+        assert.strictEqual(drag.resolveDragTarget().reason, 'no-row', 'below the list is still off the end')
+        assert.strictEqual(touchDrag.index.length, rows.length, 'and an unchanged list is not rebuilt for it (the counts agree)')
     })
 
     await test('webview touch drag: the row index skips the peek, and every scroll shifts it', () => {
@@ -5124,6 +5176,25 @@ async function main() {
         assert.strictEqual(state.messageBoxes.length, 0, 'silently')
         assert.ok(!state.panelMessages.some(message => message[0] === 'panelToast'), 'not even a toast')
     })
+    await test('pin (Cockpit): a Pin landing while a gone pin is being pruned is kept - both writes go through one queue (2.11 review)', async () => {
+        // forgetPins and changeCockpitPins are each a read-modify-write of the one setting. A Pin landing between the prune's read and its write
+        // was written away by it; serialised, the Pin reads what the prune wrote.
+        const state = await pinRun({ initialSettings: { [PINNED_IDS_KEY]: JSON.stringify([pinOverdue]) } })
+        const gone = id32('pq')
+        let pending = null
+        state.onSettingWrite = async (key, value) => {
+            if (pending || key !== PINNED_IDS_KEY || value !== JSON.stringify([pinOverdue])) return
+            pending = state.panelMessageHandler(['pinNotes', [pinOther]])        // the Pin, while the prune's write is in flight
+            // Turns of the event loop, not a timer: the harness captures setTimeout while a panel message is handled.
+            for (let turn = 0; turn < 50; turn++) await new Promise(resolve => setImmediate(resolve))
+        }
+        await state.panelMessageHandler(['pinNotes', [gone]])                     // pinned, drawn, found gone, pruned
+        assert.ok(pending, 'the prune wrote while the second Pin was made')
+        await pending
+        state.onSettingWrite = null
+        assert.deepStrictEqual(JSON.parse(state.settings[PINNED_IDS_KEY]), [pinOverdue, pinOther], 'the gone pin is forgotten and the new one kept')
+    })
+
     await test('pin (Cockpit): the overview markdown never draws the Pinned section', async () => {
         const notes = pinNotes()
         notes.ov = { id: 'ov', title: 'Overview', body: 'stale' }
@@ -6336,7 +6407,7 @@ async function main() {
         assert.ok(handlerBody('allRows').includes("'.todo[data-todo-id], .todo[data-note-id]'"),
             'both row kinds must be in the row query')
         assert.ok(rowsBody.includes(".closest('.outside-results')"), 'the read-only peek must stay out of the selectable order')
-        assert.ok(handlerBody('onRowPressed').includes('allSelectableRows().map(rowIDOf)'),
+        assert.ok(handlerBody('onRowPressed').includes('var rows = allSelectableRows()') && handlerBody('onRowPressed').includes('rows.map(rowIDOf)'),
             'the Shift range must be measured along the selectable rows of both kinds')
         assert.ok(handlerBody('collapseMultiSelection').includes('allSelectableRows().map(rowIDOf)'),
             'and so must the Escape collapse fallback')
@@ -6349,6 +6420,39 @@ async function main() {
         const menuBody = handlerBody('showNoteContextMenu')
         assert.ok(/selectedRowIDs\.has\(noteID\) && selectedRowIDs\.size > 1/.test(menuBody),
             'any row inside a multi-row selection must open the batch menu, whichever kind it is')
+    })
+
+    await test('multi-select: a Shift range is measured from the COPY pressed, so a twice-drawn row never sweeps in its other copy (2.11 review)', () => {
+        // Since 2.11 one id can be drawn twice: a pinned row also sits in its own group, a note on dates on two days. indexOf answers with the
+        // first copy, so a range from the Overdue copy of pinned X started at X's Pinned copy at the top and swept the whole section in.
+        const [x, y, a, b, c, d] = ['x', 'y', 'a', 'b', 'c', 'd'].map(rowId)
+        const listed = [x, y, a, x, b, c, y, d]                       // Pinned: X, Y - then the list: A, X, B, C, Y, D
+        const pressed = RowSelection.pressSelection({ selected: [], lastClicked: null, lastInteraction: null }, x, {}, listed, 1)
+        assert.strictEqual(pressed.lastClickedAt, 1, 'the anchor remembers which copy was pressed')
+        const ranged = RowSelection.pressSelection(pressed, c, { shift: true }, listed, 0)
+        assert.deepStrictEqual(ranged.selected, [x, b, c], 'the range from the second copy of X must not reach the first (no Y, no A)')
+        assert.strictEqual(ranged.lastClicked, x, 'the anchor stays put')
+        assert.strictEqual(ranged.lastClickedAt, 1, '...copy and all, so a further Shift+press resizes the same range')
+        assert.deepStrictEqual(RowSelection.pressSelection(ranged, a, { shift: true }, listed, 0).selected, [a, x], 'resized upwards from the same copy')
+        // The far end is a position too: Shift on the list copy of Y from the list copy of X takes B, C and Y, not the Pinned Y.
+        assert.deepStrictEqual(RowSelection.pressSelection(pressed, y, { shift: true }, listed, 1).selected, [x, b, c, y], 'the pressed copy is the far end')
+        // A range that spans both copies lists the id once: the selection is a set of ids, and both copies light up.
+        const fromTop = RowSelection.pressSelection({ selected: [], lastClicked: null, lastInteraction: null }, x, {}, listed, 0)
+        assert.deepStrictEqual(RowSelection.pressSelection(fromTop, b, { shift: true }, listed, 0).selected, [x, y, a, b], 'X once, though both copies are in the span')
+        // A click keeps the copy too, and without occurrences the rule is the id-only one it was.
+        assert.strictEqual(RowSelection.clickSelection({ selected: [a, b], lastClicked: a }, x, 1).lastClickedAt, 1, 'a collapsing click anchors on its own copy')
+        assert.deepStrictEqual(RowSelection.pressSelection({ selected: [x], lastClicked: x }, c, { shift: true }, listed).selected, [x, y, a, b, c],
+            'no occurrence given: the first copy, as before 2.11')
+        // The webview passes the pressed row's own copy (its currentTarget) and keeps the anchor's beside the id.
+        const press = handlerBody('onRowPressed')
+        assert.ok(press.includes('rowOccurrence(event.currentTarget, rows)'), 'the press passes the copy that was pressed')
+        assert.ok(press.includes('lastClickedAt: lastClickedOccurrence()') && press.includes('lastClickedRowAt = { id: next.lastClicked, at: next.lastClickedAt }'),
+            'and hands back and keeps the anchor\'s copy')
+        const rowOccurrence = new Function('rowIDOf', handlerBody('rowOccurrence') + '\n}\nreturn rowOccurrence')((r) => r.dataset.todoId)
+        const els = [x, a, x].map(id => ({ dataset: { todoId: id } }))
+        assert.strictEqual(rowOccurrence(els[2], els), 1, 'the second element carrying X is copy 1')
+        assert.strictEqual(rowOccurrence(els[1], els), 0, 'a row drawn once is copy 0')
+        assert.strictEqual(rowOccurrence(null, els), null, 'a press from no row passes no copy')
     })
 
     await test('read-only peek: a CLICK on a peek row opens it and selects NOTHING (MAJOR-1)', () => {
@@ -9479,7 +9583,23 @@ async function main() {
         assert.ok(!html.includes('outside-results'), 'so the peek does not run')
     })
 
-    await test('notes on dates (old path): both switches off - a stored profile without them, or with both false - draws the Notes section as before, byte for byte', async () => {
+    // The Notes section of one small fixture (one note, one to-do, Interval, notes after, desktop) as the build WITHOUT notes on dates drew it:
+    // captured from wip/2.11-drag (the 2.10 base plus the drag fix, formats.ts untouched) through this same harness, so a change to the shared
+    // old path fails here rather than only being compared with itself.
+    const NOD_OLD_PATH_NOTES_SECTION = "<section class=\"notes-section\">\n            <h2>Notes</h2>\n            \n            <div class=\"todo -note\" data-note-id=\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n                onmousedown=\"onNoteRowMouseDown(event, 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')\"\n                onclick=\"onNoteRowClicked(event, 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')\"\n                ondblclick=\"onRowDoubleClicked(event, 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')\"\n                oncontextmenu=\"onNoteContextMenu(event, 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee')\">\n                <span class=\"note-progress -empty\" style=\"--percent: 0;\" title=\"No checkboxes inside\"></span>\n                <a class=\"todo-title\" title=\"Left click to show&#10;Right click to options&#10;Double click to new window\">Old path note</a>\n                <span class=\"todo-notebook\" data-notebook-id=\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\" title=\"Inbox&#10;Left click to filter by this&#10;Right click to move\">Inbox</span>\n            </div>\n        \n            \n        </section>"
+    await test('notes on dates (old path): both switches off - a stored profile without them, or with both false - draws the Notes section as the build before 2.11 did, byte for byte', async () => {
+        const oldPathFixture = {
+            todos: [{ id: 'a'.repeat(32), title: 'Old path to-do', todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: nodFolder, user_updated_time: 1, user_created_time: 1 }],
+            searchNotes: [{ id: 'e'.repeat(32), title: 'Old path note', is_todo: 0, parent_id: nodFolder, user_created_time: 1, user_updated_time: 2 }],
+        }
+        const notesSectionOf = (state) => {
+            const html = nodHtml(state)
+            const start = html.indexOf('<section class="notes-section">')
+            return start < 0 ? null : html.slice(start, html.indexOf('</section>', start) + '</section>'.length)
+        }
+        assert.strictEqual(notesSectionOf(await nodRun({}, oldPathFixture)), NOD_OLD_PATH_NOTES_SECTION, 'no switches stored: the pre-2.11 Notes section')
+        assert.strictEqual(notesSectionOf(await nodRun({ notesOnCreated: false, notesOnUpdated: false }, oldPathFixture)), NOD_OLD_PATH_NOTES_SECTION,
+            'both false: the same')
         const absent = await nodRun({})
         const off = await nodRun({ notesOnCreated: false, notesOnUpdated: false })
         assert.ok(nodHtml(absent).includes('<section class="notes-section">'), 'the Notes section')

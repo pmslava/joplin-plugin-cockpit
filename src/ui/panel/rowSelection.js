@@ -40,10 +40,40 @@
         return value == null ? null : idString(value)
     }
 
+    // An occurrence as the caller passed it - a whole number from 0 - or null for "not given", which means the id-only behaviour.
+    function occurrenceOf(value){
+        return (typeof value === 'number' && value >= 0 && Math.floor(value) === value) ? value : null
+    }
+
+    /** positionOf ************************************************************************************************************************************
+     * Where in `listed` a row sits: the index of the `occurrence`-th entry carrying `id` (0 is the first), or of its FIRST entry when no occurrence   *
+     * is given or the list holds fewer copies than that. One id can be drawn twice since 2.11 - a pinned row also appears in its own group below,     *
+     * and a note on dates is drawn on its created day and its updated day - and indexOf answers with the first copy whichever one was pressed, so a  *
+     * Shift range measured by id alone started at the Pinned copy at the top and swept the whole section in. The occurrence is counted in the list's *
+     * own order, which is what survives a re-render (an element would not), and is only ever a tie-breaker between copies of one id: with no copies  *
+     * it lands on exactly what indexOf did.                                                                                                          *
+     ***********************************************************************************************************************************************/
+    function positionOf(listed, id, occurrence){
+        var first = listed.indexOf(id)
+        if (first < 0 || !occurrence) return first
+        var seen = 0
+        for (var index = first; index < listed.length; index++){
+            if (listed[index] !== id) continue
+            if (seen === occurrence) return index
+            seen++
+        }
+        return first
+    }
+
     /** pressSelection ******************************************************************************************************************************
      * The selection state a PRESS on `rowID` leaves behind. `state` is { selected: [ids], lastClicked, lastInteraction }; `modifiers` is             *
      * { shift, ctrl } (Cmd folds into ctrl at the call site); `order` is every SELECTABLE row id in the list's own order, which only the Shift range *
      * consults. The same shape comes back, with `selected` a new array.                                                                              *
+     *                                                                                                                                                *
+     * POSITIONS, NOT JUST IDS. `order` may carry one id twice (positionOf above says when). `occurrence` is which copy of `rowID` was pressed, and    *
+     * `state.lastClickedAt` which copy of the anchor; both are counted in `order`, and `lastClickedAt` comes back for the caller to keep beside      *
+     * `lastClicked`. Left out, every position is the first copy - the id-only rule this had before 2.11. The selection itself stays a set of ids, so *
+     * both copies of a selected row light up, and a range that spans both lists the id once.                                                         *
      *                                                                                                                                                *
      *   - SHIFT: the range from the anchor to the pressed row, replacing the selection. The anchor is `lastClicked` while it is still in the list,    *
      *     otherwise the pressed row itself; it is returned UNCHANGED so a further Shift+press resizes the range rather than chaining from its end.    *
@@ -54,58 +84,63 @@
      *     here would strand the rest of a multi-row drag; the collapse belongs to a plain CLICK that produced no drag (clickSelection below).          *
      *   - PLAIN otherwise: the selection becomes just the pressed row.                                                                                *
      ***********************************************************************************************************************************************/
-    function pressSelection(state, rowID, modifiers, order){
+    function pressSelection(state, rowID, modifiers, order, occurrence){
         var current = state || {}
         var selected = listOf(current.selected)
         var id = idString(rowID)
         var keys = modifiers || {}
         var listed = listOf(order)
         var lastClicked = anchorOf(current.lastClicked)
+        var lastClickedAt = occurrenceOf(current.lastClickedAt)
         var lastInteraction = anchorOf(current.lastInteraction)
+        var pressedAt = occurrenceOf(occurrence)
 
         if (keys.shift){
-            var anchor = (lastClicked !== null && listed.indexOf(lastClicked) >= 0) ? lastClicked : id
-            var from = listed.indexOf(anchor)
-            var to = listed.indexOf(id)
+            var anchored = lastClicked !== null && listed.indexOf(lastClicked) >= 0
+            var from = anchored ? positionOf(listed, lastClicked, lastClickedAt) : positionOf(listed, id, pressedAt)
+            var to = positionOf(listed, id, pressedAt)
             // A pressed row the caller's order does not hold cannot anchor a range; select it alone rather than
             // splicing an out-of-range span (index -1 would silently produce a wrong or empty selection).
-            if (from < 0 || to < 0) return { selected: [id], lastClicked: lastClicked, lastInteraction: id }
+            if (from < 0 || to < 0) return { selected: [id], lastClicked: lastClicked, lastClickedAt: lastClickedAt, lastInteraction: id }
             var range = []
-            for (var index = Math.min(from, to); index <= Math.max(from, to); index++) range.push(listed[index])
-            return { selected: range, lastClicked: lastClicked, lastInteraction: id }
+            for (var index = Math.min(from, to); index <= Math.max(from, to); index++){
+                if (range.indexOf(listed[index]) < 0) range.push(listed[index])
+            }
+            return { selected: range, lastClicked: lastClicked, lastClickedAt: lastClickedAt, lastInteraction: id }
         }
 
         if (keys.ctrl){
             var at = selected.indexOf(id)
             if (at >= 0){
                 selected.splice(at, 1)
-                return { selected: selected, lastClicked: id, lastInteraction: lastInteraction }
+                return { selected: selected, lastClicked: id, lastClickedAt: pressedAt, lastInteraction: lastInteraction }
             }
             selected.push(id)
-            return { selected: selected, lastClicked: id, lastInteraction: id }
+            return { selected: selected, lastClicked: id, lastClickedAt: pressedAt, lastInteraction: id }
         }
 
         if (selected.length > 1 && selected.indexOf(id) >= 0){
-            return { selected: selected, lastClicked: id, lastInteraction: id }
+            return { selected: selected, lastClicked: id, lastClickedAt: pressedAt, lastInteraction: id }
         }
 
-        return { selected: [id], lastClicked: id, lastInteraction: id }
+        return { selected: [id], lastClicked: id, lastClickedAt: pressedAt, lastInteraction: id }
     }
 
     /** clickSelection ******************************************************************************************************************************
      * The selection a plain CLICK on `rowID` leaves behind - the collapse half of the file-manager rule whose drag half pressSelection defers. A real *
      * drag fires no click, so a click reaching here is a press that produced none, and it collapses the selection onto the clicked row. `changed` is  *
      * false when the row was ALREADY the sole selection, so a plain single click never repaints needlessly. The last interaction is not this           *
-     * function's business (the press that preceded this click already recorded it).                                                                   *
+     * function's business (the press that preceded this click already recorded it). `occurrence` is which copy of the row was clicked, kept as the    *
+     * anchor's `lastClickedAt` exactly as pressSelection keeps it.                                                                                     *
      ***********************************************************************************************************************************************/
-    function clickSelection(state, rowID){
+    function clickSelection(state, rowID, occurrence){
         var current = state || {}
         var selected = listOf(current.selected)
         var id = idString(rowID)
         if (selected.length === 1 && selected[0] === id){
-            return { selected: selected, lastClicked: anchorOf(current.lastClicked), changed: false }
+            return { selected: selected, lastClicked: anchorOf(current.lastClicked), lastClickedAt: occurrenceOf(current.lastClickedAt), changed: false }
         }
-        return { selected: [id], lastClicked: id, changed: true }
+        return { selected: [id], lastClicked: id, lastClickedAt: occurrenceOf(occurrence), changed: true }
     }
 
     /** schedulableIDs ******************************************************************************************************************************

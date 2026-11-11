@@ -139,6 +139,7 @@
         return date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
     }
 
+    // A label as menu text, never markup: the item strings are innerHTML, and a locale's day or month name is not ours to trust.
     function escapeLabel(text){
         return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     }

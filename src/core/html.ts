@@ -32,9 +32,10 @@ export function dropTargetAttributes(target, endTarget?){
 /** headingContextAttributes ************************************************************************************************************************
  * The attributes that give a group heading - or a month day cell (2.11) - its context menu: a right click (desktop) or a long press (mobile) opens  *
  * the panel's heading menu (headingMenuHtml in noteMenu.js), which offers to move the group's to-dos to a date and, when the heading names a day,   *
- * to create a to-do due that day. `day` is that day as YYYY-MM-DD (data-day), and only a heading naming a single day passes one: an empty day still *
- * has a menu then, for its New to-do item. Without a day the output is exactly what it was before 2.11 - nothing at all for an empty group - so it  *
- * can still be interpolated unconditionally.                                                                                                       *
+ * to create a to-do due that day. `day` is that day as YYYY-MM-DD (data-day): a heading whose drop target is a day passes it - a single-day heading *
+ * its own day, and a heading that spans days (This Week, Next Month ...) its FIRST day, the same day a drop on it writes - while Overdue, Future and *
+ * No Due Date pass none. An empty group with a day still has a menu, for its New to-do item. Without a day the output is exactly what it was before *
+ * 2.11 - nothing at all for an empty group - so it can still be interpolated unconditionally.                                                      *
  ***************************************************************************************************************************************************/
 export function headingContextAttributes(todoIDs, day?){
     var ids = todoIDs && todoIDs.length ? ` data-todo-ids="${escapeHtml(todoIDs.join(","))}"` : ""

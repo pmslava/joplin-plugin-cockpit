@@ -68,18 +68,33 @@ export async function applyPinChange(ids: string[], pin: boolean, mobile: boolea
     return changed
 }
 
+/** serialisePins ***********************************************************************************************************************************
+ * Runs one read-modify-write of Cockpit's pin list after every one queued before it. changeCockpitPins and forgetPins each read the setting and   *
+ * write it back a settings round trip later, and a Pin landing between a prune's read and its write was written away by it. One chain for both,  *
+ * so each reads what the one before wrote. A failure still reaches its own caller, but the chain itself swallows it, so it never sticks.         *
+ ***************************************************************************************************************************************************/
+var pinQueue: Promise<unknown> = Promise.resolve()
+
+function serialisePins<T>(work: () => Promise<T>): Promise<T> {
+    var run = pinQueue.then(work)
+    pinQueue = run.catch(() => undefined)
+    return run
+}
+
 /** changeCockpitPins *******************************************************************************************************************************
  * Writes Cockpit's pin list with the ids added (at the end, in the order given) or removed. Nothing is written when nothing changes, so a Pin of  *
- * a row already pinned costs no write and no render.                                                                                              *
+ * a row already pinned costs no write and no render. Queued with forgetPins (serialisePins).                                                      *
  ***************************************************************************************************************************************************/
 async function changeCockpitPins(ids: string[], pin: boolean){
-    var current = await getPinnedNoteIds()
-    var next = pin
-        ? current.concat(ids.filter((id, index) => !current.includes(id) && ids.indexOf(id) === index))
-        : current.filter(id => !ids.includes(id))
-    if (next.length === current.length && next.every((id, index) => id === current[index])) return false
-    await setPinnedNoteIds(next)
-    return true
+    return serialisePins(async () => {
+        var current = await getPinnedNoteIds()
+        var next = pin
+            ? current.concat(ids.filter((id, index) => !current.includes(id) && ids.indexOf(id) === index))
+            : current.filter(id => !ids.includes(id))
+        if (next.length === current.length && next.every((id, index) => id === current[index])) return false
+        await setPinnedNoteIds(next)
+        return true
+    })
 }
 
 /** callNoteTabs ************************************************************************************************************************************
@@ -192,12 +207,15 @@ async function readPinnedRecord(id: string): Promise<{ record?: any, gone?: bool
 
 /** forgetPins **************************************************************************************************************************************
  * Drops the given ids from Cockpit's pins. The list is read again rather than taken from the render that found them gone, so a pin made while     *
- * that render was reading is not written away with them.                                                                                          *
+ * that render was reading is not written away with them; and the read and the write are queued with changeCockpitPins (serialisePins), so a pin  *
+ * made between the two is not either.                                                                                                             *
  ***************************************************************************************************************************************************/
 async function forgetPins(gone: string[]){
-    var current = await getPinnedNoteIds()
-    var next = current.filter(id => !gone.includes(id))
-    if (next.length !== current.length) await setPinnedNoteIds(next)
+    return serialisePins(async () => {
+        var current = await getPinnedNoteIds()
+        var next = current.filter(id => !gone.includes(id))
+        if (next.length !== current.length) await setPinnedNoteIds(next)
+    })
 }
 
 /** pinnedTodoLabel *********************************************************************************************************************************
