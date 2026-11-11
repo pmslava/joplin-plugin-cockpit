@@ -1239,8 +1239,8 @@ document.addEventListener('pointermove', onPanelSelectionDragProbe, true)
 // While the passthrough is engaged the panel iframe gets no more events (they fall through to the main
 // window), so the drag's END fires in the PARENT document, not here. Listen there too and ALWAYS restore:
 // on the button release (mouseup / pointerup), on a native drag ending (dragend), and on the window losing
-// focus mid-drag (blur - e.g. Alt+Tab). Wired once at load; every handler is a no-op unless a passthrough is
-// actually active, so leaving them attached is harmless. Guarded so a cross-origin parent just skips it.
+// focus mid-drag (blur - e.g. Alt+Tab). Wired once at load; the release and drag-end routes only ever fire
+// when a press is over, so leaving them attached is harmless. Guarded so a cross-origin parent just skips it.
 ;(function wireParentSelectionDragRestore(){
     try {
         var parentWindow = window.parent
@@ -1248,9 +1248,23 @@ document.addEventListener('pointermove', onPanelSelectionDragProbe, true)
         parentWindow.addEventListener('mouseup', endForeignSelectionDrag, true)
         parentWindow.addEventListener('pointerup', endForeignSelectionDrag, true)
         parentWindow.addEventListener('dragend', endForeignSelectionDrag, true)
-        parentWindow.addEventListener('blur', endForeignSelectionDrag, true)
+        parentWindow.addEventListener('blur', onParentWindowBlur, true)
     } catch (error){}
 })()
+
+/** onParentWindowBlur ******************************************************************************************************************************
+ * The blur route ends a passthrough that is ENGAGED, and touches nothing otherwise - unlike the release routes, it is not a sign that a press is   *
+ * over. A press inside the panel moves keyboard focus out of the main window and into this iframe, and that focus change fires blur in the parent  *
+ * (on the element that had focus, and on the parent window itself) right AFTER the panel's own pointerdown. When this route called the full       *
+ * restore, the restore cleared panelPointerIsDown in the middle of the panel's own press, the press's first held pointermove then looked like a   *
+ * foreign selection drag, and the iframe went pointer-events:none before the drag had started: no dragstart, nothing in the panel accepted the    *
+ * release. That is the 2.11 "first drag" report - "almost never works from the first attempt. Only on second one." - because the second press     *
+ * finds focus already inside the panel and no blur fires (e2e/first-drag.spec.ts logs the sequence). Alt+Tab during a passthrough still restores  *
+ * here; Alt+Tab during a press of the panel's own leaves the flag up until the next button release, which only keeps the passthrough off.         *
+ ***************************************************************************************************************************************************/
+function onParentWindowBlur(){
+    if (foreignSelectionDragActive) endForeignSelectionDrag()
+}
 
 /** Drag and drop ***********************************************************************************************************************************
  * Dragging a selected to-do takes the whole selection with it; dragging an unselected one drags just that one. The drop targets - group headings,   *

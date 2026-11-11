@@ -2524,10 +2524,22 @@ async function main() {
     await test('selection drag: the parent window ALWAYS restores on every end-of-drag route', () => {
         // The passthrough hands the live drag to the parent document, so its END fires there - restore from all of them.
         assert.ok(/window\.parent/.test(webviewSource), 'the restore must be wired on the parent window')
-        for (const evt of ['mouseup', 'pointerup', 'dragend', 'blur']){
+        for (const evt of ['mouseup', 'pointerup', 'dragend']){
             assert.ok(webviewSource.includes(`parentWindow.addEventListener('${evt}', endForeignSelectionDrag, true)`),
                 `the parent-window always-restore must cover ${evt}`)
         }
+        assert.ok(webviewSource.includes("parentWindow.addEventListener('blur', onParentWindowBlur, true)"),
+            'the parent-window restore must cover blur too')
+    })
+    await test('selection drag: the parent blur ends only an ENGAGED passthrough, never the panel\'s own press (2.11 first drag)', () => {
+        // A press inside the panel moves focus into the iframe, which blurs the parent right after the pointerdown. A blur that ran the full
+        // restore cleared panelPointerIsDown mid-press, so the press's own first move engaged the passthrough and the drag never started.
+        const body = handlerBody('onParentWindowBlur')
+        assert.ok(/if \(foreignSelectionDragActive\) endForeignSelectionDrag\(\)/.test(body),
+            'the blur must restore only while a passthrough is engaged')
+        assert.ok(!/panelPointerIsDown/.test(body), 'the blur must not touch the press-began-inside flag')
+        assert.ok(!webviewSource.includes("parentWindow.addEventListener('blur', endForeignSelectionDrag, true)"),
+            'the blur must not be wired to the full restore')
     })
     await test('selection drag: a re-render repairs an orphaned passthrough but never disturbs an active one', () => {
         const body = handlerBody('reconcile')
