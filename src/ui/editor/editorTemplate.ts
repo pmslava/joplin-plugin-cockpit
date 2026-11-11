@@ -187,6 +187,14 @@ export var editorTemplate = `
             <label for="showNotesCheckbox">Show regular notes matching the search criteria</label>
         </section>
         <section>
+            <input type="checkbox" id="notesOnCreatedCheckbox" name="notesOnCreated">
+            <label for="notesOnCreatedCheckbox">Show each note on the day it was created</label>
+        </section>
+        <section>
+            <input type="checkbox" id="notesOnUpdatedCheckbox" name="notesOnUpdated">
+            <label for="notesOnUpdatedCheckbox">Show each note on the day it was last updated</label>
+        </section>
+        <section>
             <label for="notesPositionSelect">Show notes</label>
             <select id="notesPositionSelect" name="notesPosition">
                 <option value="after">After todos</option>

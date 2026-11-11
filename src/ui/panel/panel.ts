@@ -15,7 +15,7 @@ import { applyLocalCreate, applyLocalRemoval, applyLocalWrite, isReady as isStor
 import { getSyncStatus } from "../../core/syncStatus";
 import { createProfile, getAllProfiles, getProfile, updateProfile } from "../../core/database";
 import { getEditorInitial, openDeleteDialog, openEditor } from "../editor/editor";
-import { TODO_DRAW_BUDGET, TODO_SECTION_BATCH, checkboxFilterActive, completedSwitches, escapeHtml, getFormatter, isCalendarFormat, renderCheckboxScanLine, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
+import { TODO_DRAW_BUDGET, TODO_SECTION_BATCH, checkboxFilterActive, completedSwitches, escapeHtml, fetchSectionNotes, getFormatter, isCalendarFormat, notesOnDates, renderCheckboxScanLine, renderNotesSection, renderOutsideResultsSection, renderRevealedNoteSection, stepCalendarAnchor } from "../../core/formats";
 import { toISODate } from "../../core/calendar";
 import { forgetCurrentProfileID, getCreateButtonClickRoute, getCreateButtonRightClickRoute, getCurrentProfileID, getCustomCss, getDayStartTime, setCurrentProfileID, gestureTraceAvailable, gestureTraceSettingKey } from "../../core/settings";
 import { buildThemeCss } from "../../core/theme";
@@ -1666,10 +1666,14 @@ async function renderPanelData(options?){
     // Such a view therefore keeps the row where the index still files it, exactly as before the re-check existed;
     // the two lists can never both hold it, since the index answers type:todo and type:note from one stale value.
     var panelViewState = { ...calendarViewState, notebookFilter: viewNotebookFilter, searchFilter: searchFilter, sort: { field: sortField, direction: sortDirection }, fastCheckboxCounts: fast, fillCounts: fillCounts, priorityStart: estimateFirstVisibleIndex(), optimistic: optimistic, isMobile: mobile, keepMistypedRows: !locallyEvaluable, notesLimit: notesLimit, todoLimits: new Map(todoSectionLimits), todoBudget: todoDrawBudget, ringsChangedOnly: ringsChangedOnly, quickFilters: viewQuickFilters, checkboxScan: checkboxScan, scanIsCurrent: checkboxScan ? scanIsCurrent : null, scanPass: checkboxScan ? scanPass : null }
-    var formatter = getFormatter(profile, 'html', panelViewState)
+    // Notes on dates (2.11): a profile that shows its notes on the day they were created or last updated (notesOnDates) has the Notes section's
+    // own set read once, here, by the section's fetch, and handed to the formatter in the view state, which draws each note on its day among the
+    // to-dos; the Notes section is then not drawn. Every other profile takes the old path below, untouched.
+    var datedNotes = notesOnDates(profile) ? await fetchSectionNotes(profile, panelViewState) : null
+    var formatter = getFormatter(profile, 'html', datedNotes ? { ...panelViewState, datedNotes: datedNotes } : panelViewState)
     var todosHtml = await formatter.renderHtml()
     var notesHtml = ""
-    if (profile.showNotes){
+    if (profile.showNotes && !datedNotes){
         notesHtml = await renderNotesSection(profile, panelViewState)
         todosHtml = profile.notesPosition === "before" ? notesHtml + todosHtml : todosHtml + notesHtml
     }
@@ -1691,7 +1695,7 @@ async function renderPanelData(options?){
     // is touched - and it honours the fast option, which is carried in panelViewState for the checkbox rings.
     // A view the scan is still reading is not empty yet (2.10): the peek waits for the scan to say so.
     var outsideSearchText = String(searchFilter || "").trim()
-    var filteredViewIsEmpty = formatter.getRenderedTodoCount() === 0 && notesHtml === "" && !(checkboxScan && checkboxScan.unread)
+    var filteredViewIsEmpty = formatter.getRenderedTodoCount() === 0 && notesHtml === "" && !formatter.drewDatedNotes() && !(checkboxScan && checkboxScan.unread)
     if (outsideSearchText && filteredViewIsEmpty){
         todosHtml += await renderOutsideResultsSection(profile, panelViewState, outsideSearchText)
     }

@@ -48,6 +48,10 @@ const profileDefaults = {
     // Regular notes can be listed alongside the to-dos, in their own group before or after them
     showNotes: true,
     notesPosition: "after",
+    // Notes on dates (2.11): each note drawn on the day it was created and/or the day it was last updated, among that day's to-dos, instead
+    // of in the Notes group. Off, which is also what a profile stored before they existed reads, so its notes stay where they were.
+    notesOnCreated: false,
+    notesOnUpdated: false,
     // The panel's header state this profile starts with, making a profile a complete view preset:
     // the notebook filter (a folder ID, empty for all), the search field, and the tie-break sorting
     notebook: "",

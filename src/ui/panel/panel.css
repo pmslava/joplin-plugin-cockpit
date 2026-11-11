@@ -1250,6 +1250,14 @@ table {
     background-color: var(--cockpit-color-faded, rgba(127, 127, 127, 0.6));
 }
 
+/* A note drawn on the day (notes on dates, 2.11): a hollow ring, so it reads as "something on this
+ * day" beside the to-dos' filled dots without claiming a due, overdue or done state of its own. */
+.calendar-dot.-note {
+    box-sizing: border-box;
+    background-color: transparent;
+    border: 1.5px solid var(--cockpit-url-color, #2D6BDC);
+}
+
 .calendar-more {
     font-size: 0.8em;
     opacity: 0.7;

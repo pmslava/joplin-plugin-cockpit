@@ -258,6 +258,9 @@ export interface ProfileFields {
   showCompleted?: boolean;
   showNoDue?: boolean;
   showNotes?: boolean;
+  /** Notes on dates (2.11): "Show each note on the day it was created" / "... last updated". */
+  notesOnCreated?: boolean;
+  notesOnUpdated?: boolean;
   noDueDatesAtEnd?: boolean;
 }
 
@@ -320,6 +323,8 @@ async function fillProfileForm(frame: Frame, fields: ProfileFields): Promise<voi
   }
   if (fields.showNoDue != null) await setCheckbox('#showNoDueCheckbox', fields.showNoDue);
   if (fields.showNotes != null) await setCheckbox('#showNotesCheckbox', fields.showNotes);
+  if (fields.notesOnCreated != null) await setCheckbox('#notesOnCreatedCheckbox', fields.notesOnCreated);
+  if (fields.notesOnUpdated != null) await setCheckbox('#notesOnUpdatedCheckbox', fields.notesOnUpdated);
   if (fields.noDueDatesAtEnd != null) {
     await setCheckbox('#noDueDatesAtEndCheckbox', fields.noDueDatesAtEnd);
   }

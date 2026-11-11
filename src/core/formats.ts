@@ -26,6 +26,9 @@ import {
 // The pure interval-horizon math (window.CockpitHorizons is unused in this bundle; the require pulls the same UMD file
 // the Node harness unit-tests, so the panel's grouping and the tests share one implementation). Webpack bundles it in.
 const { horizonPlan, horizonOf, kindOf, dropDateFor, dropEndDateFor } = require("./horizons");
+// The pure rules of the notes on dates (2.11): which days a note is drawn on and how a list's groups take them in. Bundled the same way, from the
+// same UMD file the harness unit-tests.
+const { noteSlots, slotsByDay, mergeGroups, placeRows } = require("./noteSlots");
 
 export { escapeHtml } from "./html";
 
@@ -360,14 +363,21 @@ abstract class BaseFormat {
             // The panel draws at most its limit of each group (the cap and the budget, see planTodoDraw); the heading's data-todo-ids names the DRAWN
             // rows only, so its context menu acts on what the user sees, and the footer says the rest exists. The markdown output takes the whole group.
             var capped = this.capTodoGroup(group.key, group.todos, layout.limits)
-            todoString += this.getHeadingString(heading, this.getHeadingDropTarget(heading, group.todos), capped.drawn.map(todo => todo.id), this.getHeadingDropEnd(heading, group.todos))
+            // A group only notes are on (notes on dates, 2.11) has no to-do to read its day from, so its heading asks with the notes' slots, which
+            // carry their timestamp as the pseudo-due the format reads: a day with notes only gets its heading and that day's drop target.
+            var dated = group.todos.length || !group.notes ? group.todos : group.notes
+            todoString += this.getHeadingString(heading, this.getHeadingDropTarget(heading, dated), capped.drawn.map(todo => todo.id), this.getHeadingDropEnd(heading, dated))
+            var todoRows = ""
             for (var todo of capped.drawn){
-                todoString += this.getTodoString(todo, heading)
+                todoRows += this.getTodoString(todo, heading)
             }
+            // The group's notes before or after its to-dos as the profile places notes, and the cap's footer last ("" and "" without notes).
+            todoString += this.placeNoteRows(todoRows, this.renderSlotRows(group.notes, heading))
             todoString += capped.footer
         }
         // The groups past the budget's cut (the order shape of planTodoDraw) are not drawn at all; one footer stands in for them.
         if (layout.later) todoString += renderLaterGroupsFooter(layout.later)
+        todoString += this.renderDatedNotesFooter()
         return todoString
     }
 
@@ -419,8 +429,76 @@ abstract class BaseFormat {
             for (var headingGroup of this.todoGroups(todoList)){
                 groups.push({ key: this.getGroupKey(headingGroup[0], headingGroup[1]), heading: headingGroup[0], todos: headingGroup[1] })
             }
-            return { groups: groups }
+            return { groups: this.withNoteGroups(groups) }
         })
+    }
+
+    /** withNoteGroups (2.11) ***********************************************************************************************************************
+     * The list's to-do groups with the notes on dates folded in: the slots grouped by the format's own heading rule (a slot is a pseudo to-do due  *
+     * at the note's timestamp), then merged by noteSlots.js - a group both have takes the notes, a group only notes have goes where its time puts  *
+     * it. A note-only group holds no to-do, so the cap and the budget (planTodoDraw) pass over it, and the order shape's cut, an index into these  *
+     * groups, leaves out the note groups past it with the to-do groups. Without slots the groups come back untouched, as they always were.         *
+     ***********************************************************************************************************************************************/
+    private withNoteGroups(groups){
+        var slots = this.datedNoteSlots()
+        if (!slots.length) return groups
+        var noteGroups = []
+        for (var headingGroup of this.groupBy(slots)){
+            noteGroups.push({ key: this.getGroupKey(headingGroup[0], headingGroup[1]), heading: headingGroup[0], slots: headingGroup[1] })
+        }
+        return mergeGroups(groups, noteGroups, !!this.profile.noDueDatesAtEnd)
+    }
+
+    /** Notes on dates (2.11) ***********************************************************************************************************************
+     * datedNotes is what the Notes section's fetch read for this render (fetchSectionNotes), handed over by the panel in the view state when the   *
+     * profile draws its notes on their days (notesOnDates); null otherwise, and always in the overview markdown, which never draws a note.         *
+     * datedNoteSlots is those notes as slots (noteSlots.js), worked out once per formatter, which is once per render. drewDatedNotes says whether  *
+     * the render drew any of it - a slot, or the lone "show more" footer of a filter that left none - which the panel's empty-view peek counts as  *
+     * content, as it counts the Notes section. Slots outside the week or month on screen count, as the to-dos outside it do.                       *
+     ***********************************************************************************************************************************************/
+    private noteSlotList = null
+
+    protected datedNotes(){
+        if (this.outputFormat !== "html" || !this.viewState) return null
+        return (this.viewState as any).datedNotes || null
+    }
+
+    protected datedNoteSlots(){
+        if (!this.noteSlotList){
+            var dated = this.datedNotes()
+            this.noteSlotList = dated ? noteSlots(dated.notes, !!this.profile.notesOnCreated, !!this.profile.notesOnUpdated) : []
+        }
+        return this.noteSlotList
+    }
+
+    public drewDatedNotes(){
+        var dated = this.datedNotes()
+        return !!dated && (this.datedNoteSlots().length > 0 || !!dated.footerOnly)
+    }
+
+    /** placeNoteRows / renderSlotRows / renderSlotRow / renderDatedNotesFooter (2.11) **************************************************************
+     * The drawing of the notes on dates. Inside a group the profile's "Show notes [Before/After todos]" decides (placeRows in noteSlots.js); a     *
+     * slot is the ordinary note row (renderNoteRowHtml: selection, menu, click to open, no drag), labelled the way the format labels a to-do due   *
+     * at the slot's time, and drawn from a copy so the label never lands on the note the other slot of a twice-drawn note shares. The Notes        *
+     * section's "show more" footer is drawn once, after everything else the format draws.                                                          *
+     ***********************************************************************************************************************************************/
+    protected placeNoteRows(todoRows, noteRows){
+        return placeRows(todoRows, noteRows, this.profile.notesPosition)
+    }
+
+    protected renderSlotRows(slots, heading){
+        if (!slots || !slots.length) return ""
+        return slots.map(slot => this.renderSlotRow(slot, this.getFormatTodoString(slot, heading))).join("")
+    }
+
+    protected renderSlotRow(slot, label){
+        var mobile = !!(this.viewState && (this.viewState as any).isMobile)
+        return renderNoteRowHtml({ ...slot.note, title: label }, { mobile: mobile })
+    }
+
+    protected renderDatedNotesFooter(){
+        var dated = this.datedNotes()
+        return dated ? renderNotesMoreFooter(dated) : ""
     }
 
     protected drawnLayout(todoList){
@@ -993,9 +1071,11 @@ class MonthFormat extends DateFormat {
         }).join("")
 
         var days = buildMonthGrid(anchor, weekStartsOn)
+        // The notes on dates (2.11), by local day: a dot each in the day's strip, and rows in the selected day's list. An empty map without them.
+        var noteDays = slotsByDay(this.datedNoteSlots())
         var rows = ""
         for (var index = 0; index < days.length; index += 7){
-            rows += `<tr>${days.slice(index, index + 7).map(day => this.renderDayCell(day, grouped.byDate, anchor, todayKey, selectedKey, today)).join("")}</tr>`
+            rows += `<tr>${days.slice(index, index + 7).map(day => this.renderDayCell(day, grouped.byDate, anchor, todayKey, selectedKey, today, noteDays)).join("")}</tr>`
         }
 
         var title = anchor.toLocaleDateString(undefined, { month: "long", year: "numeric" })
@@ -1005,8 +1085,8 @@ class MonthFormat extends DateFormat {
                 <thead><tr>${headerCells}</tr></thead>
                 <tbody>${rows}</tbody>
             </table>
-            ${this.renderSelectedDay(grouped.byDate, selectedKey, layout.limits)}
-            ${this.renderUndatedSection(grouped.undated, layout.limits)}
+            ${this.renderSelectedDay(grouped.byDate, selectedKey, layout.limits, noteDays)}
+            ${this.renderUndatedSection(grouped.undated, layout.limits)}${this.renderDatedNotesFooter()}
         `
     }
 
@@ -1027,10 +1107,13 @@ class MonthFormat extends DateFormat {
 
     /** renderDayCell *******************************************************************************************************************************
      * One day of the grid: its number, and a dot for each to-do due on it. The dots are capped so that a busy day cannot push the grid out of shape. *
+     * A note drawn on the day (notes on dates, 2.11) adds a -note dot, counted under the same cap and placed before or after the to-dos' dots as   *
+     * the profile places notes; the day's state class is still the to-dos' alone, since a note is neither due nor done.                            *
      ***********************************************************************************************************************************************/
-    private renderDayCell(day, byDate, anchor, todayKey, selectedKey, now){
+    private renderDayCell(day, byDate, anchor, todayKey, selectedKey, now, noteDays?){
         var key = toISODate(day)
         var todos = byDate.get(key) || []
+        var notes = noteDays ? noteDays.get(key) || [] : []
         var classes = ["calendar-day", `-${dayState(todos, now)}`]
         if (day.getMonth() !== anchor.getMonth()) classes.push("-outside")
         if (key === todayKey) classes.push("-today")
@@ -1038,14 +1121,18 @@ class MonthFormat extends DateFormat {
 
         var maxDots = Number(this.profile.maxDotsPerDay)
         if (!Number.isFinite(maxDots) || maxDots < 1) maxDots = 4
-        var dots = todos.slice(0, maxDots).map(todo => {
+        var dotList = todos.map(todo => {
             var state = todo.todo_completed ? "done" : (todo.todo_due < now.getTime() ? "overdue" : "due")
             return `<span class="calendar-dot -${state}"></span>`
-        }).join("")
-        var overflow = todos.length > maxDots ? `<span class="calendar-more">+${todos.length - maxDots}</span>` : ""
+        })
+        var noteDots = notes.map(() => `<span class="calendar-dot -note"></span>`)
+        if (noteDots.length) dotList = this.profile.notesPosition === "before" ? noteDots.concat(dotList) : dotList.concat(noteDots)
+        var dots = dotList.slice(0, maxDots).join("")
+        var overflow = dotList.length > maxDots ? `<span class="calendar-more">+${dotList.length - maxDots}</span>` : ""
 
         var outstanding = todos.filter(todo => !todo.todo_completed).length
         var label = `${day.toLocaleDateString(undefined, { day: "numeric", month: "long" })}, ${todos.length} to-do${todos.length === 1 ? "" : "s"}, ${outstanding} outstanding`
+        if (notes.length) label += `, ${notes.length} note${notes.length === 1 ? "" : "s"}`
 
         return `
             <td class="${classes.join(" ")}"${dropTargetAttributes(key)}>
@@ -1058,16 +1145,18 @@ class MonthFormat extends DateFormat {
     }
 
     /** renderSelectedDay ***************************************************************************************************************************
-     * The to-dos of the day the user picked, listed under the grid                                                                                  *
+     * The to-dos of the day the user picked, listed under the grid, with the notes drawn on that day (notes on dates, 2.11) before or after them.  *
      ***********************************************************************************************************************************************/
-    private renderSelectedDay(byDate, selectedKey, limits){
+    private renderSelectedDay(byDate, selectedKey, limits, noteDays?){
         if (!selectedKey) return ""
         var day = fromISODate(selectedKey)
         var todos = byDate.get(selectedKey) || []
+        var notes = noteDays ? noteDays.get(selectedKey) || [] : []
         // A day's rows are a group like any other, capped under the day's date (2.7.1); the heading names the drawn rows only.
         var capped = this.capTodoGroup(selectedKey, todos, limits)
-        var rows = todos.length
-            ? capped.drawn.map(todo => this.renderTodoRow(todo, `${this.getTimeString(todo.todo_due)} - ${todo.title}`)).join("") + capped.footer
+        var noteRows = notes.map(slot => this.renderSlotRow(slot, `${this.getTimeString(slot.todo_due)} - ${slot.title}`)).join("")
+        var rows = todos.length || notes.length
+            ? this.placeNoteRows(capped.drawn.map(todo => this.renderTodoRow(todo, `${this.getTimeString(todo.todo_due)} - ${todo.title}`)).join(""), noteRows) + capped.footer
             : `<p class="calendar-empty">Nothing due</p>`
         return `
             <section class="calendar-selected">
@@ -1093,11 +1182,14 @@ class WeekFormat extends DateFormat {
         var todayKey = toISODate(new Date())
 
         var days = buildWeek(anchor, weekStartsOn)
+        // The notes on dates (2.11), by local day: a card each in its day's section, before or after the day's to-dos. An empty map without them.
+        var noteDays = slotsByDay(this.datedNoteSlots())
         var sections = days.map(day => {
             var key = toISODate(day)
             var todos = grouped.byDate.get(key) || []
-            var rows = todos.length
-                ? todos.map(todo => this.renderWeekCard(todo)).join("")
+            var notes = noteDays.get(key) || []
+            var rows = todos.length || notes.length
+                ? this.placeNoteRows(todos.map(todo => this.renderWeekCard(todo)).join(""), notes.map(slot => this.renderWeekNoteCard(slot)).join(""))
                 : `<p class="calendar-empty">Nothing due</p>`
             var heading = day.toLocaleDateString(undefined, { weekday: this.profile.weekdayFormat || "long", day: "numeric", month: "short" })
             return `
@@ -1114,7 +1206,7 @@ class WeekFormat extends DateFormat {
         return `
             ${renderNavigation(title)}
             <section class="week-planner">${sections}</section>
-            ${this.renderUndatedSection(grouped.undated, layout.limits)}
+            ${this.renderUndatedSection(grouped.undated, layout.limits)}${this.renderDatedNotesFooter()}
         `
     }
 
@@ -1175,6 +1267,39 @@ class WeekFormat extends DateFormat {
                 </div>
             `
     }
+
+    /** renderWeekNoteCard (2.11) *******************************************************************************************************************
+     * A note drawn on a day of the planner (notes on dates): renderNoteRowHtml's row - the same data-note-id, the same select / open / new-window  *
+     * / menu handlers, the display-only progress ring, never a drag - laid out as the week's two-zone card, with the slot's time (when the note    *
+     * was created or last updated) in the head line where a to-do card shows its due time. The class carries both -note and -card, so the week     *
+     * card's layout rules apply as they are and the note rules (no tick, no strike-through) as they are.                                           *
+     ***********************************************************************************************************************************************/
+    protected renderWeekNoteCard(slot){
+        var note = slot.note
+        var mobile = !!(this.viewState && (this.viewState as any).isMobile)
+        var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
+        var notebookHints = mobile ? "" : "&#10;Left click to filter by this&#10;Right click to move"
+        var notebookString = note.notebookTitle
+            ? `<span class="todo-notebook" data-notebook-id="${escapeHtml(note.parent_id)}" title="${escapeHtml(note.notebookPath)}${notebookHints}">${escapeHtml(note.notebookTitle)}</span>`
+            : ""
+        var total = Number(note.checkboxTotal) || 0
+        var percent = total ? Math.round((Number(note.checkboxDone) || 0) / total * 100) : 0
+        var progressTitle = total ? `${note.checkboxDone}/${total} checkboxes done` : "No checkboxes inside"
+        return `
+                <div class="todo -note -card" data-note-id="${note.id}"
+                    onmousedown="onNoteRowMouseDown(event, '${note.id}')"
+                    onclick="onNoteRowClicked(event, '${note.id}')"
+                    ondblclick="onRowDoubleClicked(event, '${note.id}')"
+                    oncontextmenu="onNoteContextMenu(event, '${note.id}')">
+                    <div class="week-card-head">
+                        <span class="note-progress${total ? "" : " -empty"}" style="--percent: ${percent};" title="${escapeHtml(progressTitle)}"></span>
+                        <span class="week-card-time">${escapeHtml(this.getTimeString(slot.todo_due))}</span>
+                        ${notebookString}
+                    </div>
+                    <a class="todo-title"${titleHint}>${escapeHtml(note.title)}</a>
+                </div>
+            `
+    }
 }
 
 /** itemComparator **********************************************************************************************************************************
@@ -1197,11 +1322,13 @@ export function itemComparator(sort){
     }
 }
 
-/** renderNotesSection ******************************************************************************************************************************
- * The regular notes matching the profile, as their own group in the panel. Notes have no due date or completion, so the circle only shows the       *
- * checkbox progress of the note and cannot be ticked.                                                                                              *
+/** fetchSectionNotes (2.11) ************************************************************************************************************************
+ * The notes the Notes section shows, read and narrowed exactly as the section always has - the profile's criteria, the notebook filter, the quick  *
+ * filters, the newest-updated notesLimit - and returned undrawn, as { notes, more, footerOnly, checkboxFilter, notesLimit }. Split out of          *
+ * renderNotesSection so the notes on dates draw the very same set: the panel reads it once per render and hands it either to the section (the old  *
+ * path, untouched) or, when the profile shows its notes on their days (notesOnDates), to the formatter through the view state.                     *
  ***************************************************************************************************************************************************/
-export async function renderNotesSection(profile, viewState){
+export async function fetchSectionNotes(profile, viewState){
     var notebooks = await getNotebookMap()
     var searchFilter = viewState ? viewState.searchFilter : null
     var searchCriteria = viewCriteria(profile.searchCriteria, searchFilter)
@@ -1268,22 +1395,41 @@ export async function renderNotesSection(profile, viewState){
     // A search cut short by the scan's bound before any of its notes passed still has more to offer (2.10): the section is drawn with its footer
     // alone, so "show more" can raise the bound, and the view is not empty to the "Results outside current filters" peek, which reads this "".
     var footerOnly = !notes.length && checkboxFilter && more
-    if (!notes.length && !footerOnly) return ""
+    return { notes: notes, more: more, footerOnly: footerOnly, checkboxFilter: checkboxFilter, notesLimit: notesLimit }
+}
+
+/** renderNotesMoreFooter (2.11) ********************************************************************************************************************
+ * The footer of a capped notes set, as the Notes section has always drawn it below its rows; split out so the notes on dates draw the same one,    *
+ * once, at the end of the list. "" when nothing was left out.                                                                                      *
+ ***************************************************************************************************************************************************/
+function renderNotesMoreFooter(fetched){
+    var notes = fetched.notes
+    // A capped section says so, and offers the next batch; search and the notebook filter reach any note directly. Under a checkbox filter the
+    // count is what is shown: a search cut by its bound can leave fewer notes than the limit on screen.
+    return fetched.footerOnly
+        ? `<p class="notes-more-message">None of the most recently updated notes passes the filters. Search or pick a notebook to find others, or
+            <button type="button" class="notes-more-button" onclick="onShowMoreNotesClicked()">show more</button></p>`
+        : fetched.more
+        ? `<p class="notes-more-message">Showing the ${formatCount(fetched.checkboxFilter ? notes.length : fetched.notesLimit)} most recently updated notes. Search or pick a notebook to find others, or
+            <button type="button" class="notes-more-button" onclick="onShowMoreNotesClicked()">show more</button></p>`
+        : ""
+}
+
+/** renderNotesSection ******************************************************************************************************************************
+ * The regular notes matching the profile, as their own group in the panel. Notes have no due date or completion, so the circle only shows the       *
+ * checkbox progress of the note and cannot be ticked.                                                                                              *
+ ***************************************************************************************************************************************************/
+export async function renderNotesSection(profile, viewState){
+    var fetched = await fetchSectionNotes(profile, viewState)
+    var notes = fetched.notes
+    if (!notes.length && !fetched.footerOnly) return ""
     // The row markup lives in the shared renderNoteRowHtml so the read-only "results outside current filters"
     // peek can reuse it for its note items. isMobile is carried in the view state (see panel.ts) and drops the
     // desktop-only hover action hints (a note's progress ring is display-only, so only its title and notebook
     // pill carry action lines); selectable stays true here so ordinary Notes-section rows are unchanged.
     var mobile = !!(viewState && viewState.isMobile)
     var rows = notes.map(note => renderNoteRowHtml(note, { mobile: mobile })).join("")
-    // A capped section says so, and offers the next batch; search and the notebook filter reach any note directly. Under a checkbox filter the
-    // count is what is shown: a search cut by its bound can leave fewer notes than the limit on screen.
-    var moreFooter = footerOnly
-        ? `<p class="notes-more-message">None of the most recently updated notes passes the filters. Search or pick a notebook to find others, or
-            <button type="button" class="notes-more-button" onclick="onShowMoreNotesClicked()">show more</button></p>`
-        : more
-        ? `<p class="notes-more-message">Showing the ${formatCount(checkboxFilter ? notes.length : notesLimit)} most recently updated notes. Search or pick a notebook to find others, or
-            <button type="button" class="notes-more-button" onclick="onShowMoreNotesClicked()">show more</button></p>`
-        : ""
+    var moreFooter = renderNotesMoreFooter(fetched)
     return `
         <section class="notes-section">
             <h2>Notes</h2>
@@ -1459,5 +1605,15 @@ const defaultFormatName = 'interval'
 export function getFormatter(profile, outputFormat, viewState?){
     var format = formats[profile.displayFormat] || formats[defaultFormatName]
     return new format(profile, outputFormat, viewState)
+}
+
+/** notesOnDates (2.11) *****************************************************************************************************************************
+ * Whether the panel draws this profile's notes on their days among the to-dos instead of as the Notes section: notes shown, either switch on       *
+ * ("Show each note on the day it was created" / "... last updated"), and a format with dates. The basic list has none and keeps the section; an    *
+ * unknown format is drawn as the default one (getFormatter above), so it is judged as that one.                                                    *
+ ***************************************************************************************************************************************************/
+export function notesOnDates(profile){
+    if (!profile || !profile.showNotes || !(profile.notesOnCreated || profile.notesOnUpdated)) return false
+    return (formats[profile.displayFormat] || formats[defaultFormatName]) !== BasicFormat
 }
 

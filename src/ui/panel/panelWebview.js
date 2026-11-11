@@ -1386,9 +1386,11 @@ function betweenTargetAt(element, clientY){
 // group (data-todo-group) - is its next sibling. The gap below it is not the group's end - the rows the cap left out follow it - so a drop there
 // would land beyond the cap and vanish from the list, and its bottom band is inert, on the desktop drag and the touch drag alike. The footer that
 // stands in for whole groups left out names none: the group above it is drawn whole, and the gap below its last row is that group's end. The Notes
-// section's footer sits inside its own section, never beside a to-do row.
+// section's footer sits inside its own section, never beside a to-do row. A group's notes drawn after its to-dos (notes on dates, 2.11) sit
+// between its last to-do row and its footer, so they are stepped over.
 function capFooterFollows(row){
     var next = row ? row.nextElementSibling : null
+    while (next && next.classList && next.classList.contains('todo') && next.dataset && next.dataset.noteId) next = next.nextElementSibling
     return !!(next && next.classList && next.classList.contains('notes-more-message') && next.querySelector('[data-todo-group]'))
 }
 
@@ -4682,6 +4684,14 @@ var EDITOR_FORM_HTML = `
             <label for="showNotesCheckbox">Show regular notes matching the search criteria</label>
         </section>
         <section>
+            <input type="checkbox" id="notesOnCreatedCheckbox" name="notesOnCreated">
+            <label for="notesOnCreatedCheckbox">Show each note on the day it was created</label>
+        </section>
+        <section>
+            <input type="checkbox" id="notesOnUpdatedCheckbox" name="notesOnUpdated">
+            <label for="notesOnUpdatedCheckbox">Show each note on the day it was last updated</label>
+        </section>
+        <section>
             <label for="notesPositionSelect">Show notes</label>
             <select id="notesPositionSelect" name="notesPosition">
                 <option value="after">After todos</option>
@@ -4776,7 +4786,7 @@ var EDITOR_FORM_HTML = `
 // Every editor field id, so the form can be wired and serialized without repeating the list.
 var EDITOR_TEXT_IDS = ['nameInput', 'sortOrderInput', 'searchCriteriaInput', 'noteIDInput', 'panelSearchInput', 'maxDotsPerDayInput']
 var EDITOR_SELECT_IDS = ['notesPositionSelect', 'notebookSelect', 'sortFieldSelect', 'sortDirectionSelect', 'displayFormatSelect', 'yearFormatSelect', 'monthFormatSelect', 'dayFormatSelect', 'weekdayFormatSelect', 'weekStartsOnSelect']
-var EDITOR_CHECK_IDS = ['showCompletedPastCheckbox', 'showCompletedTodayCheckbox', 'showCompletedFutureCheckbox', 'showCompletedNoDueCheckbox', 'showOpenCheckboxesCheckbox', 'showDoneCheckboxesCheckbox', 'showNoCheckboxesCheckbox', 'showNotesCheckbox', 'showNoDueCheckbox', 'timeIs12HourCheckbox', 'noDueDatesAtEndCheckbox']
+var EDITOR_CHECK_IDS = ['showCompletedPastCheckbox', 'showCompletedTodayCheckbox', 'showCompletedFutureCheckbox', 'showCompletedNoDueCheckbox', 'showOpenCheckboxesCheckbox', 'showDoneCheckboxesCheckbox', 'showNoCheckboxesCheckbox', 'showNotesCheckbox', 'notesOnCreatedCheckbox', 'notesOnUpdatedCheckbox', 'showNoDueCheckbox', 'timeIs12HourCheckbox', 'noDueDatesAtEndCheckbox']
 
 function editorField(id){ return document.getElementById(id) }
 
@@ -4819,6 +4829,9 @@ function populateEditorForm(profile){
     editorField('showDoneCheckboxesCheckbox').checked = profile['showDoneCheckboxes'] !== false
     editorField('showNoCheckboxesCheckbox').checked = profile['showNoCheckboxes'] !== false
     editorField('showNotesCheckbox').checked = profile['showNotes']
+    // Off unless the profile says so, as editorWebview.js reads them (2.11).
+    editorField('notesOnCreatedCheckbox').checked = profile['notesOnCreated'] === true
+    editorField('notesOnUpdatedCheckbox').checked = profile['notesOnUpdated'] === true
     editorField('notesPositionSelect').value = profile['notesPosition'] || 'after'
     editorField('notebookSelect').value = profile['notebook'] || ''
     editorField('panelSearchInput').value = profile['panelSearch'] || ''
@@ -4852,6 +4865,8 @@ function serializeEditorForm(){
         'showDoneCheckboxes': editorField('showDoneCheckboxesCheckbox') ? editorField('showDoneCheckboxesCheckbox').checked : true,
         'showNoCheckboxes': editorField('showNoCheckboxesCheckbox') ? editorField('showNoCheckboxesCheckbox').checked : true,
         'showNotes': editorField('showNotesCheckbox') ? editorField('showNotesCheckbox').checked : false,
+        'notesOnCreated': editorField('notesOnCreatedCheckbox') ? editorField('notesOnCreatedCheckbox').checked : false,
+        'notesOnUpdated': editorField('notesOnUpdatedCheckbox') ? editorField('notesOnUpdatedCheckbox').checked : false,
         'notesPosition': editorField('notesPositionSelect') ? editorField('notesPositionSelect').value : 'after',
         'notebook': editorField('notebookSelect') ? editorField('notebookSelect').value : '',
         'panelSearch': editorField('panelSearchInput') ? editorField('panelSearchInput').value : '',

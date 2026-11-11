@@ -3731,8 +3731,9 @@ async function main() {
         const htmlSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'html.ts'), 'utf8')
         assert.ok(htmlSource.includes('oncontextmenu="onHeadingContextMenu(event)"'),
             'and so must a group heading - the fourth inline handler, in src/core/html.ts rather than formats.ts, which an inventory that reads only formats.ts would miss')
-        assert.strictEqual((formatsSource.match(/oncontextmenu=/g) || []).length + (htmlSource.match(/oncontextmenu=/g) || []).length, 4,
-            'the list row, the week card, the note row and the group heading: four inline handlers, none of which may run on mobile')
+        // The week planner's note card (notes on dates, 2.11) is the fifth: a note row laid out as a card, under the same suppression.
+        assert.strictEqual((formatsSource.match(/oncontextmenu=/g) || []).length + (htmlSource.match(/oncontextmenu=/g) || []).length, 5,
+            'the list row, the week card, the note row, the week note card and the group heading: five inline handlers, none of which may run on mobile')
         // The suppression, and its SCOPE: any target at all, not just the search suggestion list it started as.
         const block = /document\.addEventListener\('contextmenu', function\(event\)\{([\s\S]*?)\}, true\)/.exec(webviewSource)
         assert.ok(block, 'the panel must still handle contextmenu in the capture phase, at the document')
@@ -8610,6 +8611,450 @@ async function main() {
             checked++
         }
         assert.strictEqual(checked, 5, 'all five period sections must have been label-checked')
+    })
+
+    // ============================================================ notes on dates (2.11): each note on the day it was created or last updated
+    // The owner: "Add in Notes settings: Show notes on the date of creation; Show notes on the date of update. Checkmarks, OFF by default. Both
+    // OFF: all notes work as now, shown above or below todos. Any ON: notes shown at the correct date before or after todos (see the setting).
+    // Both ON: the same note is shown both on its creation date and on its update date." Two profile fields, notesOnCreated / notesOnUpdated.
+    // With either on (showNotes on, a format with dates) the Notes section's own set is drawn among the to-dos, each note where a to-do due at
+    // its timestamp would be. The slot rules are the pure src/core/noteSlots.js, unit-tested first; then the rendered panel in every format,
+    // the old path left byte for byte, the empty-view peek, the profile, and the two editors.
+    const NoteSlots = require('../src/core/noteSlots.js')
+    const nodAt = (y, m, d, hh, mm) => new Date(y, m - 1, d, hh || 0, mm || 0, 0, 0).getTime()
+
+    await test('notes on dates (slots): one slot per switch, the same day once, different days twice, no slot without a stamp, earliest first', () => {
+        const sameDay = { id: 'same', title: 'Same day', user_created_time: nodAt(2026, 3, 4, 9, 0), user_updated_time: nodAt(2026, 3, 4, 15, 0) }
+        const twoDays = { id: 'two', title: 'Two days', user_created_time: nodAt(2026, 3, 1, 8, 0), user_updated_time: nodAt(2026, 3, 6, 10, 0) }
+        const noCreated = { id: 'nocreated', title: 'No created stamp', user_created_time: 0, user_updated_time: nodAt(2026, 3, 4, 10, 0) }
+        const garbage = { id: 'garbage', title: 'Neither stamp', user_created_time: 'soon', user_updated_time: -5 }
+        const notes = [sameDay, twoDays, noCreated, garbage]
+        const shape = slots => slots.map(slot => `${slot.id}@${new Date(slot.todo_due).getDate()}/${new Date(slot.todo_due).getHours()}`)
+        assert.deepStrictEqual(shape(NoteSlots.noteSlots(notes, true, false)), ['two@1/8', 'same@4/9'], 'created: one slot per note with a created stamp, earliest first')
+        assert.deepStrictEqual(shape(NoteSlots.noteSlots(notes, false, true)), ['nocreated@4/10', 'same@4/15', 'two@6/10'], 'updated: one slot per note with an updated stamp')
+        assert.deepStrictEqual(shape(NoteSlots.noteSlots(notes, true, true)), ['two@1/8', 'same@4/9', 'nocreated@4/10', 'two@6/10'],
+            'both: created and updated on the same day is ONE slot (the created one), on two days TWO, and a missing stamp gives none')
+        assert.deepStrictEqual(NoteSlots.noteSlots(notes, false, false), [], 'neither switch: no slot at all')
+        const slot = NoteSlots.noteSlots([sameDay], true, false)[0]
+        assert.deepStrictEqual([slot.id, slot.title, slot.todo_due], ['same', 'Same day', sameDay.user_created_time], 'a slot is a pseudo to-do due at the note\'s timestamp')
+        assert.strictEqual(slot.note, sameDay, 'carrying the note itself for the row')
+        const tie = [{ id: 'first', title: 'A', user_created_time: 1000 }, { id: 'second', title: 'B', user_created_time: 1000 }]
+        assert.deepStrictEqual(NoteSlots.noteSlots(tie, true, false).map(s => s.id), ['first', 'second'], 'slots at the same instant keep the notes\' own order')
+        const days = NoteSlots.slotsByDay(NoteSlots.noteSlots(notes, true, true))
+        assert.deepStrictEqual([...days.keys()], ['2026-03-01', '2026-03-04', '2026-03-06'], 'slotsByDay keys by the local day')
+        assert.deepStrictEqual(days.get('2026-03-04').map(s => s.id), ['same', 'nocreated'], 'each day in slot order')
+    })
+
+    await test('notes on dates (merge): a group both have takes the notes, a note-only group goes where its time puts it, the undated group stays where the profile put it', () => {
+        const todo = due => ({ id: 'todo' + due, todo_due: due })
+        const slots = (...dues) => dues.map(due => ({ id: 'note' + due, todo_due: due }))
+        const todoGroups = [
+            { key: 'undated', heading: 'No Due Date', todos: [todo(0)] },
+            { key: 'Today', heading: 'Today', todos: [todo(500)] },
+            { key: 'Future', heading: 'Future', todos: [todo(900)] },
+        ]
+        const noteGroups = [
+            { key: 'Overdue', heading: 'Overdue', slots: slots(100) },
+            { key: 'Today', heading: 'Today', slots: slots(450, 520) },
+            { key: 'This Year', heading: 'This Year', slots: slots(700) },
+        ]
+        const shape = groups => groups.map(group => `${group.key}:${group.todos.length}t${group.notes.length}n`)
+        assert.deepStrictEqual(shape(NoteSlots.mergeGroups(todoGroups, noteGroups, false)),
+            ['undated:1t0n', 'Overdue:0t1n', 'Today:1t2n', 'This Year:0t1n', 'Future:1t0n'], 'the undated group drawn first stays first')
+        const undatedLast = [todoGroups[1], todoGroups[2], todoGroups[0]]
+        assert.deepStrictEqual(shape(NoteSlots.mergeGroups(undatedLast, noteGroups, true)),
+            ['Overdue:0t1n', 'Today:1t2n', 'This Year:0t1n', 'Future:1t0n', 'undated:1t0n'], 'drawn last, it stays last')
+        const late = noteGroups.concat([{ key: 'Later', heading: 'Later', slots: slots(950) }])
+        assert.deepStrictEqual(shape(NoteSlots.mergeGroups(undatedLast, late, true)).slice(-2), ['Later:0t1n', 'undated:1t0n'],
+            'a note group past every dated to-do group goes before an undated group drawn last')
+        assert.deepStrictEqual(shape(NoteSlots.mergeGroups(todoGroups, late, false)).slice(-1), ['Later:0t1n'], '...and at the very end otherwise')
+        assert.deepStrictEqual(shape(NoteSlots.mergeGroups([], noteGroups, false)), ['Overdue:0t1n', 'Today:0t2n', 'This Year:0t1n'], 'no to-dos: the note groups in time order')
+        assert.deepStrictEqual(NoteSlots.mergeGroups(todoGroups, [], false).map(group => group.notes.length), [0, 0, 0], 'no notes: the to-do groups as they were')
+        assert.strictEqual(NoteSlots.placeRows('T', 'N', 'before'), 'NT', '"Before todos": the group\'s notes first')
+        assert.strictEqual(NoteSlots.placeRows('T', 'N', 'after'), 'TN', '"After todos": after its to-dos')
+        assert.strictEqual(NoteSlots.placeRows('T', '', 'before'), 'T', 'a group without notes is its to-do rows alone')
+    })
+
+    // The rendered panel. The fixtures sit on today at fixed clock times and on a day long past, so every heading they fall under is the
+    // same whatever time the suite runs at; only a midnight crossing during a run could move them, and the checks below stand down then.
+    const nodFolder = 'n'.repeat(32)
+    const nodToday = new Date()
+    nodToday.setHours(12, 0, 0, 0)
+    const nodNoon = nodToday.getTime()
+    const nodTodayKey = isoDayOf(nodNoon)
+    const nodLongAgo = nodAt(2025, 1, 15, 9, 30)
+    const nodTodo = { id: 'a'.repeat(32), title: 'NOD to-do at noon', todo_completed: 0, todo_due: nodNoon, parent_id: nodFolder, user_updated_time: 1, user_created_time: 1 }
+    const nodUndated = { id: 'b'.repeat(32), title: 'NOD undated to-do', todo_completed: 0, todo_due: 0, parent_id: nodFolder, user_updated_time: 1, user_created_time: 1 }
+    // Created at 11:00 and edited at 11:30: one day, so one slot with both switches on.
+    const nodMadeToday = { id: 'e'.repeat(32), title: 'NOD made today', is_todo: 0, parent_id: nodFolder, user_created_time: nodNoon - 3600000, user_updated_time: nodNoon - 1800000 }
+    // Created long ago and edited today at 12:10: two days, so drawn twice with both switches on.
+    const nodTwice = { id: 'f'.repeat(32), title: 'NOD old, edited today', is_todo: 0, parent_id: nodFolder, user_created_time: nodLongAgo, user_updated_time: nodNoon + 600000 }
+    let nodSeq = 0
+    const nodRun = (profile, extra) => run(Object.assign({
+        dataDir: path.join(tmp, 'notes-on-dates-' + (++nodSeq)),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [nodTodo, nodUndated],
+        searchNotes: [nodMadeToday, nodTwice],
+        folders: [{ id: nodFolder, title: 'Inbox', parent_id: '', updated_time: 1 }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Notes on dates', showNotes: true, notesPosition: 'after', ...profile }] }),
+            currentProfileID: 1,
+        },
+    }, extra || {}))
+    const nodHtml = state => state.panelHtml['panel-panel']
+    const nodList = state => { const html = nodHtml(state); return html.slice(html.indexOf('class="todos"')) }
+    // The list split at its headings: [{ heading, attrs, body }], in document order.
+    const nodSegments = html => html.split(/<h2\b/).slice(1).map(segment => {
+        const parts = /^([^>]*)>([\s\S]*?)<\/h2>([\s\S]*)$/.exec(segment)
+        return parts ? { attrs: parts[1], heading: parts[2], body: parts[3] } : { attrs: '', heading: '', body: segment }
+    })
+    // The heading of every row of the note with this id, one entry per row.
+    const nodHeadingsOf = (html, id) => {
+        const found = []
+        for (const segment of nodSegments(html)) {
+            const rows = segment.body.split(`data-note-id="${id}"`).length - 1
+            for (let index = 0; index < rows; index++) found.push(segment.heading)
+        }
+        return found
+    }
+    const nodLabelsOf = (html, id) => [...html.matchAll(new RegExp(`data-note-id="${id}"[\\s\\S]*?<a class="todo-title"[^>]*>([^<]*)</a>`, 'g'))].map(match => match[1])
+    const nodTime = ms => new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: 'numeric', hour12: baseProfile.timeIs12Hour })
+    const nodDayBefore = isoDayOf(Date.now())
+    const nodCreated = await nodRun({ notesOnCreated: true })
+    const nodUpdated = await nodRun({ notesOnUpdated: true })
+    const nodBoth = await nodRun({ notesOnCreated: true, notesOnUpdated: true })
+    const nodBothBefore = await nodRun({ notesOnCreated: true, notesOnUpdated: true, notesPosition: 'before' })
+    const nodStable = () => isoDayOf(Date.now()) === nodDayBefore
+
+    await test('notes on dates (interval): created - each note under the horizon of the day it was created, labelled as a to-do due then, and no Notes section', () => {
+        if (!nodStable()) return
+        const html = nodList(nodCreated)
+        assert.ok(!html.includes('class="notes-section"'), 'the notes are drawn on their days, not in the Notes group')
+        assert.deepStrictEqual(nodHeadingsOf(html, nodMadeToday.id), ['Today'], 'created today: under Today')
+        assert.deepStrictEqual(nodHeadingsOf(html, nodTwice.id), ['Overdue'], 'created long ago: under Overdue, whose name does not change for notes')
+        assert.deepStrictEqual(nodLabelsOf(html, nodMadeToday.id), [`${nodTime(nodMadeToday.user_created_time)} - ${nodMadeToday.title}`], 'a time under a day group, as a to-do')
+        const overdueLabel = new Date(nodLongAgo).toLocaleDateString(undefined, { year: baseProfile.yearFormat, month: baseProfile.monthFormat, day: baseProfile.dayFormat })
+        assert.deepStrictEqual(nodLabelsOf(html, nodTwice.id), [`${overdueLabel} - ${nodTwice.title}`.replace(/'/g, '&#39;')], 'the full date under Overdue, as a to-do')
+        const overdue = nodSegments(html).find(segment => segment.heading === 'Overdue')
+        assert.ok(!overdue.attrs.includes('data-drop=') && !overdue.attrs.includes('data-todo-ids='), 'a note-only Overdue heading: no drop day, no to-do ids')
+    })
+
+    await test('notes on dates (interval): updated - each note under the day it was last updated', () => {
+        if (!nodStable()) return
+        const html = nodList(nodUpdated)
+        assert.deepStrictEqual(nodHeadingsOf(html, nodMadeToday.id), ['Today'])
+        assert.deepStrictEqual(nodHeadingsOf(html, nodTwice.id), ['Today'], 'edited today: under Today, however old it is')
+        assert.deepStrictEqual(nodLabelsOf(html, nodTwice.id), [`${nodTime(nodTwice.user_updated_time)} - ${nodTwice.title}`.replace(/'/g, '&#39;')])
+        assert.ok(!html.includes('>Overdue</h2>'), 'nothing is overdue: no Overdue heading at all')
+    })
+
+    await test('notes on dates (interval): both - the same day is drawn once, two days twice (the same id twice in the list), in slot order inside a group', () => {
+        if (!nodStable()) return
+        const html = nodList(nodBoth)
+        assert.deepStrictEqual(nodHeadingsOf(html, nodMadeToday.id), ['Today'], 'created and edited today: once')
+        assert.deepStrictEqual(nodHeadingsOf(html, nodTwice.id), ['Overdue', 'Today'], 'created long ago and edited today: on both days')
+        const today = nodSegments(html).find(segment => segment.heading === 'Today').body
+        assert.ok(today.indexOf(nodMadeToday.id) < today.indexOf(nodTwice.id), 'the 11:00 slot before the 12:10 one')
+    })
+
+    await test('notes on dates (position): "After todos" puts a group\'s notes after its to-dos, "Before todos" before them - inside the group', () => {
+        if (!nodStable()) return
+        for (const [state, position] of [[nodBoth, 'after'], [nodBothBefore, 'before']]) {
+            const segments = nodSegments(nodList(state))
+            const today = segments.find(segment => segment.heading === 'Today').body
+            const todoAt = today.indexOf(`data-todo-id="${nodTodo.id}"`)
+            const noteAt = today.indexOf(`data-note-id="${nodMadeToday.id}"`)
+            assert.ok(todoAt >= 0 && noteAt >= 0, `${position}: both rows are under Today`)
+            assert.ok(position === 'after' ? todoAt < noteAt : noteAt < todoAt, `${position}: the note row ${position} the to-do row`)
+            // The groups keep their own order whatever the position: the undated group first (noDueDatesAtEnd is off here), then Overdue, Today.
+            assert.deepStrictEqual(segments.map(segment => segment.heading), ['No Due Date', 'Overdue', 'Today'], `${position}: the groups in time order`)
+        }
+    })
+
+    await test('notes on dates (rows): a slotted note is the ordinary note row - selectable, opens, its menu, never draggable', () => {
+        const html = nodList(nodBoth)
+        const tag = rootOpenTag(html, `data-note-id="${nodMadeToday.id}"`)
+        assert.ok(tag.startsWith('<div class="todo -note"'), 'the note row class')
+        for (const handler of ['onNoteRowMouseDown', 'onNoteRowClicked', 'onRowDoubleClicked', 'onNoteContextMenu']) {
+            assert.ok(tag.includes(`${handler}(event, '${nodMadeToday.id}')`), `${handler} on the row`)
+        }
+        assert.ok(!tag.includes('draggable') && !tag.includes('ondragstart'), 'no drag')
+    })
+
+    await test('notes on dates (date view): a heading per day, the union of the to-dos\' days and the notes\', in order; a day with notes only gets its heading and its drop day', () => {
+        return nodRun({ notesOnCreated: true, notesOnUpdated: true, displayFormat: 'date' }).then(state => {
+            if (!nodStable()) return
+            const segments = nodSegments(nodList(state))
+            const longAgo = segments.find(segment => segment.attrs.includes('data-drop="2025-01-15"'))
+            assert.ok(longAgo, 'the day the note was created, which no to-do is due on, has its heading with that day as its drop target')
+            assert.ok(longAgo.body.includes(nodTwice.id) && !longAgo.body.includes('data-todo-id'), 'holding the note alone')
+            assert.ok(!longAgo.attrs.includes('data-todo-ids='), 'and no to-do ids')
+            const today = segments.find(segment => segment.attrs.includes(`data-drop="${nodTodayKey}"`))
+            assert.ok(today.body.includes(nodTodo.id) && today.body.includes(nodMadeToday.id) && today.body.includes(nodTwice.id), 'today holds the to-do and both notes')
+            assert.deepStrictEqual(segments.map(segment => (/ data-drop="([^"]*)"/.exec(segment.attrs) || [])[1]), ['clear', '2025-01-15', nodTodayKey], 'the days in date order, the undated group where it was')
+            assert.deepStrictEqual(nodLabelsOf(nodList(state), nodMadeToday.id), [`${nodTime(nodMadeToday.user_created_time)} - ${nodMadeToday.title}`], 'labelled with the time, as a to-do')
+        })
+    })
+
+    await test('notes on dates (week planner): a note is a card in its day\'s section - the note row with the week card\'s two zones and the time in the head line', () => {
+        return nodRun({ notesOnCreated: true, displayFormat: 'week' }).then(state => {
+            if (!nodStable()) return
+            const html = nodList(state)
+            const sections = html.split('<section class="week-day').slice(1)
+            const today = sections.find(section => section.includes(`data-drop="${nodTodayKey}"`))
+            assert.ok(today && today.startsWith(' -today'), 'today\'s section')
+            const card = rootOpenTag(today, `data-note-id="${nodMadeToday.id}"`)
+            assert.ok(card.startsWith('<div class="todo -note -card"'), 'a note card')
+            assert.ok(card.includes(`onNoteRowClicked(event, '${nodMadeToday.id}')`) && card.includes(`onNoteContextMenu(event, '${nodMadeToday.id}')`) && !card.includes('draggable'),
+                'with the note row\'s handlers and no drag')
+            const body = today.slice(today.indexOf(`data-note-id="${nodMadeToday.id}"`))
+            assert.ok(/^[^]*?<div class="week-card-head">\s*<span class="note-progress[^"]*"[^>]*><\/span>\s*<span class="week-card-time">([^<]*)<\/span>/.test(body), 'the head line: the ring, then the time')
+            assert.strictEqual(/<span class="week-card-time">([^<]*)<\/span>/.exec(body)[1], nodTime(nodMadeToday.user_created_time), 'the time it was created')
+            assert.ok(today.indexOf(`data-todo-id="${nodTodo.id}"`) < today.indexOf(`data-note-id="${nodMadeToday.id}"`), 'after the day\'s to-do ("After todos")')
+            assert.ok(!html.includes(nodTwice.id), 'a note on a day outside the week on screen is not drawn')
+        })
+    })
+
+    await test('notes on dates (month): a -note dot per slot under the same cap as the to-dos, the day\'s state from its to-dos alone, the selected day lists the notes', async () => {
+        // The 15th (the 16th when today is the 15th) of this month carries one note and no to-do.
+        const otherDay = new Date(nodNoon)
+        otherDay.setDate(otherDay.getDate() === 15 ? 16 : 15)
+        otherDay.setHours(10, 0, 0, 0)
+        const onOtherDay = { id: 'd'.repeat(32), title: 'NOD on a quiet day', is_todo: 0, parent_id: nodFolder, user_created_time: otherDay.getTime(), user_updated_time: otherDay.getTime() }
+        // The day's to-do is completed, so its state (-done) and its dot do not depend on the time of day the suite runs at.
+        const doneTodo = { ...nodTodo, todo_completed: nodNoon }
+        const state = await nodRun({ notesOnCreated: true, notesOnUpdated: true, displayFormat: 'month', maxDotsPerDay: 2 }, { todos: [doneTodo, nodUndated], searchNotes: [nodMadeToday, nodTwice, onOtherDay] })
+        if (!nodStable()) return
+        const cellOf = key => {
+            const html = nodHtml(state)
+            const at = html.indexOf(`onCalendarDaySelected('${key}')`)
+            return html.slice(html.lastIndexOf('<td', at), html.indexOf('</td>', at))
+        }
+        const today = cellOf(nodTodayKey)
+        assert.ok(/class="calendar-day -done -today/.test(today), 'today\'s state is its to-do\'s (done), not changed by the notes')
+        assert.strictEqual((/<span class="calendar-dots">([\s\S]*?)<\/span>\s*<\/button>/.exec(today) || [])[1],
+            '<span class="calendar-dot -done"></span><span class="calendar-dot -note"></span><span class="calendar-more">+1</span>',
+            'one to-do and two notes under a cap of two: the to-do\'s dot, one note dot, +1 ("After todos")')
+        assert.ok(today.includes('1 to-do, 0 outstanding, 2 notes'), 'the label counts the notes')
+        const quiet = cellOf(isoDayOf(otherDay.getTime()))
+        assert.ok(/class="calendar-day -empty/.test(quiet), 'a day with notes only is still -empty: a note is neither due nor done')
+        assert.ok(quiet.includes('<span class="calendar-dots"><span class="calendar-dot -note"></span></span>'), 'with its note\'s dot')
+        await state.panelMessageHandler(['calendarDaySelected', nodTodayKey])
+        const selected = nodHtml(state).slice(nodHtml(state).indexOf('<section class="calendar-selected">'))
+        const todoAt = selected.indexOf(`data-todo-id="${nodTodo.id}"`)
+        assert.ok(todoAt > 0 && todoAt < selected.indexOf(nodMadeToday.id) && selected.indexOf(nodMadeToday.id) < selected.indexOf(nodTwice.id), 'the selected day: its to-do, then its notes in slot order')
+        assert.deepStrictEqual(nodLabelsOf(selected, nodMadeToday.id), [`${nodTime(nodMadeToday.user_created_time)} - ${nodMadeToday.title}`], 'labelled with the time')
+        assert.ok(/<h2 data-todo-ids="a{32}"/.test(selected), 'the heading still names the to-dos only')
+        await state.panelMessageHandler(['calendarDaySelected', isoDayOf(otherDay.getTime())])
+        const quietList = nodHtml(state).slice(nodHtml(state).indexOf('<section class="calendar-selected">'))
+        assert.ok(quietList.includes(onOtherDay.id) && !quietList.includes('Nothing due'), 'a day with notes only lists them instead of "Nothing due"')
+    })
+
+    await test('notes on dates (month): "Before todos" puts the note dots first, and the cap counts them with the to-dos', async () => {
+        const state = await nodRun({ notesOnCreated: true, notesOnUpdated: true, displayFormat: 'month', maxDotsPerDay: 2, notesPosition: 'before' })
+        if (!nodStable()) return
+        const html = nodHtml(state)
+        const at = html.indexOf(`onCalendarDaySelected('${nodTodayKey}')`)
+        const cell = html.slice(html.lastIndexOf('<td', at), html.indexOf('</td>', at))
+        assert.ok(cell.includes('<span class="calendar-dots"><span class="calendar-dot -note"></span><span class="calendar-dot -note"></span><span class="calendar-more">+1</span></span>'),
+            'two note dots fill the cap of two, and the to-do is the +1')
+    })
+
+    await test('notes on dates (cap): a capped group draws its notes after its drawn to-dos and keeps its "show more" footer last; the notes\' own footer is drawn once, at the end', async () => {
+        // 1,001 to-dos and 1,001 notes, all today: the group draws its first 1,000 to-dos, and the notes are read as the section reads them, the
+        // 1,000 most recently updated.
+        const many = []
+        for (let index = 0; index < 1001; index++) {
+            many.push({ id: ('c' + String(index).padStart(4, '0')).padEnd(32, 'c'), title: `NOD capped to-do ${index}`, todo_completed: 0, todo_due: nodNoon - 3600000 + index * 1000, parent_id: nodFolder, user_updated_time: 1 })
+        }
+        const notes = []
+        for (let index = 0; index < 1001; index++) {
+            notes.push({ id: ('9' + String(index).padStart(4, '0')).padEnd(32, '9'), title: `NOD many ${index}`, is_todo: 0, parent_id: nodFolder, user_created_time: nodNoon + index * 1000, user_updated_time: nodNoon + index * 1000 })
+        }
+        const state = await nodRun({ notesOnCreated: true }, { todos: many, searchNotes: notes })
+        if (!nodStable()) return
+        const list = nodList(state)
+        const today = nodSegments(list).find(segment => segment.heading === 'Today').body
+        const footerAt = today.indexOf('data-todo-group="Today"')
+        const lastTodoAt = today.lastIndexOf('data-todo-id=')
+        const firstNoteAt = today.indexOf('data-note-id=')
+        const lastNoteAt = today.lastIndexOf('data-note-id=')
+        assert.ok(footerAt > 0, 'the group is capped')
+        assert.ok(lastTodoAt < firstNoteAt && lastNoteAt < footerAt, 'its drawn to-dos, then its notes, then its footer')
+        assert.strictEqual((today.match(/data-note-id=/g) || []).length, 1000, 'the 1,000 most recently updated notes are drawn')
+        assert.strictEqual((list.match(/most recently updated notes/g) || []).length, 1, 'the notes\' footer, once')
+        assert.ok(list.indexOf('Showing the 1,000 most recently updated notes') > list.lastIndexOf('data-note-id='), 'after the last row of the list')
+        assert.ok(list.includes('onShowMoreNotesClicked()'), 'offering the next batch')
+    })
+
+    await test('notes on dates (cap, webview): the last drawn to-do row of a capped group still has an inert bottom band when its notes sit between it and the footer', () => {
+        const capFooterFollows = new Function(handlerBody('capFooterFollows') + '\n}; return capFooterFollows')()
+        const element = (classes, dataset, next, holdsGroup) => ({
+            classList: { contains: name => classes.includes(name) }, dataset: dataset || {}, nextElementSibling: next || null,
+            querySelector: () => (holdsGroup ? {} : null),
+        })
+        const footer = element(['notes-more-message'], {}, null, true)
+        const noteRow = element(['todo', '-note'], { noteId: 'n1' }, element(['todo', '-note'], { noteId: 'n2' }, footer))
+        assert.strictEqual(capFooterFollows(element(['todo'], { todoId: 't' }, noteRow)), true, 'stepping over the notes to the group\'s footer')
+        assert.strictEqual(capFooterFollows(element(['todo'], { todoId: 't' }, footer)), true, 'the footer right after it, as before')
+        assert.strictEqual(capFooterFollows(element(['todo'], { todoId: 't' }, element(['todo'], { todoId: 'u' }, footer))), false, 'a to-do row after it: not the last drawn')
+        assert.strictEqual(capFooterFollows(element(['todo'], { todoId: 't' }, element(['todo', '-note'], { noteId: 'n' }, null))), false, 'notes and then the group\'s end: no footer')
+    })
+
+    await test('notes on dates (peek): a view whose only content is slotted notes is not empty - no "Results outside current filters"', async () => {
+        const state = await nodRun({ notesOnCreated: true }, {
+            todos: (q) => (q.includes('zebra') ? [] : [nodTodo]),
+            searchNotes: (q) => (q.includes('zebra') ? [{ ...nodMadeToday, title: 'NOD zebra note' }] : [nodMadeToday]),
+            outsideResults: [{ id: '7'.repeat(32), title: 'NOD zebra elsewhere', is_todo: 0, parent_id: nodFolder, user_updated_time: 3 }],
+        })
+        await state.panelMessageHandler(['searchFilterChanged', 'zebra'])
+        const html = nodHtml(state)
+        assert.ok(html.includes('NOD zebra note') && !html.includes('class="notes-section"'), 'precondition: the note is drawn on its day, the only row of the view')
+        assert.ok(!html.includes('outside-results'), 'so the peek does not run')
+    })
+
+    await test('notes on dates (old path): both switches off - a stored profile without them, or with both false - draws the Notes section as before, byte for byte', async () => {
+        const absent = await nodRun({})
+        const off = await nodRun({ notesOnCreated: false, notesOnUpdated: false })
+        assert.ok(nodHtml(absent).includes('<section class="notes-section">'), 'the Notes section')
+        assert.strictEqual(nodHtml(off), nodHtml(absent), 'both false is the profile stored before they existed')
+        const stored = JSON.parse(absent.settings.profileData).profiles[0]
+        assert.deepStrictEqual([stored.notesOnCreated, stored.notesOnUpdated], [false, false], 'which reads them as false')
+        for (const displayFormat of ['date', 'week', 'month']) {
+            const before = await nodRun({ displayFormat })
+            const after = await nodRun({ displayFormat, notesOnCreated: false, notesOnUpdated: false })
+            assert.strictEqual(nodHtml(after), nodHtml(before), `${displayFormat}: the same markup`)
+            assert.ok(nodHtml(before).includes('<section class="notes-section">'), `${displayFormat}: with the Notes section`)
+        }
+        // Notes hidden: the switches mean nothing, so the markup is that of a profile without them.
+        const hidden = await nodRun({ showNotes: false })
+        const hiddenOn = await nodRun({ showNotes: false, notesOnCreated: true, notesOnUpdated: true })
+        assert.strictEqual(nodHtml(hiddenOn), nodHtml(hidden), 'showNotes off: the switches change nothing')
+        assert.ok(!nodHtml(hidden).includes('data-note-id'), 'and no note is drawn')
+    })
+
+    await test('notes on dates (basic): the basic list has no dates, so it keeps the one Notes section whatever the switches say', async () => {
+        const off = await nodRun({ displayFormat: 'basic' })
+        const on = await nodRun({ displayFormat: 'basic', notesOnCreated: true, notesOnUpdated: true })
+        assert.ok(nodHtml(on).includes('<section class="notes-section">'), 'the Notes section')
+        assert.strictEqual(nodHtml(on), nodHtml(off), 'exactly as with both off')
+    })
+
+    await test('notes on dates (overview note): the markdown never draws a note, switches on or off', async () => {
+        const overview = 'o'.repeat(32)
+        const state = await nodRun({ notesOnCreated: true, notesOnUpdated: true, noteID: overview }, { notes: { [overview]: { id: overview, title: 'Overview', body: '' } } })
+        // The overview lane may still be armed after startup: run it.
+        for (const pending of state.timeouts.filter(entry => !entry.cleared && !entry.fired)) await state.fireTimeout(pending)
+        const written = state.notePuts.filter(put => put.id === overview).map(put => put.body).join('\n')
+        assert.ok(written.includes(nodTodo.title), 'precondition: the overview note was written')
+        assert.ok(!written.includes(nodMadeToday.title) && !written.includes(nodTwice.title), 'with no note in it')
+    })
+
+    // -- the profile and the two editors ---------------------------------------------------------------------
+    const nodTemplate = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'editor', 'editorTemplate.ts'), 'utf8')
+    const nodDesktopScript = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'editor', 'editorWebview.js'), 'utf8')
+    const nodOverlayAt = webviewSource.indexOf('var EDITOR_FORM_HTML = `')
+    const nodOverlay = webviewSource.slice(nodOverlayAt, webviewSource.indexOf('`', nodOverlayAt + 'var EDITOR_FORM_HTML = `'.length))
+    const nodFields = [['notesOnCreated', 'Show each note on the day it was created'], ['notesOnUpdated', 'Show each note on the day it was last updated']]
+    const nodEncode = profile => btoa(encodeURI(JSON.stringify(profile)))
+    const nodDecode = value => JSON.parse(decodeURI(atob(value)))
+    // A stand-in document for an editor script: an element for every id asked for, whose checked coerces as a real checkbox's does.
+    const nodDocument = () => {
+        const elements = {}
+        const element = id => {
+            if (!elements[id]) {
+                let checked = false
+                elements[id] = {
+                    id, value: '', listeners: {}, style: {}, offsetWidth: 0, offsetHeight: 0,
+                    get checked(){ return checked }, set checked(value){ checked = !!value },
+                    addEventListener(type, handler){ (this.listeners[type] = this.listeners[type] || []).push(handler) },
+                    fire(type){ for (const handler of this.listeners[type] || []) handler({ type }) },
+                    getAttribute: () => 'edit', appendChild(){}, focus(){}, select(){},
+                }
+            }
+            return elements[id]
+        }
+        return { getElementById: element, createElement: () => ({}), elements }
+    }
+
+    await test('notes on dates (editors): both carry the two checkboxes in the Notes fieldset, under "Show regular notes..." and above "Show notes [Before/After todos]", in the same markup', () => {
+        const notesFieldset = (source, where) => {
+            const at = source.indexOf('<legend>Notes</legend>')
+            assert.ok(at > 0, `${where}: the Notes fieldset`)
+            return source.slice(source.lastIndexOf('<fieldset>', at), source.indexOf('</fieldset>', at))
+        }
+        const desktop = notesFieldset(nodTemplate, 'desktop')
+        assert.strictEqual(notesFieldset(nodOverlay, 'mobile'), desktop, 'the overlay copies the desktop markup verbatim')
+        const showNotesAt = desktop.indexOf('id="showNotesCheckbox"')
+        const positionAt = desktop.indexOf('id="notesPositionSelect"')
+        let previous = showNotesAt
+        for (const [field, label] of nodFields) {
+            const markup = `<section>\n            <input type="checkbox" id="${field}Checkbox" name="${field}">\n            <label for="${field}Checkbox">${label}</label>\n        </section>`
+            const at = desktop.indexOf(markup)
+            assert.ok(at > previous && at < positionAt, `${field}: a plain checkbox labelled "${label}", in order between the two`)
+            previous = at
+        }
+        const checkIds = (webviewSource.match(/var EDITOR_CHECK_IDS = \[([^\]]*)\]/) || [])[1] || ''
+        assert.ok(nodFields.every(([field]) => checkIds.includes(`'${field}Checkbox'`)), 'the overlay wires both for reload-survival')
+    })
+
+    await test('notes on dates (editors): the desktop editor script loads both fields, saves them on every change, and reads a profile without them as off', () => {
+        const runEditor = (profile) => {
+            const document = nodDocument()
+            document.getElementById('profileDataInput').value = nodEncode(profile)
+            new Function('document', 'window', 'btoa', 'atob', nodDesktopScript)(document, { addEventListener(){}, innerWidth: 0, innerHeight: 0 }, btoa, atob)
+            return document.elements
+        }
+        const loaded = runEditor({ ...baseProfile, notesOnCreated: true, notesOnUpdated: false })
+        assert.deepStrictEqual([loaded.notesOnCreatedCheckbox.checked, loaded.notesOnUpdatedCheckbox.checked], [true, false], 'loaded from the profile')
+        assert.deepStrictEqual([nodDecode(loaded.profileDataInput.value).notesOnCreated, nodDecode(loaded.profileDataInput.value).notesOnUpdated], [true, false], 'and in the form as it opens')
+        loaded.notesOnUpdatedCheckbox.checked = true
+        loaded.notesOnUpdatedCheckbox.fire('change')
+        assert.strictEqual(nodDecode(loaded.profileDataInput.value).notesOnUpdated, true, 'a change saves it into the form Joplin submits')
+        loaded.notesOnCreatedCheckbox.checked = false
+        loaded.notesOnCreatedCheckbox.fire('change')
+        assert.strictEqual(nodDecode(loaded.profileDataInput.value).notesOnCreated, false, 'both ways')
+        const old = runEditor({ ...baseProfile })
+        assert.deepStrictEqual([old.notesOnCreatedCheckbox.checked, old.notesOnUpdatedCheckbox.checked], [false, false], 'a profile without them: both off')
+        assert.deepStrictEqual([nodDecode(old.profileDataInput.value).notesOnCreated, nodDecode(old.profileDataInput.value).notesOnUpdated], [false, false], 'and saved as false')
+    })
+
+    await test('notes on dates (editors): the mobile overlay fills both fields from a profile and serialises them back', () => {
+        const fns = new Function('document', [
+            'function editorField(id){ return document.getElementById(id) }',
+            handlerBody('populateEditorForm') + '\n}',
+            handlerBody('serializeEditorForm') + '\n}',
+            'return { populate: populateEditorForm, serialize: serializeEditorForm }',
+        ].join('\n'))
+        const document = nodDocument()
+        const form = fns(document)
+        form.populate({ ...baseProfile, notesOnCreated: false, notesOnUpdated: true })
+        assert.deepStrictEqual([document.elements.notesOnCreatedCheckbox.checked, document.elements.notesOnUpdatedCheckbox.checked], [false, true], 'filled')
+        assert.deepStrictEqual([form.serialize().notesOnCreated, form.serialize().notesOnUpdated], [false, true], 'serialised')
+        document.elements.notesOnCreatedCheckbox.checked = true
+        assert.strictEqual(form.serialize().notesOnCreated, true, 'a tick is what the Save sends')
+        form.populate({ ...baseProfile })
+        assert.deepStrictEqual([form.serialize().notesOnCreated, form.serialize().notesOnUpdated], [false, false], 'a profile without them: both off')
+    })
+
+    await test('notes on dates (profile): a Save from either editor stores both fields, and the panel draws by them at once', async () => {
+        const phone = await nodRun({}, { require: mobileRequire, versionInfo: { version: '3.7.0', platform: 'mobile' }, installationDir: path.join(tmp, 'notes-on-dates-mobile-install') })
+        const storedOf = state => JSON.parse(state.settings.profileData).profiles[0]
+        assert.ok(nodHtml(phone).includes('<section class="notes-section">'), 'mobile: the Notes section before the save')
+        await phone.panelMessageHandler(['profileSaved', 1, { ...storedOf(phone), notesOnCreated: true, notesOnUpdated: 'false' }])
+        assert.deepStrictEqual([storedOf(phone).notesOnCreated, storedOf(phone).notesOnUpdated], [true, false], 'mobile: stored as booleans')
+        assert.ok(!nodHtml(phone).includes('<section class="notes-section">') && nodHeadingsOf(nodList(phone), nodMadeToday.id).length === 1, 'mobile: and drawn on their days')
+        const desk = await nodRun({})
+        desk.dialogResult = { id: 'ok', formData: { profileDataForm: { profileData: nodEncode({ ...storedOf(desk), notesOnUpdated: true }) } } }
+        await desk.panelMessageHandler(['editProfileClicked', 1])
+        assert.deepStrictEqual([storedOf(desk).notesOnCreated, storedOf(desk).notesOnUpdated], [false, true], 'desktop: stored')
+        assert.ok(!nodHtml(desk).includes('<section class="notes-section">'), 'desktop: and drawn on their days')
+        desk.dialogResult = null
+        await desk.panelMessageHandler(['editProfileClicked', 1])
+        const formValue = (String(desk.dialogHtml['dialog-editor'] || '').match(/id="profileDataInput" name="profileData" value="([^"]*)"/) || [])[1]
+        assert.strictEqual(nodDecode(formValue).notesOnUpdated, true, 'desktop: the edit form opens with the stored value')
     })
 
     // ============================================================ the settings note (v2.6.0): profiles and settings between devices
