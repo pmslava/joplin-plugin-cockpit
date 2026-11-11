@@ -22,6 +22,7 @@
  *                                                      noteGroups { key, heading, slots }, both in their own order; a to-do group with no dated    *
  *                                                      to-do is the undated one, and undatedLast says where it stands.                             *
  *   placeRows(todoRows, noteRows, position)          - one group's rows: the notes' first for 'before', after the to-dos' otherwise.               *
+ *   drawnRange(profile, anchorISO)                   - the week planner's or the month grid's drawn days as { fromMs, toMs }, else null.           *
  *                                                                                                                                                  *
  * The very same file is require()d by the Node test harness (module.exports below) and bundled into the host by webpack (require("./noteSlots")    *
  * in formats.ts), so the rules are unit-tested AND drive the real panel.                                                                           *
@@ -143,11 +144,48 @@
         return position === 'before' ? noteRows + todoRows : todoRows + noteRows
     }
 
+    /** drawnRange (2.11, section 7 of the brief) ***************************************************************************************************
+     * The days the week planner or the month grid draws, as the instants a note's timestamp must lie between to be drawn on one of them: local     *
+     * midnight of the first day to the last millisecond of the last. The panel reads the note store by this range for those two views (getNotes'   *
+     * range option), so a note made or edited on a day on screen is drawn however many newer notes the vault holds - the capped set the list       *
+     * views take would leave an older month nearly empty. The days are the ones buildWeek and buildMonthGrid (calendar.ts) draw: the seven days of *
+     * the anchor's week, and the whole weeks covering the anchor's month, the neighbouring months' outside days included, as their to-do dots are. *
+     * Every day is built from calendar parts (new Date(y, m, d)), never by adding 24 hours, so a DST change inside the range moves no boundary;    *
+     * the end is the next day's midnight less one millisecond for the same reason. The week starts as the formats start it (getWeekStartsOn:       *
+     * Sunday only for 0), and an anchor that is not a YYYY-MM-DD reads as today, as fromISODate reads it. Any other format answers null: the       *
+     * Interval, Date and Basic views keep the capped set.                                                                                          *
+     ***********************************************************************************************************************************************/
+    function drawnRange(profile, anchorISO){
+        var format = profile ? profile.displayFormat : null
+        if (format !== 'week' && format !== 'month') return null
+        var weekStartsOn = Number(profile.weekStartsOn) === 0 ? 0 : 1
+        var parts = String(anchorISO).split('-').map(Number)
+        var now = new Date()
+        var anchor = parts.length === 3 && parts.every(function(part){ return Number.isFinite(part) })
+            ? new Date(parts[0], parts[1] - 1, parts[2])
+            : new Date(now.getFullYear(), now.getMonth(), now.getDate())
+        var year = anchor.getFullYear()
+        var month = anchor.getMonth()
+        var back = function(date){ return (date.getDay() - weekStartsOn + 7) % 7 }
+        var first
+        var last
+        if (format === 'week'){
+            first = new Date(year, month, anchor.getDate() - back(anchor))
+            last = new Date(year, month, anchor.getDate() - back(anchor) + 6)
+        } else {
+            var lastOfMonth = new Date(year, month + 1, 0)
+            first = new Date(year, month, 1 - back(new Date(year, month, 1)))
+            last = new Date(year, month, lastOfMonth.getDate() - back(lastOfMonth) + 6)
+        }
+        return { fromMs: first.getTime(), toMs: new Date(last.getFullYear(), last.getMonth(), last.getDate() + 1).getTime() - 1 }
+    }
+
     return {
         noteSlots: noteSlots,
         dayKeyOf: dayKeyOf,
         slotsByDay: slotsByDay,
         mergeGroups: mergeGroups,
         placeRows: placeRows,
+        drawnRange: drawnRange,
     }
 })

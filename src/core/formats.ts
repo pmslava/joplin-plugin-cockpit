@@ -1355,8 +1355,13 @@ export function itemComparator(sort){
  * filters, the newest-updated notesLimit - and returned undrawn, as { notes, more, footerOnly, checkboxFilter, notesLimit }. Split out of          *
  * renderNotesSection so the notes on dates draw the very same set: the panel reads it once per render and hands it either to the section (the old  *
  * path, untouched) or, when the profile shows its notes on their days (notesOnDates), to the formatter through the view state.                     *
+ *                                                                                                                                                  *
+ * range (section 7 of the 2.11 brief) is the week planner's or the month grid's drawn days ({ fromMs, toMs }, drawnRange in noteSlots.js), which   *
+ * the panel works out once per render for a profile drawing its notes on their days. It goes to getNotes with the profile's two switches, and on   *
+ * the store path the set is then every note created or last updated on those days rather than the newest notesLimit: nothing is left out, so no    *
+ * cap follows the quick filters and no footer is drawn. Off the store, and for the other formats, the set is the capped one, footer and all.       *
  ***************************************************************************************************************************************************/
-export async function fetchSectionNotes(profile, viewState){
+export async function fetchSectionNotes(profile, viewState, range?){
     var notebooks = await getNotebookMap()
     var searchFilter = viewState ? viewState.searchFilter : null
     var searchCriteria = viewCriteria(profile.searchCriteria, searchFilter)
@@ -1390,7 +1395,10 @@ export async function fetchSectionNotes(profile, viewState){
     var checkboxFilter = checkboxFilterActive(quickFilters)
     var showsNothing = checkboxFilterShowsNothing(quickFilters)
     var scanning = scanOptions(viewState, quickFilters)
-    var fetched = await getNotes(searchCriteria, fast, useCache, { fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks, storeView: storeView, ringsChangedOnly: viewState ? viewState.ringsChangedOnly || null : null, scan: scanning.scan, scanFilters: scanning.scan ? quickFilters : null, scanIsCurrent: scanning.scanIsCurrent, scanPass: scanning.scanPass, undrawn: showsNothing ? everyRowId : null })
+    var noteRange = range && notesOnDates(profile) && (profile.displayFormat === "week" || profile.displayFormat === "month")
+        ? { fromMs: range.fromMs, toMs: range.toMs, byCreated: !!profile.notesOnCreated, byUpdated: !!profile.notesOnUpdated }
+        : null
+    var fetched = await getNotes(searchCriteria, fast, useCache, { range: noteRange, fillCounts: fillCounts, priorityStart: 0, viewKey: notesViewKey, keepMistypedRows: viewState ? !!viewState.keepMistypedRows : false, limit: notesLimit, listingNotebooks: listingNotebooks, storeView: storeView, ringsChangedOnly: viewState ? viewState.ringsChangedOnly || null : null, scan: scanning.scan, scanFilters: scanning.scan ? quickFilters : null, scanIsCurrent: scanning.scanIsCurrent, scanPass: scanning.scanPass, undrawn: showsNothing ? everyRowId : null })
     var notes = fetched.notes
     for (var note of notes){
         var notebook = notebooks.get(note.parent_id)
@@ -1412,7 +1420,7 @@ export async function fetchSectionNotes(profile, viewState){
         // The limit keeps the most recently updated of the notes that pass, in the order the store and the listing keep them (newest first, then
         // the id descending), and anything past it is "more" - as is whatever the search's bound left unread (fetched.more).
         notes = judged.shown.sort((first, second) => (second.user_updated_time - first.user_updated_time) || (first.id < second.id ? 1 : first.id > second.id ? -1 : 0))
-        if (notesLimit && notes.length > notesLimit){
+        if (notesLimit && notes.length > notesLimit && !fetched.ranged){
             more = true
             notes = notes.slice(0, notesLimit)
         }

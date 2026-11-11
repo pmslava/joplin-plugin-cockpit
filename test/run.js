@@ -9741,6 +9741,200 @@ async function main() {
         assert.strictEqual(nodDecode(formValue).notesOnUpdated, true, 'desktop: the edit form opens with the stored value')
     })
 
+    // ---- the week and month range read (2.11, section 7 of the brief) -----------------------------------------------------------------------
+    // With notes on their days the week planner and the month read the note store by the days they draw (drawnRange in noteSlots.js, getNotes'
+    // range option), not the Notes section's newest 1,000, so a note made or edited on a day on screen is drawn however many newer notes there
+    // are. The pure range first; then a store-served panel over more than 1,000 newer notes, read week by week and month by month. The store
+    // section's own helpers are declared further down the file, so the few this block needs are declared here (its timers: the 2,000 ms startup
+    // build, the 0 ms store render).
+    const nrRange = NoteSlots.drawnRange
+    const nrDay = ms => isoDayOf(ms)
+    const nrSpan = range => [nrDay(range.fromMs), nrDay(range.toMs)]
+
+    await test('notes on dates (range): the week\'s seven days and the month grid\'s whole weeks, for both week starts, from midnight to the last millisecond, null for the other views', () => {
+        // 2026-11-11 is a Wednesday; November 2026 starts on a Sunday and ends on a Monday, so its grid is five weeks from Sunday and six from Monday.
+        assert.deepStrictEqual(nrSpan(nrRange({ displayFormat: 'week', weekStartsOn: 1 }, '2026-11-11')), ['2026-11-09', '2026-11-15'], 'week from Monday')
+        assert.deepStrictEqual(nrSpan(nrRange({ displayFormat: 'week', weekStartsOn: 0 }, '2026-11-11')), ['2026-11-08', '2026-11-14'], 'week from Sunday')
+        assert.deepStrictEqual(nrSpan(nrRange({ displayFormat: 'week' }, '2026-11-11')), ['2026-11-09', '2026-11-15'], 'no week start stored: Monday, as the formats read it')
+        const monday = nrRange({ displayFormat: 'month', weekStartsOn: 1 }, '2026-11-11')
+        const sunday = nrRange({ displayFormat: 'month', weekStartsOn: 0 }, '2026-11-30')
+        assert.deepStrictEqual(nrSpan(monday), ['2026-10-26', '2026-12-06'], 'month from Monday: six weeks, the outside days of October and December included')
+        assert.deepStrictEqual(nrSpan(sunday), ['2026-11-01', '2026-12-05'], 'month from Sunday: five weeks, whatever day of the month the anchor is')
+        assert.deepStrictEqual(nrSpan(nrRange({ displayFormat: 'month', weekStartsOn: 0 }, '2026-02-10')), ['2026-02-01', '2026-02-28'], 'February 2026 from Sunday: exactly four weeks')
+        for (const range of [monday, sunday]){
+            const first = new Date(range.fromMs)
+            assert.strictEqual(range.fromMs, new Date(first.getFullYear(), first.getMonth(), first.getDate()).getTime(), 'it starts at local midnight')
+            assert.notStrictEqual(nrDay(range.toMs + 1), nrDay(range.toMs), 'and ends on the last millisecond of its last day')
+        }
+        // The last Sunday of March 2026 is a DST change in much of the world: built from calendar parts, the boundaries stay on midnight.
+        const dst = nrRange({ displayFormat: 'week', weekStartsOn: 1 }, '2026-03-25')
+        assert.deepStrictEqual([nrDay(dst.fromMs), nrDay(dst.fromMs - 1), nrDay(dst.toMs), nrDay(dst.toMs + 1)], ['2026-03-23', '2026-03-22', '2026-03-29', '2026-03-30'], 'a DST week keeps its days')
+        const odd = nrRange({ displayFormat: 'week' }, 'not a day')
+        assert.ok(odd.fromMs <= Date.now() && Date.now() <= odd.toMs, 'an anchor that is not a day reads as today')
+        for (const format of ['interval', 'date', 'basic', 'nonsense']) assert.strictEqual(nrRange({ displayFormat: format }, '2026-11-11'), null, `${format}: no range`)
+        assert.strictEqual(nrRange(null, '2026-11-11'), null, 'and none without a profile')
+    })
+
+    await test('notes on dates (range): the range is the days the formatter draws - the first and last day of the drawn week and month grid, both week starts', async () => {
+        for (const weekStartsOn of [0, 1]){
+            for (const displayFormat of ['week', 'month']){
+                const state = await nodRun({ notesOnCreated: true, displayFormat: displayFormat, weekStartsOn: weekStartsOn })
+                if (!nodStable()) return
+                const html = nodHtml(state)
+                const drawn = displayFormat === 'week'
+                    ? html.split('<section class="week-day').slice(1).map(section => / data-drop="([^"]*)"/.exec(section)[1])
+                    : html.slice(html.indexOf('<table class="calendar-grid">'), html.indexOf('</table>')).split('<td').slice(1).map(cell => / data-drop="([^"]*)"/.exec(cell)[1])
+                assert.deepStrictEqual(nrSpan(nrRange({ displayFormat: displayFormat, weekStartsOn: weekStartsOn }, nodTodayKey)), [drawn[0], drawn[drawn.length - 1]],
+                    `${displayFormat}, the week from ${weekStartsOn ? 'Monday' : 'Sunday'}: the range spans exactly the drawn days`)
+            }
+        }
+    })
+
+    const nrFolder = 'c'.repeat(31) + '1'
+    const nrId = n => 'c'.repeat(24) + String(n).padStart(8, '0')
+    const nrToday = new Date()
+    const nrAt = (dayOffset, hours, minutes) => new Date(nrToday.getFullYear(), nrToday.getMonth(), nrToday.getDate() + dayOffset, hours, minutes || 0).getTime()
+    const nrNote = (n, extra) => Object.assign({
+        id: nrId(n), title: `Range note ${n}`, is_todo: 0, todo_completed: 0, todo_due: 0, parent_id: nrFolder,
+        user_updated_time: 0, user_created_time: 0, deleted_time: 0, is_conflict: 0,
+    }, extra)
+    // 1,001 notes made and edited today, at noon less a second each: the newest of all, so the capped set (the newest 1,000) is all of them but one.
+    const nrFresh = Array.from({ length: 1001 }, (_, i) => nrNote(i + 1, { title: `Fresh ${i + 1}`, user_created_time: nrAt(0, 12) - (i + 1) * 1000, user_updated_time: nrAt(0, 12) - (i + 1) * 1000 }))
+    const nrFreshIds = new Set(nrFresh.map(note => note.id))
+    // Older than every fresh note by both stamps, so none of these is in the capped set. A week ago is always in the previous week, and the 15th of
+    // last month is never in this month's grid nor in last week.
+    const nrMadePrev = nrNote(2001, { title: 'Made last week', user_created_time: nrAt(-7, 10), user_updated_time: nrAt(-7, 10, 30) })
+    const nrEditedPrev = nrNote(2002, { title: 'Edited last week', user_created_time: nodLongAgo, user_updated_time: nrAt(-7, 15) })
+    const nrMadePrevEditedToday = nrNote(2003, { title: 'Made last week, edited today', user_created_time: nrAt(-7, 9), user_updated_time: nrAt(0, 11) })
+    const nrLastMonth15 = new Date(nrToday.getFullYear(), nrToday.getMonth() - 1, 15, 10).getTime()
+    const nrMadeLastMonth = nrNote(2004, { title: 'Made last month', user_created_time: nrLastMonth15, user_updated_time: nrLastMonth15 + 3600000 })
+    const nrItems = nrFresh.concat([nrMadePrevEditedToday, nrEditedPrev, nrMadePrev, nrMadeLastMonth])
+    const nrProfiles = [
+        { name: 'Week by created', displayFormat: 'week', notesOnCreated: true },
+        { name: 'Interval by created', displayFormat: 'interval', notesOnCreated: true },
+        { name: 'Week by updated', displayFormat: 'week', notesOnUpdated: true },
+        { name: 'Month by created', displayFormat: 'month', notesOnCreated: true },
+        { name: 'Week by created, searching', displayFormat: 'week', notesOnCreated: true, searchCriteria: 'Range' },
+        { name: 'Week by created, the twin', displayFormat: 'week', notesOnCreated: true },
+    ]
+    const nrState = await run({
+        dataDir: path.join(tmp, 'notes-range-' + Math.random().toString(36).slice(2)),
+        installationDir: path.join(tmp, 'desktop-install'),
+        require: desktopRequire,
+        versionInfo: { version: '3.7.0', platform: 'desktop' },
+        todos: [],
+        listingFromNotes: true,
+        notes: Object.fromEntries(nrItems.map(note => [note.id, note])),
+        // The index serves the same notes, newest first by update, as copies.
+        searchNotes: nrItems.slice().sort((first, second) => second.user_updated_time - first.user_updated_time).map(note => ({ ...note })),
+        folders: [{ id: nrFolder, title: 'Range', parent_id: '' }],
+        initialSettings: {
+            profileData: JSON.stringify({ nextID: nrProfiles.length + 1, profiles: nrProfiles.map((profile, index) =>
+                ({ ...baseProfile, showNotes: true, notesPosition: 'after', id: index + 1, sortOrder: index, noteID: '', ...profile })) }),
+            currentProfileID: 1,
+        },
+    })
+    await nrState.fireTimeout(nrState.timeouts.find(timeout => timeout.ms === 2000))
+    const nrStoreReady = nrState.noteStore.isReady()
+    if (nrState.pendingTimeouts(0).length === 1) await nrState.fireTimeout(nrState.pendingTimeouts(0)[0])
+    const nrHtml = () => String(nrState.panelHtml['panel-panel'] || '')
+    const nrDrawn = () => [...nrHtml().matchAll(/data-note-id="([^"]+)"/g)].map(match => match[1])
+    const nrFreshDrawn = () => nrDrawn().filter(id => nrFreshIds.has(id)).length
+    const nrHas = note => nrDrawn().includes(note.id)
+    const nrSearchesSince = mark => nrState.gets.slice(mark).filter(g => g.path[0] === 'search').length
+    const nrSwitch = async id => await nrState.panelMessageHandler(['profilesDropdownChanged', id])
+    const nrSectionOf = ms => {
+        const html = nrHtml()
+        return html.split('<section class="week-day').slice(1).find(section => section.includes(`data-drop="${nrDay(ms)}"`)) || ''
+    }
+    const nrStable = () => isoDayOf(Date.now()) === isoDayOf(nrToday.getTime())
+
+    await test('notes on dates (range): the week reads every note created in it from the store - a note older than the cap is drawn on its day, which the capped set misses', async () => {
+        assert.ok(nrStoreReady, 'precondition: the store built')
+        if (!nrStable()) return
+        await nrSwitch(2)
+        assert.ok(!nrHas(nrMadePrev) && nrHtml().includes('Showing the 1,000 most recently updated notes'), 'precondition: the capped set (Interval) leaves the older notes out')
+        await nrSwitch(1)
+        const mark = nrState.gets.length
+        await nrState.panelMessageHandler(['calendarNavigate', -1])
+        assert.ok(nrSectionOf(nrMadePrev.user_created_time).includes(`data-note-id="${nrMadePrev.id}"`), 'last week: the note made a week ago, in its day')
+        assert.ok(nrSectionOf(nrMadePrevEditedToday.user_created_time).includes(`data-note-id="${nrMadePrevEditedToday.id}"`), 'and the one made then and edited today, on the day it was made')
+        assert.ok(!nrHas(nrEditedPrev), 'not the one only edited last week: the created switch reads by creation')
+        assert.strictEqual(nrFreshDrawn(), 0, 'and none of this week\'s')
+        assert.strictEqual(nrSearchesSince(mark), 0, 'all of it from the store, no search')
+    })
+
+    await test('notes on dates (range): the range follows the anchor, and a range read is never capped - 1,001 notes in this week, all drawn, no footer', async () => {
+        if (!nrStable()) return
+        await nrSwitch(1)
+        assert.strictEqual(nrFreshDrawn(), 1001, 'this week: every note made in it, past the 1,000 the Notes section would keep')
+        assert.ok(!nrHtml().includes('notes-more-message'), 'and no "show more" footer: nothing was left out')
+        assert.ok(!nrHas(nrMadePrev) && !nrHas(nrMadePrevEditedToday), 'last week\'s notes are not in this week')
+        await nrState.panelMessageHandler(['calendarNavigate', -1])
+        assert.ok(nrHas(nrMadePrev) && nrFreshDrawn() === 0, 'Previous: last week\'s')
+        await nrState.panelMessageHandler(['calendarNavigate', 1])
+        assert.ok(!nrHas(nrMadePrev) && nrFreshDrawn() === 1001, 'Next: this week\'s again')
+    })
+
+    await test('notes on dates (range): the updated switch reads by update time - last week holds the notes edited then, this week the one edited today', async () => {
+        if (!nrStable()) return
+        await nrSwitch(3)
+        assert.ok(nrSectionOf(nrMadePrevEditedToday.user_updated_time).includes(`data-note-id="${nrMadePrevEditedToday.id}"`), 'this week: the note edited today, under today')
+        await nrState.panelMessageHandler(['calendarNavigate', -1])
+        assert.ok(nrSectionOf(nrEditedPrev.user_updated_time).includes(`data-note-id="${nrEditedPrev.id}"`), 'last week: the note edited then, made long ago')
+        assert.ok(nrHas(nrMadePrev), 'and the one made and edited then')
+        assert.ok(!nrHas(nrMadePrevEditedToday), 'not the one made then and edited today')
+    })
+
+    await test('notes on dates (range): the month reads the notes of its grid - last month\'s note is a dot on its day after Previous and in that day\'s list, and gone again after Next', async () => {
+        if (!nrStable()) return
+        await nrSwitch(4)
+        assert.ok(!nrHas(nrMadeLastMonth), 'this month: last month\'s note is not read')
+        await nrState.panelMessageHandler(['calendarNavigate', -1])
+        const key = nrDay(nrMadeLastMonth.user_created_time)
+        const html = nrHtml()
+        const at = html.indexOf(`onCalendarDaySelected('${key}')`)
+        assert.ok(at > 0 && html.slice(html.lastIndexOf('<td', at), html.indexOf('</td>', at)).includes('calendar-dot -note'), 'last month: a note dot on its day')
+        await nrState.panelMessageHandler(['calendarDaySelected', key])
+        const selected = nrHtml().slice(nrHtml().indexOf('<section class="calendar-selected">'))
+        assert.ok(selected.includes(`data-note-id="${nrMadeLastMonth.id}"`), 'and the note in that day\'s list')
+        await nrState.panelMessageHandler(['calendarNavigate', 1])
+        assert.ok(!nrHas(nrMadeLastMonth), 'Next: this month again, without it')
+    })
+
+    await test('notes on dates (range): a search-served week is unchanged - the capped set, its footer, and no older note', async () => {
+        if (!nrStable()) return
+        await nrSwitch(5)
+        const mark = nrState.gets.length
+        await nrState.panelMessageHandler(['calendarNavigate', -1])
+        assert.ok(nrSearchesSince(mark) > 0, 'precondition: criteria send the view to the search')
+        assert.ok(!nrHas(nrMadePrev) && !nrHas(nrMadePrevEditedToday), 'last week stays empty of the older notes')
+        assert.ok(nrHtml().includes('Showing the 1,000 most recently updated notes'), 'and the capped set keeps its footer')
+    })
+
+    await test('notes on dates (range): the store read is keyed by its range - a cached answer for last week is never painted into this week', async () => {
+        if (!nrStable()) return
+        await nrSwitch(1)
+        await nrState.panelMessageHandler(['calendarNavigate', -1])
+        assert.ok(nrHas(nrMadePrev), 'precondition: last week read')
+        // The twin profile opens on this week; its switch paints fast and fills from the result cache before its truth refresh. Every paint is checked.
+        const paints = []
+        const panels = global.joplin.views.panels
+        const setHtml = panels.setHtml
+        panels.setHtml = async (handle, html) => { paints.push(String(html)); return await setHtml(handle, html) }
+        try {
+            await nrSwitch(6)
+        } finally {
+            panels.setHtml = setHtml
+        }
+        assert.ok(paints.length > 0, 'precondition: the switch painted')
+        for (const html of paints){
+            assert.ok(!html.includes(`data-note-id="${nrMadePrev.id}"`), 'no paint holds last week\'s note')
+            assert.ok([...html.matchAll(/data-note-id="([^"]+)"/g)].some(match => nrFreshIds.has(match[1])), 'every paint holds this week\'s')
+        }
+        assert.strictEqual(nrFreshDrawn(), 1001, 'and the last one all of them')
+    })
+
     // ============================================================ the settings note (v2.6.0): profiles and settings between devices
     // Joplin syncs notes and never plugin settings, so one note carries Cockpit's profiles and view settings between a user's devices
     // (issue 5). The format half is a pure, dependency-free module - src/core/settingsNote.js, the SAME UMD file webpack bundles into

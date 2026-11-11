@@ -241,12 +241,24 @@ function readStoreTodos(showCompleted, showNoDue, excludedSet, notebooks){
     return items.sort((first, second) => (first.todo_due - second.todo_due) || compareIds(first.id, second.id))
 }
 
-function readStoreNotes(limit, excludedSet, notebooks){
+function readStoreNotes(limit, excludedSet, notebooks, range?){
     var items = filterExcluded(applyNoteNarrowing(getStoreModel().notes()), excludedSet)
     if (notebooks) items = items.filter(item => notebooks.ids.has(item.parent_id))
+    // A range read (getNotes' opts.range): the notes created and/or last updated inside the days on screen, every one of them (the caller passes no
+    // limit, so `more` stays false).
+    if (range) items = items.filter(item => inNoteRange(item, range))
     items.sort((first, second) => (second.user_updated_time - first.user_updated_time) || compareIds(second.id, first.id))
     var more = limit > 0 && items.length > limit
     return { items: more ? items.slice(0, limit) : items, more: more }
+}
+
+/** inNoteRange (2.11) ******************************************************************************************************************************
+ * Whether a note belongs to a range read: its creation time inside the range when the range reads by creation, or its last update inside it when   *
+ * it reads by update - either, with both switches on, since such a note is drawn on each of its days and one of them is on screen.                 *
+ ***************************************************************************************************************************************************/
+function inNoteRange(item, range){
+    var inside = value => value >= range.fromMs && value <= range.toMs
+    return (!!range.byCreated && inside(item.user_created_time)) || (!!range.byUpdated && inside(item.user_updated_time))
 }
 
 /** listAllNotes ***********************************************************************************************************************************
@@ -550,6 +562,14 @@ export async function searchTitleSuggestions(partial){
  * (opts.scanPass, shared with the to-dos), and no further once opts.scanIsCurrent answers false. `more` then says only that the search was cut     *
  * short; the caller adds what its own cap leaves out. opts.undrawn (2.10) is a skip list for the ring reads, given only when the checkbox filters  *
  * can show nothing: every row.                                                                                                                     *
+ *                                                                                                                                                  *
+ * opts.range (2.11, { fromMs, toMs, byCreated, byUpdated }): the week planner and the month drawing notes on their days ask for the notes of the   *
+ * days on screen rather than the newest `limit`, which on a large vault leave a past week or month all but empty. Honoured on the store path only: *
+ * readStoreNotes narrows the mirror as it always does and keeps the notes created (byCreated) or last updated (byUpdated) inside the range, every  *
+ * one of them, so `more` is false and the result says `ranged`; the scan and the caller's quick filters follow as today, and the key carries the   *
+ * range, so a step to the next week never meets the last week's entry. A search-served view ignores the option and keeps its capped read: a        *
+ * `created:` / `updated:` search could ask the same, but the search pages slowly, and a view narrow enough to need the search is usually whole     *
+ * within its cap anyway.                                                                                                                           *
  ***************************************************************************************************************************************************/
 export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var excluded = await excludedContext()
@@ -583,10 +603,13 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     var storeView = opts && opts.storeView ? opts.storeView : null
     var fromStore = storeServes(storeView ? storeView.criteria : searchCriteria)
     var storeNotebooks = fromStore && storeView ? storeView.notebooks : null
+    // The range read (2.11) is a store read; off the store the option is ignored, the key left as it was.
+    var range = fromStore && opts && opts.range ? opts.range : null
     if (fromStore){
         var revision = getStoreModel().revision
         dropStaleStoreEntries(revision)
-        cacheKey = storeCacheKey(revision, `x${excluded.clauses}|nb${storeNotebooks ? storeNotebooks.key : ""}|n${limit}${scanKeySuffix(opts)}`)
+        var rangeKey = range ? `|r${range.fromMs}-${range.toMs}${range.byCreated ? "c" : ""}${range.byUpdated ? "u" : ""}` : ""
+        cacheKey = storeCacheKey(revision, `x${excluded.clauses}|nb${storeNotebooks ? storeNotebooks.key : ""}|n${limit}${scanKeySuffix(opts)}${rangeKey}`)
     }
     var allNotes;
     var more = false
@@ -600,8 +623,8 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     } else {
         if (fromStore){
             // The mirror, newest first and capped exactly as the listing would be (see readStoreNotes): no data call, "show more" included.
-            // A scan takes every candidate; the caller caps what passes the filter.
-            var stored = readStoreNotes(scan ? 0 : limit, excluded.set, storeNotebooks)
+            // A scan takes every candidate; the caller caps what passes the filter. A range read takes every note of its days, uncapped.
+            var stored = readStoreNotes(scan || range ? 0 : limit, excluded.set, storeNotebooks, range)
             allNotes = stored.items
             more = stored.more
         } else if (unfiltered){
@@ -670,7 +693,7 @@ export async function getNotes(searchCriteria, fast?, useCache?, opts?){
     mergeOptimisticNotes(allNotes, opts && opts.viewKey)
     allNotes = filterExcluded(allNotes, excluded.set)
     allNotes.sort((first, second) => String(first.title).localeCompare(String(second.title), undefined, { numeric: true, sensitivity: "base" }))
-    return { notes: allNotes, more: more }
+    return { notes: allNotes, more: more, ranged: !!range }
 }
 
 /** searchOutsideFilters ****************************************************************************************************************************

@@ -28,6 +28,7 @@ import { iconButton, icons } from "../icons";
 // The pure "drop between rows" date math (window.CockpitBetween is unused in this bundle; the require pulls the same UMD
 // file the Node harness unit-tests, so the drop path and the tests share one implementation). Webpack bundles it in.
 const { sequenceBetween, betweenBounds } = require("../../core/between");
+const { drawnRange } = require("../../core/noteSlots");
 
 /** Variable Declaration ***************************************************************************************************************************/
 var panel = null;
@@ -1681,7 +1682,11 @@ async function renderPanelData(options?){
     // Notes on dates (2.11): a profile that shows its notes on the day they were created or last updated (notesOnDates) has the Notes section's
     // own set read once, here, by the section's fetch, and handed to the formatter in the view state, which draws each note on its day among the
     // to-dos; the Notes section is then not drawn. Every other profile takes the old path below, untouched.
-    var datedNotes = notesOnDates(profile) ? await fetchSectionNotes(profile, panelViewState) : null
+    // The week planner and the month read every note of the days they draw (drawnRange, section 7 of the 2.11 brief) when the note store serves
+    // the view; worked out here, once, from the calendarViewState.anchor this render's view state copied, which is the one the formatter draws by
+    // (a step the user takes mid-render belongs to the next render). null for the other formats.
+    var datedRange = notesOnDates(profile) ? drawnRange(profile, panelViewState.anchor) : null
+    var datedNotes = notesOnDates(profile) ? await fetchSectionNotes(profile, panelViewState, datedRange) : null
     var formatter = getFormatter(profile, 'html', datedNotes ? { ...panelViewState, datedNotes: datedNotes } : panelViewState)
     var todosHtml = await formatter.renderHtml()
     var notesHtml = ""
