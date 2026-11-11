@@ -809,6 +809,10 @@ function onNoteContextMenu(event, noteID){
  *                                                                                                                                                     *
  * QUICK EDIT… (2.8) calls the Jot plugin, which Cockpit does on desktop only, so the mobile menu is built without it ({ mobile: IS_MOBILE }) and stays*
  * the menu it was before. On desktop it is single-only: greyed in a multi-selection, as Open is.                                                      *
+ *                                                                                                                                                     *
+ * PIN (2.11) is read from the markup the host drew, not asked of it: every row of a pinned note carries data-pinned="1" and the list carries the     *
+ * pin target (pinMenuState). The item is multi-capable, so it is routed here for one row and for many alike - as pinNotes / unpinNotes with the ids, *
+ * never through the batch handler.                                                                                                                   *
  ***************************************************************************************************************************************************/
 function showNoteContextMenu(event, noteID, isTodo){
     // Belt to the braces of the panel-wide contextmenu suppression above: while a touch gesture owns the finger -
@@ -840,7 +844,8 @@ function showNoteContextMenu(event, noteID, isTodo){
     var extra = (IS_MOBILE && isTodo) ? [{ action: 'setDueDate', label: 'Move to date…' }] : []
     var menu = document.createElement('div')
     menu.id = 'noteContextMenu'
-    menu.innerHTML = window.NoteMenu.menuHtml(count, extra, { mobile: IS_MOBILE })
+    var pinState = pinMenuState(selectionIDs)
+    menu.innerHTML = window.NoteMenu.menuHtml(count, extra, { mobile: IS_MOBILE, pin: pinState })
     menu.addEventListener('click', clickEvent => {
         var button = clickEvent.target.closest ? clickEvent.target.closest('.context-menu-item') : null
         // A greyed-out (single-only, on a multi-selection) item is inert: it fires no action and leaves the
@@ -850,6 +855,7 @@ function showNoteContextMenu(event, noteID, isTodo){
         hideNoteContextMenu()
         if (!action) return
         if (action === 'setDueDate'){ requestAlarm([noteID]); return }
+        if (action === 'pin'){ void webviewApi.postMessage([window.NoteMenu.pinMessage(pinState.allPinned, pinState.target, IS_MOBILE), selectionIDs]); return }
         // Multi-selection (desktop): route every capable action to the host's batch handler with all the ids.
         // Single-only actions never get here - they render disabled and returned above.
         if (count > 1){ void webviewApi.postMessage(['noteMenuActionMulti', action, selectionIDs]); return }
@@ -872,6 +878,20 @@ function showNoteContextMenu(event, noteID, isTodo){
         menu.tabIndex = -1
         try { menu.focus({ preventScroll: true }) } catch (error){ menu.focus() }
     }
+}
+
+/** pinMenuState (2.11) ******************************************************************************************************************************
+ * What the row menu's Pin item needs, read off the markup the host drew: whether EVERY id of the selection is pinned in Cockpit's section (a row of  *
+ * a pinned note carries data-pinned="1", wherever it is drawn), and the pin target, which rides on the list as data-pin-target - absent for the      *
+ * default, Cockpit's section, so the default markup is the one before 2.11. The ids are 32-hex note ids taken from the markup itself.                 *
+ ***************************************************************************************************************************************************/
+function pinMenuState(ids){
+    var list = document.querySelector('.todos')
+    var target = (list && list.dataset && list.dataset.pinTarget) || 'cockpit'
+    var allPinned = ids.length > 0 && ids.every(function(id){
+        return !!document.querySelector('[data-pinned="1"][data-todo-id="' + id + '"], [data-pinned="1"][data-note-id="' + id + '"]')
+    })
+    return { allPinned: allPinned, target: target }
 }
 
 // Whatever held focus in the panel when the menu took it, so closing the menu can hand it back.
@@ -1347,9 +1367,11 @@ function betweenGroupHeading(row){
 // row: groupDate is the group's calendar date ('YYYY-MM-DD') for a DATED group, or null for a DATELESS group
 // (Overdue/Future) whose edge day the host derives from the neighbour's own due. Returns null (not eligible) for a row
 // outside the .todos list (list views only), a headingless row, or the No-Due group (data-drop 'clear'): its rows carry
-// no due, so there is nothing to sit BETWEEN. An INTERIOR drop (both neighbours present) needs no group date at all -
+// no due, so there is nothing to sit BETWEEN - nor for the Pinned group (2.11, data-group="pinned"), whose rows stand in pin order, whatever
+// their dues, and which sits outside the list's own groups anyway. An INTERIOR drop (both neighbours present) needs no group date at all -
 // the neighbours' dues define the interval - which is exactly what lets the dateless groups take between-drops.
 function betweenGroupInfo(row){
+    if (row && row.closest && row.closest('[data-group="pinned"]')) return null    // Pinned (2.11): pin order, not due order - nothing to sit between
     if (!row || !row.parentElement || !row.parentElement.classList.contains('todos')) return null
     var heading = betweenGroupHeading(row)
     if (!heading) return null

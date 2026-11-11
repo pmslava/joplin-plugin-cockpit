@@ -25,6 +25,9 @@ export const bellOpensCockpitPickerSettingKey = "bellOpensCockpitPicker"
 /** What a click and a right-click on New note / New to-do do (2.8), per device and desktop only: see createButtonRoute below. */
 export const createButtonClickSettingKey = "createButtonClick"
 export const createButtonRightClickSettingKey = "createButtonRightClick"
+/** Pin (2.11), both per device: what Pin in the row menu does, and Cockpit's own pins - see getPinTarget and getPinnedNoteIds below. */
+export const pinTargetSettingKey = "pinTarget"
+export const pinnedNoteIdsSettingKey = "pinnedNoteIds"
 export const gestureTraceSettingKey = "gestureTrace"
 /** The gesture trace's ONE switch. A shipping build must never show the diagnostic strip, whatever a profile happens
  * to have stored, so every reader of gestureTraceSettingKey is gated on this constant and startup resets a stored
@@ -60,6 +63,13 @@ const createButtonRouteOptions = {
 	editor: "Create and open in the editor",
 	newWindow: "Create and open in a new window",
 	jot: "Jot",
+}
+
+/** Where Pin in the row menu sends a note (2.11), in the order Settings lists them. */
+const pinTargetOptions = {
+	cockpit: "Cockpit's Pinned section",
+	noteTabs: "The Note Tabs plugin",
+	both: "Both",
 }
 
 /** The theme settings that, when changed, need the panel re-rendered. */
@@ -178,6 +188,25 @@ export async function setupSettings(){
 			isEnum: true,
 			options: createButtonRouteOptions,
 			public: true,
+			section: 'section',
+		},
+		[pinTargetSettingKey]: {
+			label: "Pinning a note",
+			description: "What Pin in the row menu does. Cockpit's Pinned section sits above the list in every profile. The Note Tabs plugin must be installed for its tabs. On mobile the Pinned section is used whatever this says.",
+			value: "cockpit",
+			type: SettingItemType.String,
+			isEnum: true,
+			options: pinTargetOptions,
+			public: true,
+			section: 'section',
+		},
+		[pinnedNoteIdsSettingKey]: {
+			// Cockpit's own pins: a JSON array of note ids in the order they were pinned. Per device, as Note Tabs keeps its own
+			// list; written by the row menu's Pin / Unpin and by the Pinned section's pruning (src/core/pinned.ts). Not shown.
+			label: "The ids of the notes pinned in Cockpit's Pinned section (managed by Cockpit)",
+			value: "[]",
+			type: SettingItemType.String,
+			public: false,
 			section: 'section',
 		},
 		"panelSortField": {
@@ -356,6 +385,8 @@ export async function setupSettings(){
 		// The create buttons' tooltips say what a click and a right-click do (2.8, panel.ts createButtonTooltip), so a change to either
 		// route redraws the panel.
 		if (keys.includes(createButtonClickSettingKey) || keys.includes(createButtonRightClickSettingKey)) await refreshInterfaces()
+		// The panel's markup carries the pin target (2.11: the row menu's labels read it), so a change of it redraws the panel.
+		if (keys.includes(pinTargetSettingKey)) await refreshInterfaces()
 		// The user edited the visible "Excluded notebooks" names field: resolve the names to ids (the source
 		// of truth), rewrite the field to the canonical resolved titles, and re-render everything so the
 		// exclusion takes effect at once.
@@ -609,6 +640,36 @@ export async function getCreateButtonRightClickRoute(){
 function createButtonRoute(value, fallback){
 	var route = String(value)
 	return Object.prototype.hasOwnProperty.call(createButtonRouteOptions, route) ? route : fallback
+}
+
+/** getPinTarget (2.11) ******************************************************************************************************************************
+ * Where Pin in the row menu sends a note: "cockpit", "noteTabs" or "both". A stored value outside the three answers the setting's default, as	*
+ * createButtonRoute does. Mobile never asks: there the Cockpit section is used whatever this says (src/core/pinned.ts, pinTargetFor).				*
+ ***************************************************************************************************************************************************/
+export async function getPinTarget(){
+	var target = String(await joplin.settings.value(pinTargetSettingKey))
+	return Object.prototype.hasOwnProperty.call(pinTargetOptions, target) ? target : "cockpit"
+}
+
+/** getPinnedNoteIds / setPinnedNoteIds (2.11) ******************************************************************************************************
+ * Cockpit's own pins, in pin order. The setting holds JSON text, so a value that does not parse, or is not an array, reads as no pins at all	*
+ * rather than breaking the render that asks; anything that is not a non-empty string is dropped, and so is a repeat.								*
+ ***************************************************************************************************************************************************/
+export async function getPinnedNoteIds(): Promise<string[]> {
+	var parsed = null
+	try {
+		parsed = JSON.parse(String(await joplin.settings.value(pinnedNoteIdsSettingKey) || "[]"))
+	} catch (error) {
+		parsed = null
+	}
+	if (!Array.isArray(parsed)) return []
+	var ids = []
+	for (var id of parsed) if (typeof id === "string" && id && !ids.includes(id)) ids.push(id)
+	return ids
+}
+
+export async function setPinnedNoteIds(ids: string[]){
+	await joplin.settings.setValue(pinnedNoteIdsSettingKey, JSON.stringify(ids || []))
 }
 
 /** setCustomCss ************************************************************************************************************************************

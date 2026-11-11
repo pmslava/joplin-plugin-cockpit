@@ -23,6 +23,7 @@ import { appVersionAtLeast, isMobile } from "../../core/platform";
 import { isSettingsNoteConnected } from "../../core/settingsSync";
 import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
+import { applyPinChange, pinTargetAttribute, withPinnedSection } from "../../core/pinned";
 import { iconButton, icons } from "../icons";
 // The pure "drop between rows" date math (window.CockpitBetween is unused in this bundle; the require pulls the same UMD
 // file the Node harness unit-tests, so the drop path and the tests share one implementation). Webpack bundles it in.
@@ -755,6 +756,11 @@ async function eventHandler(message){
         // The batch version: the webview posts this only when several rows are selected (desktop-only).
         var menuMultiIDs = Array.isArray(message[2]) ? message[2].map(id => String(id || "")).filter(Boolean) : []
         await runNoteMenuActionMulti(String(message[1] || ""), menuMultiIDs)
+    } else if (message[0] == 'pinNotes' || message[0] == 'unpinNotes'){
+        // The row menu's Pin / Unpin (2.11) with the selection's ids, one row or many: Cockpit's section, Note Tabs or both, as the pin target
+        // says (applyPinChange in core/pinned.ts). A change to Cockpit's pins is drawn at once; a call into Note Tabs changes nothing here.
+        var pinIDs = Array.isArray(message[1]) ? message[1].map(id => String(id || "")).filter(Boolean) : []
+        if (await applyPinChange(pinIDs, message[0] == 'pinNotes', await isMobile(), notifyPanel)) await refreshPanelData()
     } else if (message[0] == 'todoChecked'){
         await applyTodoChecked(String(message[1] || ""), !!message[2])
     } else if (message[0] == 'profilesDropdownChanged'){
@@ -1706,6 +1712,9 @@ async function renderPanelData(options?){
     // from. The two peeks cannot collide in practice: a reveal clears the typed search, which is the ordinary
     // peek's own trigger, and committing a search clears the pin.
     if (revealedNote) todosHtml += await renderRevealedNoteSection(revealedNote, panelViewState)
+    // The Pinned section (2.11): first in the list in every format, drawn from Cockpit's pins alone and so in every profile, and every row of a
+    // pinned note marked for the row menu. Added after the empty-view decision above, which it therefore never counts as content.
+    todosHtml = await withPinnedSection(todosHtml, profile, panelViewState)
     var controlsHtml = await getControlsHTML(profileID)
     // The theme block is rebuilt on every render (never memoised) so that a theme-setting change
     // alters the markup and gets past the equality guard below. It sits before the custom CSS, which
@@ -1741,8 +1750,10 @@ async function renderPanelData(options?){
     // even when the view it lands in is otherwise byte-identical to the one on screen, while an UNCHANGED marker
     // leaves the guard exactly as strict as it was. The webview consumes it once, on the render that holds the row.
     var revealAttributes = revealID ? ` data-reveal-id="${escapeHtml(revealID)}" data-reveal-note="${escapeHtml(revealNoteID)}"` : ''
+    // The pin target, for the row menu's Pin labels (2.11): nothing for the default, so the default list is the one before 2.11.
+    var pinTarget = await pinTargetAttribute(mobile)
     var contentHtml = panelTemplate
-        .replace("<<REVEAL>>", () => revealAttributes)
+        .replace("<<REVEAL>>", () => revealAttributes + pinTarget)
         .replace("<<THEME_CSS>>", () => themeCss)
         .replace("<<CUSTOM_CSS>>", () => customCss)
         .replace("<<ROOT_MARKER>>", () => rootMarker)

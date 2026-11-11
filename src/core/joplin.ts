@@ -915,7 +915,7 @@ function viewportRank(idx, start, total){
     return idx >= start ? idx - start : total + (start - idx)
 }
 
-async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: Set<string>, undrawn?: (items) => Set<string>, budget = maxBodyFetchesPerRefresh, isCurrent?: () => boolean, pass?: { deadline: number }){
+export async function attachCheckboxCounts(items, fast?, priorityStart?, changedOnly?: Set<string>, undrawn?: (items) => Set<string>, budget = maxBodyFetchesPerRefresh, isCurrent?: () => boolean, pass?: { deadline: number }){
     if (!fast){
         // The rows the panel's drawing cap leaves out of this render (2.7.1) have no ring on screen: none is read and none is owed (a render is
         // complete without them), and they take no place in the viewport index, which counts the drawn rows only - priorityStart is estimated from

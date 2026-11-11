@@ -785,6 +785,12 @@ h2 {
     padding-top: 2px;
 }
 
+/* The Pinned section (2.11) is the list's first child whenever it is drawn, so its heading takes the tighter top the first heading has above;
+ * the heading after it is then an ordinary one. Rows and heading are otherwise the shared .todo / h2 rules, as the Notes section's are. */
+.todos > .pinned-section:first-child > h2:first-child {
+    padding-top: 2px;
+}
+
 /* To-do rows ----------------------------------------------------------------------------------*/
 
 .todo {

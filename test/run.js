@@ -4627,6 +4627,354 @@ async function main() {
         assert.strictEqual(m.dataDeletes.length, 0, 'a copy must not delete any note')
     })
 
+    // ============================================================ PIN (2.11): the row menu's Pin, Cockpit's Pinned section, Note Tabs
+    // The owner: "In Cockpit settings - picker what to do on pin: Own Cockpit pin, Note Tab plugin pin, or both. On Cockpit: Pinned notes show in
+    // the section Pinned above Overdue. On Note Tab: see how it is implemented in Jot. Add option to pin note [to the row menu]. Pinned notes/todos
+    // should be visible on all profiles, independently from profile." (docs/BRIEF-2.11-dates-pins-drag.md section 2.) Pinned here: the menu's
+    // labels in every state and target (the shared NoteMenu module), the webview's reading of the markup and its gate on the between-drop (the
+    // webview functions run against stand-in elements), the two settings, the section's markup and placement, its independence from the view, the
+    // pruning of a gone pin, the Note Tabs call, the one toast a session, mobile, and the overview markdown that never draws it.
+    const PIN_TARGET_KEY = 'pinTarget'
+    const PINNED_IDS_KEY = 'pinnedNoteIds'
+    const PIN_TOAST = 'Cockpit: the Note Tabs plugin is not installed or is off.'
+    const pinFolder = id32('pf')
+    const pinFolders = [{ id: pinFolder, title: 'Pins', parent_id: '' }]
+    const pinOverdue = id32('po')
+    const pinOther = id32('pt')
+    const pinNote = id32('pn')
+    const pinNotes = () => ({
+        [pinOverdue]: { id: pinOverdue, title: 'Pinned overdue task', is_todo: 1, todo_completed: 0, todo_due: Date.now() - 2 * 86400000, parent_id: pinFolder, user_updated_time: 1, user_created_time: 1, deleted_time: 0, body: '- [x] one\n- [ ] two' },
+        [pinOther]: { id: pinOther, title: 'Another task', is_todo: 1, todo_completed: 0, todo_due: Date.now() + 3600000, parent_id: pinFolder, user_updated_time: 1, user_created_time: 1, deleted_time: 0 },
+        [pinNote]: { id: pinNote, title: 'A pinned plain note', is_todo: 0, todo_completed: 0, todo_due: 0, parent_id: pinFolder, user_updated_time: 1, user_created_time: 1, deleted_time: 0 },
+    })
+    const pinTodoRows = (notes) => [notes[pinOverdue], notes[pinOther]].map(note => ({ ...note }))
+    // A desktop (or mobile) run whose search serves the two to-dos and whose GET by id serves all three notes.
+    const pinRun = async (opts, platform) => {
+        const notes = (opts && opts.notes) || pinNotes()
+        const base = { notes, todos: (opts && opts.todos) || pinTodoRows(notes), folders: pinFolders }
+        if (platform === 'mobile') {
+            const dir = path.join(tmp, `pin-mobile-${multiRunSeq++}`)
+            return run(Object.assign({ dataDir: dir, installationDir: dir + '-install', require: mobileRequire, versionInfo: { version: '3.7.0', platform: 'mobile' } }, base, opts || {}, { notes }))
+        }
+        return desktopRun(Object.assign(base, opts || {}, { notes }))
+    }
+    const pinPanel = (state) => state.panelHtml['panel-panel']
+    // The list's own markup: what <section class="todos" ...> holds.
+    const pinList = (state) => {
+        const html = pinPanel(state)
+        const open = html.indexOf('<section class="todos"')
+        return html.slice(html.indexOf('>', open) + 1)
+    }
+    const PINNED_OPEN = '<section class="pinned-section" data-group="pinned">'
+    const pinnedSectionOf = (state) => {
+        const list = pinList(state)
+        const start = list.indexOf(PINNED_OPEN)
+        if (start < 0) return null
+        return list.slice(start, list.indexOf('</section>', start))
+    }
+
+    // -- labels (the pure menu module) --------------------------------------------------------------------------
+    await test('pin (menu): the desktop single-note menu with the pin state is the 2.8 menu with Pin right after Quick edit…; without it, the menu before 2.11', () => {
+        const openItem = menuItemHtml('context-menu-item', 'open', 'Open')
+        const quickEdit = menuItemHtml('context-menu-item', 'quickEdit', 'Quick edit…')
+        const rest = MENU_SINGLE_BEFORE_2_8.slice(openItem.length)
+        const withPin = (label) => openItem + quickEdit + menuItemHtml('context-menu-item', 'pin', label) + rest
+        assert.strictEqual(NoteMenu.menuHtml(1, [], { mobile: false, pin: { allPinned: false, target: 'cockpit' } }), withPin('Pin'))
+        assert.strictEqual(NoteMenu.menuHtml(1, [], { mobile: false, pin: { allPinned: true, target: 'cockpit' } }), withPin('Unpin'))
+        assert.strictEqual(NoteMenu.menuHtml(1, [], { pin: { allPinned: true, target: 'both' } }), withPin('Unpin'), 'Both reads as Cockpit')
+        assert.strictEqual(NoteMenu.menuHtml(1, [], { pin: { allPinned: false, target: 'noteTabs' } }), withPin('Pin in Note Tabs'))
+        assert.strictEqual(NoteMenu.menuHtml(1, [], { pin: { allPinned: true, target: 'noteTabs' } }), withPin('Pin in Note Tabs'), 'Note Tabs never offers an Unpin')
+        assert.strictEqual(NoteMenu.menuHtml(1, []), openItem + quickEdit + rest, 'no pin state: no Pin item, the menu before 2.11')
+        assert.deepStrictEqual(NoteMenu.NOTE_MENU_ITEMS[2], { action: 'pin', label: 'Pin' }, 'third in the shared list, after Quick edit…')
+    })
+    await test('pin (menu): several rows - "Pin N notes" while any is unpinned, "Unpin N notes" when all are, "Pin N notes in Note Tabs" for Note Tabs; never greyed', () => {
+        for (const [allPinned, target, label] of [
+            [false, 'cockpit', 'Pin 3 notes'], [true, 'cockpit', 'Unpin 3 notes'],
+            [false, 'both', 'Pin 3 notes'], [true, 'both', 'Unpin 3 notes'],
+            [false, 'noteTabs', 'Pin 3 notes in Note Tabs'], [true, 'noteTabs', 'Pin 3 notes in Note Tabs'],
+        ]){
+            const html = NoteMenu.menuHtml(3, [], { pin: { allPinned, target } })
+            assert.ok(html.includes(menuItemHtml('context-menu-item', 'pin', label)), `${target}, all pinned ${allPinned}: ${label}`)
+            assert.strictEqual((html.match(/aria-disabled/g) || []).length, 2, 'only Open and Quick edit… are greyed')
+        }
+        assert.strictEqual(NoteMenu.pinLabel(1, false, 'cockpit', false), 'Pin')
+        assert.strictEqual(NoteMenu.pinLabel(2, true, 'cockpit', false), 'Unpin 2 notes')
+    })
+    await test('pin (menu): mobile reads the Cockpit labels whatever the target - the 2.8 mobile menu with Pin after Open', () => {
+        const openItem = menuItemHtml('context-menu-item', 'open', 'Open')
+        const rest = MENU_SINGLE_BEFORE_2_8.slice(openItem.length)
+        for (const target of ['cockpit', 'noteTabs', 'both']){
+            assert.strictEqual(NoteMenu.menuHtml(1, [], { mobile: true, pin: { allPinned: false, target } }), openItem + menuItemHtml('context-menu-item', 'pin', 'Pin') + rest, target)
+            assert.strictEqual(NoteMenu.menuHtml(1, [], { mobile: true, pin: { allPinned: true, target } }), openItem + menuItemHtml('context-menu-item', 'pin', 'Unpin') + rest, target + ', pinned')
+        }
+        const withExtra = NoteMenu.menuHtml(1, [{ action: 'setDueDate', label: 'Move to date…' }], { mobile: true, pin: { allPinned: false, target: 'noteTabs' } })
+        assert.ok(withExtra.startsWith(menuItemHtml('context-menu-item', 'setDueDate', 'Move to date…') + openItem + menuItemHtml('context-menu-item', 'pin', 'Pin')), 'Move to date… still leads')
+    })
+    await test('pin (menu): the click posts unpinNotes exactly when the label says Unpin, pinNotes otherwise', () => {
+        assert.strictEqual(NoteMenu.pinMessage(false, 'cockpit', false), 'pinNotes')
+        assert.strictEqual(NoteMenu.pinMessage(true, 'cockpit', false), 'unpinNotes')
+        assert.strictEqual(NoteMenu.pinMessage(true, 'both', false), 'unpinNotes')
+        assert.strictEqual(NoteMenu.pinMessage(true, 'noteTabs', false), 'pinNotes', 'Note Tabs: always a pin')
+        assert.strictEqual(NoteMenu.pinMessage(true, 'noteTabs', true), 'unpinNotes', 'mobile: Cockpit, so a pinned row unpins')
+    })
+
+    // -- the webview: reading the markup, routing the click, refusing the between-drop ---------------------------
+    await test('pin (webview): the menu is built with the pin state and its click posts the pin message with every selected id, before the batch route', () => {
+        const body = handlerBody('showNoteContextMenu')
+        assert.ok(body.includes('var pinState = pinMenuState(selectionIDs)'), 'the state is read for the selection')
+        assert.ok(body.includes('window.NoteMenu.menuHtml(count, extra, { mobile: IS_MOBILE, pin: pinState })'), 'and handed to the menu')
+        const pinAt = body.indexOf("if (action === 'pin'){ void webviewApi.postMessage([window.NoteMenu.pinMessage(pinState.allPinned, pinState.target, IS_MOBILE), selectionIDs]); return }")
+        assert.ok(pinAt > 0, 'a Pin click posts pinNotes / unpinNotes with the selection ids')
+        assert.ok(pinAt < body.indexOf("noteMenuActionMulti"), 'ahead of the batch route, so one row and many take the same message')
+    })
+    await test('pin (webview): pinMenuState reads data-pinned off the rows and the target off the list, Cockpit when the list says nothing', () => {
+        const make = (pinnedIds, target) => ({
+            querySelector: (selector) => {
+                if (selector === '.todos') return { dataset: target ? { pinTarget: target } : {} }
+                const match = /data-todo-id="([^"]*)"/.exec(selector)
+                return match && pinnedIds.includes(match[1]) ? {} : null
+            },
+        })
+        const build = (doc) => new Function('document', handlerBody('pinMenuState') + '\n}\nreturn pinMenuState')(doc)
+        assert.deepStrictEqual(build(make(['a', 'b'], null))(['a', 'b']), { allPinned: true, target: 'cockpit' })
+        assert.deepStrictEqual(build(make(['a'], 'noteTabs'))(['a', 'b']), { allPinned: false, target: 'noteTabs' })
+        assert.deepStrictEqual(build(make([], 'both'))(['a']), { allPinned: false, target: 'both' })
+    })
+    await test('pin (webview): a row in the Pinned group takes no between-drop, gated on data-group="pinned" like the No-Due group; a list row still does', () => {
+        const heading = { getAttribute: (name) => (name === 'data-drop' ? '2026-11-12' : null) }
+        const betweenGroupInfo = new Function('betweenGroupHeading', handlerBody('betweenGroupInfo') + '\n}\nreturn betweenGroupInfo')(() => heading)
+        const listParent = { classList: { contains: (name) => name === 'todos' } }
+        const pinnedRow = { parentElement: listParent, closest: (selector) => (selector === '[data-group="pinned"]' ? {} : null) }
+        const listRow = { parentElement: listParent, closest: () => null }
+        assert.strictEqual(betweenGroupInfo(pinnedRow), null, 'a pinned row is never between-eligible, wherever its section sits')
+        assert.deepStrictEqual(betweenGroupInfo(listRow), { groupDate: '2026-11-12', groupEndDate: '2026-11-12' }, 'an ordinary row keeps its group date')
+    })
+
+    // -- the settings -------------------------------------------------------------------------------------------
+    await test('pin (settings): "Pinning a note" is a public per-device enum defaulting to Cockpit\'s section; pinnedNoteIds is private, "[]"; neither travels', async () => {
+        const state = await pinRun()
+        const target = state.registeredSettings[PIN_TARGET_KEY]
+        assert.ok(target, 'pinTarget is registered')
+        assert.strictEqual(target.label, 'Pinning a note')
+        assert.strictEqual(target.value, 'cockpit')
+        assert.strictEqual(target.isEnum, true)
+        assert.strictEqual(target.type, 2, 'SettingItemType.String')
+        assert.strictEqual(target.public, true)
+        assert.strictEqual(target.section, 'section')
+        assert.deepStrictEqual(Object.entries(target.options), [['cockpit', "Cockpit's Pinned section"], ['noteTabs', 'The Note Tabs plugin'], ['both', 'Both']])
+        assert.strictEqual(target.description, "What Pin in the row menu does. Cockpit's Pinned section sits above the list in every profile. The Note Tabs plugin must be installed for its tabs. On mobile the Pinned section is used whatever this says.")
+        const ids = state.registeredSettings[PINNED_IDS_KEY]
+        assert.ok(ids, 'pinnedNoteIds is registered')
+        assert.strictEqual(ids.public, false, 'not shown')
+        assert.strictEqual(ids.value, '[]', 'no pins on a fresh install')
+        assert.strictEqual(ids.type, 2)
+        const synced = require('../src/core/settingsNote.js').SYNCED_SETTING_KEYS
+        assert.ok(!synced.includes(PIN_TARGET_KEY) && !synced.includes(PINNED_IDS_KEY), 'both are per device')
+        const phone = await pinRun({}, 'mobile')
+        assert.ok(phone.registeredSettings[PIN_TARGET_KEY] && phone.registeredSettings[PINNED_IDS_KEY], 'the mobile app registers both too')
+    })
+    await test('pin (settings): a stored pin list that is not a JSON array of ids reads as no pins - no section, no failure - and a stored target outside the three reads as Cockpit', async () => {
+        for (const stored of ['not json', '{"a":1}', '[1, null, ""]']){
+            const state = await pinRun({ initialSettings: { [PINNED_IDS_KEY]: stored, [PIN_TARGET_KEY]: 'somewhereElse' } })
+            assert.ok(pinPanel(state).includes('Pinned overdue task'), `the panel draws (${stored})`)
+            assert.strictEqual(pinnedSectionOf(state), null, `and has no Pinned section (${stored})`)
+            assert.ok(!pinPanel(state).includes('data-pin-target'), 'an unknown target is the default, which the list does not spell out')
+        }
+    })
+    await test('pin (settings): with no pins and the default target the list markup carries neither data-pinned nor data-pin-target', async () => {
+        const state = await pinRun()
+        assert.ok(/<section class="todos" data-scroll-top="\d+" data-render-nonce="\d+">/.test(pinPanel(state)), 'the list opens as before 2.11')
+        assert.ok(!pinPanel(state).includes('data-pinned') && !pinPanel(state).includes('pinned-section'), 'nothing pinned, nothing marked')
+        const tabs = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'noteTabs' } })
+        assert.ok(/<section class="todos" data-scroll-top="\d+" data-render-nonce="\d+" data-pin-target="noteTabs">/.test(pinPanel(tabs)), 'the Note Tabs target rides on the list')
+        const phone = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'noteTabs' } }, 'mobile')
+        assert.ok(!pinPanel(phone).includes('data-pin-target'), 'mobile pins into Cockpit whatever the setting says, so it carries none')
+    })
+
+    // -- Cockpit's section ------------------------------------------------------------------------------------
+    await test('pin (Cockpit): pinNotes writes the id, the Pinned section is drawn first in the list - above Overdue - with the row, and every row of the note is marked', async () => {
+        const state = await pinRun()
+        assert.strictEqual(pinnedSectionOf(state), null, 'nothing pinned yet')
+        await state.panelMessageHandler(['pinNotes', [pinOverdue]])
+        assert.deepStrictEqual(JSON.parse(state.settings[PINNED_IDS_KEY]), [pinOverdue], 'the id is stored')
+        const list = pinList(state)
+        assert.ok(list.trimStart().startsWith(PINNED_OPEN + '\n            <h2>Pinned</h2>'), 'the section and its heading open the list')
+        assert.ok(list.indexOf(PINNED_OPEN) < list.indexOf('>Overdue</h2>'), 'above Overdue')
+        const section = pinnedSectionOf(state)
+        assert.ok(section.includes(`data-todo-id="${pinOverdue}" data-pinned="1" draggable="true"`), 'the to-do row, draggable like any desktop row, marked')
+        assert.ok(section.includes('Pinned overdue task'), 'with its title')
+        assert.ok(section.includes(`onchange="onTodoChecked('${pinOverdue}', this.checked)"`), 'and its tick')
+        assert.ok(section.includes('class="todo-notebook"') && section.includes('>Pins</span>'), 'and its notebook pill')
+        assert.ok(section.includes('--percent: 50;'), 'and its checkbox ring, attached as on every other row')
+        assert.ok(!section.includes(pinOther), 'only the pinned note is in the section')
+        assert.strictEqual((list.match(new RegExp(`data-todo-id="${pinOverdue}" data-pinned="1"`, 'g')) || []).length, 2, 'both rows of the note - the section\'s and Overdue\'s - are marked')
+        assert.ok(list.includes(`data-todo-id="${pinOther}" draggable`), 'an unpinned row is not')
+    })
+    await test('pin (Cockpit): pins append in order, a pin of a pinned row writes nothing, a note row is drawn as a note, and unpinNotes takes the section away', async () => {
+        const state = await pinRun()
+        await state.panelMessageHandler(['pinNotes', [pinNote, pinOverdue]])
+        const writes = state.settingWrites.length
+        await state.panelMessageHandler(['pinNotes', [pinOverdue]])
+        assert.strictEqual(state.settingWrites.length, writes, 'already pinned: no write')
+        assert.deepStrictEqual(JSON.parse(state.settings[PINNED_IDS_KEY]), [pinNote, pinOverdue], 'in the order given')
+        const section = pinnedSectionOf(state)
+        assert.ok(section.indexOf(`data-note-id="${pinNote}" data-pinned="1"`) >= 0, 'the note is a note row, marked')
+        assert.ok(section.indexOf(pinNote) < section.indexOf(pinOverdue), 'drawn in pin order')
+        await state.panelMessageHandler(['unpinNotes', [pinNote, pinOverdue]])
+        assert.deepStrictEqual(JSON.parse(state.settings[PINNED_IDS_KEY]), [], 'unpinned')
+        assert.strictEqual(pinnedSectionOf(state), null, 'the section is hidden when empty')
+        assert.ok(!pinPanel(state).includes('data-pinned'), 'and no row is marked')
+    })
+    await test('pin (Cockpit): the to-do label is the Interval format\'s Overdue date with the time after it', async () => {
+        const notes = pinNotes()
+        const state = await pinRun({ notes, initialSettings: { [PINNED_IDS_KEY]: JSON.stringify([pinOverdue]) } })
+        const due = new Date(notes[pinOverdue].todo_due)
+        const date = due.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+        // The default profile's formats (database.ts): numeric / long / numeric, a 24-hour clock.
+        const time = due.toLocaleTimeString(undefined, { hour: 'numeric', minute: 'numeric', hour12: false })
+        assert.ok(pinnedSectionOf(state).includes(`>${date} ${time} - Pinned overdue task</a>`), 'date, time, title')
+        assert.ok(pinList(state).includes(`>${date} - Pinned overdue task</a>`), 'the Overdue row keeps its own date-only label')
+    })
+    await test('pin (Cockpit): the section sits above a "before" Notes section and above a calendar\'s navigation', async () => {
+        const before = await pinRun({
+            searchNotes: [{ ...pinNotes()[pinNote] }],
+            initialSettings: {
+                [PINNED_IDS_KEY]: JSON.stringify([pinOverdue]),
+                profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Notes first', showNotes: true, notesPosition: 'before' }] }),
+                currentProfileID: 1,
+            },
+        })
+        const list = pinList(before)
+        assert.ok(list.includes('<section class="notes-section">'), 'the Notes section is drawn')
+        assert.ok(list.indexOf(PINNED_OPEN) < list.indexOf('<section class="notes-section">'), 'Pinned above it')
+        const month = await pinRun({
+            initialSettings: {
+                [PINNED_IDS_KEY]: JSON.stringify([pinOverdue]),
+                profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Month', displayFormat: 'month' }] }),
+                currentProfileID: 1,
+            },
+        })
+        assert.ok(pinList(month).trimStart().startsWith(PINNED_OPEN), 'Pinned is the first thing in a calendar format too, above its navigation')
+    })
+    await test('pin (Cockpit): the section is the same in every profile - not narrowed by the profile, the notebook filter, the search or the quick filters', async () => {
+        const notes = pinNotes()
+        const state = await pinRun({
+            notes,
+            todos: (q) => (q.includes('tag:one') ? pinTodoRows(notes) : []),
+            initialSettings: {
+                [PINNED_IDS_KEY]: JSON.stringify([pinOverdue]),
+                profileData: JSON.stringify({ nextID: 3, profiles: [
+                    { ...baseProfile, id: 1, name: 'One', searchCriteria: 'tag:one', sortOrder: 0 },
+                    { ...baseProfile, id: 2, name: 'Two', searchCriteria: 'tag:two', sortOrder: 1 },
+                ] }),
+                currentProfileID: 1,
+            },
+        })
+        const pinnedRow = `data-todo-id="${pinOverdue}" data-pinned="1"`
+        assert.ok(pinnedSectionOf(state).includes(pinnedRow), 'drawn in profile One')
+        await state.panelMessageHandler(['profilesDropdownChanged', 2])
+        assert.ok(!pinList(state).includes('>Overdue</h2>'), 'profile Two lists none of the to-dos')
+        assert.ok(pinnedSectionOf(state) && pinnedSectionOf(state).includes(pinnedRow), 'and still draws the pinned one')
+        await state.panelMessageHandler(['notebookFilterChanged', id32('elsewhere')])
+        assert.ok(pinnedSectionOf(state) && pinnedSectionOf(state).includes(pinnedRow), 'under a notebook filter that excludes it')
+        await state.panelMessageHandler(['searchFilterChanged', 'nothing matches this'])
+        assert.ok(pinnedSectionOf(state) && pinnedSectionOf(state).includes(pinnedRow), 'under a search that excludes it')
+        await state.panelMessageHandler(['quickFilterToggled', 'openCheckboxes'])
+        assert.ok(pinnedSectionOf(state) && pinnedSectionOf(state).includes(pinnedRow), 'and under a quick filter')
+    })
+    await test('pin (Cockpit): the pinned rows are not content to the empty-view peek - a search that empties the list still shows "Results outside current filters" / "No matches"', async () => {
+        const state = await pinRun({ todos: (q) => (q.includes('zzqq') ? [] : pinTodoRows(pinNotes())), initialSettings: { [PINNED_IDS_KEY]: JSON.stringify([pinOverdue]) } })
+        await state.panelMessageHandler(['searchFilterChanged', 'zzqq'])
+        assert.ok(pinnedSectionOf(state), 'the section is drawn')
+        assert.ok(pinList(state).includes('<section class="outside-results">'), 'and the peek ran as though the list were empty')
+    })
+    await test('pin (Cockpit): a pin in an excluded notebook is kept but not drawn; a completed to-do stays pinned', async () => {
+        const notes = pinNotes()
+        notes[pinOther].todo_completed = Date.now()
+        const excluded = await pinRun({ notes, initialSettings: { [PINNED_IDS_KEY]: JSON.stringify([pinOverdue]), excludedNotebookIds: pinFolder } })
+        assert.strictEqual(pinnedSectionOf(excluded), null, 'not drawn')
+        assert.deepStrictEqual(JSON.parse(excluded.settings[PINNED_IDS_KEY]), [pinOverdue], 'and kept')
+        const done = await pinRun({ notes, initialSettings: { [PINNED_IDS_KEY]: JSON.stringify([pinOther]) } })
+        assert.ok(pinnedSectionOf(done).includes(`data-todo-id="${pinOther}"`) && pinnedSectionOf(done).includes('todo -completed'), 'the completed to-do is drawn, completed')
+    })
+    await test('pin (Cockpit): a pin whose note is gone (Not Found) or trashed is dropped from the setting silently; the others are drawn', async () => {
+        const notes = pinNotes()
+        const trashed = id32('px')
+        notes[trashed] = { id: trashed, title: 'In the trash', is_todo: 0, parent_id: pinFolder, user_updated_time: 1, deleted_time: Date.now() }
+        const gone = id32('pg')
+        const state = await pinRun({ notes, initialSettings: { [PINNED_IDS_KEY]: JSON.stringify([gone, pinOverdue, trashed]) } })
+        assert.deepStrictEqual(JSON.parse(state.settings[PINNED_IDS_KEY]), [pinOverdue], 'the gone and the trashed are forgotten')
+        assert.ok(pinnedSectionOf(state).includes(pinOverdue) && !pinnedSectionOf(state).includes('In the trash'), 'the live one is drawn')
+        assert.strictEqual(state.messageBoxes.length, 0, 'silently')
+        assert.ok(!state.panelMessages.some(message => message[0] === 'panelToast'), 'not even a toast')
+    })
+    await test('pin (Cockpit): the overview markdown never draws the Pinned section', async () => {
+        const notes = pinNotes()
+        notes.ov = { id: 'ov', title: 'Overview', body: 'stale' }
+        const state = await pinRun({
+            notes,
+            initialSettings: {
+                [PINNED_IDS_KEY]: JSON.stringify([pinOverdue]),
+                profileData: JSON.stringify({ nextID: 2, profiles: [{ ...baseProfile, id: 1, name: 'Overview', noteID: 'ov' }] }),
+                currentProfileID: 1,
+            },
+        })
+        assert.ok(pinnedSectionOf(state), 'the panel draws it')
+        const overview = state.notePuts.filter(put => put.id === 'ov')
+        assert.ok(overview.length && overview[overview.length - 1].body.includes('Pinned overdue task](:/'), 'the overview note was written with the to-do')
+        assert.ok(overview.every(put => !/Pinned\n|## Pinned|data-pinned/.test(put.body)), 'and with no Pinned section')
+    })
+
+    // -- Note Tabs ----------------------------------------------------------------------------------------------
+    await test('pin (Note Tabs): tabsPinNote / tabsUnpinNote with the ids as an ARRAY, no own write, Cockpit\'s pins untouched', async () => {
+        const calls = []
+        const state = await pinRun({
+            initialSettings: { [PIN_TARGET_KEY]: 'noteTabs' },
+            appCommands: { tabsPinNote: async (...args) => { calls.push(['tabsPinNote', ...args]) }, tabsUnpinNote: async (...args) => { calls.push(['tabsUnpinNote', ...args]) } },
+        })
+        const writes = state.settingWrites.length
+        await state.panelMessageHandler(['pinNotes', [pinOverdue, pinNote]])
+        await state.panelMessageHandler(['unpinNotes', [pinOverdue]])
+        assert.deepStrictEqual(calls, [['tabsPinNote', [pinOverdue, pinNote]], ['tabsUnpinNote', [pinOverdue]]], 'one call each, with the id array as the only argument')
+        assert.strictEqual(state.settingWrites.length, writes, 'no Cockpit pin written')
+        assert.strictEqual(pinnedSectionOf(state), null, 'no section')
+        assert.strictEqual(state.notePuts.length + state.dataPosts.length, 0, 'and no note write of Cockpit\'s own')
+    })
+    await test('pin (Note Tabs): Both pins into Cockpit and Note Tabs; with Note Tabs absent Cockpit\'s pin still applies', async () => {
+        const calls = []
+        const both = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'both' }, appCommands: { tabsPinNote: async (ids) => { calls.push(ids) } } })
+        await both.panelMessageHandler(['pinNotes', [pinOverdue]])
+        assert.deepStrictEqual(calls, [[pinOverdue]], 'Note Tabs called')
+        assert.deepStrictEqual(JSON.parse(both.settings[PINNED_IDS_KEY]), [pinOverdue], 'and Cockpit pinned')
+        const absent = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'both' }, absentCommands: ['tabsPinNote'] })
+        await absent.panelMessageHandler(['pinNotes', [pinOverdue]])
+        assert.deepStrictEqual(JSON.parse(absent.settings[PINNED_IDS_KEY]), [pinOverdue], 'Cockpit pinned without Note Tabs')
+        assert.ok(pinnedSectionOf(absent).includes(pinOverdue), 'and drew it')
+    })
+    await test('pin (Note Tabs): an absent Note Tabs is said ONCE a session in the panel toast - "Command not found" and "without a runtime" alike - never in a dialog; another refusal says nothing', async () => {
+        const state = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'noteTabs' }, absentCommands: ['tabsPinNote', 'tabsUnpinNote'] })
+        await state.panelMessageHandler(['pinNotes', [pinOverdue]])
+        await state.panelMessageHandler(['pinNotes', [pinNote]])
+        await state.panelMessageHandler(['unpinNotes', [pinNote]])
+        assert.deepStrictEqual(state.panelMessages.filter(message => message[0] === 'panelToast'), [['panelToast', PIN_TOAST]], 'one toast, with the brief\'s words')
+        assert.strictEqual(state.messageBoxes.length, 0, 'no dialog')
+        const runtime = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'noteTabs' }, appCommands: { tabsPinNote: async () => { throw new Error('Cannot execute a command without a runtime: tabsPinNote') } } })
+        await runtime.panelMessageHandler(['pinNotes', [pinOverdue]])
+        assert.deepStrictEqual(runtime.panelMessages.filter(message => message[0] === 'panelToast'), [['panelToast', PIN_TOAST]], 'a plugin that is off is absent too')
+        const failing = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'noteTabs' }, appCommands: { tabsPinNote: async () => { throw new Error('Note Tabs: something went wrong') } } })
+        await failing.panelMessageHandler(['pinNotes', [pinOverdue]])
+        assert.ok(!failing.panelMessages.some(message => message[0] === 'panelToast'), 'Note Tabs\' own failure is not absence')
+    })
+    await test('pin (mobile): the Cockpit section is used whatever the setting says - the pin is written, Note Tabs is never called', async () => {
+        const state = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'noteTabs' } }, 'mobile')
+        await state.panelMessageHandler(['pinNotes', [pinOverdue]])
+        assert.deepStrictEqual(JSON.parse(state.settings[PINNED_IDS_KEY]), [pinOverdue], 'Cockpit pinned')
+        assert.ok(!state.commandCalls.some(call => /^tabs/.test(call.name)), 'no Note Tabs call')
+        const section = pinnedSectionOf(state)
+        assert.ok(section && section.includes(`data-todo-id="${pinOverdue}" data-pinned="1"`), 'the section is drawn')
+        assert.ok(!section.includes('draggable'), 'with a mobile row: no native drag')
+    })
+
     // ============================================================ TYPE FLIP: instant, and exactly one row
     // Switching an item between note and to-do type used to reach the panel only when the search index caught up
     // (the 7s reconcile rung), and until then the item rendered TWICE - once under a to-do heading, once under
@@ -15095,7 +15443,7 @@ async function main() {
         }
         assert.ok(handlerBody('onNewNoteClicked').includes("webviewApi.postMessage(['newNoteClicked'])"), 'the New note click still posts newNoteClicked')
         assert.ok(handlerBody('onNewTodoClicked').includes("webviewApi.postMessage(['newTodoClicked'])"), 'the New to-do click still posts newTodoClicked')
-        assert.ok(handlerBody('showNoteContextMenu').includes('window.NoteMenu.menuHtml(count, extra, { mobile: IS_MOBILE })'),
+        assert.ok(handlerBody('showNoteContextMenu').includes('window.NoteMenu.menuHtml(count, extra, { mobile: IS_MOBILE, pin: pinState })'),
             'the row menu is built for the platform, so mobile never draws Quick edit…')
     })
 

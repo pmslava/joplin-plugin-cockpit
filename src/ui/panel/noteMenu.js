@@ -16,6 +16,11 @@
  * mixed set for the same reason, and "Switch type of 3 items" already reads for both. So the labels below are deliberately UNCHANGED by the mixed     *
  * selection; only the time-based operations (drag-to-date, set alarm), which live outside this menu, care which kind a row is.                        *
  *                                                                                                                                                    *
+ * PIN (2.11): the Pin item sits right after Quick edit… and is drawn only when options.pin says what it would do - { allPinned, target } - so a   *
+ * caller that does not ask for it (the older harness pins, any other caller) gets the menu it always got, byte for byte. Its label is the        *
+ * selection's state and the target's (pinLabel); which message the click posts is pinMessage's. On mobile the Cockpit wording is used whatever   *
+ * the target, since the phone pins into Cockpit's own section only.                                                                               *
+ *                                                                                                                                                    *
  * The labels are static literals (no user text), so nothing here is HTML-escaped - matching the inline template this replaced.                        *
  ***************************************************************************************************************************************************/
 ;(function(root, factory){
@@ -31,6 +36,7 @@
     var NOTE_MENU_ITEMS = [
         { action: 'open', label: 'Open' },
         { action: 'quickEdit', label: 'Quick edit…' },
+        { action: 'pin', label: 'Pin' },
         { action: 'toggleType', label: 'Switch between note and to-do type' },
         { action: 'tags', label: 'Tags...' },
         { action: 'moveToFolder', label: 'Move to notebook...' },
@@ -48,6 +54,25 @@
     var DESKTOP_ONLY = { quickEdit: true }
 
     function isSingleOnly(action){ return !!SINGLE_ONLY[action] }
+
+    // The target a pin goes to as the menu speaks of it: mobile pins into Cockpit's own section whatever the setting says (2.11).
+    function effectivePinTarget(target, mobile){
+        return (!mobile && (target === 'noteTabs' || target === 'both')) ? target : 'cockpit'
+    }
+
+    // The Pin item's label (2.11) for a selection of `count` rows. allPinned: every selected row is pinned in Cockpit's section. With the
+    // Note Tabs target there is never an Unpin - Note Tabs unpins in its own panel - so the label only ever offers the pin, naming where.
+    function pinLabel(count, allPinned, target, mobile){
+        var n = (count > 1) ? count : 1
+        if (effectivePinTarget(target, mobile) === 'noteTabs') return n > 1 ? 'Pin ' + n + ' notes in Note Tabs' : 'Pin in Note Tabs'
+        if (n > 1) return (allPinned ? 'Unpin ' : 'Pin ') + n + ' notes'
+        return allPinned ? 'Unpin' : 'Pin'
+    }
+
+    // The message a click on the Pin item posts to the host (2.11): 'unpinNotes' exactly when its label says Unpin, 'pinNotes' otherwise.
+    function pinMessage(allPinned, target, mobile){
+        return (allPinned && effectivePinTarget(target, mobile) !== 'noteTabs') ? 'unpinNotes' : 'pinNotes'
+    }
 
     // The label a multi-capable item shows when `count` (> 1) rows are selected. The count is baked into the
     // wording so a mistaken batch is obvious before the click. Single-only items keep their base label (they
@@ -82,15 +107,22 @@
 
     // The full menu innerHTML for a selection of `count` rows. `extraItems` (an optional array of { action,
     // label }) are prepended verbatim - mobile's single-note "Move to date…" entry - and take no count.
-    // `options.mobile` leaves out the desktop-only items; without options the menu is the desktop one.
+    // `options.mobile` leaves out the desktop-only items; without options the menu is the desktop one. `options.pin` ({ allPinned, target },
+    // 2.11) draws the Pin item with the label pinLabel gives it; without it the item is left out and the menu is the one before 2.11.
     function menuHtml(count, extraItems, options){
         var n = (count > 1) ? count : 1
         var mobile = !!(options && options.mobile)
-        var baseItems = mobile
-            ? NOTE_MENU_ITEMS.filter(function(item){ return !DESKTOP_ONLY[item.action] })
-            : NOTE_MENU_ITEMS
+        var pin = (options && options.pin) ? options.pin : null
+        var baseItems = NOTE_MENU_ITEMS.filter(function(item){
+            if (mobile && DESKTOP_ONLY[item.action]) return false
+            return item.action !== 'pin' || !!pin
+        })
         var items = (extraItems || []).concat(baseItems)
-        return items.map(function(item){ return itemHtml(item, n) }).join('')
+        return items.map(function(item){
+            // The Pin label is already the count's (pinLabel); multiLabel leaves an action it does not know with the label it is given.
+            if (item.action === 'pin') return itemHtml({ action: 'pin', label: pinLabel(n, !!pin.allPinned, pin.target, mobile) }, n)
+            return itemHtml(item, n)
+        }).join('')
     }
 
     return {
@@ -99,5 +131,7 @@
         multiLabel: multiLabel,
         itemHtml: itemHtml,
         menuHtml: menuHtml,
+        pinLabel: pinLabel,
+        pinMessage: pinMessage,
     }
 })

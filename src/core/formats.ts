@@ -218,7 +218,7 @@ function renderTodoCapFooter(groupKey, shown, total){
  * ondrop. A row that carries no draggable attribute cannot start one, so the touch gesture gets the finger it was designed around. This repo believed  *
  * the opposite ("Android fires no HTML5 drag from a touch") until the device screenshots showed the drag image; MOBILE.md 7 records that.              *
  ***************************************************************************************************************************************************/
-function renderTodoRowHtml(todo, label, options?){
+export function renderTodoRowHtml(todo, label, options?){
     var mobile = !!(options && options.mobile)
     var draggable = !options || options.draggable !== false
     // Two independent switches, and only the first one touches selection: draggable:false is the peek's row (no drag,
@@ -268,7 +268,7 @@ function renderTodoRowHtml(todo, label, options?){
  * pickedNoteID is persisted desktop state that only powers selection highlighting/bulk actions a read-only peek row cannot use, so a peek row is kept    *
  * out of it. Every ordinary Notes-section row passes selectable:true and is byte-for-byte what renderNotesSection emitted before this was extracted.     *
  ***************************************************************************************************************************************************/
-function renderNoteRowHtml(note, options?){
+export function renderNoteRowHtml(note, options?){
     var mobile = !!(options && options.mobile)
     var selectable = !options || options.selectable !== false
     var titleHint = mobile ? "" : ` title="Left click to show&#10;Right click to options&#10;Double click to new window"`
