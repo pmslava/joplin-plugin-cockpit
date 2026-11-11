@@ -5,7 +5,7 @@
 /** Imports ****************************************************************************************************************************************/
 import joplin from "api";
 import { openStyler } from "../ui/styler/styler";
-import { filterByNotebook, revealNote, togglePanelVisibility } from "../ui/panel/panel";
+import { filterByNotebook, pinNotes, revealNote, togglePanelVisibility } from "../ui/panel/panel";
 import { showToolbarButtonSettingKey } from "./settings";
 import { connectSettingsNote } from "./settingsSync";
 
@@ -53,6 +53,15 @@ export async function setupCommands(){
         name: 'cockpit.revealNote',
         label: 'Cockpit: reveal note',
         execute: revealNote
+    })
+    // The third (2.11.1): 'cockpit.pinNotes' pins note ids in Cockpit's own Pinned section - never Note Tabs, whatever the pin target says,
+    // since the caller decides where it pins. Jot executes it for the note it creates when its own pin setting names Cockpit, passing an
+    // array of ids (a bare string is one id), and treats "Command not found" / "without a runtime" as Cockpit being absent. Total like the
+    // two above: an empty or malformed argument warns and returns; otherwise it resolves { pinned }, the ids now in the list.
+    await joplin.commands.register({
+        name: 'cockpit.pinNotes',
+        label: 'Cockpit: pin notes',
+        execute: pinNotes
     })
 }
 

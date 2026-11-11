@@ -68,6 +68,18 @@ export async function applyPinChange(ids: string[], pin: boolean, mobile: boolea
     return changed
 }
 
+/** pinInCockpit ************************************************************************************************************************************
+ * Another plugin's pin (cockpit.pinNotes, 2.11.1, docs/BRIEF-2.11-dates-pins-drag.md section 8): the ids appended to Cockpit's own pin list by    *
+ * the write the row menu's Pin makes, whatever the pin target says - the caller has already chosen where it pins, so Note Tabs is never called    *
+ * from here. An id already pinned stays where it is; an id whose note is not there (yet, or any more) is pinned all the same and left to the      *
+ * section's pruning. Answers whether the list changed and the list as it now stands, read in the same queue as the write.                         *
+ ***************************************************************************************************************************************************/
+export async function pinInCockpit(ids: string[]){
+    var changed = await changeCockpitPins(ids, true)
+    var pinned = await serialisePins(() => getPinnedNoteIds())
+    return { changed: changed, pinned: pinned }
+}
+
 /** serialisePins ***********************************************************************************************************************************
  * Runs one read-modify-write of Cockpit's pin list after every one queued before it. changeCockpitPins and forgetPins each read the setting and   *
  * write it back a settings round trip later, and a Pin landing between a prune's read and its write was written away by it. One chain for both,  *

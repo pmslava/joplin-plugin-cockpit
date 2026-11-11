@@ -208,6 +208,8 @@ Both plugins reach into Joplin's note title bar, and they do not collide: Wherea
 
 With Jot installed, Cockpit calls it from three places, on desktop. A **right-click on New note or New to-do** opens Jot's form with the button's type and the panel's notebook, and the click setting can send a plain click there too — see [Notebooks and notes](#notebooks-and-notes); with **New to-do: due on the selected day** on, the form opens with the selected day's date already in its Due row. The heading menu's **New to-do due <day>…** opens the same form with that day set (both need Jot 0.5.0 or later for the date; an older Jot opens the form without it). **Quick edit…** in the row menu opens Jot's edit mode on that row; Jot puts the same form in Joplin's own note list as "Edit with Jot…", so this is that form, reached from the panel. Jot writes the note, and Cockpit reads its change feed the moment the form saves, so the new row appears, or the edited one changes, at once rather than at the next refresh. Cancel the form and nothing happens.
 
+Jot 0.6.0 or later can also pin the note it creates in Cockpit's Pinned section, in Note Tabs, or in both: its "Where the new note is pinned" setting picks, and it pins here through `cockpit.pinNotes` (see [Commands for other plugins](#commands-for-other-plugins)).
+
 Neither plugin needs the other. Without Jot, the first press that calls it in a session says so, once:
 
 > Cockpit: this needs the Jot plugin, which is not installed. Install "Jot" from Settings › Plugins, or change the "New note and New to-do" settings.
@@ -317,12 +319,13 @@ Desktop-only: Ctrl/Shift multi-select and the batch actions that follow from it,
 
 ## Commands for other plugins
 
-Cockpit registers two commands with no menu item of their own, for other plugins (or the command palette) to call. Both take a plain id string, ignore an id that no longer resolves, and never throw back at the caller.
+Cockpit registers three commands with no menu item of their own, for other plugins (or the command palette) to call. None of them throws back at the caller. The first two take a plain id string and ignore an id that no longer resolves.
 
 | Command | Argument | What it does |
 | --- | --- | --- |
 | `cockpit.filterByNotebook` | a notebook id; `""` or no argument | Points the panel at that notebook, exactly as picking it in the notebook dropdown does. `""` (or no argument) clears the filter back to all notebooks. An unknown id is ignored rather than treated as a clear. The saved profile is not changed. Works on desktop and mobile. |
 | `cockpit.revealNote` | a note id | Shows that note in the panel: a hidden panel is shown first, then the note is shown where it already is, or the filter switches to its notebook and the typed search is cleared, or — when the active profile cannot list it at all — it is pinned below the list as a read-only "Revealed" row. The revealed row is scrolled into view and flashed. The pin goes when you switch profile, change the notebook, commit a search, reveal something else or open the row. **Desktop only**: on mobile the panel is a tab in Joplin's own plugin-panel screen, which is yours to open and close, so a reveal there does nothing. |
+| `cockpit.pinNotes` | an array of note ids; a single id string counts as one | Pins the notes in Cockpit's own **Pinned** section, as Pin in the row menu does, and redraws the panel. An id that is already pinned keeps its place. It always pins in Cockpit, whatever the **Pinning a note** setting says, because the calling plugin decides where it pins. A note that does not exist is pinned anyway and then leaves the section by itself. An empty or malformed argument is ignored with a console warning. Returns `{ pinned }`, the ids now pinned. Pins are kept per device. Works on desktop and mobile. |
 
 ## Build from source
 

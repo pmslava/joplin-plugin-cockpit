@@ -23,7 +23,7 @@ import { appVersionAtLeast, isMobile } from "../../core/platform";
 import { isSettingsNoteConnected } from "../../core/settingsSync";
 import { isDialogOpen, openPluginDialog, resetOverlayGuard, setOverlayGuard } from "../../core/dialog";
 import { panelTemplate } from "./panelTemplate";
-import { applyPinChange, pinTargetAttribute, withPinnedSection } from "../../core/pinned";
+import { applyPinChange, pinInCockpit, pinTargetAttribute, withPinnedSection } from "../../core/pinned";
 import { iconButton, icons } from "../icons";
 // The pure "drop between rows" date math (window.CockpitBetween is unused in this bundle; the require pulls the same UMD
 // file the Node harness unit-tests, so the drop path and the tests share one implementation). Webpack bundles it in.
@@ -1544,6 +1544,31 @@ export async function revealNote(noteID){
     // (c) The profile itself hides it: pin it below the list instead.
     revealedNote = { id: String(note.id), parent_id: String(note.parent_id || ""), is_todo: note.is_todo, todo_completed: note.todo_completed, title: String(note.title || "") }
     await refreshPanelData()
+}
+
+/** pinNotes (cockpit.pinNotes) *********************************************************************************************************************
+ * The third entry of the cross-plugin contract (2.11.1, docs/BRIEF-2.11-dates-pins-drag.md section 8): another plugin - Jot, for the note it has  *
+ * just created - pins notes in Cockpit's Pinned section. Cockpit's pins are its own private per-device setting, so a command is the only way in.  *
+ * The argument is an array of note ids; a bare string is taken as one id.                                                                         *
+ *                                                                                                                                                 *
+ * COCKPIT'S SECTION ONLY, whatever the pinTarget setting says: that setting is what the row menu's Pin does, and the caller has already decided   *
+ * where it pins (Jot calls Note Tabs itself when its own setting says so). The write is the row menu's (pinInCockpit in core/pinned.ts): appended *
+ * in the order given, an id already pinned left where it is, no own-write bracket since no note is written. The note need not be in the store or  *
+ * even exist yet - the Pinned section's own pruning drops an id whose note is gone or trashed on a later render.                                  *
+ *                                                                                                                                                 *
+ * Total on its input, like the other two: an empty or malformed argument (not a string or an array of non-empty strings) warns and resolves       *
+ * nothing, so nothing is pinned and nothing thrown back into the caller. Otherwise it resolves { pinned }, the ids now in the list, after one     *
+ * refresh when the list changed. Both platforms: the section exists on mobile too, and nothing here shows or hides the panel.                     *
+ ***************************************************************************************************************************************************/
+export async function pinNotes(noteIDs?){
+    var ids = typeof noteIDs === "string" ? [noteIDs] : noteIDs
+    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== "string" || !id.trim())){
+        console.warn("Cockpit: pinNotes takes a note id or an array of note ids, and was given", noteIDs)
+        return
+    }
+    var result = await pinInCockpit(ids.map(id => id.trim()))
+    if (result.changed) await refreshPanelData()
+    return { pinned: result.pinned }
 }
 
 /** refreshPanelData ********************************************************************************************************************************

@@ -4683,13 +4683,13 @@ async function main() {
 
     // Version lockstep: the four version fields (package.json, src/manifest.json, and BOTH package-lock fields)
     // drifted once when the lockfile was left stale. This cheap read-and-compare keeps all four pinned together.
-    await test('version: package.json, manifest, and both package-lock fields are all 2.11.0', () => {
+    await test('version: package.json, manifest, and both package-lock fields are all 2.11.1', () => {
         const root = path.join(__dirname, '..')
         const readJSON = (...rel) => JSON.parse(fs.readFileSync(path.join(root, ...rel), 'utf8'))
         const pkg = readJSON('package.json')
         const manifest = readJSON('src', 'manifest.json')
         const lock = readJSON('package-lock.json')
-        const expected = '2.11.0'
+        const expected = '2.11.1'
         assert.strictEqual(pkg.version, expected, 'package.json version')
         assert.strictEqual(manifest.version, expected, 'src/manifest.json version')
         assert.strictEqual(lock.version, expected, 'package-lock.json top-level version')
@@ -8088,7 +8088,7 @@ async function main() {
         return await command.execute(...args)
     }
 
-    await test('whereabouts contract: exactly the two command names Whereabouts calls are registered, with palette labels and no menu item', async () => {
+    await test('whereabouts contract: the two command names Whereabouts calls are registered, with palette labels and no menu item', async () => {
         const state = await runReveal({})
         const names = state.commands.map(c => c.name)
         // THE contract. Whereabouts executes these two strings verbatim (its src/index.ts) and swallows the
@@ -8097,7 +8097,7 @@ async function main() {
         assert.ok(names.includes('cockpit.revealNote'), "the notebook-chip double click executes 'cockpit.revealNote'")
         // The full registration set, so a command added or dropped is a deliberate edit of this line.
         assert.deepStrictEqual(names.sort(), [
-            'cockpit.connectSettingsNote', 'cockpit.filterByNotebook', 'cockpit.revealNote', 'showStylerDialog',
+            'cockpit.connectSettingsNote', 'cockpit.filterByNotebook', 'cockpit.pinNotes', 'cockpit.revealNote', 'showStylerDialog',
             'toggleCockpitToolbarButton', 'togglePanelVisibility',
         ])
         const labelled = (name) => state.commands.find(c => c.name === name).label
@@ -8107,6 +8107,110 @@ async function main() {
         // registers exactly the one toolbar button and the one Tools menu it always had.
         assert.strictEqual(state.toolbarButtons.length, 1, 'no new toolbar button may appear for these commands')
         assert.strictEqual(state.menus.length, 1, 'no new menu may appear for these commands')
+    })
+
+    // ============================================ the third command (2.11.1): cockpit.pinNotes, for Jot
+    // Cockpit's pins are its own private per-device setting, so another plugin pins through a command (docs/BRIEF-2.11-dates-pins-drag.md
+    // section 8): Jot executes 'cockpit.pinNotes' with [id] for the note it has just created when its pin setting names Cockpit. Pinned here:
+    // the name and label on both platforms, the argument (an array, a bare string as one id), the resolve ({ pinned }, the list as it now
+    // stands), an id already pinned left in place, an empty or malformed argument that warns and pins nothing, Cockpit's section whatever the
+    // pin target says (never Note Tabs), the panel's repaint with the section, and an id with no note pinned all the same and pruned later.
+    const pinCommandWarnings = async (fn) => {
+        const realWarn = console.warn
+        const warnings = []
+        console.warn = (...args) => { warnings.push(args.map(String).join(' ')) }
+        try {
+            return { result: await fn(), warnings: warnings.filter(warning => warning.includes('pinNotes')) }
+        } finally {
+            console.warn = realWarn
+        }
+    }
+    const pinnedSetting = (state) => JSON.parse(state.settings[PINNED_IDS_KEY] || '[]')
+
+    await test('cockpit.pinNotes: registered on desktop and mobile with the label "Cockpit: pin notes", and no menu or toolbar item', async () => {
+        const desktop = await runReveal({})
+        const phone = await runReveal({ versionInfo: { version: '3.7.0', platform: 'mobile' }, require: mobileRequire })
+        for (const state of [desktop, phone]) {
+            const command = state.commands.find(c => c.name === 'cockpit.pinNotes')
+            assert.ok(command, 'the command Jot executes is registered')
+            assert.strictEqual(command.label, 'Cockpit: pin notes')
+            assert.ok(!command.iconName, 'and has no toolbar icon')
+        }
+        assert.deepStrictEqual(phone.commands.map(c => c.name).filter(name => /^cockpit\./.test(name)).sort(),
+            ['cockpit.connectSettingsNote', 'cockpit.filterByNotebook', 'cockpit.pinNotes', 'cockpit.revealNote'], 'mobile registers the whole contract')
+    })
+
+    await test('cockpit.pinNotes: an array pins in Cockpit\'s section in the order given and resolves { pinned }; the panel repaints with the Pinned section above Overdue', async () => {
+        const state = await pinRun()
+        assert.strictEqual(pinnedSectionOf(state), null, 'nothing pinned yet')
+        const paintsBefore = state.setHtmlCalls
+        const result = await executeCommand(state, 'cockpit.pinNotes', [pinOverdue, pinNote])
+        assert.deepStrictEqual(result, { pinned: [pinOverdue, pinNote] }, 'the ids now in the list')
+        assert.deepStrictEqual(pinnedSetting(state), [pinOverdue, pinNote], 'written to Cockpit\'s pin list')
+        assert.strictEqual(state.setHtmlCalls - paintsBefore, 1, 'one repaint')
+        const list = pinList(state)
+        assert.ok(list.trimStart().startsWith(PINNED_OPEN + '\n            <h2>Pinned</h2>'), 'the section opens the list')
+        assert.ok(list.indexOf(PINNED_OPEN) < list.indexOf('>Overdue</h2>'), 'above Overdue')
+        const section = pinnedSectionOf(state)
+        assert.ok(section.includes(`data-todo-id="${pinOverdue}" data-pinned="1"`) && section.includes(`data-note-id="${pinNote}" data-pinned="1"`), 'with both rows, marked')
+        assert.ok(section.indexOf(pinOverdue) < section.indexOf(pinNote), 'in pin order')
+        assert.strictEqual(state.notePuts.length + state.dataPosts.length, 0, 'no note is written')
+    })
+
+    await test('cockpit.pinNotes: a bare string pins one id; an id already pinned stays where it is, with no write and no repaint', async () => {
+        const state = await pinRun({ initialSettings: { [PINNED_IDS_KEY]: JSON.stringify([pinNote]) } })
+        assert.deepStrictEqual(await executeCommand(state, 'cockpit.pinNotes', pinOverdue), { pinned: [pinNote, pinOverdue] }, 'a bare string is one id, appended')
+        const writes = state.settingWrites.length
+        const paints = state.setHtmlCalls
+        assert.deepStrictEqual(await executeCommand(state, 'cockpit.pinNotes', [pinOverdue, pinNote]), { pinned: [pinNote, pinOverdue] }, 'already pinned: the list as it stands')
+        assert.strictEqual(state.settingWrites.length, writes, 'no write')
+        assert.strictEqual(state.setHtmlCalls, paints, 'no repaint')
+        assert.deepStrictEqual(await executeCommand(state, 'cockpit.pinNotes', [pinOther, pinOverdue, pinOther]), { pinned: [pinNote, pinOverdue, pinOther] },
+            'a new id is appended once, and a pinned one in the same call keeps its place')
+    })
+
+    await test('cockpit.pinNotes: an empty or malformed argument warns, resolves nothing, pins nothing and does not repaint', async () => {
+        const state = await pinRun()
+        const writes = state.settingWrites.length
+        const paints = state.setHtmlCalls
+        for (const argument of [undefined, null, '', '   ', [], [''], [pinOverdue, 7], [pinOverdue, null], 42, { id: pinOverdue }, [[pinOverdue]]]) {
+            const { result, warnings } = await pinCommandWarnings(() => executeCommand(state, 'cockpit.pinNotes', argument))
+            assert.strictEqual(result, undefined, `${JSON.stringify(argument)} resolves nothing`)
+            assert.strictEqual(warnings.length, 1, `${JSON.stringify(argument)} warns once`)
+        }
+        assert.strictEqual(state.settingWrites.length, writes, 'nothing written')
+        assert.strictEqual(state.setHtmlCalls, paints, 'nothing repainted')
+        assert.strictEqual(pinnedSectionOf(state), null, 'no section')
+    })
+
+    await test('cockpit.pinNotes: Cockpit\'s section whatever the pin target says - with Note Tabs or Both it pins here and never calls tabsPinNote', async () => {
+        for (const target of ['noteTabs', 'both']) {
+            const calls = []
+            const state = await pinRun({
+                initialSettings: { [PIN_TARGET_KEY]: target },
+                appCommands: { tabsPinNote: async (...args) => { calls.push(args) }, tabsUnpinNote: async (...args) => { calls.push(args) } },
+            })
+            assert.deepStrictEqual(await executeCommand(state, 'cockpit.pinNotes', [pinOverdue]), { pinned: [pinOverdue] }, `${target}: resolves the pin`)
+            assert.deepStrictEqual(pinnedSetting(state), [pinOverdue], `${target}: Cockpit's list holds it`)
+            assert.ok(pinnedSectionOf(state).includes(`data-todo-id="${pinOverdue}" data-pinned="1"`), `${target}: the section draws it`)
+            assert.deepStrictEqual(calls, [], `${target}: Note Tabs is never called`)
+            assert.ok(!state.commandCalls.some(call => /^tabs/.test(call.name)), `${target}: no tabs* command at all`)
+        }
+    })
+
+    await test('cockpit.pinNotes: an id with no note is pinned all the same - the command does not look - and the section\'s pruning drops it on the render', async () => {
+        const state = await pinRun()
+        const missing = id32('pm')
+        const result = await executeCommand(state, 'cockpit.pinNotes', [pinOverdue, missing])
+        assert.deepStrictEqual(result, { pinned: [pinOverdue, missing] }, 'both are pinned by the command')
+        assert.deepStrictEqual(pinnedSetting(state), [pinOverdue], 'and the render that follows forgets the one whose note is Not Found')
+        assert.ok(pinnedSectionOf(state).includes(pinOverdue), 'the live one is drawn')
+    })
+
+    await test('cockpit.pinNotes: on mobile it pins in the section the same way', async () => {
+        const state = await pinRun({ initialSettings: { [PIN_TARGET_KEY]: 'noteTabs' } }, 'mobile')
+        assert.deepStrictEqual(await executeCommand(state, 'cockpit.pinNotes', pinOverdue), { pinned: [pinOverdue] })
+        assert.ok(pinnedSectionOf(state).includes(`data-todo-id="${pinOverdue}" data-pinned="1"`), 'the section is drawn')
     })
 
     await test('cockpit.filterByNotebook: an id filters the panel to that notebook, marks it current, and repaints once', async () => {

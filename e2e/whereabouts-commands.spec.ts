@@ -2,14 +2,17 @@ import { test, expect, Frame } from '@playwright/test';
 import { launchJoplin, closeJoplin, JoplinInstance } from './launch';
 import {
   agendaPanel,
+  callPluginCommand,
   createNote,
   createNotebook,
   createProfile,
   createTodo,
   executePluginCommand,
+  panelHeadings,
   panelToastVisible,
   panelTodoTitles,
   selectProfile,
+  setAlarm,
   setCockpitTextSetting,
   waitForPanelTodo,
   PANEL_REFRESH_TIMEOUT,
@@ -35,6 +38,7 @@ test.describe('Commands for other plugins (the Whereabouts contract)', () => {
   const betaTodo = `BetaTask${stamp}`;
   const plainNote = `PlainNote${stamp}`;
   const todosOnlyProfile = `Tasks only ${stamp}`;
+  const pinnedTodo = `PinnedByCommand${stamp}`;
   let alphaId = '';
   let betaTodoId = '';
   let plainNoteId = '';
@@ -162,6 +166,33 @@ test.describe('Commands for other plugins (the Whereabouts contract)', () => {
     expect(
       await panel.evaluate(() => (document.querySelector('.outside-results-heading')?.textContent || '').trim())
     ).toContain('Revealed - outside current filters');
+  });
+
+  /**
+   * The third command (2.11.1): Jot executes `cockpit.pinNotes([id])` for the note it has just created, so the note lands in Cockpit's
+   * Pinned section - above Overdue - and the command resolves the list as it now stands. Declared before the exclusion case, which
+   * excludes the notebook this to-do is created in.
+   */
+  test('cockpit.pinNotes pins a note in the Pinned section above Overdue and resolves the pinned ids', async () => {
+    const { win } = joplin;
+    await executePluginCommand(win, 'cockpit.filterByNotebook', '');
+    const pinnedId = await createTodo(win, pinnedTodo);
+    // Due yesterday, so the to-do sits in Overdue.
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(10, 0, 0, 0);
+    await setAlarm(win, yesterday);
+    await waitForPanelTodo(win, pinnedTodo);
+    expect(await panelHeadings(win)).not.toContain('Pinned');
+
+    const result = await callPluginCommand(win, 'cockpit.pinNotes', [pinnedId]);
+    expect(result).toEqual({ pinned: [pinnedId] });
+    await expect.poll(async () => (await panelHeadings(win))[0], { timeout: PANEL_REFRESH_TIMEOUT }).toBe('Pinned');
+    expect((await panelHeadings(win)).indexOf('Overdue')).toBeGreaterThan(0);
+    const panel = await agendaPanel(win);
+    const pinnedRows = panel.locator(`.pinned-section .todo[data-todo-id="${pinnedId}"][data-pinned="1"]`);
+    await expect(pinnedRows).toHaveCount(1);
+    expect(((await pinnedRows.locator('.todo-title').textContent()) || '').trim()).toContain(pinnedTodo);
   });
 
   /**
